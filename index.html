@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="description" content="Get a ride fare estimate from Private Car Services — Houston & Willis, TX. Estimate only; book to confirm." />
+  <title>Ride Estimate | Private Car Services</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="styles.css" />
+  <script src="config.js"></script>
+</head>
+<body>
+  <header class="site-header">
+    <div class="wrap header-inner">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true"></span>
+        <div>
+          <p class="brand-name">Private Car Services</p>
+          <p class="brand-tag">Houston &amp; Willis, TX</p>
+        </div>
+      </div>
+      <a class="header-phone" href="tel:9362617878">936-261-7878</a>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <section class="hero">
+      <h1>Get a ride estimate</h1>
+      <p class="hero-lead">
+        Enter your trip details for a quick fare estimate. This is not a booking —
+        we’ll confirm the final price when you request your ride.
+      </p>
+    </section>
+
+    <div id="api-banner" class="banner banner-warn" hidden>
+      Map lookup needs an API key — enter miles manually for now.
+    </div>
+
+    <div class="layout">
+      <form id="estimate-form" class="card form-card" novalidate>
+        <fieldset>
+          <legend>Trip details</legend>
+
+          <div class="field">
+            <label for="pickup">Pickup address</label>
+            <input type="text" id="pickup" name="pickup" autocomplete="street-address" placeholder="Where should we pick you up?" />
+          </div>
+
+          <div class="field">
+            <label for="dropoff">Drop-off address</label>
+            <input type="text" id="dropoff" name="dropoff" autocomplete="street-address" placeholder="Where are you going?" />
+          </div>
+
+          <div class="field" id="manual-miles-field" hidden>
+            <label for="manual-miles">Driving miles (one way)</label>
+            <input type="number" id="manual-miles" name="manual-miles" min="0.1" step="0.1" placeholder="e.g. 22.5" />
+          </div>
+
+          <div id="map" class="map" hidden aria-label="Route map"></div>
+          <p id="route-status" class="route-status" hidden></p>
+
+          <div class="field">
+            <label for="trip-type">Trip type</label>
+            <select id="trip-type" name="trip-type">
+              <option value="local">Local trip</option>
+              <option value="airport-drop">Airport drop-off</option>
+              <option value="airport-pick">Airport pick-up</option>
+              <option value="hourly">Hourly service — call for quote</option>
+              <option value="van">11-passenger van — call for quote</option>
+            </select>
+          </div>
+
+          <div class="row two">
+            <div class="field">
+              <label for="passengers">Passengers</label>
+              <input type="number" id="passengers" name="passengers" min="1" max="10" value="2" />
+              <p class="hint">Base fare covers 2 passengers (+$5 each extra)</p>
+            </div>
+            <div class="field">
+              <label for="stops">Extra stops</label>
+              <input type="number" id="stops" name="stops" min="0" max="20" value="0" />
+              <p class="hint">+$11 per additional stop</p>
+            </div>
+          </div>
+
+          <div class="row two">
+            <div class="field">
+              <label for="ride-date">Desired date</label>
+              <input type="date" id="ride-date" name="ride-date" required />
+            </div>
+            <div class="field">
+              <label for="ride-time">Desired time</label>
+              <input type="time" id="ride-time" name="ride-time" required />
+            </div>
+          </div>
+
+          <div class="checks">
+            <label class="check">
+              <input type="checkbox" id="holiday" name="holiday" />
+              <span>Holiday (uses weekend / night rates)</span>
+            </label>
+            <label class="check">
+              <input type="checkbox" id="short-notice" name="short-notice" />
+              <span>Less than 24 hours’ notice (+25%)</span>
+            </label>
+          </div>
+        </fieldset>
+
+        <button type="submit" class="btn btn-primary btn-estimate" id="estimate-btn">
+          Get estimate
+        </button>
+      </form>
+
+      <aside class="results-col">
+        <div id="results" class="card results-card" aria-live="polite">
+          <h2>Your estimate</h2>
+          <p class="results-empty" id="results-empty">
+            Fill in your trip and tap <strong>Get estimate</strong>.
+          </p>
+          <div id="results-body" hidden>
+            <p class="estimate-badge">ESTIMATE ONLY</p>
+            <p class="miles-line" id="miles-line"></p>
+            <p class="tier-line" id="tier-line"></p>
+            <ul class="line-items" id="line-items"></ul>
+            <div class="total-row">
+              <span>Estimated total</span>
+              <strong id="total-amount"></strong>
+            </div>
+            <p class="return-note" id="return-note" hidden>
+              One-way trips over 75 miles may include a return fee based on the driver’s return time.
+              Call to confirm — we don’t invent that amount here.
+            </p>
+            <div class="call-quote" id="call-quote" hidden>
+              <p>This trip type needs a custom quote.</p>
+              <a class="btn btn-primary" href="tel:9362617878">Call 936-261-7878</a>
+            </div>
+
+            <div class="promo-banner" aria-label="Website booking promotion">
+              <p class="promo-kicker">Website booking offer</p>
+              <p class="promo-copy">Want 10% off? Book on the website by Nov 30 — pay in full, no cancel within 24h of pickup, book ≥48h ahead. Rides through Dec 31.</p>
+              <a class="btn btn-promo" href="https://www.ptstaxiservices.com" target="_blank" rel="noopener">Book on the website for 10% off</a>
+              <p class="promo-phone">Questions? <a href="tel:9362617878">936-261-7878</a></p>
+            </div>
+          </div>
+        </div>
+
+        <div class="card cta-card">
+          <h3>Ready to book?</h3>
+          <p>We’ll confirm your fare, then you can hold the ride with a Square deposit if needed.</p>
+          <a class="btn btn-primary" href="tel:9362617878">Call 936-261-7878</a>
+          <a class="btn btn-secondary" href="https://www.ptstaxiservices.com/" target="_blank" rel="noopener">Request a ride on our site</a>
+          <p class="cta-note">Deposit via Square comes after Matthew confirms your trip.</p>
+        </div>
+      </aside>
+    </div>
+
+    <aside class="disclaimer" role="note">
+      <h2>Important</h2>
+      <p>
+        This tool provides an <strong>estimate only</strong> — not a confirmed fare.
+        Final price may change with traffic, waits, route, stops, vehicle, and timing.
+        Book by phone or the request form on our website to confirm.
+        A deposit may be required to hold your ride (Square) after we confirm.
+      </p>
+      <p>
+        Questions?
+        <a href="tel:9362617878">936-261-7878</a>
+        ·
+        <a href="mailto:mwragge@privatetaxiservices.net">mwragge@privatetaxiservices.net</a>
+      </p>
+    </aside>
+  </main>
+
+  <footer class="site-footer">
+    <div class="wrap">
+      <p>© <span id="year"></span> Private Car Services · Houston &amp; Willis, TX</p>
+      <p><a href="https://www.ptstaxiservices.com/">ptstaxiservices.com</a></p>
+    </div>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>
