@@ -50,6 +50,7 @@
   var lastDriverPatchLat = null;
   var lastDriverPatchLng = null;
   var rideLookup = 0;
+  var openListSeq = 0;
   var driving = { key: "", pending: "", done: false, miles: null, line: null };
 
   var state = {
@@ -2456,19 +2457,22 @@
       state.openRides = [];
       state.openListError = "";
       state.openListLoading = false;
+      var statusOff = document.getElementById("board-status");
+      if (statusOff) statusOff.textContent = driverBoardStatusInner();
       syncDriverBoardMarkers();
       return;
     }
-    if (state.openListLoading && !force) return;
+    var seq = ++openListSeq;
     state.openListLoading = true;
     listOpenRides().then(function (rides) {
+      if (seq !== openListSeq) return;
       state.openListLoading = false;
       var prevError = state.openListError;
       state.openListError = "";
       var stamp = rides.map(function (r) {
         return (r.code || "") + ":" + (r.updatedAt || "") + ":" + (r.pickupLat || "") + "," + (r.pickupLng || "");
       }).join("|");
-      var changed = stamp !== state.openListStamp || prevError !== "";
+      var changed = stamp !== state.openListStamp || !!prevError;
       state.openListStamp = stamp;
       state.openRides = rides;
       var selectionCleared = false;
@@ -2481,21 +2485,31 @@
           changed = true;
         }
       }
-      if (force || selectionCleared || prevError) {
+      // Full render only when forced or the Accept/Deny card must rebuild.
+      // Routine polls update the status line + map markers in place (map stays alive).
+      if (force || selectionCleared) {
         render();
         return;
       }
-      if (changed) {
+      if (changed || prevError) {
         var status = document.getElementById("board-status");
-        if (status) status.innerHTML = driverBoardStatusInner();
+        if (status) status.textContent = driverBoardStatusInner();
         syncDriverBoardMarkers();
       }
     }).catch(function (err) {
+      if (seq !== openListSeq) return;
       state.openListLoading = false;
       var next = err && err.denied ? "open-denied" : "open-error";
       var changed = state.openListError !== next;
       state.openListError = next;
-      if (force || changed) render();
+      if (force) {
+        render();
+        return;
+      }
+      if (changed) {
+        var statusErr = document.getElementById("board-status");
+        if (statusErr) statusErr.textContent = driverBoardStatusInner();
+      }
     });
   }
 
@@ -2940,7 +2954,7 @@
     setInterval(pullRemoteRide, 3000);
     setInterval(function () {
       if (ROLE === "driver" && signedIn() && state.screen === "home") refreshOpenRides();
-    }, 5000);
+    }, 3000);
     setInterval(function () {
       if (ROLE === "driver" && signedIn()) publishDriverPresence();
     }, 20000);
