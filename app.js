@@ -1,5 +1,5 @@
 /**
- * Private Car Services â€” Ride Fare Estimator
+ * Private Car Services — Ride Fare Estimator
  * Rates mirror ptstaxiservices.com (estimate only).
  */
 (function () {
@@ -12,19 +12,19 @@
     extraStop: 11,
     shortNoticePct: 0.25,
     daytime: {
-      label: 'Monâ€“Fri daytime (6:00 amâ€“5:59 pm)',
+      label: 'Mon–Fri daytime (6:00 am–5:59 pm)',
       perMile: 1.1,
       airportDrop: 15.5,
       airportPick: 25,
     },
     weekendNight: {
-      label: 'Nights, holidays & weekends (6:00â€“9:59 pm band / weekend daytime)',
+      label: 'Nights, holidays & weekends (6:00–9:59 pm band / weekend daytime)',
       perMile: 1.38,
       airportDrop: 20,
       airportPick: 30,
     },
     late: {
-      label: 'Late nights (10:00 pmâ€“5:59 am)',
+      label: 'Late nights (10:00 pm–5:59 am)',
       perMile: 1.43,
       airportDrop: 30,
       airportPick: 50,
@@ -103,9 +103,9 @@
 
   /**
    * Tier selection (per product requirements):
-   * 1) hour 22:00â€“05:59 â†’ late
-   * 2) weekend OR holiday OR hour 18:00â€“21:59 â†’ weekend/night ($1.38)
-   * 3) else â†’ weekday daytime ($1.10)
+   * 1) hour 22:00–05:59 → late
+   * 2) weekend OR holiday OR hour 18:00–21:59 → weekend/night ($1.38)
+   * 3) else → weekday daytime ($1.10)
    */
   function resolveTier(dateStr, timeStr, isHoliday) {
     if (!dateStr || !timeStr) return RATES.daytime;
@@ -113,7 +113,7 @@
     const [y, m, d] = dateStr.split('-').map(Number);
     const [hh, mm] = timeStr.split(':').map(Number);
     const date = new Date(y, m - 1, d, hh, mm || 0, 0, 0);
-    const day = date.getDay(); // 0 Sun â€¦ 6 Sat
+    const day = date.getDay(); // 0 Sun … 6 Sat
     const isWeekend = day === 0 || day === 6;
     const hour = hh;
 
@@ -155,7 +155,7 @@
 
     const mileage = mi * tier.perMile;
     items.push({
-      label: `Mileage (${mi.toFixed(1)} mi Ã— $${tier.perMile.toFixed(2)})`,
+      label: `Mileage (${mi.toFixed(1)} mi × $${tier.perMile.toFixed(2)})`,
       amount: mileage,
     });
     subtotal += mileage;
@@ -164,7 +164,7 @@
     if (extraPax > 0) {
       const amt = extraPax * RATES.extraPassenger;
       items.push({
-        label: `Extra passengers (${extraPax} Ã— $${RATES.extraPassenger})`,
+        label: `Extra passengers (${extraPax} × $${RATES.extraPassenger})`,
         amount: amt,
       });
       subtotal += amt;
@@ -173,7 +173,7 @@
     if (extraStops > 0) {
       const amt = extraStops * RATES.extraStop;
       items.push({
-        label: `Extra stops (${extraStops} Ã— $${RATES.extraStop})`,
+        label: `Extra stops (${extraStops} × $${RATES.extraStop})`,
         amount: amt,
       });
       subtotal += amt;
@@ -183,7 +183,7 @@
     if (shortNotice) {
       const surcharge = subtotal * RATES.shortNoticePct;
       items.push({
-        label: 'Less than 24 hoursâ€™ notice (+25%)',
+        label: 'Less than 24 hours’ notice (+25%)',
         amount: surcharge,
       });
       total += surcharge;
@@ -470,7 +470,7 @@
     if (mapsReady) {
       miles = await fetchDrivingMiles();
     } else if (!hasApiKey()) {
-      showRouteStatus('Looking up driving milesâ€¦');
+      showRouteStatus('Looking up driving miles…');
       miles = await fetchPublicDrivingMiles();
     }
 
@@ -540,7 +540,7 @@
         els.apiBanner.hidden = true;
         // Keep manual miles available as fallback
         els.manualMilesField.hidden = false;
-        showRouteStatus('Map ready â€” enter pickup and drop-off, then Get estimate.');
+        showRouteStatus('Map ready — enter pickup and drop-off, then Get estimate.');
       } catch (err) {
         console.error(err);
         initManualMode();
@@ -556,6 +556,9 @@
     if (sessionStorage.getItem('pcs-quote')) showConfirmation();
     els.form.addEventListener('submit', (event) => {
       event.preventDefault();
+    });
+    els.form.querySelectorAll('input[readonly]').forEach((field) => {
+      field.addEventListener('focus', () => field.removeAttribute('readonly'));
     });
     els.form.addEventListener('input', saveDraft);
     els.form.addEventListener('change', saveDraft);
