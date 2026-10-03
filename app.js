@@ -35,6 +35,14 @@
     form: document.getElementById('estimate-form'),
     pickup: document.getElementById('pickup'),
     dropoff: document.getElementById('dropoff'),
+    contactName: document.getElementById('contact-name'),
+    contactEmail: document.getElementById('contact-email'),
+    contactPhone: document.getElementById('contact-phone'),
+    flightDetails: document.getElementById('flight-details'),
+    airline: document.getElementById('airline'),
+    flightNumber: document.getElementById('flight-number'),
+    flightDirection: document.getElementById('flight-direction'),
+    emailRequestButton: document.getElementById('email-request-btn'),
     manualMilesField: document.getElementById('manual-miles-field'),
     manualMiles: document.getElementById('manual-miles'),
     tripType: document.getElementById('trip-type'),
@@ -186,24 +194,56 @@
     };
   }
 
+  function needsFlightDetails() {
+    return els.tripType.value === 'airport-pick' || /\bairport\b/i.test(els.pickup.value);
+  }
+
+  function updateFlightDetails() {
+    const required = needsFlightDetails();
+    els.flightDetails.hidden = !required;
+    [els.airline, els.flightNumber, els.flightDirection].forEach((field) => {
+      field.required = required;
+    });
+  }
+
+  function composeRideRequest(result) {
+    updateFlightDetails();
+    if (!els.form.reportValidity()) return;
+    const flight = needsFlightDetails()
+      ? [`Airline: ${els.airline.value.trim()}`, `Flight number: ${els.flightNumber.value.trim()}`, `Arrival or departure: ${els.flightDirection.value}`]
+      : ['Flight details: Not applicable'];
+    const lines = [
+      'Hello Matthew,', '',
+      'I would like to request a ride. Please confirm availability and the final fare.', '',
+      `Name: ${els.contactName.value.trim()}`,
+      `Email: ${els.contactEmail.value.trim()}`,
+      `Phone: ${els.contactPhone.value.trim()}`,
+      `Pickup: ${els.pickup.value.trim()}`,
+      `Drop-off: ${els.dropoff.value.trim()}`,
+      `Date of service: ${els.rideDate.value}`,
+      `Time of service: ${els.rideTime.value}`,
+      `Passengers: ${els.passengers.value}`,
+      `Trip type: ${els.tripType.options[els.tripType.selectedIndex].text}`,
+      ...flight,
+      `Estimated fare: ${result && !result.callForQuote ? money(result.total) : 'Please quote'}`,
+      '', 'This is a ride request only, not a booking confirmation. Please reply with availability and the confirmed fare.'
+    ];
+    window.location.href = `mailto:mwragge@privatetaxiservices.net?subject=${encodeURIComponent(`Ride request - ${els.contactName.value.trim()}`)}&body=${encodeURIComponent(lines.join('\n'))}`;
+  }
+
   function updateRequestLink(result) {
     if (!els.requestRideLink) return;
     const lines = [
-      'Hello Matthew,',
-      '',
-      'I would like to request a ride. Please confirm availability and the final fare.',
-      '',
+      'Hello Matthew,', '', 'I would like to request a ride. Please confirm availability and the final fare.', '',
+      `Name: ${els.contactName.value.trim() || 'Not provided'}`,
+      `Email: ${els.contactEmail.value.trim() || 'Not provided'}`,
+      `Phone: ${els.contactPhone.value.trim() || 'Not provided'}`,
       `Pickup: ${els.pickup.value.trim() || 'Not provided'}`,
       `Drop-off: ${els.dropoff.value.trim() || 'Not provided'}`,
-      `Driving miles: ${result && !result.callForQuote ? result.miles.toFixed(1) : 'Not available'}`,
-      `Estimated fare: ${result && !result.callForQuote ? money(result.total) : 'Custom quote requested'}`,
-      `Trip type: ${els.tripType.options[els.tripType.selectedIndex].text}`,
+      `Date of service: ${els.rideDate.value || 'Not provided'}`,
+      `Time of service: ${els.rideTime.value || 'Not provided'}`,
       `Passengers: ${els.passengers.value}`,
-      `Stops: ${els.stops.value}`,
-      `Ride date: ${els.rideDate.value || 'Not provided'}`,
-      `Ride time: ${els.rideTime.value || 'Not provided'}`,
-      '',
-      'This is a ride request only, not a booking confirmation. Please reply with availability and the confirmed fare.'
+      `Estimated fare: ${result && !result.callForQuote ? money(result.total) : 'Please quote'}`,
     ];
     els.requestRideLink.href = `mailto:mwragge@privatetaxiservices.net?subject=${encodeURIComponent('Ride request')}&body=${encodeURIComponent(lines.join('\n'))}`;
   }
@@ -388,6 +428,10 @@
     if (els.year) els.year.textContent = String(new Date().getFullYear());
     setDefaultDateTime();
     els.form.addEventListener('submit', onSubmit);
+    els.emailRequestButton.addEventListener('click', () => composeRideRequest(lastEstimate));
+    els.tripType.addEventListener('change', updateFlightDetails);
+    els.pickup.addEventListener('input', updateFlightDetails);
+    updateFlightDetails();
 
     if (hasApiKey()) {
       initMaps();

@@ -45,12 +45,40 @@
 
           <div class="field">
             <label for="pickup">Pickup address</label>
-            <input type="text" id="pickup" name="pickup" autocomplete="street-address" maxlength="120" placeholder="Where should we pick you up?" />
+            <input type="text" id="pickup" name="pickup" autocomplete="street-address" maxlength="120" required placeholder="Where should we pick you up?" />
           </div>
 
           <div class="field">
             <label for="dropoff">Drop-off address</label>
-            <input type="text" id="dropoff" name="dropoff" autocomplete="street-address" maxlength="120" placeholder="Where are you going?" />
+            <input type="text" id="dropoff" name="dropoff" autocomplete="street-address" maxlength="120" required placeholder="Where are you going?" />
+          </div>
+
+          <div class="row two">
+            <div class="field">
+              <label for="contact-name">Your name</label>
+              <input type="text" id="contact-name" name="contact-name" autocomplete="name" required maxlength="120" />
+            </div>
+            <div class="field">
+              <label for="contact-phone">Phone</label>
+              <input type="tel" id="contact-phone" name="contact-phone" autocomplete="tel" required maxlength="40" />
+            </div>
+          </div>
+          <div class="field">
+            <label for="contact-email">Email</label>
+            <input type="email" id="contact-email" name="contact-email" autocomplete="email" required maxlength="160" />
+          </div>
+
+          <div class="field" id="flight-details" hidden>
+            <label for="airline">Airline</label>
+            <input type="text" id="airline" name="airline" maxlength="80" />
+            <label for="flight-number">Flight number</label>
+            <input type="text" id="flight-number" name="flight-number" maxlength="30" />
+            <label for="flight-direction">Arrival or departure</label>
+            <select id="flight-direction" name="flight-direction">
+              <option value="">Select one</option>
+              <option value="Arrival">Arrival</option>
+              <option value="Departure">Departure</option>
+            </select>
           </div>
 
           <div class="field" id="manual-miles-field" hidden>
@@ -110,6 +138,9 @@
 
         <button type="submit" class="btn btn-primary btn-estimate" id="estimate-btn">
           Get estimate
+        </button>
+        <button type="button" class="btn btn-secondary" id="email-request-btn">
+          Email ride request
         </button>
       </form>
 
