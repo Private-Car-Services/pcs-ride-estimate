@@ -190,6 +190,13 @@
       total += surcharge;
     }
 
+    const stateTax = Math.round(total * 0.0825 * 100) / 100;
+    items.push({
+      label: 'Texas tax (8.25%)',
+      amount: stateTax,
+    });
+    total = Math.round((total + stateTax) * 100) / 100;
+
     return {
       callForQuote: false,
       tier,
