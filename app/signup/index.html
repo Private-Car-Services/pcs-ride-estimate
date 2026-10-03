@@ -269,6 +269,10 @@
           };
           localStorage.setItem("pcs-rider-account", JSON.stringify(profile));
           localStorage.setItem("pcs-rider-session", email);
+          try {
+            localStorage.removeItem("pcs-beta-ride");
+            localStorage.removeItem("pcs-beta-ride-owner");
+          } catch (err) {}
           document.getElementById("password").value = "";
           document.getElementById("confirm").value = "";
           location.replace("../");
