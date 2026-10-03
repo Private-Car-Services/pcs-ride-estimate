@@ -137,6 +137,20 @@
     return pointFrom(state.driverLat, state.driverLng);
   }
 
+  function driverNearPickup() {
+    var driver = savedDriverPoint();
+    var pickup = placeCoords("pickup");
+    if (!driver || !pickup) return false;
+    return haversine(driver, pickup) <= 20;
+  }
+
+  function unavailableCall() {
+    return (
+      '<div class="status"><i></i><span>No one is available</span></div>' +
+      '<p class="lede">No one is available. Please call <a href="tel:' + BUSINESS_PHONE + '">' + esc(BUSINESS_PHONE) + "</a> directly.</p>"
+    );
+  }
+
   function routePoints() {
     var pickup = placeCoords("pickup") || GEO.pickup;
     var dropoff = placeCoords("drop") || GEO.dropoff;
@@ -1149,9 +1163,12 @@
     var caption = !both
       ? "Sample map · Willis"
       : (driver ? "Your driver" : "Driver location shows once they accept on a linked phone.");
+    var near = driverNearPickup();
     return (
       '<button class="btn ghost" type="button" id="back-home">← Request</button>' +
-      '<div class="status"><i></i><span>Driver on the way</span></div>' +
+      (near
+        ? '<div class="status"><i></i><span>Driver on the way</span></div>'
+        : unavailableCall()) +
       "<p class=\"lede\">" + esc(pickupLine()) + " → " + esc(dropLine()) + "<br>" + esc(prettyWhen()) + "</p>" +
       customerMapBlock(caption, driver) +
       moneyCard() +
@@ -1167,9 +1184,12 @@
     var note = syncOn()
       ? "This screen changes when a driver accepts. Nothing is texted."
       : "Open the driver app and accept this ride. This screen changes when a driver accepts.";
+    var near = driverNearPickup();
     return (
       '<button class="btn ghost" type="button" id="back-home">← Request</button>' +
-      '<div class="status"><i></i><span>Waiting for a driver</span></div>' +
+      (near
+        ? '<div class="status"><i></i><span>Waiting for a driver</span></div>'
+        : unavailableCall()) +
       "<p class=\"lede\">" + esc(pickupLine()) + " → " + esc(dropLine()) + "<br>" + esc(prettyWhen()) + "</p>" +
       rideCodeBanner() +
       customerMapBlock(caption, driver) +
