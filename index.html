@@ -43,15 +43,29 @@
         <fieldset>
           <legend>Trip details</legend>
 
-          <div class="field">
-            <label for="pickup">Pickup address</label>
-            <input type="text" id="pickup" name="pickup" autocomplete="street-address" maxlength="120" required placeholder="Where should we pick you up?" />
-          </div>
+          <fieldset class="address-group">
+            <legend>Pickup address</legend>
+            <div class="row two">
+              <div class="field"><label for="pickup-house">House number</label><input type="text" id="pickup-house" name="pickup-house" required maxlength="20" /></div>
+              <div class="field"><label for="pickup-street">Street</label><input type="text" id="pickup-street" name="pickup-street" required maxlength="100" autocomplete="address-line1" /></div>
+            </div>
+            <div class="row two">
+              <div class="field"><label for="pickup-city">City</label><input type="text" id="pickup-city" name="pickup-city" required maxlength="80" autocomplete="address-level2" /></div>
+              <div class="field"><label for="pickup-state">State</label><input type="text" id="pickup-state" name="pickup-state" required maxlength="30" autocomplete="address-level1" /></div>
+            </div>
+          </fieldset>
 
-          <div class="field">
-            <label for="dropoff">Drop-off address</label>
-            <input type="text" id="dropoff" name="dropoff" autocomplete="street-address" maxlength="120" required placeholder="Where are you going?" />
-          </div>
+          <fieldset class="address-group">
+            <legend>Drop-off address</legend>
+            <div class="row two">
+              <div class="field"><label for="dropoff-house">House number</label><input type="text" id="dropoff-house" name="dropoff-house" required maxlength="20" /></div>
+              <div class="field"><label for="dropoff-street">Street</label><input type="text" id="dropoff-street" name="dropoff-street" required maxlength="100" autocomplete="address-line1" /></div>
+            </div>
+            <div class="row two">
+              <div class="field"><label for="dropoff-city">City</label><input type="text" id="dropoff-city" name="dropoff-city" required maxlength="80" autocomplete="address-level2" /></div>
+              <div class="field"><label for="dropoff-state">State</label><input type="text" id="dropoff-state" name="dropoff-state" required maxlength="30" autocomplete="address-level1" /></div>
+            </div>
+          </fieldset>
 
           <div class="row two">
             <div class="field">
