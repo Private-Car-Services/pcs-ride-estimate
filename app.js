@@ -47,6 +47,7 @@
     flightNumber: document.getElementById('flight-number'),
     flightDirection: document.getElementById('flight-direction'),
     textRequestButton: document.getElementById('text-request-btn'),
+    textRequestNote: document.getElementById('text-request-note'),
     manualMilesField: document.getElementById('manual-miles-field'),
     manualMiles: document.getElementById('manual-miles'),
     tripType: document.getElementById('trip-type'),
@@ -267,10 +268,20 @@
     return lines.join('\n');
   }
 
-  function composeRideRequest(result) {
+  function composeRideRequest(event, result) {
     updateFlightDetails();
-    if (!els.form.reportValidity()) return;
-    window.location.href = smsUrl(rideRequestBody(result));
+    if (!els.form.reportValidity()) {
+      event.preventDefault();
+      const bad = els.form.querySelector(':invalid');
+      if (bad && bad.scrollIntoView) bad.scrollIntoView({ block: 'center' });
+      if (els.textRequestNote) {
+        els.textRequestNote.hidden = false;
+        els.textRequestNote.textContent = 'Fill the highlighted field, then tap Text ride request again.';
+      }
+      return;
+    }
+    if (els.textRequestNote) els.textRequestNote.hidden = true;
+    els.textRequestButton.href = smsUrl(rideRequestBody(result));
   }
 
   function renderEstimate(result) {
@@ -503,7 +514,7 @@
     if (els.year) els.year.textContent = String(new Date().getFullYear());
     setDefaultDateTime();
     els.form.addEventListener('submit', onSubmit);
-    els.textRequestButton.addEventListener('click', () => composeRideRequest(lastEstimate));
+    els.textRequestButton.addEventListener('click', (event) => composeRideRequest(event, lastEstimate));
     els.tripType.addEventListener('change', updateFlightDetails);
     [
       els.pickupStreet, els.pickupCity, els.pickupState,

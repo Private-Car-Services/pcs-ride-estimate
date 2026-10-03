@@ -91,7 +91,7 @@
           </div>
           <div class="field">
             <label for="contact-email">Email</label>
-            <input type="email" id="contact-email" name="contact-email" autocomplete="email" required maxlength="160" />
+            <input type="email" id="contact-email" name="contact-email" autocomplete="email" maxlength="160" />
           </div>
 
           <div class="field" id="flight-details" hidden>
@@ -165,9 +165,8 @@
         <button type="submit" class="btn btn-primary btn-estimate" id="estimate-btn">
           Get estimate
         </button>
-        <button type="button" class="btn btn-secondary" id="text-request-btn">
-          Text ride request
-        </button>
+        <a class="btn btn-secondary" id="text-request-btn" href="sms:9362617878">Text ride request</a>
+        <p class="route-status" id="text-request-note" hidden></p>
       </form>
 
       <aside class="results-col">
@@ -236,6 +235,6 @@
     </div>
   </footer>
 
-  <script src="app.js"></script>
+  <script src="app.js?v=4"></script>
 </body>
 </html>
