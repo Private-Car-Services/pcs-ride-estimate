@@ -24,6 +24,11 @@
     <main id="signup-main">
       <h2>Create an account</h2>
       <p class="lede">Invitation sign-up. This phone keeps the account. Nothing is charged.</p>
+      <p class="fine"><a class="back-link" id="mission-link" href="#mission-copy" aria-expanded="false">Mission</a></p>
+      <div id="mission-copy" hidden>
+        <p class="lede">Our private car services ensure you reach your destination on time, every time. With a focus on punctuality and dependability, you can trust us to get you where you need to go without the stress. All our drivers are highly trained professionals who prioritize your safety and comfort. With extensive knowledge of the local area, they provide a smooth and enjoyable ride tailored to your needs. Travel in style and comfort with our fleet of clean, well-maintained vehicles. Each ride is designed to provide a relaxing atmosphere, making your journey as pleasant as possible. Whether you need a ride for a few hours or a full day, our flexible booking options cater to your schedule. Enjoy the convenience of door-to-door service that fits your lifestyle.</p>
+        <p class="fine">-Matthew Wragge founder&amp;owner</p>
+      </div>
       <form id="signup-form" autocomplete="off">
         <label for="photo">Profile picture</label>
         <div class="photo-pick">
@@ -61,6 +66,15 @@
       var errorEl = document.getElementById("form-error");
       var squareBtn = document.getElementById("square-btn");
       var squareHelp = document.getElementById("square-help");
+      var missionLink = document.getElementById("mission-link");
+      var missionCopy = document.getElementById("mission-copy");
+
+      missionLink.addEventListener("click", function (event) {
+        event.preventDefault();
+        var show = missionCopy.hidden;
+        missionCopy.hidden = !show;
+        missionLink.setAttribute("aria-expanded", String(show));
+      });
 
       if (SQUARE_SIGNUP_URL) {
         squareBtn.disabled = false;
