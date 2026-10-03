@@ -21,7 +21,7 @@
     dropStreet: "",
     dropCity: "",
     dropState: "TX",
-    time: "08:00"
+    time: ""
   };
 
   var GEO = {
@@ -39,6 +39,7 @@
 
   var ROLE = document.body && document.body.getAttribute("data-app") === "driver" ? "driver" : "customer";
   var STORE = "pcs-beta-ride";
+  var RIDE_OWNER = "pcs-beta-ride-owner";
   var DRIVER_CODE = "pcs-driver-code";
   var CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
   var lastDriverPatchAt = 0;
@@ -58,7 +59,7 @@
     dropStreet: SAMPLE.dropStreet,
     dropCity: SAMPLE.dropCity,
     dropState: SAMPLE.dropState,
-    date: tomorrowISO(),
+    date: "",
     time: SAMPLE.time,
     error: "",
     passengers: 2,
@@ -105,6 +106,52 @@
     d.setDate(d.getDate() + 1);
     var z = function (n) { return String(n).padStart(2, "0"); };
     return d.getFullYear() + "-" + z(d.getMonth() + 1) + "-" + z(d.getDate());
+  }
+
+  function chicagoParts(when) {
+    var parts = {};
+    new Intl.DateTimeFormat("en-US", {
+      timeZone: "America/Chicago",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      hourCycle: "h23"
+    }).formatToParts(when || new Date()).forEach(function (part) {
+      if (part.type !== "literal") parts[part.type] = part.value;
+    });
+    var hour = parts.hour === "24" ? "00" : parts.hour;
+    return {
+      date: parts.year + "-" + parts.month + "-" + parts.day,
+      time: hour + ":" + parts.minute
+    };
+  }
+
+  function pickupStamp(dateStr, timeStr) {
+    if (!dateStr || !timeStr) return null;
+    var ymd = String(dateStr).split("-");
+    var hm = String(timeStr).split(":");
+    if (ymd.length !== 3 || hm.length < 2) return null;
+    var y = Number(ymd[0]);
+    var m = Number(ymd[1]);
+    var d = Number(ymd[2]);
+    var h = Number(hm[0]);
+    var min = Number(hm[1]);
+    if (![y, m, d, h, min].every(function (n) { return isFinite(n); })) return null;
+    return y * 100000000 + m * 1000000 + d * 10000 + h * 100 + min;
+  }
+
+  function chicagoNowStamp() {
+    var now = chicagoParts(new Date());
+    return pickupStamp(now.date, now.time);
+  }
+
+  function isPickupInPast(dateStr, timeStr) {
+    var want = pickupStamp(dateStr, timeStr);
+    var now = chicagoNowStamp();
+    if (want == null || now == null) return false;
+    return want < now;
   }
 
   function esc(value) {
@@ -1104,6 +1151,55 @@
     return !!readSession();
   }
 
+  function readRideOwner() {
+    try { return localStorage.getItem(RIDE_OWNER) || ""; } catch (err) { return ""; }
+  }
+
+  function writeRideOwner(key) {
+    try {
+      if (key) localStorage.setItem(RIDE_OWNER, key);
+      else localStorage.removeItem(RIDE_OWNER);
+    } catch (err) {}
+  }
+
+  function rideBelongsToSession(ride) {
+    if (!ride) return false;
+    var session = readSession();
+    if (!session) return false;
+    var owner = readRideOwner();
+    if (owner) return owner === session;
+    // Legacy rides saved before owner stamping stay on this phone for the current session.
+    return true;
+  }
+
+  function discardStoredRide() {
+    try { localStorage.removeItem(STORE); } catch (err) {}
+    writeRideOwner("");
+    clearRideFields();
+  }
+
+  function maybeRestoreCustomerRide() {
+    if (ROLE === "driver" || !signedIn()) return false;
+    var savedRide = currentRide();
+    if (!savedRide) return false;
+    if (!rideBelongsToSession(savedRide)) {
+      discardStoredRide();
+      return false;
+    }
+    if (savedRide.pickupStreet && savedRide.dropStreet &&
+        (savedRide.status === "requested" || savedRide.status === "accepted")) {
+      if (isPickupInPast(savedRide.date, savedRide.time)) {
+        discardStoredRide();
+        state.screen = "home";
+        return false;
+      }
+      applyRide(savedRide);
+      state.screen = savedRide.status === "accepted" ? "trip" : "waiting";
+      return true;
+    }
+    return false;
+  }
+
   function accountForRole() {
     return ROLE === "driver" ? readDriverAccount() : readRiderAccount();
   }
@@ -1141,6 +1237,10 @@
   }
 
   function customerHome() {
+    if (isPickupInPast(state.date, state.time)) {
+      state.date = "";
+      state.time = "";
+    }
     return (
       logoutLine() +
       "<h2>Request a ride</h2>" +
@@ -1161,7 +1261,7 @@
       field("drop-state", "State", state.dropState, 'required maxlength="2"') +
       "</div></div></div>" +
       '<div class="group"><p class="group-title">When</p><div class="row"><div class="city">' +
-      field("ride-date", "Date", state.date, 'type="date" required') +
+      field("ride-date", "Date", state.date, 'type="date" required min="' + chicagoParts(new Date()).date + '"') +
       '</div><div class="city">' +
       field("ride-time", "Time", state.time, 'type="time" required') +
       "</div></div></div>" +
@@ -1384,8 +1484,13 @@
     state.dropStreet = ride.dropStreet || "";
     state.dropCity = ride.dropCity || "";
     state.dropState = ride.dropState || "TX";
-    state.date = ride.date || state.date;
-    state.time = ride.time || state.time;
+    if (ride.date && ride.time && isPickupInPast(ride.date, ride.time)) {
+      state.date = "";
+      state.time = "";
+    } else {
+      state.date = ride.date || state.date;
+      state.time = ride.time || state.time;
+    }
     state.rideStatus = ride.status || "";
     state.pickupLat = ride.pickupLat;
     state.pickupLng = ride.pickupLng;
@@ -1474,6 +1579,7 @@
     };
     if (state.code) rideOut.code = state.code;
     localStorage.setItem(STORE, JSON.stringify(rideOut));
+    if (ROLE === "customer") writeRideOwner(readSession());
   }
 
   function clearRideFields() {
@@ -1483,6 +1589,8 @@
     state.pickupCity = "";
     state.dropStreet = "";
     state.dropCity = "";
+    state.date = "";
+    state.time = "";
     state.rideStatus = "";
     state.pickupLat = null;
     state.pickupLng = null;
@@ -1674,6 +1782,7 @@
           state.gateStep = "";
           state.screen = "home";
           if (ROLE === "driver") followGps();
+          else maybeRestoreCustomerRide();
           render();
         }).catch(function () {
           state.loginError = "Could not check the password on this phone.";
@@ -1720,6 +1829,11 @@
         readForm();
         if (!formComplete()) {
           state.error = "Add pickup, drop-off, date, time, name, and phone.";
+          render();
+          return;
+        }
+        if (isPickupInPast(state.date, state.time)) {
+          state.error = "Pick a date and time that have not passed yet.";
           render();
           return;
         }
@@ -2168,12 +2282,7 @@
     }, 1000);
     setInterval(pullRemoteRide, 3000);
     if (ROLE !== "driver" && signedIn()) {
-      var savedRide = currentRide();
-      if (savedRide && savedRide.pickupStreet && savedRide.dropStreet &&
-          (savedRide.status === "requested" || savedRide.status === "accepted")) {
-        applyRide(savedRide);
-        state.screen = savedRide.status === "accepted" ? "trip" : "waiting";
-      }
+      maybeRestoreCustomerRide();
     }
     render();
   });
