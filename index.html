@@ -46,24 +46,48 @@
           <fieldset class="address-group">
             <legend>Pickup address</legend>
             <div class="row two">
-              <div class="field"><label for="pickup-house">House number</label><input type="text" id="pickup-house" name="pickup-house" required maxlength="20" /></div>
-              <div class="field"><label for="pickup-street">Street</label><input type="text" id="pickup-street" name="pickup-street" required maxlength="100" autocomplete="address-line1" /></div>
+              <div class="field">
+                <label for="pickup-house">House number</label>
+                <input type="text" id="pickup-house" name="pickup-house" inputmode="numeric" autocomplete="off" required maxlength="20" placeholder="502" />
+              </div>
+              <div class="field">
+                <label for="pickup-street">Street name</label>
+                <input type="text" id="pickup-street" name="pickup-street" autocomplete="off" required maxlength="80" placeholder="Montgomery St" />
+              </div>
             </div>
             <div class="row two">
-              <div class="field"><label for="pickup-city">City</label><input type="text" id="pickup-city" name="pickup-city" required maxlength="80" autocomplete="address-level2" /></div>
-              <div class="field"><label for="pickup-state">State</label><input type="text" id="pickup-state" name="pickup-state" required maxlength="30" autocomplete="address-level1" /></div>
+              <div class="field">
+                <label for="pickup-city">City</label>
+                <input type="text" id="pickup-city" name="pickup-city" autocomplete="address-level2" required maxlength="80" placeholder="Willis" />
+              </div>
+              <div class="field">
+                <label for="pickup-state">State</label>
+                <input type="text" id="pickup-state" name="pickup-state" autocomplete="address-level1" required maxlength="30" placeholder="TX" />
+              </div>
             </div>
           </fieldset>
 
           <fieldset class="address-group">
             <legend>Drop-off address</legend>
             <div class="row two">
-              <div class="field"><label for="dropoff-house">House number</label><input type="text" id="dropoff-house" name="dropoff-house" required maxlength="20" /></div>
-              <div class="field"><label for="dropoff-street">Street</label><input type="text" id="dropoff-street" name="dropoff-street" required maxlength="100" autocomplete="address-line1" /></div>
+              <div class="field">
+                <label for="dropoff-house">House number</label>
+                <input type="text" id="dropoff-house" name="dropoff-house" inputmode="numeric" autocomplete="off" required maxlength="20" placeholder="502" />
+              </div>
+              <div class="field">
+                <label for="dropoff-street">Street name</label>
+                <input type="text" id="dropoff-street" name="dropoff-street" autocomplete="off" required maxlength="80" placeholder="Montgomery St" />
+              </div>
             </div>
             <div class="row two">
-              <div class="field"><label for="dropoff-city">City</label><input type="text" id="dropoff-city" name="dropoff-city" required maxlength="80" autocomplete="address-level2" /></div>
-              <div class="field"><label for="dropoff-state">State</label><input type="text" id="dropoff-state" name="dropoff-state" required maxlength="30" autocomplete="address-level1" /></div>
+              <div class="field">
+                <label for="dropoff-city">City</label>
+                <input type="text" id="dropoff-city" name="dropoff-city" autocomplete="address-level2" required maxlength="80" placeholder="Willis" />
+              </div>
+              <div class="field">
+                <label for="dropoff-state">State</label>
+                <input type="text" id="dropoff-state" name="dropoff-state" autocomplete="address-level1" required maxlength="30" placeholder="TX" />
+              </div>
             </div>
           </fieldset>
 
@@ -153,7 +177,7 @@
         <button type="submit" class="btn btn-primary btn-estimate" id="estimate-btn">
           Get estimate
         </button>
-        <button type="button" class="btn btn-secondary" id="email-request-btn">
+        <button type="button" class="btn btn-secondary" id="text-request-btn">
           Text ride request
         </button>
       </form>
@@ -195,8 +219,7 @@
           <h3>Ready to book?</h3>
           <p>We’ll confirm your fare, then you can hold the ride with a Square deposit if needed.</p>
           <a class="btn btn-primary" href="tel:9362617878">Call 936-261-7878</a>
-          <a class="btn btn-secondary" id="request-ride-link" href="sms:9362617878?body=Ride%20request">Text a ride request</a>
-          <p class="cta-note">Your text will include the details entered and any estimate shown. This is a request, not a booking confirmation. Deposit via Square comes after Matthew confirms your trip.</p>
+          <p class="cta-note">This is a request, not a booking confirmation. A deposit may be required to hold the ride after we confirm.</p>
         </div>
       </aside>
     </div>

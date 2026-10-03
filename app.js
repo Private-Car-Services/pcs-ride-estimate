@@ -48,7 +48,7 @@
     airline: document.getElementById('airline'),
     flightNumber: document.getElementById('flight-number'),
     flightDirection: document.getElementById('flight-direction'),
-    emailRequestButton: document.getElementById('email-request-btn'),
+    textRequestButton: document.getElementById('text-request-btn'),
     manualMilesField: document.getElementById('manual-miles-field'),
     manualMiles: document.getElementById('manual-miles'),
     tripType: document.getElementById('trip-type'),
@@ -69,7 +69,6 @@
     totalAmount: document.getElementById('total-amount'),
     returnNote: document.getElementById('return-note'),
     callQuote: document.getElementById('call-quote'),
-    requestRideLink: document.getElementById('request-ride-link'),
     year: document.getElementById('year'),
   };
 
@@ -77,8 +76,6 @@
   let directionsService = null;
   let directionsRenderer = null;
   let distanceMatrixService = null;
-  let pickupAutocomplete = null;
-  let dropoffAutocomplete = null;
   let lastDrivingMiles = null;
   let mapsReady = false;
   let lastEstimate = null;
@@ -200,18 +197,35 @@
     };
   }
 
-  function address(prefix) {
-    const parts = [
-      els[prefix + 'House'],
-      els[prefix + 'Street'],
-      els[prefix + 'City'],
-      els[prefix + 'State'],
-    ].map((field) => field.value.trim());
-    return parts.join(', ');
+  function composeAddress(houseEl, streetEl, cityEl, stateEl) {
+    const streetLine = [houseEl.value.trim(), streetEl.value.trim()].filter(Boolean).join(' ');
+    return [streetLine, cityEl.value.trim(), stateEl.value.trim()].filter(Boolean).join(', ');
+  }
+
+  function pickupAddress() {
+    return composeAddress(els.pickupHouse, els.pickupStreet, els.pickupCity, els.pickupState);
+  }
+
+  function dropoffAddress() {
+    return composeAddress(els.dropoffHouse, els.dropoffStreet, els.dropoffCity, els.dropoffState);
+  }
+
+  function isAppleSmsDevice() {
+    const ua = navigator.userAgent || '';
+    if (/iPhone|iPad/i.test(ua)) return true;
+    // iPadOS 13+ identifies as Macintosh, but still needs the iOS sms separator.
+    return navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1;
+  }
+
+  function smsUrl(body) {
+    const separator = isAppleSmsDevice() ? '&' : '?';
+    return 'sms:9362617878' + separator + 'body=' + encodeURIComponent(body);
   }
 
   function needsFlightDetails() {
-    return els.tripType.value === 'airport-pick' || /\bairport\b/i.test(address('pickup'));
+    const type = els.tripType.value;
+    if (type === 'airport-pick' || type === 'airport-drop') return true;
+    return /\bairport\b/i.test(pickupAddress() + ' ' + dropoffAddress());
   }
 
   function updateFlightDetails() {
@@ -222,51 +236,48 @@
     });
   }
 
+  function rideRequestBody(result) {
+    const lines = [
+      'Hello,',
+      '',
+      'I would like to request a ride. Please confirm availability and the final fare.',
+      '',
+      'Name: ' + els.contactName.value.trim(),
+      'Phone: ' + els.contactPhone.value.trim(),
+    ];
+    const email = els.contactEmail.value.trim();
+    if (email) lines.push('Email: ' + email);
+    lines.push(
+      'Pickup: ' + pickupAddress(),
+      'Drop-off: ' + dropoffAddress(),
+      'Date: ' + els.rideDate.value,
+      'Time: ' + els.rideTime.value,
+      'Passengers: ' + els.passengers.value,
+      'Stops: ' + els.stops.value,
+      'Trip type: ' + els.tripType.options[els.tripType.selectedIndex].text
+    );
+    if (needsFlightDetails()) {
+      lines.push(
+        'Airline: ' + els.airline.value.trim(),
+        'Flight number: ' + els.flightNumber.value.trim(),
+        'Arrival or departure: ' + els.flightDirection.value
+      );
+    }
+    if (result && !result.callForQuote && typeof result.total === 'number') {
+      lines.push('Estimated total: ' + money(result.total));
+    }
+    lines.push('', 'This is a ride request only, not a booking confirmation.');
+    return lines.join('\n');
+  }
+
   function composeRideRequest(result) {
     updateFlightDetails();
     if (!els.form.reportValidity()) return;
-    const flight = needsFlightDetails()
-      ? [`Airline: ${els.airline.value.trim()}`, `Flight number: ${els.flightNumber.value.trim()}`, `Arrival or departure: ${els.flightDirection.value}`]
-      : ['Flight details: Not applicable'];
-    const lines = [
-      'Hello Matthew,', '',
-      'I would like to request a ride. Please confirm availability and the final fare.', '',
-      `Name: ${els.contactName.value.trim()}`,
-      `Email: ${els.contactEmail.value.trim()}`,
-      `Phone: ${els.contactPhone.value.trim()}`,
-      `Pickup: ${address('pickup').trim()}`,
-      `Drop-off: ${address('dropoff').trim()}`,
-      `Date of service: ${els.rideDate.value}`,
-      `Time of service: ${els.rideTime.value}`,
-      `Passengers: ${els.passengers.value}`,
-      `Trip type: ${els.tripType.options[els.tripType.selectedIndex].text}`,
-      ...flight,
-      `Estimated fare: ${result && !result.callForQuote ? money(result.total) : 'Please quote'}`,
-      '', 'This is a ride request only, not a booking confirmation. Please reply with availability and the confirmed fare.'
-    ];
-    window.location.href = `sms:9362617878?body=${encodeURIComponent(lines.join('\n'))}`;
-  }
-
-  function updateRequestLink(result) {
-    if (!els.requestRideLink) return;
-    const lines = [
-      'Hello Matthew,', '', 'I would like to request a ride. Please confirm availability and the final fare.', '',
-      `Name: ${els.contactName.value.trim() || 'Not provided'}`,
-      `Email: ${els.contactEmail.value.trim() || 'Not provided'}`,
-      `Phone: ${els.contactPhone.value.trim() || 'Not provided'}`,
-      `Pickup: ${address('pickup').trim() || 'Not provided'}`,
-      `Drop-off: ${address('dropoff').trim() || 'Not provided'}`,
-      `Date of service: ${els.rideDate.value || 'Not provided'}`,
-      `Time of service: ${els.rideTime.value || 'Not provided'}`,
-      `Passengers: ${els.passengers.value}`,
-      `Estimated fare: ${result && !result.callForQuote ? money(result.total) : 'Please quote'}`,
-    ];
-    els.requestRideLink.href = `sms:9362617878?body=${encodeURIComponent(lines.join('\n'))}`;
+    window.location.href = smsUrl(rideRequestBody(result));
   }
 
   function renderEstimate(result) {
     lastEstimate = result;
-    updateRequestLink(result);
     els.resultsEmpty.hidden = true;
     els.resultsBody.hidden = false;
 
@@ -310,8 +321,8 @@
   async function fetchDrivingMiles() {
     if (!mapsReady || !directionsService) return null;
 
-    const origin = address('pickup').trim();
-    const destination = address('dropoff').trim();
+    const origin = pickupAddress();
+    const destination = dropoffAddress();
     if (!origin || !destination) return null;
 
     return new Promise((resolve) => {
@@ -420,18 +431,11 @@
         });
         distanceMatrixService = new google.maps.DistanceMatrixService();
 
-        const acOpts = {
-          fields: ['formatted_address', 'geometry', 'name'],
-          componentRestrictions: { country: 'us' },
-        };
-        pickupAutocomplete = new google.maps.places.Autocomplete(els.pickupStreet, acOpts);
-        dropoffAutocomplete = new google.maps.places.Autocomplete(els.dropoffStreet, acOpts);
-
         mapsReady = true;
         els.apiBanner.hidden = true;
         // Keep manual miles available as fallback
         els.manualMilesField.hidden = false;
-        showRouteStatus('Address suggestions enabled — pick pickup & drop-off, then Get estimate.');
+        showRouteStatus('Map ready — enter pickup and drop-off, then Get estimate.');
       } catch (err) {
         console.error(err);
         initManualMode();
@@ -444,9 +448,12 @@
     if (els.year) els.year.textContent = String(new Date().getFullYear());
     setDefaultDateTime();
     els.form.addEventListener('submit', onSubmit);
-    els.emailRequestButton.addEventListener('click', () => composeRideRequest(lastEstimate));
+    els.textRequestButton.addEventListener('click', () => composeRideRequest(lastEstimate));
     els.tripType.addEventListener('change', updateFlightDetails);
-    ['pickupHouse', 'pickupStreet', 'pickupCity', 'pickupState', 'dropoffHouse', 'dropoffStreet', 'dropoffCity', 'dropoffState'].forEach((key) => els[key].addEventListener('input', updateFlightDetails));
+    [
+      els.pickupHouse, els.pickupStreet, els.pickupCity, els.pickupState,
+      els.dropoffHouse, els.dropoffStreet, els.dropoffCity, els.dropoffState,
+    ].forEach((field) => field.addEventListener('input', updateFlightDetails));
     updateFlightDetails();
 
     if (hasApiKey()) {
@@ -459,6 +466,8 @@
   // Expose for optional testing
   window.PCS_computeEstimate = computeEstimate;
   window.PCS_resolveTier = resolveTier;
+  window.PCS_composeAddress = composeAddress;
+  window.PCS_smsUrl = smsUrl;
 
   init();
 })();
