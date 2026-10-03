@@ -33,8 +33,14 @@
 
   const els = {
     form: document.getElementById('estimate-form'),
-    pickup: document.getElementById('pickup'),
-    dropoff: document.getElementById('dropoff'),
+    pickupHouse: document.getElementById('pickup-house'),
+    pickupStreet: document.getElementById('pickup-street'),
+    pickupCity: document.getElementById('pickup-city'),
+    pickupState: document.getElementById('pickup-state'),
+    dropoffHouse: document.getElementById('dropoff-house'),
+    dropoffStreet: document.getElementById('dropoff-street'),
+    dropoffCity: document.getElementById('dropoff-city'),
+    dropoffState: document.getElementById('dropoff-state'),
     contactName: document.getElementById('contact-name'),
     contactEmail: document.getElementById('contact-email'),
     contactPhone: document.getElementById('contact-phone'),
@@ -194,8 +200,18 @@
     };
   }
 
+  function address(prefix) {
+    const parts = [
+      els[prefix + 'House'],
+      els[prefix + 'Street'],
+      els[prefix + 'City'],
+      els[prefix + 'State'],
+    ].map((field) => field.value.trim());
+    return parts.join(', ');
+  }
+
   function needsFlightDetails() {
-    return els.tripType.value === 'airport-pick' || /\bairport\b/i.test(els.pickup.value);
+    return els.tripType.value === 'airport-pick' || /\bairport\b/i.test(address('pickup'));
   }
 
   function updateFlightDetails() {
@@ -218,8 +234,8 @@
       `Name: ${els.contactName.value.trim()}`,
       `Email: ${els.contactEmail.value.trim()}`,
       `Phone: ${els.contactPhone.value.trim()}`,
-      `Pickup: ${els.pickup.value.trim()}`,
-      `Drop-off: ${els.dropoff.value.trim()}`,
+      `Pickup: ${address('pickup').trim()}`,
+      `Drop-off: ${address('dropoff').trim()}`,
       `Date of service: ${els.rideDate.value}`,
       `Time of service: ${els.rideTime.value}`,
       `Passengers: ${els.passengers.value}`,
@@ -238,8 +254,8 @@
       `Name: ${els.contactName.value.trim() || 'Not provided'}`,
       `Email: ${els.contactEmail.value.trim() || 'Not provided'}`,
       `Phone: ${els.contactPhone.value.trim() || 'Not provided'}`,
-      `Pickup: ${els.pickup.value.trim() || 'Not provided'}`,
-      `Drop-off: ${els.dropoff.value.trim() || 'Not provided'}`,
+      `Pickup: ${address('pickup').trim() || 'Not provided'}`,
+      `Drop-off: ${address('dropoff').trim() || 'Not provided'}`,
       `Date of service: ${els.rideDate.value || 'Not provided'}`,
       `Time of service: ${els.rideTime.value || 'Not provided'}`,
       `Passengers: ${els.passengers.value}`,
@@ -294,8 +310,8 @@
   async function fetchDrivingMiles() {
     if (!mapsReady || !directionsService) return null;
 
-    const origin = els.pickup.value.trim();
-    const destination = els.dropoff.value.trim();
+    const origin = address('pickup').trim();
+    const destination = address('dropoff').trim();
     if (!origin || !destination) return null;
 
     return new Promise((resolve) => {
@@ -408,8 +424,8 @@
           fields: ['formatted_address', 'geometry', 'name'],
           componentRestrictions: { country: 'us' },
         };
-        pickupAutocomplete = new google.maps.places.Autocomplete(els.pickup, acOpts);
-        dropoffAutocomplete = new google.maps.places.Autocomplete(els.dropoff, acOpts);
+        pickupAutocomplete = new google.maps.places.Autocomplete(els.pickupStreet, acOpts);
+        dropoffAutocomplete = new google.maps.places.Autocomplete(els.dropoffStreet, acOpts);
 
         mapsReady = true;
         els.apiBanner.hidden = true;
@@ -430,7 +446,7 @@
     els.form.addEventListener('submit', onSubmit);
     els.emailRequestButton.addEventListener('click', () => composeRideRequest(lastEstimate));
     els.tripType.addEventListener('change', updateFlightDetails);
-    els.pickup.addEventListener('input', updateFlightDetails);
+    ['pickupHouse', 'pickupStreet', 'pickupCity', 'pickupState', 'dropoffHouse', 'dropoffStreet', 'dropoffCity', 'dropoffState'].forEach((key) => els[key].addEventListener('input', updateFlightDetails));
     updateFlightDetails();
 
     if (hasApiKey()) {
