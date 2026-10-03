@@ -510,3 +510,37 @@ a.back-link {
   color: var(--gold-2);
   font-weight: 700;
 }
+
+img.avatar[hidden] { display: none !important; }
+
+.avatar {
+  width: 72px;
+  height: 72px;
+  border-radius: 50%;
+  object-fit: cover;
+  border: 2px solid var(--gold);
+  background: var(--navy-3);
+  display: block;
+  flex: 0 0 auto;
+}
+
+.photo-pick {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.photo-pick input[type="file"] {
+  flex: 1;
+  padding: 10px;
+  font-size: 14px;
+}
+
+.who {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 0 0 12px;
+}
+
+.who h2, .who .lede { margin: 0; }

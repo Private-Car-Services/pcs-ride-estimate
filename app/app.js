@@ -68,6 +68,8 @@
     driverLng: null,
     driverName: "",
     driverPhone: "",
+    riderPhoto: "",
+    driverPhoto: "",
     code: "",
     driverCode: "",
     codeError: "",
@@ -113,6 +115,31 @@
     return (cents / 100).toLocaleString("en-US", { style: "currency", currency: "USD" });
   }
 
+  function readRiderAccount() {
+    try {
+      var raw = localStorage.getItem("pcs-rider-account");
+      if (!raw) return null;
+      var account = JSON.parse(raw);
+      if (!account || typeof account !== "object") return null;
+      return account;
+    } catch (err) {
+      return null;
+    }
+  }
+
+  function safePhoto(value) {
+    if (typeof value !== "string") return "";
+    if (!/^data:image\/jpeg;base64,[A-Za-z0-9+/=]+$/.test(value)) return "";
+    if (value.length > 120000) return "";
+    return value;
+  }
+
+  function photoImg(value) {
+    var photo = safePhoto(value);
+    if (!photo) return "";
+    return '<img class="avatar" alt="" src="' + photo + '">';
+  }
+
   function readDriverAccount() {
     try {
       var raw = localStorage.getItem("pcs-driver-account");
@@ -143,13 +170,16 @@
   }
 
   function driverIdentityLine() {
-    if (!state.driverName) return "";
+    var img = photoImg(state.driverPhoto);
+    if (!state.driverName && !img) return "";
     var phone = "";
     if (state.driverPhone) {
       var tel = String(state.driverPhone).replace(/[^\d+]/g, "");
       phone = ' <a href="tel:' + esc(tel) + '">' + esc(state.driverPhone) + "</a>";
     }
-    return '<p class="lede">Your driver is ' + esc(state.driverName) + "." + phone + "</p>";
+    var who = state.driverName ? esc(state.driverName) : "your driver";
+    return '<div class="who">' + img +
+      '<p class="lede">Your driver is ' + who + "." + phone + "</p></div>";
   }
 
   function haversine(a, b) {
@@ -940,7 +970,8 @@
       coordNum(ride.driverLng) !== coordNum(state.driverLng);
     var codeChanged = !!(ride.code && ride.code !== state.code);
     var identityChanged = (ride.driverName || "") !== (state.driverName || "") ||
-      (ride.driverPhone || "") !== (state.driverPhone || "");
+      (ride.driverPhone || "") !== (state.driverPhone || "") ||
+      safePhoto(ride.driverPhoto) !== safePhoto(state.driverPhoto);
     if (!statusChanged && !placesChanged && !driverChanged && !codeChanged && !identityChanged) return;
     var screen = state.screen;
     applyRide(ride);
@@ -1272,6 +1303,8 @@
     state.driverLng = isCoord(ride.driverLng) ? +ride.driverLng : null;
     state.driverName = ride.driverName || "";
     state.driverPhone = ride.driverPhone || "";
+    state.riderPhoto = safePhoto(ride.riderPhoto);
+    state.driverPhoto = safePhoto(ride.driverPhoto);
     if (ride.passengers != null) state.passengers = ride.passengers;
     if (ride.stops != null) state.stops = ride.stops;
     state.holiday = !!ride.holiday;
@@ -1294,15 +1327,28 @@
     var driverLng = isCoord(state.driverLng) ? +state.driverLng : null;
     var driverName = state.driverName || "";
     var driverPhone = state.driverPhone || "";
+    var driverPhoto = safePhoto(state.driverPhoto);
+    var riderPhoto = safePhoto(state.riderPhoto);
     if (clearDriver) {
       driverName = "";
       driverPhone = "";
+      driverPhoto = "";
     } else {
       if (!driverName && prev.driverName) driverName = prev.driverName;
       if (!driverPhone && prev.driverPhone) driverPhone = prev.driverPhone;
+      if (!driverPhoto) driverPhoto = safePhoto(prev.driverPhoto);
+    }
+    if (ROLE === "customer") {
+      var riderAccount = readRiderAccount();
+      var fromAccount = safePhoto(riderAccount && riderAccount.photo);
+      if (fromAccount) riderPhoto = fromAccount;
+    } else if (!riderPhoto) {
+      riderPhoto = safePhoto(prev.riderPhoto);
     }
     state.driverName = driverName;
     state.driverPhone = driverPhone;
+    state.driverPhoto = driverPhoto;
+    state.riderPhoto = riderPhoto;
     if (!clearDriver) {
       if (!isCoord(driverLat) && isCoord(prev.driverLat)) driverLat = +prev.driverLat;
       if (!isCoord(driverLng) && isCoord(prev.driverLng)) driverLng = +prev.driverLng;
@@ -1327,6 +1373,8 @@
       driverLng: driverLng,
       driverName: driverName,
       driverPhone: driverPhone,
+      driverPhoto: driverPhoto,
+      riderPhoto: riderPhoto,
       passengers: ridePassengers(),
       stops: rideStops(),
       holiday: !!state.holiday
@@ -1351,6 +1399,8 @@
     state.driverLng = null;
     state.driverName = "";
     state.driverPhone = "";
+    state.driverPhoto = "";
+    state.riderPhoto = "";
     state.passengers = 2;
     state.stops = 0;
     state.holiday = false;
@@ -1380,8 +1430,11 @@
           (isFinite(state.hereLat) ? "" : '<p class="fine">Allow location to put you on this map.</p>') +
           '<article class="card">' +
           '<p class="tag">' + (state.rideStatus === "accepted" ? "Accepted" : "New") + "</p>" +
+          '<div class="who">' + photoImg(state.riderPhoto) +
+          "<div>" +
           '<h2 style="font-size:18px">' + esc(state.name || "Rider") + "</h2>" +
           '<p class="fine">' + esc(prettyWhen()) + (state.phone ? " · " + esc(state.phone) : "") + "</p>" +
+          "</div></div>" +
           '<div class="route-line"><p>' + esc(pickupLine()) + "</p><p>" + esc(dropLine()) + "</p></div>" +
           '<p class="fine">' + (est.ready ? est.raw.toFixed(2) + " miles, billed as " + est.billed + "." : "Miles appear when both places are found.") + "</p>" +
           commissionLine() +
@@ -1396,7 +1449,8 @@
     return (
       '<button class="btn ghost" type="button" id="back-driver">← Requests</button>' +
       '<div class="status"><i></i><span>Heading to pickup</span></div>' +
-      "<p class=\"lede\">" + esc(state.name || "Rider") + " is at " + esc(pickupLine()) + ".</p>" +
+      '<div class="who">' + photoImg(state.riderPhoto) +
+      "<p class=\"lede\">" + esc(state.name || "Rider") + " is at " + esc(pickupLine()) + ".</p></div>" +
       mapBlock("Customer") +
       '<div class="card"><p class="tag">This ride</p>' +
       "<p><strong>Drop-off</strong><br>" + esc(dropLine()) + "</p>" +
@@ -1539,12 +1593,14 @@
         var account = readDriverAccount();
         if (account && account.name) state.driverName = account.name;
         if (account && account.phone) state.driverPhone = account.phone;
+        if (account && safePhoto(account.photo)) state.driverPhoto = safePhoto(account.photo);
         saveRide("accepted");
         var code = state.driverCode || state.code || readDriverCode();
         if (syncOn() && code) {
           var patch = { status: "accepted" };
           if (state.driverName) patch.driverName = state.driverName;
           if (state.driverPhone) patch.driverPhone = state.driverPhone;
+          if (safePhoto(state.driverPhoto)) patch.driverPhoto = safePhoto(state.driverPhoto);
           patchRide(code, patch).catch(function () {});
         }
         state.mode = "driver";
