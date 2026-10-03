@@ -1,6 +1,8 @@
 /* Private Car Services starter. Preview only: no texts, no charges, no API key. Shared rides use Firebase REST when PCS_SYNC.databaseURL is set. */
 (function () {
   var BUSINESS_PHONE = "936-261-7878";
+  var DRIVER_COMMISSION_RATE = 0.7;
+  var EXTRA_FEE = 0;
   var BASE_CENTS = 1100;
   var EXTRA_PAX_CENTS = 500;
   var EXTRA_STOP_CENTS = 1100;
@@ -64,6 +66,8 @@
     holiday: false,
     driverLat: null,
     driverLng: null,
+    driverName: "",
+    driverPhone: "",
     code: "",
     driverCode: "",
     codeError: "",
@@ -107,6 +111,45 @@
 
   function money(cents) {
     return (cents / 100).toLocaleString("en-US", { style: "currency", currency: "USD" });
+  }
+
+  function readDriverAccount() {
+    try {
+      var raw = localStorage.getItem("pcs-driver-account");
+      if (!raw) return null;
+      var account = JSON.parse(raw);
+      if (!account || typeof account !== "object") return null;
+      return account;
+    } catch (err) {
+      return null;
+    }
+  }
+
+  function commissionLine() {
+    var rate = DRIVER_COMMISSION_RATE;
+    if (rate == null || typeof rate !== "number" || rate < 0 || rate > 1) {
+      return '<p class="fine">Commission: rate not set yet</p>';
+    }
+    var pct = Math.round(rate * 100);
+    var est = estimate();
+    if (!est.ready) {
+      return '<p class="fine">Your commission is ' + pct + '% of the fare before tax and fees. Estimate only · not a payout.</p>';
+    }
+    var base = est.sub - EXTRA_FEE;
+    if (base < 0) base = 0;
+    var cents = Math.round(base * rate);
+    return '<p><strong>Your commission</strong> ' + money(cents) + '</p>' +
+      '<p class="fine">' + pct + '% of the fare before tax and fees. Estimate only · not a payout.</p>';
+  }
+
+  function driverIdentityLine() {
+    if (!state.driverName) return "";
+    var phone = "";
+    if (state.driverPhone) {
+      var tel = String(state.driverPhone).replace(/[^\d+]/g, "");
+      phone = ' <a href="tel:' + esc(tel) + '">' + esc(state.driverPhone) + "</a>";
+    }
+    return '<p class="lede">Your driver is ' + esc(state.driverName) + "." + phone + "</p>";
   }
 
   function haversine(a, b) {
@@ -868,8 +911,13 @@
     return '<button class="btn ghost" type="button" id="different-code">Different code</button>';
   }
 
+  function driverProfileLink() {
+    return '<p class="fine"><a href="signup/">Profile</a></p>';
+  }
+
   function driverCodeForm() {
     return (
+      driverProfileLink() +
       "<h2>Open requests</h2>" +
       '<form id="code-form" autocomplete="off">' +
       field("ride-code", "Ride code", state.codeDraft || "", 'autocapitalize="characters" autocomplete="off" spellcheck="false"') +
@@ -891,11 +939,13 @@
     var driverChanged = coordNum(ride.driverLat) !== coordNum(state.driverLat) ||
       coordNum(ride.driverLng) !== coordNum(state.driverLng);
     var codeChanged = !!(ride.code && ride.code !== state.code);
-    if (!statusChanged && !placesChanged && !driverChanged && !codeChanged) return;
+    var identityChanged = (ride.driverName || "") !== (state.driverName || "") ||
+      (ride.driverPhone || "") !== (state.driverPhone || "");
+    if (!statusChanged && !placesChanged && !driverChanged && !codeChanged && !identityChanged) return;
     var screen = state.screen;
     applyRide(ride);
     if (screen === "waiting" && ride.status === "accepted") state.screen = "trip";
-    var onlyDriver = !statusChanged && !placesChanged && driverChanged && state.screen === screen;
+    var onlyDriver = !statusChanged && !placesChanged && !identityChanged && driverChanged && state.screen === screen;
     if (onlyDriver && carMarker && isCoord(state.driverLat) && isCoord(state.driverLng)) {
       carMarker.setLatLng([+state.driverLat, +state.driverLng]);
       return;
@@ -1169,6 +1219,7 @@
       (near
         ? '<div class="status"><i></i><span>Driver on the way</span></div>'
         : unavailableCall()) +
+      driverIdentityLine() +
       "<p class=\"lede\">" + esc(pickupLine()) + " → " + esc(dropLine()) + "<br>" + esc(prettyWhen()) + "</p>" +
       customerMapBlock(caption, driver) +
       moneyCard() +
@@ -1190,6 +1241,7 @@
       (near
         ? '<div class="status"><i></i><span>Waiting for a driver</span></div>'
         : unavailableCall()) +
+      driverIdentityLine() +
       "<p class=\"lede\">" + esc(pickupLine()) + " → " + esc(dropLine()) + "<br>" + esc(prettyWhen()) + "</p>" +
       rideCodeBanner() +
       customerMapBlock(caption, driver) +
@@ -1218,6 +1270,8 @@
     state.dropLng = keptDrop ? keptDrop.lng : ride.dropLng;
     state.driverLat = isCoord(ride.driverLat) ? +ride.driverLat : null;
     state.driverLng = isCoord(ride.driverLng) ? +ride.driverLng : null;
+    state.driverName = ride.driverName || "";
+    state.driverPhone = ride.driverPhone || "";
     if (ride.passengers != null) state.passengers = ride.passengers;
     if (ride.stops != null) state.stops = ride.stops;
     state.holiday = !!ride.holiday;
@@ -1238,6 +1292,17 @@
     var clearDriver = opts && opts.clearDriver;
     var driverLat = isCoord(state.driverLat) ? +state.driverLat : null;
     var driverLng = isCoord(state.driverLng) ? +state.driverLng : null;
+    var driverName = state.driverName || "";
+    var driverPhone = state.driverPhone || "";
+    if (clearDriver) {
+      driverName = "";
+      driverPhone = "";
+    } else {
+      if (!driverName && prev.driverName) driverName = prev.driverName;
+      if (!driverPhone && prev.driverPhone) driverPhone = prev.driverPhone;
+    }
+    state.driverName = driverName;
+    state.driverPhone = driverPhone;
     if (!clearDriver) {
       if (!isCoord(driverLat) && isCoord(prev.driverLat)) driverLat = +prev.driverLat;
       if (!isCoord(driverLng) && isCoord(prev.driverLng)) driverLng = +prev.driverLng;
@@ -1260,6 +1325,8 @@
       dropLng: state.dropLng,
       driverLat: driverLat,
       driverLng: driverLng,
+      driverName: driverName,
+      driverPhone: driverPhone,
       passengers: ridePassengers(),
       stops: rideStops(),
       holiday: !!state.holiday
@@ -1282,6 +1349,8 @@
     state.dropLng = null;
     state.driverLat = null;
     state.driverLng = null;
+    state.driverName = "";
+    state.driverPhone = "";
     state.passengers = 2;
     state.stops = 0;
     state.holiday = false;
@@ -1298,11 +1367,12 @@
 
   function driverHome() {
     if (syncOn() && state.remoteLoading && !state.pickupStreet) {
-      return "<h2>Open requests</h2><p class=\"lede\">Opening ride…</p>" + differentCodeButton();
+      return driverProfileLink() + "<h2>Open requests</h2><p class=\"lede\">Opening ride…</p>" + differentCodeButton();
     }
     if (syncOn() && !state.pickupStreet) return driverCodeForm();
     var est = estimate();
     return (
+      driverProfileLink() +
       "<h2>Open requests</h2>" +
       (state.pickupStreet
         ? '<p class="lede">From the passenger app.</p>' +
@@ -1314,6 +1384,7 @@
           '<p class="fine">' + esc(prettyWhen()) + (state.phone ? " · " + esc(state.phone) : "") + "</p>" +
           '<div class="route-line"><p>' + esc(pickupLine()) + "</p><p>" + esc(dropLine()) + "</p></div>" +
           '<p class="fine">' + (est.ready ? est.raw.toFixed(2) + " miles, billed as " + est.billed + "." : "Miles appear when both places are found.") + "</p>" +
+          commissionLine() +
           '<button class="btn" type="button" id="accept-ride">' +
           (state.rideStatus === "accepted" ? "Open trip" : "Accept") + "</button></article>" +
           (syncOn() ? differentCodeButton() : "")
@@ -1329,6 +1400,7 @@
       mapBlock("Customer") +
       '<div class="card"><p class="tag">This ride</p>' +
       "<p><strong>Drop-off</strong><br>" + esc(dropLine()) + "</p>" +
+      commissionLine() +
       "<p class=\"fine\">" + esc(prettyWhen()) + ". Miles round up. Texas tax 8.25% stays estimate-only.</p></div>"
     );
   }
@@ -1464,9 +1536,17 @@
     var accept = document.getElementById("accept-ride");
     if (accept) {
       accept.addEventListener("click", function () {
+        var account = readDriverAccount();
+        if (account && account.name) state.driverName = account.name;
+        if (account && account.phone) state.driverPhone = account.phone;
         saveRide("accepted");
         var code = state.driverCode || state.code || readDriverCode();
-        if (syncOn() && code) patchRide(code, { status: "accepted" }).catch(function () {});
+        if (syncOn() && code) {
+          var patch = { status: "accepted" };
+          if (state.driverName) patch.driverName = state.driverName;
+          if (state.driverPhone) patch.driverPhone = state.driverPhone;
+          patchRide(code, patch).catch(function () {});
+        }
         state.mode = "driver";
         state.screen = "trip";
         render();
