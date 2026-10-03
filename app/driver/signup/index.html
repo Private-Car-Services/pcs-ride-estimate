@@ -1,0 +1,323 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0b1c33">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="PCS Driver">
+  <link rel="apple-touch-icon" href="../../icon-driver.png">
+  <link rel="icon" href="../../icon-driver.png">
+  <link rel="manifest" href="manifest.webmanifest">
+  <title>PCS Driver</title>
+  <link rel="stylesheet" href="../../styles.css?v=6">
+</head>
+<body>
+  <div class="phone">
+    <header class="top">
+      <div class="brand">
+        <h1>Private Car Services</h1>
+      </div>
+      <p class="starter-flag">Driver</p>
+    </header>
+    <main id="signup-main">
+      <h2>Create a driver account</h2>
+      <p class="lede">Invitation sign-up. This phone keeps the account. Nothing is charged.</p>
+      <form id="signup-form" autocomplete="off">
+        <label for="full-name">Full name</label>
+        <input id="full-name" name="name" type="text" autocomplete="name" required>
+        <label for="mobile">Mobile phone</label>
+        <input id="mobile" name="phone" type="tel" inputmode="tel" autocomplete="tel" required>
+        <label for="email">Email</label>
+        <input id="email" name="email" type="email" autocomplete="email" required>
+        <label for="username">Username</label>
+        <input id="username" name="username" type="text" autocomplete="username" required>
+        <label for="password">Password</label>
+        <input id="password" name="password" type="password" autocomplete="new-password" required>
+        <label for="confirm">Confirm password</label>
+        <input id="confirm" name="confirm" type="password" autocomplete="new-password" required>
+        <p class="error" id="form-error" role="alert"></p>
+        <button class="btn" type="submit">Save account</button>
+      </form>
+    </main>
+  </div>
+  <script>
+    (function () {
+      var form = document.getElementById("signup-form");
+      var errorEl = document.getElementById("form-error");
+
+      function digits(value) {
+        return String(value || "").replace(/\D/g, "");
+      }
+
+      function sha256Hex(text) {
+        var data = new TextEncoder().encode(text);
+        return crypto.subtle.digest("SHA-256", data).then(function (buf) {
+          return Array.prototype.map.call(new Uint8Array(buf), function (b) {
+            return b.toString(16).padStart(2, "0");
+          }).join("");
+        });
+      }
+
+      function showError(message) {
+        errorEl.textContent = message;
+      }
+
+      function readAccount() {
+        try {
+          var raw = localStorage.getItem("pcs-driver-account");
+          if (!raw) return null;
+          var account = JSON.parse(raw);
+          if (!account || typeof account !== "object") return null;
+          return account;
+        } catch (err) {
+          return null;
+        }
+      }
+
+      function prettyPhone(value) {
+        var d = digits(value);
+        if (d.length === 10) return "(" + d.slice(0, 3) + ") " + d.slice(3, 6) + "-" + d.slice(6);
+        return String(value || "");
+      }
+
+      function installBlock() {
+        var ua = navigator.userAgent || "";
+        var ios = /iPhone|iPad|iPod/i.test(ua);
+        var android = /Android/i.test(ua);
+        var wrap = document.createElement("div");
+        var title = document.createElement("h2");
+        title.textContent = "Add the driver app";
+        wrap.appendChild(title);
+        var lead = document.createElement("p");
+        lead.className = "lede";
+        lead.textContent = "The icon is the Private Car Services driver button. After you add it, that button opens the driver app.";
+        wrap.appendChild(lead);
+
+        function steps(heading, items) {
+          var h = document.createElement("p");
+          h.className = "group-title";
+          h.textContent = heading;
+          wrap.appendChild(h);
+          var list = document.createElement("ol");
+          list.className = "steps";
+          items.forEach(function (item) {
+            var li = document.createElement("li");
+            li.textContent = item;
+            list.appendChild(li);
+          });
+          wrap.appendChild(list);
+        }
+
+        var iphoneSteps = [
+          "Open this page in Safari.",
+          "Tap Share.",
+          "Tap Add to Home Screen."
+        ];
+        var androidSteps = [
+          "Open this page in Chrome.",
+          "Tap the menu.",
+          "Tap Add to Home screen."
+        ];
+
+        if (ios) {
+          steps("On this iPhone", iphoneSteps);
+        } else if (android) {
+          steps("On this Android phone", androidSteps);
+        } else {
+          steps("iPhone (Safari)", iphoneSteps);
+          steps("Android (Chrome)", androidSteps);
+        }
+        return wrap;
+      }
+
+      function showSaved() {
+        var main = document.getElementById("signup-main");
+        main.textContent = "";
+        var h = document.createElement("h2");
+        h.textContent = "Account saved on this phone";
+        var p = document.createElement("p");
+        p.className = "lede";
+        p.textContent = "The account is saved on this phone.";
+        var link = document.createElement("a");
+        link.className = "back-link";
+        link.href = "../";
+        link.textContent = "Open the driver app";
+        var linkP = document.createElement("p");
+        linkP.appendChild(link);
+        main.appendChild(h);
+        main.appendChild(p);
+        main.appendChild(linkP);
+        main.appendChild(installBlock());
+      }
+
+      function showProfile(account, note) {
+        var main = document.getElementById("signup-main");
+        main.textContent = "";
+        var h = document.createElement("h2");
+        h.textContent = "Driver profile";
+        var lead = document.createElement("p");
+        lead.className = "lede";
+        lead.textContent = "Saved on this phone. Riders see your name when you accept a ride.";
+        main.appendChild(h);
+        main.appendChild(lead);
+        if (note) {
+          var noteP = document.createElement("p");
+          noteP.className = "note";
+          noteP.textContent = note;
+          main.appendChild(noteP);
+        }
+
+        function row(label, value) {
+          var p = document.createElement("p");
+          var strong = document.createElement("strong");
+          strong.textContent = label;
+          p.appendChild(strong);
+          p.appendChild(document.createTextNode(" " + value));
+          main.appendChild(p);
+        }
+
+        row("Name", account.name || "");
+        row("Phone", prettyPhone(account.phone));
+        row("Email", account.email || "");
+        row("Username", account.username || "");
+
+        var updateForm = document.createElement("form");
+        updateForm.id = "profile-form";
+        updateForm.autocomplete = "off";
+
+        function labeled(id, label, value, type) {
+          var lab = document.createElement("label");
+          lab.htmlFor = id;
+          lab.textContent = label;
+          var input = document.createElement("input");
+          input.id = id;
+          input.name = id;
+          input.type = type;
+          input.value = value;
+          input.required = true;
+          if (type === "tel") input.inputMode = "tel";
+          updateForm.appendChild(lab);
+          updateForm.appendChild(input);
+        }
+
+        labeled("profile-name", "Full name", account.name || "", "text");
+        labeled("profile-phone", "Mobile phone", prettyPhone(account.phone), "tel");
+
+        var err = document.createElement("p");
+        err.className = "error";
+        err.id = "profile-error";
+        err.setAttribute("role", "alert");
+        updateForm.appendChild(err);
+
+        var btn = document.createElement("button");
+        btn.className = "btn";
+        btn.type = "submit";
+        btn.textContent = "Update name and phone";
+        updateForm.appendChild(btn);
+        main.appendChild(updateForm);
+
+        var link = document.createElement("a");
+        link.className = "back-link";
+        link.href = "../";
+        link.textContent = "Open the driver app";
+        var linkP = document.createElement("p");
+        linkP.appendChild(link);
+        main.appendChild(linkP);
+
+        updateForm.addEventListener("submit", function (event) {
+          event.preventDefault();
+          err.textContent = "";
+          var name = document.getElementById("profile-name").value.trim();
+          var phone = digits(document.getElementById("profile-phone").value);
+          if (!name) {
+            err.textContent = "Enter your full name.";
+            return;
+          }
+          if (phone.length !== 10) {
+            err.textContent = "Enter a mobile phone with 10 digits.";
+            return;
+          }
+          var next = {
+            name: name,
+            phone: phone,
+            email: account.email || "",
+            username: account.username || "",
+            passwordHash: account.passwordHash || ""
+          };
+          try {
+            localStorage.setItem("pcs-driver-account", JSON.stringify(next));
+          } catch (saveErr) {
+            err.textContent = "Could not update the profile on this phone.";
+            return;
+          }
+          showProfile(next, "Name and phone updated on this phone.");
+        });
+      }
+
+      var existing = readAccount();
+      if (existing && existing.username) {
+        showProfile(existing, "");
+        return;
+      }
+
+      form.addEventListener("submit", function (event) {
+        event.preventDefault();
+        showError("");
+        var name = document.getElementById("full-name").value.trim();
+        var phone = digits(document.getElementById("mobile").value);
+        var email = document.getElementById("email").value.trim();
+        var username = document.getElementById("username").value.trim();
+        var password = document.getElementById("password").value;
+        var confirm = document.getElementById("confirm").value;
+
+        if (!name) {
+          showError("Enter your full name.");
+          return;
+        }
+        if (phone.length !== 10) {
+          showError("Enter a mobile phone with 10 digits.");
+          return;
+        }
+        if (email.indexOf("@") === -1) {
+          showError("Enter an email that contains @.");
+          return;
+        }
+        if (!/^[A-Za-z0-9]{3,}$/.test(username)) {
+          showError("Username must be at least 3 letters or numbers, with no spaces or symbols.");
+          return;
+        }
+        if (password.length < 8) {
+          showError("Password must be at least 8 characters.");
+          return;
+        }
+        if (password !== confirm) {
+          showError("Password and confirm password must match.");
+          return;
+        }
+        if (!window.crypto || !crypto.subtle || !crypto.subtle.digest) {
+          showError("This browser cannot save a password safely. Try Safari or Chrome.");
+          return;
+        }
+
+        sha256Hex(password).then(function (hex) {
+          var profile = {
+            name: name,
+            phone: phone,
+            email: email,
+            username: username,
+            passwordHash: hex
+          };
+          localStorage.setItem("pcs-driver-account", JSON.stringify(profile));
+          document.getElementById("password").value = "";
+          document.getElementById("confirm").value = "";
+          showSaved();
+        }).catch(function () {
+          showError("Could not save the account on this phone. Nothing was stored.");
+        });
+      });
+    })();
+  </script>
+</body>
+</html>
