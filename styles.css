@@ -176,6 +176,15 @@ a {
   margin-bottom: 1rem;
 }
 
+.address-group {
+  margin: 0 0 0.35rem;
+}
+
+.address-group > legend {
+  font-size: 0.95rem;
+  margin-bottom: 0.55rem;
+}
+
 .field {
   margin-bottom: 1rem;
 }
@@ -262,6 +271,86 @@ a {
 
 .route-status.error {
   color: var(--danger);
+}
+
+
+.stops-block {
+  margin: 0.2rem 0 1.1rem;
+}
+
+.stops-title {
+  margin: 0 0 0.25rem;
+  font-weight: 700;
+  font-size: 0.95rem;
+  color: var(--navy);
+}
+
+.optional-tag {
+  font-weight: 600;
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+
+.stops-price {
+  margin: 0 0 0.75rem;
+  font-size: 0.9rem;
+  color: var(--text);
+}
+
+.stop-card {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 0.8rem 0.9rem 0.15rem;
+  margin-bottom: 0.75rem;
+  background: #f7f9fc;
+}
+
+.stop-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: 0.55rem;
+}
+
+.stop-label {
+  margin: 0;
+  font-weight: 700;
+  color: var(--navy);
+}
+
+.btn-remove-stop {
+  width: auto;
+  margin: 0;
+  padding: 0.35rem 0.7rem;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: #fff;
+  color: var(--danger);
+  font: inherit;
+  font-size: 0.82rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.btn-add-stop {
+  width: auto;
+  margin-top: 0.15rem;
+  padding: 0.6rem 0.95rem;
+  background: #fff;
+  color: var(--navy);
+  border: 1px solid var(--navy-soft);
+}
+
+.btn-add-stop:hover {
+  background: #f7f9fc;
+}
+
+.destination-note {
+  margin: -0.35rem 0 0.75rem;
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: var(--navy);
 }
 
 /* Buttons */

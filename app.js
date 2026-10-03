@@ -56,7 +56,8 @@
     manualMiles: document.getElementById('manual-miles'),
     tripType: document.getElementById('trip-type'),
     passengers: document.getElementById('passengers'),
-    stops: document.getElementById('stops'),
+    stopsList: document.getElementById('stops-list'),
+    addStopButton: document.getElementById('add-stop-btn'),
     rideDate: document.getElementById('ride-date'),
     rideTime: document.getElementById('ride-time'),
     holiday: document.getElementById('holiday'),
@@ -224,6 +225,79 @@
     return composeAddress(els.dropoffStreet, els.dropoffCity, els.dropoffState);
   }
 
+  function stopCards() {
+    if (!els.stopsList) return [];
+    return Array.from(els.stopsList.querySelectorAll('.stop-card'));
+  }
+
+  function readStopParts(card) {
+    return ['street', 'city', 'state'].map((part) => {
+      const field = card.querySelector('[data-part="' + part + '"]');
+      return field ? field.value.trim() : '';
+    });
+  }
+
+  function stopAddresses() {
+    const addresses = [];
+    stopCards().forEach((card) => {
+      const parts = readStopParts(card);
+      if (parts.every(Boolean)) addresses.push(parts.join(', '));
+    });
+    return addresses;
+  }
+
+  function routeAddresses() {
+    return [pickupAddress(), ...stopAddresses(), dropoffAddress()].filter(Boolean);
+  }
+
+  function renumberStops() {
+    stopCards().forEach((card, index) => {
+      const n = index + 1;
+      const title = card.querySelector('.stop-label');
+      if (title) title.textContent = 'Stop ' + n;
+      ['street', 'city', 'state'].forEach((part) => {
+        const field = card.querySelector('[data-part="' + part + '"]');
+        const label = card.querySelector('label[data-for-part="' + part + '"]');
+        const id = 'stop-' + n + '-' + part;
+        if (field) field.id = id;
+        if (label) label.htmlFor = id;
+      });
+    });
+  }
+
+  function addStop(options) {
+    if (!els.stopsList || stopCards().length >= 20) return;
+    const n = stopCards().length + 1;
+    const card = document.createElement('div');
+    card.className = 'stop-card';
+    card.innerHTML =
+      '<div class="stop-card-head">' +
+        '<p class="stop-label">Stop ' + n + '</p>' +
+        '<button type="button" class="btn-remove-stop">Remove stop</button>' +
+      '</div>' +
+      '<div class="field">' +
+        '<label data-for-part="street" for="stop-' + n + '-street">Street address</label>' +
+        '<input type="text" id="stop-' + n + '-street" data-part="street" name="pcs-stop-line" autocomplete="off" autocorrect="off" readonly required maxlength="120" placeholder="Street address" />' +
+      '</div>' +
+      '<div class="row two">' +
+        '<div class="field">' +
+          '<label data-for-part="city" for="stop-' + n + '-city">City</label>' +
+          '<input type="text" id="stop-' + n + '-city" data-part="city" name="pcs-stop-town" autocomplete="off" readonly required maxlength="80" placeholder="Willis" />' +
+        '</div>' +
+        '<div class="field">' +
+          '<label data-for-part="state" for="stop-' + n + '-state">State</label>' +
+          '<input type="text" id="stop-' + n + '-state" data-part="state" name="pcs-stop-region" autocomplete="off" readonly required maxlength="30" placeholder="TX" />' +
+        '</div>' +
+      '</div>';
+    els.stopsList.appendChild(card);
+    renumberStops();
+    if (!options || options.save !== false) saveDraft();
+  }
+
+  function incompleteStopCard() {
+    return stopCards().find((card) => !readStopParts(card).every(Boolean)) || null;
+  }
+
   function isAppleSmsDevice() {
     const ua = navigator.userAgent || '';
     if (/iPhone|iPad/i.test(ua)) return true;
@@ -239,7 +313,7 @@
   function needsFlightDetails() {
     const type = els.tripType.value;
     if (type === 'airport-pick' || type === 'airport-drop') return true;
-    return /\bairport\b/i.test(pickupAddress() + ' ' + dropoffAddress());
+    return /\bairport\b/i.test(routeAddresses().join(' '));
   }
 
   function updateFlightDetails() {
@@ -261,13 +335,15 @@
     ];
     const email = els.contactEmail.value.trim();
     if (email) lines.push('Email: ' + email);
+    lines.push('Pickup: ' + pickupAddress());
+    stopAddresses().forEach((address, index) => {
+      lines.push('Stop ' + (index + 1) + ': ' + address);
+    });
     lines.push(
-      'Pickup: ' + pickupAddress(),
-      'Drop-off: ' + dropoffAddress(),
+      'Final destination: ' + dropoffAddress(),
       'Date: ' + els.rideDate.value,
       'Time: ' + els.rideTime.value,
       'Passengers: ' + els.passengers.value,
-      'Stops: ' + els.stops.value,
       'Trip type: ' + els.tripType.options[els.tripType.selectedIndex].text
     );
     if (needsFlightDetails()) {
@@ -283,9 +359,13 @@
         var offer = Math.round(result.total * 0.9 * 100) / 100;
         lines.push('10% website booking. Please apply the discount. Offer total: ' + money(offer));
         lines.push('Offer terms: book by Nov 30, pay in full, no cancel within 24h, at least 48h ahead. Rides through Dec 31.');
+      } else {
+        lines.push('10% website booking. Please apply the discount.');
       }
     } else if (promo) {
       lines.push('10% website booking. Please apply the discount. Book by Nov 30, pay in full, no cancel within 24h, at least 48h ahead. Rides through Dec 31.');
+    } else {
+      lines.push('10% website booking. Please apply the discount.');
     }
     lines.push('', 'This is a ride request only, not a booking confirmation.');
     return lines.join('\n');
@@ -304,7 +384,24 @@
     let data;
     try { data = JSON.parse(sessionStorage.getItem('pcs-quote') || 'null'); } catch (err) { data = null; }
     if (!data) return;
+    const stopIndexes = Object.keys(data)
+      .map((id) => {
+        const match = /^stop-(\d+)-street$/.exec(id);
+        return match ? Number(match[1]) : null;
+      })
+      .filter((n) => n != null)
+      .sort((a, b) => a - b);
+    stopIndexes.forEach((oldIndex) => {
+      addStop({ save: false });
+      const n = stopCards().length;
+      ['street', 'city', 'state'].forEach((part) => {
+        const field = document.getElementById('stop-' + n + '-' + part);
+        const value = data['stop-' + oldIndex + '-' + part];
+        if (field && value != null) field.value = value;
+      });
+    });
     Object.keys(data).forEach((id) => {
+      if (/^stop-\d+-/.test(id) || id === 'stops') return;
       const field = document.getElementById(id);
       if (!field) return;
       if (field.type === 'checkbox') field.checked = !!data[id];
@@ -415,11 +512,17 @@
     return { lon: lon, lat: lat };
   }
 
-  async function fetchOsrmMiles(origin, destination) {
-    const url = 'https://router.project-osrm.org/route/v1/driving/' +
-      origin.lon + ',' + origin.lat + ';' +
-      destination.lon + ',' + destination.lat +
-      '?overview=false';
+  function routeFoundMessage(miles) {
+    const stopCount = stopAddresses().length;
+    const via = stopCount
+      ? ' via ' + stopCount + (stopCount === 1 ? ' stop' : ' stops')
+      : '';
+    return 'Route found: ' + miles.toFixed(1) + ' miles driving' + via;
+  }
+
+  async function fetchOsrmMiles(points) {
+    const path = points.map((point) => point.lon + ',' + point.lat).join(';');
+    const url = 'https://router.project-osrm.org/route/v1/driving/' + path + '?overview=false';
     const data = await fetchJson(url);
     const route = data && data.code === 'Ok' && data.routes && data.routes[0];
     const meters = route && route.distance;
@@ -428,18 +531,20 @@
   }
 
   async function fetchPublicDrivingMiles() {
-    const originAddress = pickupAddress();
-    const destinationAddress = dropoffAddress();
-    if (!originAddress || !destinationAddress) return null;
+    const addresses = routeAddresses();
+    if (addresses.length < 2 || !pickupAddress() || !dropoffAddress()) return null;
 
-    const origin = await geocodeAddress(originAddress);
-    const destination = await geocodeAddress(destinationAddress);
-    if (!origin || !destination) return null;
+    const points = [];
+    for (let i = 0; i < addresses.length; i += 1) {
+      const point = await geocodeAddress(addresses[i]);
+      if (!point) return null;
+      points.push(point);
+    }
 
-    const miles = await fetchOsrmMiles(origin, destination);
+    const miles = await fetchOsrmMiles(points);
     if (miles == null) return null;
     lastDrivingMiles = miles;
-    showRouteStatus('Route found: ' + miles.toFixed(1) + ' miles driving');
+    showRouteStatus(routeFoundMessage(miles));
     return miles;
   }
 
@@ -448,6 +553,7 @@
 
     const origin = pickupAddress();
     const destination = dropoffAddress();
+    const stops = stopAddresses();
     if (!origin || !destination) return null;
 
     return new Promise((resolve) => {
@@ -455,6 +561,7 @@
         {
           origin,
           destination,
+          waypoints: stops.map((location) => ({ location: location, stopover: true })),
           travelMode: google.maps.TravelMode.DRIVING,
           unitSystem: google.maps.UnitSystem.IMPERIAL,
         },
@@ -469,7 +576,7 @@
             });
             const miles = meters / 1609.344;
             lastDrivingMiles = miles;
-            showRouteStatus(`Route found: ${miles.toFixed(1)} miles driving`);
+            showRouteStatus(routeFoundMessage(miles));
             resolve(miles);
           } else {
             showRouteStatus('Could not find a driving route. Check addresses or enter miles.', true);
@@ -490,6 +597,17 @@
       return quote;
     }
 
+    const missingStop = incompleteStopCard();
+    if (missingStop) {
+      showRouteStatus('Enter each stop address, or remove the stop.', true);
+      const field = missingStop.querySelector('input');
+      if (field) {
+        field.removeAttribute('readonly');
+        field.focus();
+      }
+      return;
+    }
+
     let miles = null;
 
     if (mapsReady) {
@@ -502,7 +620,7 @@
     if (miles == null) {
       const manual = parseFloat(els.manualMiles.value);
       if (!manual || manual <= 0) {
-        showRouteStatus('Enter pickup & drop-off (with map) or type driving miles.', true);
+        showRouteStatus('Enter pickup and final destination, or type driving miles.', true);
         els.manualMilesField.hidden = false;
         els.manualMiles.focus();
         return;
@@ -515,7 +633,7 @@
       miles,
       tripType,
       passengers: els.passengers.value,
-      stops: els.stops.value,
+      stops: stopAddresses().length,
       dateStr: els.rideDate.value,
       timeStr: els.rideTime.value,
       isHoliday: els.holiday.checked,
@@ -565,7 +683,7 @@
         els.apiBanner.hidden = true;
         // Keep manual miles available as fallback
         els.manualMilesField.hidden = false;
-        showRouteStatus('Map ready — enter pickup and drop-off, then Get estimate.');
+        showRouteStatus('Map ready — enter pickup and final destination, then Get estimate.');
       } catch (err) {
         console.error(err);
         initManualMode();
@@ -601,6 +719,25 @@
       });
     }
     els.tripType.addEventListener('change', updateFlightDetails);
+    if (els.addStopButton) els.addStopButton.addEventListener('click', () => addStop());
+    if (els.stopsList) {
+      els.stopsList.addEventListener('click', (event) => {
+        const button = event.target.closest('.btn-remove-stop');
+        if (!button) return;
+        const card = button.closest('.stop-card');
+        if (card) card.remove();
+        renumberStops();
+        saveDraft();
+        updateFlightDetails();
+      });
+      els.stopsList.addEventListener('input', updateFlightDetails);
+    }
+    els.form.addEventListener('focusin', (event) => {
+      const field = event.target;
+      if (field && field.matches && field.matches('input[readonly]')) {
+        field.removeAttribute('readonly');
+      }
+    });
     [
       els.pickupStreet, els.pickupCity, els.pickupState,
       els.dropoffStreet, els.dropoffCity, els.dropoffState,
