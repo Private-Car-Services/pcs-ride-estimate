@@ -573,3 +573,18 @@ a.btn + .btn, .btn + a.btn, a.btn + a.btn { margin-top: 8px; }
   margin: 0 0 10px;
   display: block;
 }
+
+
+.map-stage.board-map {
+  height: 360px;
+}
+
+.open-ride-card .row-actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.open-ride-card .row-actions .btn {
+  flex: 1;
+}
