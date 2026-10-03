@@ -6,13 +6,13 @@
   var TAX_RATE = 0.0825;
 
   var SAMPLE = {
-    name: "Matthew",
-    phone: "(936) 555-0148",
-    pickupStreet: "502 W. Montgomery St",
-    pickupCity: "Willis",
+    name: "",
+    phone: "",
+    pickupStreet: "",
+    pickupCity: "",
     pickupState: "TX",
-    dropStreet: "3131 Canterbury Ln",
-    dropCity: "Willis",
+    dropStreet: "",
+    dropCity: "",
     dropState: "TX",
     time: "08:00"
   };
@@ -30,8 +30,11 @@
     maxLng: -95.44
   };
 
+  var ROLE = document.body && document.body.getAttribute("data-app") === "driver" ? "driver" : "customer";
+  var STORE = "pcs-beta-ride";
+
   var state = {
-    mode: "customer",
+    mode: ROLE,
     screen: "home",
     name: SAMPLE.name,
     phone: SAMPLE.phone,
@@ -188,9 +191,8 @@
 
   function customerHome() {
     return (
-      modeSwitch("customer") +
       "<h2>Request a ride</h2>" +
-      "<p class=\"lede\">Sample ride is filled in. Nothing is sent, and nothing is charged.</p>" +
+      "<p class=\"lede\">Nothing is sent, and nothing is charged.</p>" +
       "<form id=\"ride-form\" autocomplete=\"off\">" +
       '<div class="group"><p class="group-title">Pickup</p>' +
       field("pickup-street", "Street", state.pickupStreet, 'required') +
@@ -219,7 +221,7 @@
       '<p class="error" id="form-error" role="alert">' + esc(state.error) + "</p>" +
       '<button class="btn" type="submit">Request this ride</button>' +
       "</form>" +
-      '<p class="fine">Driver mode on this screen shows the same sample request. Live tracking and other drivers come next.</p>'
+      '<p class="fine">The driver uses a separate app. On this phone, that app sees this request. Nothing is texted.</p>'
     );
   }
 
@@ -301,20 +303,80 @@
     );
   }
 
+  function customerWaiting() {
+    return (
+      '<button class="btn ghost" type="button" id="back-home">← Request</button>' +
+      '<div class="status"><i></i><span>Waiting for a driver</span></div>' +
+      "<p class=\"lede\">" + esc(pickupLine()) + " → " + esc(dropLine()) + "<br>" + esc(prettyWhen()) + "</p>" +
+      '<p class="note">Open the driver app and accept this ride. This screen changes when a driver accepts.</p>'
+    );
+  }
+
+  function applyRide(ride) {
+    if (!ride) return;
+    state.name = ride.name || "";
+    state.phone = ride.phone || "";
+    state.pickupStreet = ride.pickupStreet || "";
+    state.pickupCity = ride.pickupCity || "";
+    state.pickupState = ride.pickupState || "TX";
+    state.dropStreet = ride.dropStreet || "";
+    state.dropCity = ride.dropCity || "";
+    state.dropState = ride.dropState || "TX";
+    state.date = ride.date || state.date;
+    state.time = ride.time || state.time;
+    state.rideStatus = ride.status || "";
+  }
+
+  function currentRide() {
+    try {
+      return JSON.parse(localStorage.getItem(STORE) || "null");
+    } catch (err) {
+      return null;
+    }
+  }
+
+  function saveRide(status) {
+    state.rideStatus = status;
+    localStorage.setItem(STORE, JSON.stringify({
+      name: state.name,
+      phone: state.phone,
+      pickupStreet: state.pickupStreet,
+      pickupCity: state.pickupCity,
+      pickupState: state.pickupState,
+      dropStreet: state.dropStreet,
+      dropCity: state.dropCity,
+      dropState: state.dropState,
+      date: state.date,
+      time: state.time,
+      status: status
+    }));
+  }
+
+  function clearRideFields() {
+    state.name = "";
+    state.phone = "";
+    state.pickupStreet = "";
+    state.pickupCity = "";
+    state.dropStreet = "";
+    state.dropCity = "";
+    state.rideStatus = "";
+  }
+
   function driverHome() {
     var est = estimate();
     return (
-      modeSwitch("driver") +
       "<h2>Open requests</h2>" +
-      "<p class=\"lede\">One sample request. No other drivers are connected.</p>" +
-      '<article class="card">' +
-      '<p class="tag">Sample</p>' +
-      "<h2 style=\"font-size:18px\">" + esc(state.name || "Rider") + "</h2>" +
-      "<p class=\"fine\">" + esc(prettyWhen()) + " · " + esc(state.phone) + "</p>" +
-      '<div class="route-line"><p>' + esc(pickupLine()) + "</p><p>" + esc(dropLine()) + "</p></div>" +
-      "<p class=\"fine\">" + est.raw.toFixed(2) + " miles on the sample map, billed as " + est.billed + ".</p>" +
-      '<button class="btn" type="button" id="accept-ride">Accept</button>' +
-      "</article>"
+      (state.pickupStreet
+        ? '<p class="lede">From the passenger app.</p>' +
+          '<article class="card">' +
+          '<p class="tag">' + (state.rideStatus === "accepted" ? "Accepted" : "New") + "</p>" +
+          '<h2 style="font-size:18px">' + esc(state.name || "Rider") + "</h2>" +
+          '<p class="fine">' + esc(prettyWhen()) + (state.phone ? " · " + esc(state.phone) : "") + "</p>" +
+          '<div class="route-line"><p>' + esc(pickupLine()) + "</p><p>" + esc(dropLine()) + "</p></div>" +
+          '<p class="fine">' + est.raw.toFixed(2) + " miles on the sample map, billed as " + est.billed + ".</p>" +
+          '<button class="btn" type="button" id="accept-ride">' +
+          (state.rideStatus === "accepted" ? "Open trip" : "Accept") + "</button></article>"
+        : '<p class="lede">No open requests. A ride from the passenger app shows up here.</p>')
     );
   }
 
@@ -334,10 +396,11 @@
     stopMotion();
     var app = document.getElementById("app");
     var html = "";
-    if (state.mode === "customer" && state.screen === "home") html = customerHome();
-    else if (state.mode === "customer" && state.screen === "trip") html = customerTrip();
-    else if (state.mode === "driver" && state.screen === "home") html = driverHome();
-    else html = driverTrip();
+    if (ROLE === "driver" && state.screen === "home") html = driverHome();
+    else if (ROLE === "driver") html = driverTrip();
+    else if (state.screen === "waiting") html = customerWaiting();
+    else if (state.screen === "trip") html = customerTrip();
+    else html = customerHome();
     app.innerHTML = html;
     bind();
     if (state.screen === "trip") startMap();
@@ -397,7 +460,8 @@
           return;
         }
         state.error = "";
-        state.screen = "trip";
+        saveRide("requested");
+        state.screen = "waiting";
         render();
       });
     }
@@ -420,6 +484,7 @@
     var accept = document.getElementById("accept-ride");
     if (accept) {
       accept.addEventListener("click", function () {
+        saveRide("accepted");
         state.mode = "driver";
         state.screen = "trip";
         render();
@@ -610,6 +675,33 @@
     document.addEventListener("keydown", function (event) {
       if (event.key === "Escape") closePreview();
     });
+    if (ROLE === "driver") applyRide(currentRide());
+    window.addEventListener("storage", function (event) {
+      if (event.key !== STORE) return;
+      syncRide();
+    });
+    setInterval(function () {
+      syncRide();
+    }, 1000);
     render();
   });
+
+  function syncRide() {
+    var ride = currentRide();
+    if (ROLE === "driver") {
+      var stamp = ride ? ride.status + "|" + ride.pickupStreet + "|" + ride.name : "";
+      if (stamp === state.syncStamp) return;
+      state.syncStamp = stamp;
+      if (!ride || !ride.pickupStreet) clearRideFields();
+      else applyRide(ride);
+      if (state.screen === "trip" && ride && ride.status === "accepted") return;
+      if (state.screen !== "home" && (!ride || ride.status !== "accepted")) state.screen = "home";
+      render();
+      return;
+    }
+    if (state.screen === "waiting" && ride && ride.status === "accepted") {
+      state.screen = "trip";
+      render();
+    }
+  }
 })();
