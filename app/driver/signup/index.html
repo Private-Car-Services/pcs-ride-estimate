@@ -37,8 +37,6 @@
         <input id="mobile" name="phone" type="tel" inputmode="tel" autocomplete="tel" required>
         <label for="email">Email</label>
         <input id="email" name="email" type="email" autocomplete="email" required>
-        <label for="username">Username</label>
-        <input id="username" name="username" type="text" autocomplete="username" required>
         <label for="password">Password</label>
         <input id="password" name="password" type="password" autocomplete="new-password" required>
         <label for="confirm">Confirm password</label>
@@ -252,7 +250,6 @@
         row("Name", account.name || "");
         row("Phone", prettyPhone(account.phone));
         row("Email", account.email || "");
-        row("Username", account.username || "");
 
         var updateForm = document.createElement("form");
         updateForm.id = "profile-form";
@@ -338,10 +335,10 @@
               name: name,
               phone: phone,
               email: account.email || "",
-              username: account.username || "",
               passwordHash: account.passwordHash || "",
               photo: photo
             };
+            if (account.username) next.username = account.username;
             try {
               localStorage.setItem("pcs-driver-account", JSON.stringify(next));
             } catch (saveErr) {
@@ -356,7 +353,7 @@
       }
 
       var existing = readAccount();
-      if (existing && existing.username) {
+      if (existing && (existing.email || existing.username)) {
         showProfile(existing, "");
         return;
       }
@@ -370,8 +367,7 @@
         showError("");
         var name = document.getElementById("full-name").value.trim();
         var phone = digits(document.getElementById("mobile").value);
-        var email = document.getElementById("email").value.trim();
-        var username = document.getElementById("username").value.trim();
+        var email = document.getElementById("email").value.trim().toLowerCase();
         var password = document.getElementById("password").value;
         var confirm = document.getElementById("confirm").value;
 
@@ -385,10 +381,6 @@
         }
         if (email.indexOf("@") === -1) {
           showError("Enter an email that contains @.");
-          return;
-        }
-        if (!/^[A-Za-z0-9]{3,}$/.test(username)) {
-          showError("Username must be at least 3 letters or numbers, with no spaces or symbols.");
           return;
         }
         if (password.length < 8) {
@@ -412,12 +404,11 @@
             name: name,
             phone: phone,
             email: email,
-            username: username,
             passwordHash: hex,
             photo: photo
           };
           localStorage.setItem("pcs-driver-account", JSON.stringify(profile));
-          localStorage.setItem("pcs-driver-session", username);
+          localStorage.setItem("pcs-driver-session", email);
           document.getElementById("password").value = "";
           document.getElementById("confirm").value = "";
           showSaved();
