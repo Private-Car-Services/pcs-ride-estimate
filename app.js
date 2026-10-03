@@ -228,7 +228,7 @@
       `Estimated fare: ${result && !result.callForQuote ? money(result.total) : 'Please quote'}`,
       '', 'This is a ride request only, not a booking confirmation. Please reply with availability and the confirmed fare.'
     ];
-    window.location.href = `mailto:mwragge@privatetaxiservices.net?subject=${encodeURIComponent(`Ride request - ${els.contactName.value.trim()}`)}&body=${encodeURIComponent(lines.join('\n'))}`;
+    window.location.href = `sms:9362617878?body=${encodeURIComponent(lines.join('\n'))}`;
   }
 
   function updateRequestLink(result) {
@@ -245,7 +245,7 @@
       `Passengers: ${els.passengers.value}`,
       `Estimated fare: ${result && !result.callForQuote ? money(result.total) : 'Please quote'}`,
     ];
-    els.requestRideLink.href = `mailto:mwragge@privatetaxiservices.net?subject=${encodeURIComponent('Ride request')}&body=${encodeURIComponent(lines.join('\n'))}`;
+    els.requestRideLink.href = `sms:9362617878?body=${encodeURIComponent(lines.join('\n'))}`;
   }
 
   function renderEstimate(result) {
