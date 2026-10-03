@@ -96,8 +96,22 @@
     return 2 * R * Math.asin(Math.sqrt(h));
   }
 
+  function routePoints() {
+    var pickup = isFinite(state.pickupLat) ? { lat: +state.pickupLat, lng: +state.pickupLng } : GEO.pickup;
+    var dropoff = isFinite(state.dropLat) ? { lat: +state.dropLat, lng: +state.dropLng } : GEO.dropoff;
+    var live = isFinite(state.pickupLat) && isFinite(state.dropLat);
+    var driver = live
+      ? {
+          lat: pickup.lat - (dropoff.lat - pickup.lat) * 0.3 - 0.008,
+          lng: pickup.lng - (dropoff.lng - pickup.lng) * 0.3 - 0.008
+        }
+      : GEO.driver;
+    return { pickup: pickup, dropoff: dropoff, driver: driver, live: live };
+  }
+
   function tripMiles() {
-    var hundredths = Math.round(haversine(GEO.pickup, GEO.dropoff) * 100) / 100;
+    var route = routePoints();
+    var hundredths = Math.round(haversine(route.pickup, route.dropoff) * 100) / 100;
     var billed = Math.ceil(hundredths);
     if (billed < 1) billed = 1;
     return { raw: hundredths, billed: billed };
@@ -145,9 +159,22 @@
   }
 
   function project(point) {
+    var route = routePoints();
+    var minLat = BOUNDS.minLat, maxLat = BOUNDS.maxLat, minLng = BOUNDS.minLng, maxLng = BOUNDS.maxLng;
+    if (route.live) {
+      var lats = [route.pickup.lat, route.dropoff.lat, route.driver.lat];
+      var lngs = [route.pickup.lng, route.dropoff.lng, route.driver.lng];
+      minLat = Math.min.apply(null, lats);
+      maxLat = Math.max.apply(null, lats);
+      minLng = Math.min.apply(null, lngs);
+      maxLng = Math.max.apply(null, lngs);
+      var padLat = Math.max((maxLat - minLat) * 0.35, 0.01);
+      var padLng = Math.max((maxLng - minLng) * 0.35, 0.01);
+      minLat -= padLat; maxLat += padLat; minLng -= padLng; maxLng += padLng;
+    }
     return {
-      x: ((point.lng - BOUNDS.minLng) / (BOUNDS.maxLng - BOUNDS.minLng)) * 100,
-      y: ((BOUNDS.maxLat - point.lat) / (BOUNDS.maxLat - BOUNDS.minLat)) * 100
+      x: ((point.lng - minLng) / (maxLng - minLng)) * 100,
+      y: ((maxLat - point.lat) / (maxLat - minLat)) * 100
     };
   }
 
@@ -214,13 +241,22 @@
     return p.name || street || "";
   }
 
-  function applyPlace(prefix, p) {
+  function setCoords(prefix, feature) {
+    var coords = feature && feature.geometry && feature.geometry.coordinates;
+    if (!coords) return;
+    state[prefix + "Lng"] = coords[0];
+    state[prefix + "Lat"] = coords[1];
+  }
+
+  function applyPlace(prefix, feature) {
+    var p = feature.properties || feature;
     var streetEl = document.getElementById(prefix + "-street");
     var cityEl = document.getElementById(prefix + "-city");
     var stateEl = document.getElementById(prefix + "-state");
     if (streetEl) streetEl.value = placeLine(p);
     if (cityEl && (p.city || p.county)) cityEl.value = p.city || p.county;
     if (stateEl) stateEl.value = stateCode(p.state);
+    setCoords(prefix, feature);
   }
 
   function wireSearch(inputId, resultsId, prefix) {
@@ -230,6 +266,8 @@
     var timer = 0;
     input.addEventListener("input", function () {
       var q = input.value.trim();
+      state[prefix + "Lat"] = null;
+      state[prefix + "Lng"] = null;
       clearTimeout(timer);
       if (q.length < 3) {
         box.hidden = true;
@@ -259,7 +297,7 @@
       if (!btn || !box._places) return;
       var feature = box._places[Number(btn.getAttribute("data-i"))];
       if (!feature) return;
-      applyPlace(prefix, feature.properties || {});
+      applyPlace(prefix, feature);
       box.hidden = true;
     });
   }
@@ -274,7 +312,7 @@
         var url = "https://photon.komoot.io/reverse?limit=1&lat=" + pos.coords.latitude + "&lon=" + pos.coords.longitude;
         fetch(url).then(function (res) { return res.json(); }).then(function (data) {
           var feature = data.features && data.features[0];
-          if (feature) applyPlace("pickup", feature.properties || {});
+          if (feature) applyPlace("pickup", feature);
           locBtn.disabled = false;
           locBtn.textContent = "Use current location";
         }).catch(function () {
@@ -329,31 +367,33 @@
     return (
       '<div class="card">' +
       '<p class="tag">Estimate only</p>' +
-      '<div class="money-row"><span>Sample distance</span><span>' + est.raw.toFixed(2) + " miles</span></div>" +
+      '<div class="money-row"><span>' + (routePoints().live ? "Distance" : "Sample distance") + '</span><span>' + est.raw.toFixed(2) + " miles</span></div>" +
       '<div class="money-row"><span>Billed miles</span><span>' + est.billed + " (rounded up)</span></div>" +
       '<div class="money-row"><span>Base</span><span>' + money(BASE_CENTS) + "</span></div>" +
       '<div class="money-row"><span>Mileage ' + est.billed + " × " + money(PER_MILE_CENTS) + "</span><span>" + money(est.mileage) + "</span></div>" +
       '<div class="money-row"><span>Texas tax 8.25%</span><span>' + money(est.tax) + "</span></div>" +
       '<div class="total-row"><span>Preview total</span><span>' + money(est.total) + "</span></div>" +
-      '<p class="fine">Not a charge. Tax is shown so the estimate matches the quote page. The map uses sample positions around Willis, not a live lookup of the typed address.</p>' +
+      '<p class="fine">Not a charge. Tax is shown so the estimate matches the quote page.' +
+      (routePoints().live ? " The route uses the places you chose." : " The map is a sample until both places are found.") + "</p>" +
       "</div>"
     );
   }
 
   function mapBlock(youLabel) {
-    var pickup = project(GEO.pickup);
-    var drop = project(GEO.dropoff);
-    var start = project(GEO.driver);
+    var route = routePoints();
+    var pickup = project(route.pickup);
+    var drop = project(route.dropoff);
+    var start = project(route.driver);
     return (
       '<div class="map-stage">' +
-      '<div id="live-map" role="img" aria-label="Sample map around Willis"></div>' +
+      '<div id="live-map" role="img" aria-label="' + (route.live ? "Route map" : "Sample map") + '"></div>' +
       '<div class="illus" id="illus">' +
       illustratedMap(start, pickup, drop) +
       pin("pin-pickup", "pin-you", youLabel, pickup) +
       pin("pin-drop", "pin-drop", "Drop-off", drop) +
       '<div class="pin pin-car" id="pin-car" style="left:' + start.x + '%;top:' + start.y + '%"><div class="car-face" id="illus-car">' + CAR_SVG + "</div></div>" +
       "</div>" +
-      '<p class="map-caption">Sample map · Willis</p>' +
+      '<p class="map-caption">' + (route.live ? "Your route" : "Sample map · Willis") + "</p>" +
       "</div>" +
       '<p class="legend"><span><i class="swatch"></i> Sample car</span>' +
       '<span><i class="swatch you"></i> ' + esc(youLabel) + "</span>" +
@@ -424,6 +464,10 @@
     state.date = ride.date || state.date;
     state.time = ride.time || state.time;
     state.rideStatus = ride.status || "";
+    state.pickupLat = ride.pickupLat;
+    state.pickupLng = ride.pickupLng;
+    state.dropLat = ride.dropLat;
+    state.dropLng = ride.dropLng;
   }
 
   function currentRide() {
@@ -447,7 +491,11 @@
       dropState: state.dropState,
       date: state.date,
       time: state.time,
-      status: status
+      status: status,
+      pickupLat: state.pickupLat,
+      pickupLng: state.pickupLng,
+      dropLat: state.dropLat,
+      dropLng: state.dropLng
     }));
   }
 
@@ -459,6 +507,10 @@
     state.dropStreet = "";
     state.dropCity = "";
     state.rideStatus = "";
+    state.pickupLat = null;
+    state.pickupLng = null;
+    state.dropLat = null;
+    state.dropLng = null;
   }
 
   function driverHome() {
@@ -472,7 +524,7 @@
           '<h2 style="font-size:18px">' + esc(state.name || "Rider") + "</h2>" +
           '<p class="fine">' + esc(prettyWhen()) + (state.phone ? " · " + esc(state.phone) : "") + "</p>" +
           '<div class="route-line"><p>' + esc(pickupLine()) + "</p><p>" + esc(dropLine()) + "</p></div>" +
-          '<p class="fine">' + est.raw.toFixed(2) + " miles on the sample map, billed as " + est.billed + ".</p>" +
+          '<p class="fine">' + est.raw.toFixed(2) + " miles, billed as " + est.billed + ".</p>" +
           '<button class="btn" type="button" id="accept-ride">' +
           (state.rideStatus === "accepted" ? "Open trip" : "Accept") + "</button></article>"
         : '<p class="lede">No open requests. A ride from the passenger app shows up here.</p>')
@@ -562,9 +614,11 @@
           return;
         }
         state.error = "";
-        saveRide("requested");
-        state.screen = "waiting";
-        render();
+        geocodeMissing().then(function () {
+          saveRide("requested");
+          state.screen = "waiting";
+          render();
+        });
       });
     }
     var backHome = document.getElementById("back-home");
@@ -594,6 +648,25 @@
     }
     var preview = document.getElementById("preview-only");
     if (preview) preview.addEventListener("click", openPreview);
+  }
+
+
+  function geocodeQuery(q) {
+    var url = "https://photon.komoot.io/api/?limit=1&lat=30.05&lon=-95.4&q=" + encodeURIComponent(q + " Texas");
+    return fetch(url).then(function (res) { return res.json(); }).then(function (data) {
+      return data.features && data.features[0];
+    }).catch(function () { return null; });
+  }
+
+  function geocodeMissing() {
+    var jobs = [];
+    if (!isFinite(state.pickupLat)) {
+      jobs.push(geocodeQuery(pickupLine()).then(function (feature) { if (feature) setCoords("pickup", feature); }));
+    }
+    if (!isFinite(state.dropLat)) {
+      jobs.push(geocodeQuery(dropLine()).then(function (feature) { if (feature) setCoords("drop", feature); }));
+    }
+    return Promise.all(jobs);
   }
 
   function draftText() {
@@ -643,8 +716,9 @@
 
   function startMap() {
     var reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-    var origin = GEO.driver;
-    var dest = GEO.pickup;
+    var route = routePoints();
+    var origin = route.driver;
+    var dest = route.pickup;
 
     function frame(now) {
       if (!motionStart) motionStart = now;
@@ -700,14 +774,15 @@
         maxZoom: 19,
         attribution: "&copy; OpenStreetMap"
       }).addTo(liveMap);
+      var route = routePoints();
       window.L.polyline(
-        [[GEO.driver.lat, GEO.driver.lng], [GEO.pickup.lat, GEO.pickup.lng], [GEO.dropoff.lat, GEO.dropoff.lng]],
+        [[route.driver.lat, route.driver.lng], [route.pickup.lat, route.pickup.lng], [route.dropoff.lat, route.dropoff.lng]],
         { color: "#d4b15a", weight: 4, opacity: 0.9 }
       ).addTo(liveMap);
       var youLabel = state.mode === "driver" ? "Customer" : "You";
-      window.L.marker([GEO.pickup.lat, GEO.pickup.lng], { icon: pinIcon(youLabel, "pin-you") }).addTo(liveMap);
-      window.L.marker([GEO.dropoff.lat, GEO.dropoff.lng], { icon: pinIcon("Drop-off", "pin-drop") }).addTo(liveMap);
-      carMarker = window.L.marker([GEO.driver.lat, GEO.driver.lng], {
+      window.L.marker([route.pickup.lat, route.pickup.lng], { icon: pinIcon(youLabel, "pin-you") }).addTo(liveMap);
+      window.L.marker([route.dropoff.lat, route.dropoff.lng], { icon: pinIcon("Drop-off", "pin-drop") }).addTo(liveMap);
+      carMarker = window.L.marker([route.driver.lat, route.driver.lng], {
         icon: window.L.divIcon({
           className: "pin-icon",
           html: '<div class="car-face">' + CAR_SVG + "</div>",
@@ -718,9 +793,9 @@
       }).addTo(liveMap);
       liveMap.fitBounds(
         window.L.latLngBounds([
-          [GEO.driver.lat, GEO.driver.lng],
-          [GEO.pickup.lat, GEO.pickup.lng],
-          [GEO.dropoff.lat, GEO.dropoff.lng]
+          [route.driver.lat, route.driver.lng],
+          [route.pickup.lat, route.pickup.lng],
+          [route.dropoff.lat, route.dropoff.lng]
         ]),
         { padding: [28, 28], maxZoom: 14 }
       );
