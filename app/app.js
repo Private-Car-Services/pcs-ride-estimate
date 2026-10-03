@@ -1085,18 +1085,10 @@
   }
 
   function accountGate() {
-    if (state.gateStep !== "login") {
-      return (
-        "<h2>Private Car Services</h2>" +
-        '<p class="lede">Log in to open the ' + (ROLE === "driver" ? "driver" : "rider") + ' page, or create an account. The account stays on this phone.</p>' +
-        '<button class="btn" type="button" id="show-login">Log in</button>' +
-        '<a class="btn secondary" href="signup/">Create an account</a>'
-      );
-    }
+    var page = ROLE === "driver" ? "driver" : "rider";
     return (
-      '<button class="btn ghost" type="button" id="gate-back">← Back</button>' +
-      "<h2>Log in</h2>" +
-      '<p class="lede">This opens the ' + (ROLE === "driver" ? "driver" : "rider") + ' page. The account stays on this phone.</p>' +
+      "<h2>Welcome</h2>" +
+      '<p class="lede">Log in here to open the ' + page + " page. Or create an account. It stays on this phone.</p>" +
       '<form id="login-form" autocomplete="off">' +
       '<label for="login-user">Username</label>' +
       '<input id="login-user" name="username" type="text" autocapitalize="none" autocomplete="username" spellcheck="false" required>' +
@@ -1104,7 +1096,8 @@
       '<input id="login-pass" name="password" type="password" autocomplete="current-password" required>' +
       '<p class="error" id="login-error" role="alert">' + esc(state.loginError || "") + "</p>" +
       '<button class="btn" type="submit">Log in</button>' +
-      "</form>"
+      "</form>" +
+      '<a class="btn secondary" href="signup/">Create an account</a>'
     );
   }
 
