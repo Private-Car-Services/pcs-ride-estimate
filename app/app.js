@@ -338,6 +338,39 @@
     return when.getTime() - Date.now() < 24 * 60 * 60 * 1000;
   }
 
+  var busyCache = null;
+
+  function pickupInstant() {
+    var ymd = (state.date || "").split("-");
+    var hm = (state.time || "").split(":");
+    return new Date(Number(ymd[0]), Number(ymd[1]) - 1, Number(ymd[2]), Number(hm[0]), Number(hm[1] || 0), 0, 0);
+  }
+
+  function rideHitsBusy(windows) {
+    var start = pickupInstant().getTime();
+    var end = start + 60 * 60 * 1000;
+    if (!windows || isNaN(start)) return false;
+    for (var i = 0; i < windows.length; i++) {
+      var win = windows[i] || {};
+      var winStart = new Date(win.start).getTime();
+      var winEnd = new Date(win.end).getTime();
+      if (isNaN(winStart) || isNaN(winEnd)) continue;
+      if (start < winEnd && winStart < end) return true;
+    }
+    return false;
+  }
+
+  function loadBusyWindows() {
+    if (busyCache) return Promise.resolve(busyCache);
+    return fetch("busy.json").then(function (res) {
+      if (!res.ok) throw new Error("busy");
+      return res.json();
+    }).then(function (data) {
+      busyCache = data && data.windows ? data.windows : [];
+      return busyCache;
+    });
+  }
+
   function estimate() {
     var miles = tripMiles();
     var tier = resolveTier(state.date, state.time, !!state.holiday);
@@ -1694,19 +1727,31 @@
           render();
           return;
         }
-        state.error = "";
-        state.customerGeocodeTried = false;
-        state.dropFix = null;
-        state.driverLat = null;
-        state.driverLng = null;
-        state.code = syncOn() ? makeRideCode() : "";
-        geocodeMissing().then(function () {
-          saveRide("requested", { clearDriver: true });
-          var created = currentRide();
-          state.customerGeocodeTried = true;
-          state.screen = "waiting";
-          render();
-          if (syncOn() && state.code && created) publishRide(state.code, created).catch(function () {});
+        function requestRide() {
+          state.error = "";
+          state.customerGeocodeTried = false;
+          state.dropFix = null;
+          state.driverLat = null;
+          state.driverLng = null;
+          state.code = syncOn() ? makeRideCode() : "";
+          geocodeMissing().then(function () {
+            saveRide("requested", { clearDriver: true });
+            var created = currentRide();
+            state.customerGeocodeTried = true;
+            state.screen = "waiting";
+            render();
+            if (syncOn() && state.code && created) publishRide(state.code, created).catch(function () {});
+          });
+        }
+        loadBusyWindows().then(function (windows) {
+          if (rideHitsBusy(windows)) {
+            state.error = "That time is already taken. Pick another time, or call 936-261-7878.";
+            render();
+            return;
+          }
+          requestRide();
+        }).catch(function () {
+          requestRide();
         });
       });
     }
