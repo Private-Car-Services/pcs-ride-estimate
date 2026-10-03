@@ -42,6 +42,10 @@
   var RIDE_OWNER = "pcs-beta-ride-owner";
   var DRIVER_CODE = "pcs-driver-code";
   var CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  // Presence + open-request indexes live under fixed ride codes so current Firebase
+  // /rides/{8-char} rules work without /open or /drivers paths.
+  var PRESENCE_HUB = "AVLBLDRV";
+  var OPEN_HUB = "REQUESTS";
   var lastDriverPatchAt = 0;
   var lastDriverPatchLat = null;
   var lastDriverPatchLng = null;
@@ -87,7 +91,10 @@
     selectedOpenCode: "",
     openListError: "",
     openListLoading: false,
-    openListStamp: ""
+    openListStamp: "",
+    onlineDrivers: [],
+    onlineStamp: "",
+    boardMarkers: null
   };
 
   var rafId = 0;
@@ -279,6 +286,28 @@
       '<div class="status"><i></i><span>No one is available</span></div>' +
       '<p class="lede">No one is available. Please call <a href="tel:' + BUSINESS_PHONE + '">' + esc(BUSINESS_PHONE) + "</a> directly.</p>"
     );
+  }
+
+  function driversOnlineNow() {
+    var cutoff = Date.now() - 2 * 60 * 1000;
+    return (state.onlineDrivers || []).filter(function (d) {
+      return d && d.online !== false && Number(d.at || 0) >= cutoff;
+    });
+  }
+
+  function someoneAvailable() {
+    if (driversOnlineNow().length) return true;
+    if (state.rideStatus === "accepted" || state.rideStatus === "started") return true;
+    if (driverNearPickup()) return true;
+    if (state.driverName) return true;
+    return false;
+  }
+
+  function waitingStatusBlock(onTheWayLabel) {
+    if (someoneAvailable()) {
+      return '<div class="status"><i></i><span>' + esc(onTheWayLabel) + "</span></div>";
+    }
+    return unavailableCall();
   }
 
   function routePoints() {
@@ -902,6 +931,32 @@
     return String(n).padStart(4, "0");
   }
 
+  function normalizeStoredPin(value) {
+    var digits = String(value == null ? "" : value).replace(/\D/g, "");
+    if (!digits) return "";
+    if (digits.length > 4) digits = digits.slice(-4);
+    return digits.padStart(4, "0");
+  }
+
+  function ensureRidePin() {
+    var pin = normalizeStoredPin(state.pin);
+    if (pin) {
+      state.pin = pin;
+      return pin;
+    }
+    var local = currentRide();
+    pin = normalizeStoredPin(local && local.pin);
+    if (!pin) pin = makeRidePin();
+    state.pin = pin;
+    if (state.rideStatus === "requested" || state.rideStatus === "accepted" || state.rideStatus === "started") {
+      saveRide(state.rideStatus || "requested");
+      if (syncOn() && state.code) {
+        patchRide(state.code, { pin: pin }).catch(function () {});
+      }
+    }
+    return pin;
+  }
+
   function normalizeCode(raw) {
     return String(raw || "").toUpperCase().replace(/\s+/g, "");
   }
@@ -957,8 +1012,23 @@
   }
 
   function openIndexUrl(code) {
-    if (code) return databaseURL() + "/open/" + encodeURIComponent(code) + ".json";
-    return databaseURL() + "/open.json";
+    if (code) {
+      return databaseURL() + "/rides/" + encodeURIComponent(OPEN_HUB) + "/" + encodeURIComponent(code) + ".json";
+    }
+    return databaseURL() + "/rides/" + encodeURIComponent(OPEN_HUB) + ".json";
+  }
+
+  function driversUrl(id) {
+    if (id) {
+      return databaseURL() + "/rides/" + encodeURIComponent(PRESENCE_HUB) + "/drivers/" + encodeURIComponent(id) + ".json";
+    }
+    return databaseURL() + "/rides/" + encodeURIComponent(PRESENCE_HUB) + "/drivers.json";
+  }
+
+  function driverPresenceId() {
+    var session = readSession() || "driver";
+    var id = String(session).toLowerCase().replace(/[^a-z0-9]/g, "_").replace(/^_+|_+$/g, "");
+    return (id || "driver").slice(0, 48);
   }
 
   function refusalUrl(id) {
@@ -1025,6 +1095,8 @@
         Object.keys(data).forEach(function (code) {
           var row = data[code];
           if (!row || typeof row !== "object") return;
+          if (row.kind === "driver" || row.kind === "driverPresence") return;
+          if (code === "drivers") return;
           if ((row.status || "requested") !== "requested") return;
           if (!isCoord(row.pickupLat) || !isCoord(row.pickupLng)) return;
           if (!row.code) row.code = code;
@@ -1082,6 +1154,75 @@
     }).then(function (res) {
       if (!res.ok) throw new Error("refusal");
       return res.text().then(function () { return { ok: true, id: id }; });
+    });
+  }
+
+  function publishDriverPresence() {
+    if (!syncOn() || ROLE !== "driver" || !signedIn()) return Promise.resolve();
+    var account = readDriverAccount() || {};
+    var body = {
+      online: true,
+      at: Date.now(),
+      name: account.name || state.driverName || "",
+      phone: account.phone || state.driverPhone || "",
+      lat: isCoord(state.hereLat) ? +state.hereLat : null,
+      lng: isCoord(state.hereLng) ? +state.hereLng : null
+    };
+    return fetch(driversUrl(driverPresenceId()), {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body)
+    }).then(function (res) {
+      if (!res.ok) throw new Error("presence");
+      return res.text().then(function () {});
+    }).catch(function () {});
+  }
+
+  function clearDriverPresence() {
+    if (!syncOn() || ROLE !== "driver") return Promise.resolve();
+    return fetch(driversUrl(driverPresenceId()), { method: "DELETE" }).catch(function () {});
+  }
+
+  function listOnlineDrivers() {
+    if (!syncOn()) return Promise.resolve([]);
+    return fetch(driversUrl()).then(function (res) {
+      if (res.status === 401 || res.status === 403) {
+        var err = new Error("drivers-denied");
+        err.denied = true;
+        throw err;
+      }
+      if (!res.ok) throw new Error("drivers");
+      return res.text().then(function (text) {
+        if (!text || text === "null") return [];
+        var data;
+        try { data = JSON.parse(text); } catch (e) { return []; }
+        if (!data || typeof data !== "object") return [];
+        var cutoff = Date.now() - 2 * 60 * 1000;
+        var out = [];
+        Object.keys(data).forEach(function (id) {
+          var row = data[id];
+          if (!row || typeof row !== "object") return;
+          if (row.online === false) return;
+          if (Number(row.at || 0) < cutoff) return;
+          row.id = id;
+          out.push(row);
+        });
+        return out;
+      });
+    });
+  }
+
+  function refreshOnlineDrivers() {
+    if (ROLE !== "customer" || !signedIn()) return;
+    if (state.screen !== "waiting" && state.screen !== "trip") return;
+    listOnlineDrivers().then(function (drivers) {
+      var stamp = drivers.map(function (d) { return (d.id || "") + ":" + (d.at || ""); }).join("|");
+      var changed = stamp !== state.onlineStamp;
+      state.onlineStamp = stamp;
+      state.onlineDrivers = drivers;
+      if (changed) render();
+    }).catch(function () {
+      /* presence index may be blocked until rules allow /drivers */
     });
   }
 
@@ -1174,11 +1315,12 @@
   }
 
   function riderPinBanner() {
-    if (!state.pin) return "";
+    var pin = ensureRidePin();
+    if (!pin) return "";
     return (
       '<div class="pin-box">' +
       '<p class="ride-pin-label">Give your driver this PIN when they arrive</p>' +
-      '<p class="ride-pin">' + esc(state.pin) + "</p>" +
+      '<p class="ride-pin">' + esc(pin) + "</p>" +
       '<p class="fine">They find your ride on the map. This PIN only starts the trip.</p>' +
       "</div>"
     );
@@ -1221,22 +1363,26 @@
     );
   }
 
-  function driverBoardStatus() {
+  function driverBoardStatusInner() {
     if (state.openListLoading && !state.openRides.length) {
-      return '<p class="lede">Looking for open rides…</p>';
+      return "Looking for open rides…";
     }
     if (state.openListError === "open-denied") {
-      return '<p class="lede">Open rides cannot load until Firebase allows reading <code>/open</code>. Individual ride codes still work for sync.</p>';
+      return "Open rides could not load. The map still shows your area.";
     }
     if (state.openListError) {
-      return '<p class="lede">Could not load open rides right now. Trying again…</p>';
+      return "Could not load open rides right now. Trying again…";
     }
     if (!state.openRides.length) {
-      return '<p class="lede">No open rides right now. New rider requests show up on this map.</p>';
+      return "No open rides right now. New rider requests show up on this map.";
     }
-    return '<p class="lede">' + state.openRides.length +
+    return state.openRides.length +
       (state.openRides.length === 1 ? " open ride" : " open rides") +
-      ". Tap a rider pin to review.</p>";
+      ". Tap a rider pin to review.";
+  }
+
+  function driverBoardStatus() {
+    return '<p class="lede" id="board-status">' + esc(driverBoardStatusInner()) + "</p>";
   }
 
   function ingestCustomerRide(ride) {
@@ -1280,6 +1426,13 @@
       if (ROLE !== "customer") return;
       if (state.screen !== "waiting" && state.screen !== "trip") return;
       if ((state.screen === "waiting" || state.screen === "trip") && state.code && ride.code && ride.code !== state.code) return;
+      var local = currentRide() || {};
+      var localPin = normalizeStoredPin(local.pin) || normalizeStoredPin(state.pin);
+      if (localPin && !normalizeStoredPin(ride.pin)) ride.pin = localPin;
+      if (!normalizeStoredPin(ride.pin)) {
+        ride.pin = makeRidePin();
+        if (syncOn() && code) patchRide(code, { pin: ride.pin }).catch(function () {});
+      }
       try { localStorage.setItem(STORE, JSON.stringify(ride)); } catch (err) {}
       ingestCustomerRide(ride);
     }).catch(function () {});
@@ -1393,6 +1546,7 @@
         return false;
       }
       applyRide(savedRide);
+      ensureRidePin();
       state.screen = (savedRide.status === "accepted" || savedRide.status === "started") ? "trip" : "waiting";
       return true;
     }
@@ -1642,9 +1796,7 @@
       '<button class="btn ghost" type="button" id="back-home">← Request</button>' +
       (started
         ? '<div class="status"><i></i><span>Ride started</span></div>'
-        : (near
-          ? '<div class="status"><i></i><span>Driver on the way</span></div>'
-          : unavailableCall())) +
+        : waitingStatusBlock(near || state.driverName ? "Driver on the way" : "Drivers are available")) +
       driverIdentityLine() +
       "<p class=\"lede\">" + esc(pickupLine()) + " → " + esc(dropLine()) + "<br>" + esc(prettyWhen()) + "</p>" +
       (started ? "" : riderPinBanner()) +
@@ -1663,11 +1815,10 @@
       ? "This screen changes when a driver accepts. Nothing is texted."
       : "Open the driver app and accept this ride. This screen changes when a driver accepts.";
     var near = driverNearPickup();
+    var waitLabel = near ? "Waiting for a driver" : (driversOnlineNow().length ? "Drivers are available" : "Waiting for a driver");
     return (
       '<button class="btn ghost" type="button" id="back-home">← Request</button>' +
-      (near
-        ? '<div class="status"><i></i><span>Waiting for a driver</span></div>'
-        : unavailableCall()) +
+      waitingStatusBlock(waitLabel) +
       driverIdentityLine() +
       "<p class=\"lede\">" + esc(pickupLine()) + " → " + esc(dropLine()) + "<br>" + esc(prettyWhen()) + "</p>" +
       riderPinBanner() +
@@ -1710,7 +1861,8 @@
     if (ride.stops != null) state.stops = ride.stops;
     state.holiday = !!ride.holiday;
     if (ride.code) state.code = ride.code;
-    if (ride.pin) state.pin = String(ride.pin);
+    var incomingPin = normalizeStoredPin(ride.pin);
+    if (incomingPin) state.pin = incomingPin;
   }
 
   function currentRide() {
@@ -1782,7 +1934,11 @@
       holiday: !!state.holiday
     };
     if (state.code) rideOut.code = state.code;
-    if (state.pin) rideOut.pin = state.pin;
+    var pinOut = normalizeStoredPin(state.pin);
+    if (pinOut) {
+      state.pin = pinOut;
+      rideOut.pin = pinOut;
+    }
     localStorage.setItem(STORE, JSON.stringify(rideOut));
     if (ROLE === "customer") writeRideOwner(readSession());
   }
@@ -1873,7 +2029,27 @@
   }
 
   function render() {
-    stopMotion();
+    var stayOnBoard = ROLE === "driver" && state.screen === "home" && signedIn();
+    var keptBoard = null;
+    if (stayOnBoard && boardMapStillMounted()) {
+      keptBoard = document.querySelector(".map-stage.board-map");
+      if (keptBoard && keptBoard.parentNode) {
+        keptBoard.parentNode.removeChild(keptBoard);
+      } else {
+        keptBoard = null;
+      }
+    }
+    if (keptBoard) {
+      if (rafId) cancelAnimationFrame(rafId);
+      rafId = 0;
+      motionStart = 0;
+      if (tileTimer) clearTimeout(tileTimer);
+      tileTimer = 0;
+    } else {
+      stopMotion();
+      boardMapEl = null;
+      state.boardMarkers = null;
+    }
     var app = document.getElementById("app");
     var html = "";
     if (!signedIn()) html = accountGate();
@@ -1883,6 +2059,23 @@
     else if (state.screen === "trip") html = customerTrip();
     else html = customerHome();
     app.innerHTML = html;
+    if (keptBoard) {
+      var slot = app.querySelector(".map-stage.board-map");
+      if (slot && slot.parentNode) {
+        slot.parentNode.replaceChild(keptBoard, slot);
+        setTimeout(function () {
+          if (liveMap) liveMap.invalidateSize();
+          syncDriverBoardMarkers();
+        }, 60);
+      } else {
+        try { if (liveMap) liveMap.remove(); } catch (e) {}
+        liveMap = null;
+        carMarker = null;
+        boardMapEl = null;
+        state.boardMarkers = null;
+        if (keptBoard.parentNode) keptBoard.parentNode.removeChild(keptBoard);
+      }
+    }
     bind();
     var customerRide = signedIn() && ROLE === "customer" && (state.screen === "waiting" || state.screen === "trip");
     if (!signedIn()) {
@@ -1890,6 +2083,7 @@
     } else if (customerRide) {
       startCustomerMap();
       ensureCustomerCoords();
+      refreshOnlineDrivers();
     } else if (ROLE === "driver" && state.screen === "home") {
       startDriverBoardMap();
     } else if (ROLE === "driver" && state.screen === "trip") {
@@ -1998,6 +2192,7 @@
           if (ROLE === "driver") {
             followGps();
             refreshOpenRides(true);
+            publishDriverPresence();
           } else {
             maybeRestoreCustomerRide();
           }
@@ -2011,10 +2206,13 @@
     var logout = document.getElementById("log-out");
     if (logout) {
       logout.addEventListener("click", function () {
+        if (ROLE === "driver") clearDriverPresence();
         writeSession("");
         state.loginError = "";
         state.gateStep = "";
         state.screen = "home";
+        state.onlineDrivers = [];
+        state.onlineStamp = "";
         render();
       });
     }
@@ -2131,7 +2329,7 @@
           render();
           return;
         }
-        if (!state.pin || entered !== String(state.pin)) {
+        if (entered !== normalizeStoredPin(state.pin)) {
           state.pinError = "That PIN does not match. Ask the rider again.";
           render();
           return;
@@ -2258,33 +2456,46 @@
       state.openRides = [];
       state.openListError = "";
       state.openListLoading = false;
+      syncDriverBoardMarkers();
       return;
     }
     if (state.openListLoading && !force) return;
     state.openListLoading = true;
     listOpenRides().then(function (rides) {
       state.openListLoading = false;
+      var prevError = state.openListError;
       state.openListError = "";
       var stamp = rides.map(function (r) {
         return (r.code || "") + ":" + (r.updatedAt || "") + ":" + (r.pickupLat || "") + "," + (r.pickupLng || "");
       }).join("|");
-      var changed = stamp !== state.openListStamp;
+      var changed = stamp !== state.openListStamp || prevError !== "";
       state.openListStamp = stamp;
       state.openRides = rides;
+      var selectionCleared = false;
       if (state.selectedOpenCode) {
         var still = rides.some(function (r) { return r.code === state.selectedOpenCode; });
         if (!still) {
           state.selectedOpenCode = "";
           clearRideFields();
+          selectionCleared = true;
           changed = true;
         }
       }
-      if (force || changed) render();
-      else if (liveMap && document.getElementById("live-map")) startDriverBoardMap();
+      if (force || selectionCleared || prevError) {
+        render();
+        return;
+      }
+      if (changed) {
+        var status = document.getElementById("board-status");
+        if (status) status.innerHTML = driverBoardStatusInner();
+        syncDriverBoardMarkers();
+      }
     }).catch(function (err) {
       state.openListLoading = false;
-      state.openListError = err && err.denied ? "open-denied" : "open-error";
-      if (force) render();
+      var next = err && err.denied ? "open-denied" : "open-error";
+      var changed = state.openListError !== next;
+      state.openListError = next;
+      if (force || changed) render();
     });
   }
 
@@ -2357,25 +2568,40 @@
   }
 
   var BOARD_CENTER = { lat: 30.39, lng: -95.65 };
+  var boardMapEl = null;
 
-  function startDriverBoardMap() {
-    if (!window.L || !document.getElementById("live-map")) return;
-    try {
-      liveMap = window.L.map("live-map", {
-        zoomControl: true,
-        scrollWheelZoom: false,
-        attributionControl: true
-      });
-      var layer = window.L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
-        maxZoom: 19,
-        attribution: "&copy; OpenStreetMap"
-      }).addTo(liveMap);
-      var bounds = [];
-      var driverHere = isFinite(state.hereLat) && isFinite(state.hereLng)
-        ? { lat: +state.hereLat, lng: +state.hereLng }
-        : null;
-      if (driverHere) {
-        carMarker = window.L.marker([driverHere.lat, driverHere.lng], {
+  function boardMapStillMounted() {
+    var el = document.getElementById("live-map");
+    return !!(liveMap && el && boardMapEl === el && el._leaflet_id);
+  }
+
+  function fitDriverBoard(bounds) {
+    if (!liveMap) return;
+    if (bounds.length >= 2) {
+      liveMap.fitBounds(window.L.latLngBounds(bounds), { padding: [36, 36], maxZoom: 13 });
+    } else if (bounds.length === 1) {
+      liveMap.setView(bounds[0], 12);
+    } else if (isFinite(state.hereLat) && isFinite(state.hereLng)) {
+      liveMap.setView([+state.hereLat, +state.hereLng], 12);
+    } else {
+      liveMap.setView([BOARD_CENTER.lat, BOARD_CENTER.lng], 11);
+    }
+  }
+
+  function syncDriverBoardMarkers() {
+    if (!boardMapStillMounted()) return;
+    if (state.boardMarkers) {
+      state.boardMarkers.clearLayers();
+    } else {
+      state.boardMarkers = window.L.layerGroup().addTo(liveMap);
+    }
+    var bounds = [];
+    if (isFinite(state.hereLat) && isFinite(state.hereLng)) {
+      var here = [+state.hereLat, +state.hereLng];
+      if (carMarker) {
+        carMarker.setLatLng(here);
+      } else {
+        carMarker = window.L.marker(here, {
           icon: window.L.divIcon({
             className: "pin-icon",
             html: '<div class="car-face">' + CAR_SVG + "</div>",
@@ -2384,45 +2610,82 @@
           }),
           zIndexOffset: 600
         }).addTo(liveMap);
-        bounds.push([driverHere.lat, driverHere.lng]);
       }
-      state.openRides.forEach(function (ride) {
-        if (!isCoord(ride.pickupLat) || !isCoord(ride.pickupLng)) return;
-        var selected = ride.code === state.selectedOpenCode;
-        var marker = window.L.marker([+ride.pickupLat, +ride.pickupLng], {
-          icon: pinIcon(selected ? "Selected" : "Rider", selected ? "pin-you" : "pin-you"),
-          zIndexOffset: selected ? 500 : 200
-        });
-        marker.addTo(liveMap);
-        marker.on("click", function () {
-          selectOpenRide(ride.code);
-        });
-        bounds.push([+ride.pickupLat, +ride.pickupLng]);
+      bounds.push(here);
+    }
+    (state.openRides || []).forEach(function (ride) {
+      if (!isCoord(ride.pickupLat) || !isCoord(ride.pickupLng)) return;
+      var selected = ride.code === state.selectedOpenCode;
+      var marker = window.L.marker([+ride.pickupLat, +ride.pickupLng], {
+        icon: pinIcon(selected ? "Selected" : "Rider", "pin-you"),
+        zIndexOffset: selected ? 500 : 200
       });
-      if (bounds.length >= 2) {
-        liveMap.fitBounds(window.L.latLngBounds(bounds), { padding: [36, 36], maxZoom: 13 });
-      } else if (bounds.length === 1) {
-        liveMap.setView(bounds[0], 12);
-      } else {
-        liveMap.setView([BOARD_CENTER.lat, BOARD_CENTER.lng], 11);
+      marker.on("click", function () {
+        selectOpenRide(ride.code);
+      });
+      state.boardMarkers.addLayer(marker);
+      bounds.push([+ride.pickupLat, +ride.pickupLng]);
+    });
+    fitDriverBoard(bounds);
+    setTimeout(function () {
+      if (liveMap) liveMap.invalidateSize();
+    }, 80);
+  }
+
+  function startDriverBoardMap() {
+    if (!window.L) return;
+    var el = document.getElementById("live-map");
+    if (!el) return;
+    if (boardMapStillMounted()) {
+      syncDriverBoardMarkers();
+      return;
+    }
+    try {
+      if (liveMap) {
+        try { liveMap.remove(); } catch (e1) {}
+        liveMap = null;
+        carMarker = null;
+        state.boardMarkers = null;
       }
+      boardMapEl = el;
+      tilesOk = false;
+      liveMap = window.L.map(el, {
+        zoomControl: true,
+        scrollWheelZoom: false,
+        attributionControl: true
+      });
+      var layer = window.L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+        maxZoom: 19,
+        attribution: "&copy; OpenStreetMap"
+      }).addTo(liveMap);
+      state.boardMarkers = window.L.layerGroup().addTo(liveMap);
+      var boardTileErrors = 0;
+      var boardFallbackTiles = false;
       layer.on("tileload", function () {
-        if (tilesOk) return;
         tilesOk = true;
-        setTimeout(function () {
-          if (liveMap) liveMap.invalidateSize();
-        }, 60);
+        if (liveMap) liveMap.invalidateSize();
       });
-      var tileErrors = 0;
       layer.on("tileerror", function () {
-        tileErrors += 1;
-        if (tileErrors >= 6 && !tilesOk) fallbackMap();
+        boardTileErrors += 1;
+        if (boardFallbackTiles || boardTileErrors < 4 || !liveMap) return;
+        boardFallbackTiles = true;
+        window.L.tileLayer("https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png", {
+          maxZoom: 19,
+          subdomains: "abcd",
+          attribution: "&copy; OpenStreetMap &copy; CARTO"
+        }).addTo(liveMap);
       });
-      tileTimer = setTimeout(function () {
-        if (!tilesOk) fallbackMap();
-      }, 5000);
+      // Never tear down the board map on slow tiles — empty navy box is worse than waiting.
+      setTimeout(function () {
+        if (liveMap) liveMap.invalidateSize();
+      }, 100);
+      setTimeout(function () {
+        if (liveMap) liveMap.invalidateSize();
+      }, 500);
+      syncDriverBoardMarkers();
     } catch (err) {
-      fallbackMap();
+      boardMapEl = null;
+      // Keep the container; do not call fallbackMap (that deletes the map with no illus on the board).
     }
   }
 
@@ -2621,7 +2884,10 @@
         localStorage.setItem(STORE, JSON.stringify(ride));
       }
       maybePatchDriverLocation();
-      if (carMarker) {
+      if (ROLE === "driver" && state.screen === "home" && boardMapStillMounted()) {
+        syncDriverBoardMarkers();
+        publishDriverPresence();
+      } else if (carMarker) {
         var dest = state.screen === "home"
           ? { lat: state.hereLat, lng: state.hereLng }
           : routePoints().pickup;
@@ -2629,8 +2895,12 @@
           { lat: state.hereLat, lng: state.hereLng },
           dest
         ));
+        if (ROLE === "driver") publishDriverPresence();
       } else if (first) {
         render();
+        if (ROLE === "driver") publishDriverPresence();
+      } else if (ROLE === "driver") {
+        publishDriverPresence();
       }
     }, function () {}, { enableHighAccuracy: true, maximumAge: 2000, timeout: 10000 });
   }
@@ -2658,6 +2928,7 @@
     if (ROLE === "driver" && signedIn()) {
       followGps();
       refreshOpenRides(true);
+      publishDriverPresence();
     }
     window.addEventListener("storage", function (event) {
       if (event.key !== STORE) return;
@@ -2670,6 +2941,15 @@
     setInterval(function () {
       if (ROLE === "driver" && signedIn() && state.screen === "home") refreshOpenRides();
     }, 5000);
+    setInterval(function () {
+      if (ROLE === "driver" && signedIn()) publishDriverPresence();
+    }, 20000);
+    setInterval(function () {
+      if (ROLE === "customer" && signedIn()) refreshOnlineDrivers();
+    }, 5000);
+    window.addEventListener("pagehide", function () {
+      if (ROLE === "driver" && signedIn()) clearDriverPresence();
+    });
     if (ROLE !== "driver" && signedIn()) {
       maybeRestoreCustomerRide();
     }
