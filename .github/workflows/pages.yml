@@ -1,0 +1,50 @@
+name: Publish quote page
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Write map config
+        env:
+          PCS_MAPS_KEY: ${{ secrets.PCS_MAPS_KEY }}
+        run: |
+          if [ -z "$PCS_MAPS_KEY" ]; then
+            echo "PCS_MAPS_KEY secret is empty" >&2
+            exit 1
+          fi
+          cat > config.js << 'END'
+          /**
+           * Private Car Services — Ride Estimate Config
+           * The live key is injected at publish time and is not stored in git.
+           */
+          END
+          printf "window.PCS_GOOGLE_MAPS_API_KEY = '%s';\n" "$PCS_MAPS_KEY" >> config.js
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: .
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
