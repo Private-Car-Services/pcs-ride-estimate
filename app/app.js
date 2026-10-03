@@ -43,6 +43,7 @@
   var lastDriverPatchLat = null;
   var lastDriverPatchLng = null;
   var rideLookup = 0;
+  var driving = { key: "", pending: "", done: false, miles: null, line: null };
 
   var state = {
     mode: ROLE,
@@ -67,7 +68,9 @@
     driverCode: "",
     codeError: "",
     codeDraft: "",
-    remoteLoading: false
+    remoteLoading: false,
+    dropFix: null,
+    pickupFromHere: false
   };
 
   var rafId = 0;
@@ -148,11 +151,66 @@
     return { pickup: pickup, dropoff: dropoff, driver: driver, live: live };
   }
 
+  function routeKey(a, b) {
+    return a.lat.toFixed(5) + "," + a.lng.toFixed(5) + ">" + b.lat.toFixed(5) + "," + b.lng.toFixed(5);
+  }
+
+  function routeStillOnScreen() {
+    if (ROLE === "customer") return state.screen === "waiting" || state.screen === "trip";
+    return state.screen === "trip" || (state.screen === "home" && !!state.pickupStreet);
+  }
+
+  function ensureDrivingRoute(a, b) {
+    if (!a || !b) return;
+    var key = routeKey(a, b);
+    if (driving.key === key && driving.done) return;
+    if (driving.pending === key) return;
+    driving.pending = key;
+    var url = "https://router.project-osrm.org/route/v1/driving/" +
+      a.lng + "," + a.lat + ";" + b.lng + "," + b.lat +
+      "?overview=full&geometries=geojson";
+    fetch(url).then(function (res) { return res.json(); }).then(function (data) {
+      var route = data && data.routes && data.routes[0];
+      var coords = route && route.geometry && route.geometry.coordinates;
+      if (!route || !coords || !coords.length || !isFinite(+route.distance)) throw new Error("osrm");
+      if (driving.pending !== key && driving.key !== key) return;
+      driving.key = key;
+      driving.pending = "";
+      driving.done = true;
+      driving.miles = Math.round((+route.distance / 1609.344) * 100) / 100;
+      driving.line = coords.map(function (pair) { return [pair[1], pair[0]]; });
+      var pickup = placeCoords("pickup");
+      var dropoff = placeCoords("drop");
+      if (routeStillOnScreen() && pickup && dropoff && routeKey(pickup, dropoff) === key) render();
+    }).catch(function () {
+      if (driving.pending !== key && driving.key !== key) return;
+      driving.key = key;
+      driving.pending = "";
+      driving.done = true;
+      driving.miles = null;
+      driving.line = null;
+    });
+  }
+
+  function routeLatLngs(a, b) {
+    if (!a || !b) return [];
+    ensureDrivingRoute(a, b);
+    var key = routeKey(a, b);
+    if (driving.key === key && driving.line && driving.line.length > 1) return driving.line;
+    return [[a.lat, a.lng], [b.lat, b.lng]];
+  }
+
   function tripMiles() {
     var pickup = placeCoords("pickup");
     var dropoff = placeCoords("drop");
     if (!pickup || !dropoff) return { raw: 0, billed: 0, ready: false };
-    var hundredths = Math.round(haversine(pickup, dropoff) * 100) / 100;
+    var key = routeKey(pickup, dropoff);
+    var hundredths;
+    if (driving.key === key && driving.done && driving.miles != null) hundredths = driving.miles;
+    else {
+      hundredths = Math.round(haversine(pickup, dropoff) * 100) / 100;
+      if (!(driving.key === key && driving.done)) ensureDrivingRoute(pickup, dropoff);
+    }
     var billed = Math.ceil(hundredths);
     if (billed < 1) billed = 1;
     return { raw: hundredths, billed: billed, ready: true };
@@ -253,6 +311,10 @@
     if (route.live) {
       var lats = [route.pickup.lat, route.dropoff.lat, route.driver.lat];
       var lngs = [route.pickup.lng, route.dropoff.lng, route.driver.lng];
+      routeLatLngs(route.pickup, route.dropoff).forEach(function (ll) {
+        lats.push(ll[0]);
+        lngs.push(ll[1]);
+      });
       minLat = Math.min.apply(null, lats);
       maxLat = Math.max.apply(null, lats);
       minLng = Math.min.apply(null, lngs);
@@ -348,6 +410,209 @@
     setCoords(prefix, feature);
   }
 
+
+  var CITY_BIAS = {
+    montgomery: { lat: 30.39, lon: -95.70 },
+    conroe: { lat: 30.31, lon: -95.46 },
+    "the woodlands": { lat: 30.17, lon: -95.46 },
+    woodlands: { lat: 30.17, lon: -95.46 },
+    magnolia: { lat: 30.21, lon: -95.75 },
+    tomball: { lat: 30.10, lon: -95.62 },
+    spring: { lat: 30.08, lon: -95.42 },
+    humble: { lat: 30.00, lon: -95.26 },
+    "new caney": { lat: 30.15, lon: -95.22 },
+    porter: { lat: 30.11, lon: -95.23 },
+    navasota: { lat: 30.39, lon: -96.09 }
+  };
+  var FALLBACK_BIAS = { lat: 30.05, lon: -95.4 };
+  var KNOWN_CITIES = [
+    "the woodlands", "new caney", "montgomery", "conroe", "magnolia", "tomball",
+    "spring", "humble", "porter", "navasota", "willis", "houston"
+  ];
+
+  function normText(value) {
+    return String(value || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").replace(/\s+/g, " ").trim();
+  }
+
+  function hasWord(text, word) {
+    if (!word) return false;
+    return (" " + normText(text) + " ").indexOf(" " + word + " ") !== -1;
+  }
+
+  function biasFor(city) {
+    var key = normText(city);
+    if (CITY_BIAS[key]) return CITY_BIAS[key];
+    return FALLBACK_BIAS;
+  }
+
+  function cityFromText(text) {
+    var hay = " " + normText(text) + " ";
+    var found = "";
+    var i;
+    for (i = 0; i < KNOWN_CITIES.length; i += 1) {
+      if (hay.indexOf(" " + KNOWN_CITIES[i] + " ") !== -1 && KNOWN_CITIES[i].length > found.length) found = KNOWN_CITIES[i];
+    }
+    return found;
+  }
+
+  function focusTokens(text, city) {
+    var skip = {
+      on: 1, the: 1, a: 1, an: 1, at: 1, in: 1, of: 1, and: 1, near: 1, to: 1,
+      tx: 1, texas: 1, rd: 1, road: 1, st: 1, street: 1, dr: 1, drive: 1,
+      ln: 1, lane: 1, ave: 1, avenue: 1, blvd: 1, boulevard: 1, ct: 1, court: 1,
+      cir: 1, circle: 1, pkwy: 1, parkway: 1, hwy: 1, highway: 1, fwy: 1,
+      freeway: 1, way: 1, trl: 1, trail: 1, loop: 1
+    };
+    normText(city).split(" ").forEach(function (w) { if (w) skip[w] = 1; });
+    return normText(text).split(" ").filter(function (w) {
+      return w.length > 2 && !skip[w];
+    });
+  }
+
+  function looksLikeAddress(text) {
+    return /^\s*\d+\s+/.test(String(text || ""));
+  }
+
+  function sameCity(props, city) {
+    var want = normText(city);
+    var got = normText(props.city || props.town || props.village || "");
+    return !!want && !!got && got === want;
+  }
+
+  function featurePoint(feature) {
+    var coords = feature && feature.geometry && feature.geometry.coordinates;
+    if (!coords || !isCoord(coords[0]) || !isCoord(coords[1])) return null;
+    return { lat: +coords[1], lng: +coords[0] };
+  }
+
+  function scoreFeature(feature, text, city) {
+    var props = feature.properties || {};
+    var tokens = focusTokens(text, city);
+    var name = props.name || "";
+    var street = [props.housenumber, props.street].filter(Boolean).join(" ");
+    var osmValue = String(props.osm_value || "").toLowerCase();
+    var osmKey = String(props.osm_key || "").toLowerCase();
+    var score = 0;
+    var i;
+    for (i = 0; i < tokens.length; i += 1) {
+      var weight = i === 0 ? 14 : 6;
+      if (hasWord(name, tokens[i])) score += weight;
+      if (hasWord(street, tokens[i])) score += 4;
+    }
+    if (city) {
+      if (sameCity(props, city)) score += 12;
+      else if (normText(props.city || props.town || props.village || "")) score -= 10;
+      else score -= 3;
+    }
+    var q = normText(text);
+    var inCity = !city || sameCity(props, city);
+    if (q.indexOf("walmart") !== -1) {
+      if (inCity && (osmValue === "supermarket" || hasWord(name, "walmart"))) score += 28;
+      if (osmValue === "golf_course" || osmKey === "leisure") score -= 36;
+      if (osmKey === "highway" || osmValue === "residential" || osmValue === "neighbourhood" || osmValue === "neighborhood" || osmValue === "suburb") score -= 24;
+    }
+    if (tokens.length && hasWord(name, tokens[0])) {
+      if (osmValue === "supermarket" || osmValue === "department_store" || osmValue === "mall") score += 8;
+      if (osmValue === "fuel" && q.indexOf("gas") === -1 && q.indexOf("fuel") === -1) score -= 4;
+    }
+    if (tokens.length && !hasWord(name, tokens[0]) && !hasWord(street, tokens[0])) {
+      if (osmKey === "leisure" || osmKey === "highway" || osmKey === "place") score -= 16;
+    }
+    var point = featurePoint(feature);
+    if (point) {
+      var bias = biasFor(city);
+      score -= Math.min(haversine(point, { lat: bias.lat, lng: bias.lon }), 80) * 0.2;
+    }
+    return score;
+  }
+
+  function rankFeatures(features, text, city) {
+    var seen = {};
+    var ranked = [];
+    (features || []).forEach(function (feature) {
+      var props = feature.properties || {};
+      var point = featurePoint(feature);
+      var id = String(props.osm_id || "") + "|" + normText(props.name) + "|" +
+        (point ? point.lat.toFixed(5) + "," + point.lng.toFixed(5) : "");
+      if (seen[id]) return;
+      seen[id] = 1;
+      ranked.push(feature);
+      feature._score = scoreFeature(feature, text, city);
+    });
+    ranked.sort(function (a, b) { return b._score - a._score; });
+    return ranked;
+  }
+
+  function composeQuery(text, city, stateName) {
+    var parts = [];
+    var base = String(text || "").trim();
+    if (base) parts.push(base);
+    var low = base.toLowerCase();
+    if (city && low.indexOf(String(city).toLowerCase()) === -1) parts.push(city);
+    var st = String(stateName || "TX").trim();
+    if (st && low.indexOf(st.toLowerCase()) === -1) parts.push(st);
+    if (low.indexOf("texas") === -1 && st.toUpperCase() === "TX") parts.push("Texas");
+    return parts.filter(Boolean).join(", ");
+  }
+
+  function photonSearch(q, bias) {
+    var url = "https://photon.komoot.io/api/?limit=8&lat=" + bias.lat + "&lon=" + bias.lon + "&q=" + encodeURIComponent(q);
+    return fetch(url).then(function (res) { return res.json(); }).then(function (data) {
+      return (data && data.features) || [];
+    }).catch(function () { return []; });
+  }
+
+  function placeQueryCity(text, city) {
+    return city || cityFromText(text) || "";
+  }
+
+  function collectPlaces(text, city, stateName) {
+    var usedCity = placeQueryCity(text, city);
+    var bias = biasFor(usedCity);
+    var query = composeQuery(text, usedCity, stateName || "TX");
+    return photonSearch(query, bias).then(function (features) {
+      var tokens = focusTokens(text, usedCity);
+      var first = tokens[0];
+      if (!first || looksLikeAddress(text)) return features;
+      var named = features.some(function (feature) {
+        var props = feature.properties || {};
+        return hasWord(props.name, first) || hasWord(props.street, first);
+      });
+      if (named) return features;
+      return photonSearch(composeQuery(first, usedCity, stateName || "TX"), bias).then(function (more) {
+        return features.concat(more);
+      });
+    });
+  }
+
+  function typedCity(prefix) {
+    var el = document.getElementById(prefix + "-city");
+    if (el && el.value.trim()) return el.value.trim();
+    return state[prefix + "City"] || "";
+  }
+
+  function typedState(prefix) {
+    var el = document.getElementById(prefix + "-state");
+    if (el && el.value.trim()) return el.value.trim();
+    return state[prefix + "State"] || "TX";
+  }
+
+  function placeLooksWeak(saved, feature, text, city) {
+    var next = featurePoint(feature);
+    if (!saved || !next) return false;
+    if (haversine(saved, next) < 0.35) return false;
+    var props = feature.properties || {};
+    var tokens = focusTokens(text, city);
+    var name = props.name || "";
+    var osmValue = String(props.osm_value || "").toLowerCase();
+    var q = normText(text);
+    if (q.indexOf("walmart") !== -1) {
+      return (osmValue === "supermarket" || hasWord(name, "walmart")) && (!city || sameCity(props, city));
+    }
+    if (city && normText(props.city || props.town || props.village || "") && !sameCity(props, city)) return false;
+    return tokens.some(function (word) { return hasWord(name, word) || hasWord(props.street, word); });
+  }
+
   function wireSearch(inputId, resultsId, prefix) {
     var input = document.getElementById(inputId);
     var box = document.getElementById(resultsId);
@@ -357,6 +622,8 @@
       var q = input.value.trim();
       state[prefix + "Lat"] = null;
       state[prefix + "Lng"] = null;
+      if (prefix === "drop") state.dropFix = null;
+      if (prefix === "pickup") state.pickupFromHere = false;
       clearTimeout(timer);
       if (q.length < 3) {
         box.hidden = true;
@@ -364,15 +631,16 @@
         return;
       }
       timer = setTimeout(function () {
-        var url = "https://photon.komoot.io/api/?limit=5&lat=30.05&lon=-95.4&q=" + encodeURIComponent(q + " Texas");
-        fetch(url).then(function (res) { return res.json(); }).then(function (data) {
-          var features = (data && data.features) || [];
-          if (input.value.trim() !== q || !features.length) {
+        var city = typedCity(prefix);
+        var stateName = typedState(prefix);
+        collectPlaces(q, city, stateName).then(function (features) {
+          var ranked = rankFeatures(features, q, placeQueryCity(q, city)).slice(0, 5);
+          if (input.value.trim() !== q || !ranked.length) {
             box.hidden = true;
             return;
           }
-          box._places = features;
-          box.innerHTML = features.map(function (f, i) {
+          box._places = ranked;
+          box.innerHTML = ranked.map(function (f, i) {
             var p = f.properties || {};
             var sub = [p.city || p.county, stateCode(p.state)].filter(Boolean).join(", ");
             return '<button type="button" class="suggest-item" data-i="' + i + '"><strong>' + esc(placeLine(p)) + "</strong><span>" + esc(sub) + "</span></button>";
@@ -402,6 +670,9 @@
         fetch(url).then(function (res) { return res.json(); }).then(function (data) {
           var feature = data.features && data.features[0];
           if (feature) applyPlace("pickup", feature);
+          state.pickupLat = pos.coords.latitude;
+          state.pickupLng = pos.coords.longitude;
+          state.pickupFromHere = true;
           locBtn.disabled = false;
           locBtn.textContent = "Use current location";
         }).catch(function () {
@@ -598,10 +869,11 @@
   function ingestCustomerRide(ride) {
     if (!ride) return;
     var statusChanged = (ride.status || "") !== (state.rideStatus || "");
+    var nextDrop = keptDropFromRide(ride);
     var placesChanged = coordNum(ride.pickupLat) !== coordNum(state.pickupLat) ||
       coordNum(ride.pickupLng) !== coordNum(state.pickupLng) ||
-      coordNum(ride.dropLat) !== coordNum(state.dropLat) ||
-      coordNum(ride.dropLng) !== coordNum(state.dropLng);
+      coordNum(nextDrop && nextDrop.lat) !== coordNum(state.dropLat) ||
+      coordNum(nextDrop && nextDrop.lng) !== coordNum(state.dropLng);
     var driverChanged = coordNum(ride.driverLat) !== coordNum(state.driverLat) ||
       coordNum(ride.driverLng) !== coordNum(state.driverLng);
     var codeChanged = !!(ride.code && ride.code !== state.code);
@@ -748,11 +1020,19 @@
     var pickup = project(route.pickup);
     var drop = project(route.dropoff);
     var start = project(route.driver);
+    var roadAttr = "";
+    if (route.live) {
+      roadAttr = routeLatLngs(route.pickup, route.dropoff).map(function (ll) {
+        var pt = project({ lat: ll[0], lng: ll[1] });
+        return pt.x + "," + pt.y;
+      }).join(" ");
+      if (roadAttr) roadAttr = start.x + "," + start.y + " " + roadAttr;
+    }
     return (
       '<div class="map-stage">' +
       '<div id="live-map" role="img" aria-label="' + (route.live ? "Route map" : "Sample map") + '"></div>' +
       '<div class="illus" id="illus">' +
-      illustratedMap(start, pickup, drop) +
+      illustratedMap(start, pickup, drop, roadAttr) +
       pin("pin-pickup", "pin-you", youLabel, pickup) +
       pin("pin-drop", "pin-drop", "Drop-off", drop) +
       '<div class="pin pin-car" id="pin-car" style="left:' + start.x + '%;top:' + start.y + '%"><div class="car-face" id="illus-car">' + CAR_SVG + "</div></div>" +
@@ -773,7 +1053,7 @@
     );
   }
 
-  function illustratedMap(start, pickup, drop) {
+  function illustratedMap(start, pickup, drop, roadAttr) {
     var grid = "";
     var i;
     for (i = 1; i < 8; i += 1) {
@@ -787,7 +1067,7 @@
       '<path d="M0 22 C 18 18, 28 32, 46 28 S 78 18, 100 26 L 100 34 C 76 28, 62 40, 44 36 S 16 30, 0 32 Z" fill="#1d4d66"/>' +
       '<circle cx="72" cy="78" r="10" fill="#1c4a38"/>' +
       grid +
-      '<polyline points="' + start.x + "," + start.y + " " + pickup.x + "," + pickup.y + " " + drop.x + "," + drop.y +
+      '<polyline points="' + (roadAttr || (start.x + "," + start.y + " " + pickup.x + "," + pickup.y + " " + drop.x + "," + drop.y)) +
       '" fill="none" stroke="#e7c56a" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>' +
       '<text x="50" y="48" text-anchor="middle" fill="#f0d48a" font-size="5" font-family="Georgia, serif">WILLIS</text>' +
       "</svg>"
@@ -821,10 +1101,16 @@
     if (pickup) points.push(pickup);
     if (drop) points.push(drop);
     if (driverPoint) points.push(driverPoint);
+    var road = both ? routeLatLngs(pickup, drop) : [];
+    road.forEach(function (ll) { points.push({ lat: ll[0], lng: ll[1] }); });
     var illus = "";
     if (both) {
       var a = fitProject(pickup, points);
       var b = fitProject(drop, points);
+      var poly = road.map(function (ll) {
+        var pt = fitProject({ lat: ll[0], lng: ll[1] }, points);
+        return pt.x + "," + pt.y;
+      }).join(" ");
       var car = "";
       if (driverPoint) {
         var c = fitProject(driverPoint, points);
@@ -834,7 +1120,7 @@
         '<div class="illus" id="illus">' +
         '<svg class="illus-svg" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">' +
         '<rect width="100" height="100" fill="#163455"/>' +
-        '<polyline points="' + a.x + "," + a.y + " " + b.x + "," + b.y +
+        '<polyline points="' + poly +
         '" fill="none" stroke="#e7c56a" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>' +
         "</svg>" +
         pin("pin-pickup", "pin-you", "Pickup", a) +
@@ -907,8 +1193,9 @@
     state.rideStatus = ride.status || "";
     state.pickupLat = ride.pickupLat;
     state.pickupLng = ride.pickupLng;
-    state.dropLat = ride.dropLat;
-    state.dropLng = ride.dropLng;
+    var keptDrop = keptDropFromRide(ride);
+    state.dropLat = keptDrop ? keptDrop.lat : ride.dropLat;
+    state.dropLng = keptDrop ? keptDrop.lng : ride.dropLng;
     state.driverLat = isCoord(ride.driverLat) ? +ride.driverLat : null;
     state.driverLng = isCoord(ride.driverLng) ? +ride.driverLng : null;
     if (ride.passengers != null) state.passengers = ride.passengers;
@@ -979,6 +1266,14 @@
     state.stops = 0;
     state.holiday = false;
     state.code = "";
+    state.dropFix = null;
+    state.pickupFromHere = false;
+  }
+
+  function keptDropFromRide(ride) {
+    var incoming = pointFrom(ride && ride.dropLat, ride && ride.dropLng);
+    if (state.dropFix && incoming && haversine(state.dropFix, incoming) > 0.25) return state.dropFix;
+    return incoming;
   }
 
   function driverHome() {
@@ -1036,9 +1331,25 @@
     } else if (ROLE === "driver" && (state.screen === "trip" || (state.screen === "home" && state.pickupStreet))) {
       startMap();
     }
-    if (ROLE === "driver" && state.pickupStreet && !placeCoords("pickup") && !state.geocodeTried) {
-      state.geocodeTried = true;
-      geocodeMissing().then(function () { render(); });
+    if (ROLE === "driver" && state.pickupStreet) {
+      var repairKey = (state.driverCode || state.code || "") + "|" + state.dropStreet;
+      if (state.geocodeKey !== repairKey) {
+        state.geocodeKey = repairKey;
+        var beforeDrop = placeCoords("drop");
+        var beforePick = placeCoords("pickup");
+        geocodeMissing().then(function () {
+          var after = placeCoords("drop");
+          var moved = !!(after && beforeDrop && haversine(beforeDrop, after) >= 0.05);
+          var filled = !!(!beforeDrop && after) || !!(!beforePick && placeCoords("pickup"));
+          if (moved) {
+            state.dropFix = { lat: +after.lat, lng: +after.lng };
+            saveRide(state.rideStatus || "requested");
+            var code = state.driverCode || state.code || readDriverCode();
+            if (syncOn() && code) patchRide(code, { dropLat: +after.lat, dropLng: +after.lng }).catch(function () {});
+          }
+          if (moved || filled) render();
+        });
+      }
     }
   }
 
@@ -1100,12 +1411,14 @@
         }
         state.error = "";
         state.customerGeocodeTried = false;
+        state.dropFix = null;
         state.driverLat = null;
         state.driverLng = null;
         state.code = syncOn() ? makeRideCode() : "";
         geocodeMissing().then(function () {
           saveRide("requested", { clearDriver: true });
           var created = currentRide();
+          state.customerGeocodeTried = true;
           state.screen = "waiting";
           render();
           if (syncOn() && state.code && created) publishRide(state.code, created).catch(function () {});
@@ -1174,24 +1487,33 @@
   }
 
 
-  function geocodeQuery(q) {
-    var url = "https://photon.komoot.io/api/?limit=1&lat=30.05&lon=-95.4&q=" + encodeURIComponent(q + " Texas");
-    return fetch(url).then(function (res) { return res.json(); }).then(function (data) {
-      return data.features && data.features[0];
+  function geocodeQuery(text, city, stateName) {
+    var usedCity = placeQueryCity(text, city);
+    return collectPlaces(text, usedCity, stateName || "TX").then(function (features) {
+      var ranked = rankFeatures(features, text, usedCity);
+      return ranked[0] || null;
     }).catch(function () { return null; });
   }
 
   function ensureCustomerCoords() {
     if (ROLE !== "customer") return;
     if (state.screen !== "waiting" && state.screen !== "trip") return;
-    if (placeCoords("pickup") && placeCoords("drop")) return;
     if (state.customerGeocodeTried) return;
     state.customerGeocodeTried = true;
+    var beforeDrop = placeCoords("drop");
+    var beforePick = placeCoords("pickup");
     geocodeMissing().then(function () {
       if (ROLE !== "customer") return;
       if (state.screen !== "waiting" && state.screen !== "trip") return;
-      if (placeCoords("pickup") || placeCoords("drop")) {
-        saveRide(state.rideStatus || (state.screen === "trip" ? "accepted" : "requested"));
+      var after = placeCoords("drop");
+      var moved = !!(after && (!beforeDrop || haversine(beforeDrop, after) >= 0.05));
+      var filledPick = !!(!beforePick && placeCoords("pickup"));
+      if (!moved && !filledPick) return;
+      if (moved && after) state.dropFix = { lat: +after.lat, lng: +after.lng };
+      saveRide(state.rideStatus || (state.screen === "trip" ? "accepted" : "requested"));
+      if (moved && after && syncOn() && state.code) {
+        patchRide(state.code, { dropLat: +after.lat, dropLng: +after.lng }).catch(function () {});
+      } else if (filledPick) {
         pushPlaceCoords();
       }
       render();
@@ -1200,11 +1522,22 @@
 
   function geocodeMissing() {
     var jobs = [];
-    if (!placeCoords("pickup")) {
-      jobs.push(geocodeQuery(pickupLine()).then(function (feature) { if (feature) setCoords("pickup", feature); }));
+    if (state.pickupStreet && !state.pickupFromHere) {
+      jobs.push(geocodeQuery(state.pickupStreet, state.pickupCity, state.pickupState).then(function (feature) {
+        if (!feature) return;
+        var saved = placeCoords("pickup");
+        if (!saved || placeLooksWeak(saved, feature, state.pickupStreet, state.pickupCity)) setCoords("pickup", feature);
+      }));
     }
-    if (!placeCoords("drop")) {
-      jobs.push(geocodeQuery(dropLine()).then(function (feature) { if (feature) setCoords("drop", feature); }));
+    if (state.dropStreet) {
+      jobs.push(geocodeQuery(state.dropStreet, state.dropCity, state.dropState).then(function (feature) {
+        if (!feature) return;
+        var saved = placeCoords("drop");
+        if (!saved || placeLooksWeak(saved, feature, state.dropStreet, state.dropCity)) {
+          setCoords("drop", feature);
+          if (saved) state.dropFix = featurePoint(feature);
+        }
+      }));
     }
     return Promise.all(jobs);
   }
@@ -1270,13 +1603,15 @@
         maxZoom: 19,
         attribution: "&copy; OpenStreetMap"
       }).addTo(liveMap);
-      var line = [[pickup.lat, pickup.lng], [drop.lat, drop.lng]];
-      var bounds = [[pickup.lat, pickup.lng], [drop.lat, drop.lng]];
+      var road = routeLatLngs(pickup, drop);
+      var bounds = road.slice();
+      if (driver) bounds.push([driver.lat, driver.lng]);
+      window.L.polyline(road, { color: "#d4b15a", weight: 4, opacity: 0.9 }).addTo(liveMap);
       if (driver) {
-        line = [[driver.lat, driver.lng], [pickup.lat, pickup.lng], [drop.lat, drop.lng]];
-        bounds.push([driver.lat, driver.lng]);
+        window.L.polyline([[driver.lat, driver.lng], [pickup.lat, pickup.lng]], {
+          color: "#d4b15a", weight: 3, opacity: 0.45, dashArray: "6 8"
+        }).addTo(liveMap);
       }
-      window.L.polyline(line, { color: "#d4b15a", weight: 4, opacity: 0.9 }).addTo(liveMap);
       window.L.marker([pickup.lat, pickup.lng], { icon: pinIcon("Pickup", "pin-you") }).addTo(liveMap);
       window.L.marker([drop.lat, drop.lng], { icon: pinIcon("Drop-off", "pin-drop") }).addTo(liveMap);
       if (driver) {
@@ -1376,10 +1711,10 @@
         attribution: "&copy; OpenStreetMap"
       }).addTo(liveMap);
       var route = routePoints();
-      window.L.polyline(
-        [[route.driver.lat, route.driver.lng], [route.pickup.lat, route.pickup.lng], [route.dropoff.lat, route.dropoff.lng]],
-        { color: "#d4b15a", weight: 4, opacity: 0.9 }
-      ).addTo(liveMap);
+      var road = route.live
+        ? routeLatLngs(route.pickup, route.dropoff)
+        : [[route.driver.lat, route.driver.lng], [route.pickup.lat, route.pickup.lng], [route.dropoff.lat, route.dropoff.lng]];
+      window.L.polyline(road, { color: "#d4b15a", weight: 4, opacity: 0.9 }).addTo(liveMap);
       var youLabel = state.mode === "driver" ? "Customer" : "You";
       window.L.marker([route.pickup.lat, route.pickup.lng], { icon: pinIcon(youLabel, "pin-you") }).addTo(liveMap);
       window.L.marker([route.dropoff.lat, route.dropoff.lng], { icon: pinIcon("Drop-off", "pin-drop") }).addTo(liveMap);
@@ -1392,14 +1727,9 @@
         }),
         zIndexOffset: 500
       }).addTo(liveMap);
-      liveMap.fitBounds(
-        window.L.latLngBounds([
-          [route.driver.lat, route.driver.lng],
-          [route.pickup.lat, route.pickup.lng],
-          [route.dropoff.lat, route.dropoff.lng]
-        ]),
-        { padding: [28, 28], maxZoom: 14 }
-      );
+      var boundPts = road.slice();
+      boundPts.push([route.driver.lat, route.driver.lng]);
+      liveMap.fitBounds(window.L.latLngBounds(boundPts), { padding: [28, 28], maxZoom: 14 });
       layer.on("tileload", function () {
         if (tilesOk) return;
         tilesOk = true;
@@ -1501,6 +1831,14 @@
       syncRide();
     }, 1000);
     setInterval(pullRemoteRide, 3000);
+    if (ROLE !== "driver") {
+      var savedRide = currentRide();
+      if (savedRide && savedRide.pickupStreet && savedRide.dropStreet &&
+          (savedRide.status === "requested" || savedRide.status === "accepted")) {
+        applyRide(savedRide);
+        state.screen = savedRide.status === "accepted" ? "trip" : "waiting";
+      }
+    }
     render();
   });
 
