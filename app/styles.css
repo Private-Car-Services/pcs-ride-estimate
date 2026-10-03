@@ -448,3 +448,29 @@ input:focus {
 @media (prefers-reduced-motion: reduce) {
   .status i { box-shadow: none; }
 }
+
+.locate { position: relative; }
+.locate-btn { width: 100%; margin: 8px 0 4px; }
+.suggest {
+  position: absolute;
+  left: 0;
+  right: 0;
+  z-index: 5;
+  background: #10243f;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  overflow: hidden;
+}
+.suggest-item {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: 0;
+  border-bottom: 1px solid rgba(212, 177, 90, 0.18);
+  padding: 10px 12px;
+  color: var(--ink);
+}
+.suggest-item span { color: var(--muted); font-size: 13px; }

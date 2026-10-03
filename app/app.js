@@ -189,20 +189,119 @@
     );
   }
 
+
+  function locateField(id, label, value, resultsId, locateId) {
+    return (
+      '<div class="locate">' +
+      field(id, label, value, 'required placeholder="Search a place" autocomplete="off"') +
+      (locateId ? '<button class="btn ghost locate-btn" type="button" id="' + locateId + '">Use current location</button>' : "") +
+      '<div class="suggest" id="' + resultsId + '" hidden></div>' +
+      "</div>"
+    );
+  }
+
+  function stateCode(name) {
+    var known = { texas: "TX", louisiana: "LA", oklahoma: "OK", arkansas: "AR" };
+    if (!name) return "TX";
+    var n = String(name).trim();
+    if (n.length === 2) return n.toUpperCase();
+    return known[n.toLowerCase()] || "TX";
+  }
+
+  function placeLine(p) {
+    var street = [p.housenumber, p.street].filter(Boolean).join(" ");
+    if (p.name && street && p.name.toLowerCase() !== street.toLowerCase()) return p.name + ", " + street;
+    return p.name || street || "";
+  }
+
+  function applyPlace(prefix, p) {
+    var streetEl = document.getElementById(prefix + "-street");
+    var cityEl = document.getElementById(prefix + "-city");
+    var stateEl = document.getElementById(prefix + "-state");
+    if (streetEl) streetEl.value = placeLine(p);
+    if (cityEl && (p.city || p.county)) cityEl.value = p.city || p.county;
+    if (stateEl) stateEl.value = stateCode(p.state);
+  }
+
+  function wireSearch(inputId, resultsId, prefix) {
+    var input = document.getElementById(inputId);
+    var box = document.getElementById(resultsId);
+    if (!input || !box) return;
+    var timer = 0;
+    input.addEventListener("input", function () {
+      var q = input.value.trim();
+      clearTimeout(timer);
+      if (q.length < 3) {
+        box.hidden = true;
+        box.innerHTML = "";
+        return;
+      }
+      timer = setTimeout(function () {
+        var url = "https://photon.komoot.io/api/?limit=5&lat=30.05&lon=-95.4&q=" + encodeURIComponent(q + " Texas");
+        fetch(url).then(function (res) { return res.json(); }).then(function (data) {
+          var features = (data && data.features) || [];
+          if (input.value.trim() !== q || !features.length) {
+            box.hidden = true;
+            return;
+          }
+          box._places = features;
+          box.innerHTML = features.map(function (f, i) {
+            var p = f.properties || {};
+            var sub = [p.city || p.county, stateCode(p.state)].filter(Boolean).join(", ");
+            return '<button type="button" class="suggest-item" data-i="' + i + '"><strong>' + esc(placeLine(p)) + "</strong><span>" + esc(sub) + "</span></button>";
+          }).join("");
+          box.hidden = false;
+        }).catch(function () { box.hidden = true; });
+      }, 350);
+    });
+    box.addEventListener("click", function (event) {
+      var btn = event.target.closest ? event.target.closest(".suggest-item") : null;
+      if (!btn || !box._places) return;
+      var feature = box._places[Number(btn.getAttribute("data-i"))];
+      if (!feature) return;
+      applyPlace(prefix, feature.properties || {});
+      box.hidden = true;
+    });
+  }
+
+  function wireLocation() {
+    var locBtn = document.getElementById("use-location");
+    if (!locBtn || !navigator.geolocation) return;
+    locBtn.addEventListener("click", function () {
+      locBtn.disabled = true;
+      locBtn.textContent = "Finding you…";
+      navigator.geolocation.getCurrentPosition(function (pos) {
+        var url = "https://photon.komoot.io/reverse?limit=1&lat=" + pos.coords.latitude + "&lon=" + pos.coords.longitude;
+        fetch(url).then(function (res) { return res.json(); }).then(function (data) {
+          var feature = data.features && data.features[0];
+          if (feature) applyPlace("pickup", feature.properties || {});
+          locBtn.disabled = false;
+          locBtn.textContent = "Use current location";
+        }).catch(function () {
+          locBtn.disabled = false;
+          locBtn.textContent = "Could not find that place";
+        });
+      }, function () {
+        locBtn.disabled = false;
+        locBtn.textContent = "Location unavailable";
+      }, { enableHighAccuracy: true, timeout: 10000 });
+    });
+  }
+
   function customerHome() {
     return (
       "<h2>Request a ride</h2>" +
       "<p class=\"lede\">Nothing is sent, and nothing is charged.</p>" +
       "<form id=\"ride-form\" autocomplete=\"off\">" +
       '<div class="group"><p class="group-title">Pickup</p>' +
-      field("pickup-street", "Street", state.pickupStreet, 'required') +
+      locateField("pickup-street", "Street", state.pickupStreet, "pickup-results", "use-location") +
       '<div class="row"><div class="city">' +
       field("pickup-city", "City", state.pickupCity, "required") +
       '</div><div class="state">' +
       field("pickup-state", "State", state.pickupState, 'required maxlength="2"') +
       "</div></div></div>" +
       '<div class="group"><p class="group-title">Drop-off</p>' +
-      field("drop-street", "Street", state.dropStreet, "required") +
+      locateField("drop-street", "Street", state.dropStreet, "drop-results", "") +
       '<div class="row"><div class="city">' +
       field("drop-city", "City", state.dropCity, "required") +
       '</div><div class="state">' +
@@ -449,6 +548,9 @@
         render();
       });
     }
+    wireSearch("pickup-street", "pickup-results", "pickup");
+    wireSearch("drop-street", "drop-results", "drop");
+    wireLocation();
     var form = document.getElementById("ride-form");
     if (form) {
       form.addEventListener("submit", function (event) {
