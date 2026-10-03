@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0b1c33">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="PCS Rider">
+  <link rel="apple-touch-icon" href="../icon-rider.png">
+  <link rel="icon" href="../icon-rider.png">
+  <link rel="manifest" href="manifest.webmanifest">
+  <title>PCS Rider</title>
+  <link rel="stylesheet" href="../styles.css?v=6">
+</head>
+<body>
+  <div class="phone">
+    <header class="top">
+      <div class="brand">
+        <p class="eyebrow">Houston &amp; Willis, TX</p>
+        <h1>Private Car Services</h1>
+      </div>
+      <p class="starter-flag">Starter</p>
+    </header>
+    <main id="signup-main">
+      <h2>Create an account</h2>
+      <p class="lede">Invitation sign-up. This phone keeps the account. Nothing is charged.</p>
+      <form id="signup-form" autocomplete="off">
+        <label for="full-name">Full name</label>
+        <input id="full-name" name="name" type="text" autocomplete="name" required>
+        <label for="mobile">Mobile phone</label>
+        <input id="mobile" name="phone" type="tel" inputmode="tel" autocomplete="tel" required>
+        <label for="email">Email</label>
+        <input id="email" name="email" type="email" autocomplete="email" required>
+        <label for="username">Username</label>
+        <input id="username" name="username" type="text" autocomplete="username" required>
+        <label for="password">Password</label>
+        <input id="password" name="password" type="password" autocomplete="new-password" required>
+        <label for="confirm">Confirm password</label>
+        <input id="confirm" name="confirm" type="password" autocomplete="new-password" required>
+        <div class="card">
+          <p class="note">Your card is added through Square at checkout. This page never stores a card number.</p>
+          <button class="btn secondary" type="button" id="square-btn" disabled>Continue to Square</button>
+          <p class="fine" id="square-help">Square link not added yet.</p>
+        </div>
+        <p class="error" id="form-error" role="alert"></p>
+        <button class="btn" type="submit">Save account</button>
+      </form>
+    </main>
+  </div>
+  <script>
+    var SQUARE_SIGNUP_URL = "";
+
+    (function () {
+      var form = document.getElementById("signup-form");
+      var errorEl = document.getElementById("form-error");
+      var squareBtn = document.getElementById("square-btn");
+      var squareHelp = document.getElementById("square-help");
+
+      if (SQUARE_SIGNUP_URL) {
+        squareBtn.disabled = false;
+        squareHelp.textContent = "";
+        squareBtn.addEventListener("click", function () {
+          window.open(SQUARE_SIGNUP_URL, "_blank", "noopener,noreferrer");
+        });
+      }
+
+      function digits(value) {
+        return String(value || "").replace(/\D/g, "");
+      }
+
+      function sha256Hex(text) {
+        var data = new TextEncoder().encode(text);
+        return crypto.subtle.digest("SHA-256", data).then(function (buf) {
+          return Array.prototype.map.call(new Uint8Array(buf), function (b) {
+            return b.toString(16).padStart(2, "0");
+          }).join("");
+        });
+      }
+
+      function showError(message) {
+        errorEl.textContent = message;
+      }
+
+      function installBlock() {
+        var ua = navigator.userAgent || "";
+        var ios = /iPhone|iPad|iPod/i.test(ua);
+        var android = /Android/i.test(ua);
+        var wrap = document.createElement("div");
+        var title = document.createElement("h2");
+        title.textContent = "Add the rider button";
+        wrap.appendChild(title);
+        var lead = document.createElement("p");
+        lead.className = "lede";
+        lead.textContent = "The icon is the Private Car Services rider button. After you add it, that button opens the rider app.";
+        wrap.appendChild(lead);
+
+        function steps(heading, items) {
+          var h = document.createElement("p");
+          h.className = "group-title";
+          h.textContent = heading;
+          wrap.appendChild(h);
+          var list = document.createElement("ol");
+          list.className = "steps";
+          items.forEach(function (item) {
+            var li = document.createElement("li");
+            li.textContent = item;
+            list.appendChild(li);
+          });
+          wrap.appendChild(list);
+        }
+
+        var iphoneSteps = [
+          "Open this page in Safari.",
+          "Tap Share.",
+          "Tap Add to Home Screen."
+        ];
+        var androidSteps = [
+          "Open this page in Chrome.",
+          "Tap the menu.",
+          "Tap Add to Home screen."
+        ];
+
+        if (ios) {
+          steps("On this iPhone", iphoneSteps);
+        } else if (android) {
+          steps("On this Android phone", androidSteps);
+        } else {
+          steps("iPhone (Safari)", iphoneSteps);
+          steps("Android (Chrome)", androidSteps);
+        }
+        return wrap;
+      }
+
+      function showSaved() {
+        var main = document.getElementById("signup-main");
+        main.textContent = "";
+        var h = document.createElement("h2");
+        h.textContent = "Account saved on this phone";
+        var p = document.createElement("p");
+        p.className = "lede";
+        p.textContent = "Your account is saved on this phone. Your card is not stored.";
+        var link = document.createElement("a");
+        link.className = "back-link";
+        link.href = "../";
+        link.textContent = "Open the rider app";
+        var linkP = document.createElement("p");
+        linkP.appendChild(link);
+        main.appendChild(h);
+        main.appendChild(p);
+        main.appendChild(linkP);
+        main.appendChild(installBlock());
+      }
+
+      form.addEventListener("submit", function (event) {
+        event.preventDefault();
+        showError("");
+        var name = document.getElementById("full-name").value.trim();
+        var phone = digits(document.getElementById("mobile").value);
+        var email = document.getElementById("email").value.trim();
+        var username = document.getElementById("username").value.trim();
+        var password = document.getElementById("password").value;
+        var confirm = document.getElementById("confirm").value;
+
+        if (!name) {
+          showError("Enter your full name.");
+          return;
+        }
+        if (phone.length !== 10) {
+          showError("Enter a mobile phone with 10 digits.");
+          return;
+        }
+        if (email.indexOf("@") === -1) {
+          showError("Enter an email that contains @.");
+          return;
+        }
+        if (!/^[A-Za-z0-9]{3,}$/.test(username)) {
+          showError("Username must be at least 3 letters or numbers, with no spaces or symbols.");
+          return;
+        }
+        if (password.length < 8) {
+          showError("Password must be at least 8 characters.");
+          return;
+        }
+        if (password !== confirm) {
+          showError("Password and confirm password must match.");
+          return;
+        }
+        if (!window.crypto || !crypto.subtle || !crypto.subtle.digest) {
+          showError("This browser cannot save a password safely. Try Safari or Chrome.");
+          return;
+        }
+
+        sha256Hex(password).then(function (hex) {
+          var profile = {
+            name: name,
+            phone: phone,
+            email: email,
+            username: username,
+            passwordHash: hex
+          };
+          localStorage.setItem("pcs-rider-account", JSON.stringify(profile));
+          document.getElementById("password").value = "";
+          document.getElementById("confirm").value = "";
+          showSaved();
+        }).catch(function () {
+          showError("Could not save the account on this phone. Nothing was stored.");
+        });
+      });
+    })();
+  </script>
+</body>
+</html>

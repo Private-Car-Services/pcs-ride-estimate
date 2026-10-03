@@ -1,0 +1,17 @@
+{
+  "name": "PCS Rider",
+  "short_name": "PCS Rider",
+  "display": "standalone",
+  "start_url": "../",
+  "scope": "../",
+  "theme_color": "#0b1c33",
+  "background_color": "#0b1c33",
+  "icons": [
+    {
+      "src": "../icon-rider.png",
+      "sizes": "1024x1024",
+      "type": "image/png",
+      "purpose": "any"
+    }
+  ]
+}
