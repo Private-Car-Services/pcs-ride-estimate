@@ -1124,9 +1124,9 @@
   function accountGate() {
     return (
       '<img class="welcome-logo" alt="Private Car Services" src="' + welcomeSrc(ROLE === "driver" ? "welcome-logo-driver.png" : "welcome-logo.png") + '">' +
-      '<form id="login-form" autocomplete="off">' +
-      '<label for="login-user">Username</label>' +
-      '<input id="login-user" name="username" type="text" autocapitalize="none" autocomplete="username" spellcheck="false" required>' +
+      '<form id="login-form" autocomplete="off" novalidate>' +
+      '<label for="login-email">Email</label>' +
+      '<input id="login-email" name="email" type="email" autocapitalize="none" autocomplete="email" spellcheck="false" required>' +
       '<label for="login-pass">Password</label>' +
       '<input id="login-pass" name="password" type="password" autocomplete="current-password" required>' +
       '<p class="error" id="login-error" role="alert">' + esc(state.loginError || "") + "</p>" +
@@ -1640,18 +1640,21 @@
       loginForm.addEventListener("submit", function (event) {
         event.preventDefault();
         state.loginError = "";
-        var userEl = document.getElementById("login-user");
+        var emailEl = document.getElementById("login-email");
         var passEl = document.getElementById("login-pass");
-        var username = userEl ? userEl.value.trim() : "";
+        var loginValue = emailEl ? emailEl.value.trim() : "";
+        var loginEmail = loginValue.toLowerCase();
         var password = passEl ? passEl.value : "";
         var account = accountForRole();
-        if (!account || !account.username || !account.passwordHash) {
+        if (!account || (!account.email && !account.username) || !account.passwordHash) {
           state.loginError = "No account on this phone yet. Create one first.";
           render();
           return;
         }
-        if (username.toLowerCase() !== String(account.username).toLowerCase()) {
-          state.loginError = "That username or password does not match the account on this phone.";
+        var emailMatches = account.email && loginEmail === String(account.email).trim().toLowerCase();
+        var legacyUsernameMatches = account.username && loginEmail === String(account.username).trim().toLowerCase();
+        if (!emailMatches && !legacyUsernameMatches) {
+          state.loginError = "That email or password does not match the account on this phone.";
           render();
           return;
         }
@@ -1662,11 +1665,11 @@
         }
         sha256Hex(password).then(function (hex) {
           if (hex !== account.passwordHash) {
-            state.loginError = "That username or password does not match the account on this phone.";
+            state.loginError = "That email or password does not match the account on this phone.";
             render();
             return;
           }
-          writeSession(account.username);
+          writeSession(account.email || account.username);
           state.loginError = "";
           state.gateStep = "";
           state.screen = "home";
