@@ -11,7 +11,7 @@
   <link rel="icon" href="../../icon-driver.png">
   <link rel="manifest" href="manifest.webmanifest">
   <title>PCS Driver</title>
-  <link rel="stylesheet" href="../../styles.css?v=6">
+  <link rel="stylesheet" href="../../styles.css?v=7">
 </head>
 <body>
   <div class="phone">
@@ -25,6 +25,12 @@
       <h2>Create a driver account</h2>
       <p class="lede">Invitation sign-up. This phone keeps the account. Nothing is charged.</p>
       <form id="signup-form" autocomplete="off">
+        <label for="photo">Profile picture</label>
+        <div class="photo-pick">
+          <img id="photo-preview" class="avatar" alt="" hidden>
+          <input id="photo" name="photo" type="file" accept="image/*">
+        </div>
+        <p class="fine">Optional. The rider sees this picture when you accept.</p>
         <label for="full-name">Full name</label>
         <input id="full-name" name="name" type="text" autocomplete="name" required>
         <label for="mobile">Mobile phone</label>
@@ -57,6 +63,63 @@
           return Array.prototype.map.call(new Uint8Array(buf), function (b) {
             return b.toString(16).padStart(2, "0");
           }).join("");
+        });
+      }
+
+      function readPhotoFile(file) {
+        return new Promise(function (resolve, reject) {
+          if (!file) { resolve(""); return; }
+          if (!/^image\//.test(file.type || "")) { reject(new Error("picture")); return; }
+          var reader = new FileReader();
+          reader.onerror = function () { reject(new Error("picture")); };
+          reader.onload = function () {
+            var img = new Image();
+            img.onload = function () {
+              var size = 160;
+              var side = Math.min(img.width, img.height);
+              if (!side) { reject(new Error("picture")); return; }
+              var canvas = document.createElement("canvas");
+              canvas.width = size;
+              canvas.height = size;
+              var ctx = canvas.getContext("2d");
+              var sx = Math.floor((img.width - side) / 2);
+              var sy = Math.floor((img.height - side) / 2);
+              ctx.drawImage(img, sx, sy, side, side, 0, 0, size, size);
+              var url = canvas.toDataURL("image/jpeg", 0.72);
+              if (!url || url.indexOf("data:image/jpeg;base64,") !== 0 || url.length > 120000) {
+                reject(new Error("picture"));
+                return;
+              }
+              resolve(url);
+            };
+            img.onerror = function () { reject(new Error("picture")); };
+            img.src = reader.result;
+          };
+          reader.readAsDataURL(file);
+        });
+      }
+
+      function safePhoto(value) {
+        if (typeof value !== "string") return "";
+        if (!/^data:image\/jpeg;base64,[A-Za-z0-9+/=]+$/.test(value)) return "";
+        if (value.length > 120000) return "";
+        return value;
+      }
+
+      function previewPhoto(input, preview, onError) {
+        input.addEventListener("change", function () {
+          var file = input.files && input.files[0];
+          preview.hidden = true;
+          preview.removeAttribute("src");
+          if (!file) return;
+          readPhotoFile(file).then(function (url) {
+            preview.src = url;
+            preview.hidden = false;
+            if (onError) onError("");
+          }).catch(function () {
+            input.value = "";
+            if (onError) onError("Choose a photo from this phone. A picture that is too large will not save.");
+          });
         });
       }
 
@@ -162,6 +225,14 @@
         lead.textContent = "Saved on this phone. Riders see your name when you accept a ride.";
         main.appendChild(h);
         main.appendChild(lead);
+        var savedPhoto = safePhoto(account.photo);
+        if (savedPhoto) {
+          var face = document.createElement("img");
+          face.className = "avatar";
+          face.alt = "";
+          face.src = savedPhoto;
+          main.appendChild(face);
+        }
         if (note) {
           var noteP = document.createElement("p");
           noteP.className = "note";
@@ -205,6 +276,25 @@
         labeled("profile-name", "Full name", account.name || "", "text");
         labeled("profile-phone", "Mobile phone", prettyPhone(account.phone), "tel");
 
+        var photoLab = document.createElement("label");
+        photoLab.htmlFor = "profile-photo";
+        photoLab.textContent = "Profile picture";
+        var photoPick = document.createElement("div");
+        photoPick.className = "photo-pick";
+        var photoPreview = document.createElement("img");
+        photoPreview.className = "avatar";
+        photoPreview.alt = "";
+        photoPreview.hidden = !savedPhoto;
+        if (savedPhoto) photoPreview.src = savedPhoto;
+        var photoInput = document.createElement("input");
+        photoInput.id = "profile-photo";
+        photoInput.type = "file";
+        photoInput.accept = "image/*";
+        photoPick.appendChild(photoPreview);
+        photoPick.appendChild(photoInput);
+        updateForm.appendChild(photoLab);
+        updateForm.appendChild(photoPick);
+
         var err = document.createElement("p");
         err.className = "error";
         err.id = "profile-error";
@@ -214,7 +304,7 @@
         var btn = document.createElement("button");
         btn.className = "btn";
         btn.type = "submit";
-        btn.textContent = "Update name and phone";
+        btn.textContent = "Update profile";
         updateForm.appendChild(btn);
         main.appendChild(updateForm);
 
@@ -225,6 +315,8 @@
         var linkP = document.createElement("p");
         linkP.appendChild(link);
         main.appendChild(linkP);
+
+        previewPhoto(photoInput, photoPreview, function (message) { err.textContent = message; });
 
         updateForm.addEventListener("submit", function (event) {
           event.preventDefault();
@@ -239,20 +331,27 @@
             err.textContent = "Enter a mobile phone with 10 digits.";
             return;
           }
-          var next = {
-            name: name,
-            phone: phone,
-            email: account.email || "",
-            username: account.username || "",
-            passwordHash: account.passwordHash || ""
-          };
-          try {
-            localStorage.setItem("pcs-driver-account", JSON.stringify(next));
-          } catch (saveErr) {
-            err.textContent = "Could not update the profile on this phone.";
-            return;
-          }
-          showProfile(next, "Name and phone updated on this phone.");
+          var photoFile = photoInput.files && photoInput.files[0];
+          var photoReady = photoFile ? readPhotoFile(photoFile) : Promise.resolve(safePhoto(account.photo));
+          photoReady.then(function (photo) {
+            var next = {
+              name: name,
+              phone: phone,
+              email: account.email || "",
+              username: account.username || "",
+              passwordHash: account.passwordHash || "",
+              photo: photo
+            };
+            try {
+              localStorage.setItem("pcs-driver-account", JSON.stringify(next));
+            } catch (saveErr) {
+              err.textContent = "Could not update the profile on this phone.";
+              return;
+            }
+            showProfile(next, "Profile updated on this phone.");
+          }).catch(function () {
+            err.textContent = "Choose a photo from this phone. A picture that is too large will not save.";
+          });
         });
       }
 
@@ -261,6 +360,10 @@
         showProfile(existing, "");
         return;
       }
+
+      var signupPhoto = document.getElementById("photo");
+      var signupPreview = document.getElementById("photo-preview");
+      if (signupPhoto && signupPreview) previewPhoto(signupPhoto, signupPreview, showError);
 
       form.addEventListener("submit", function (event) {
         event.preventDefault();
@@ -301,18 +404,23 @@
           return;
         }
 
-        sha256Hex(password).then(function (hex) {
+        var photoFile = signupPhoto && signupPhoto.files && signupPhoto.files[0];
+        var photoReady = photoFile ? readPhotoFile(photoFile) : Promise.resolve("");
+        photoReady.then(function (photo) {
+          return sha256Hex(password).then(function (hex) {
           var profile = {
             name: name,
             phone: phone,
             email: email,
             username: username,
-            passwordHash: hex
+            passwordHash: hex,
+            photo: photo
           };
           localStorage.setItem("pcs-driver-account", JSON.stringify(profile));
           document.getElementById("password").value = "";
           document.getElementById("confirm").value = "";
           showSaved();
+          });
         }).catch(function () {
           showError("Could not save the account on this phone. Nothing was stored.");
         });
