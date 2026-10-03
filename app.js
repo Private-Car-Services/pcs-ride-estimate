@@ -47,6 +47,7 @@
     flightNumber: document.getElementById('flight-number'),
     flightDirection: document.getElementById('flight-direction'),
     textRequestButton: document.getElementById('text-request-btn'),
+    promoBookButton: document.getElementById('promo-book-btn'),
     textRequestNote: document.getElementById('text-request-note'),
     requestConfirm: document.getElementById('request-confirm'),
     smsLaunch: document.getElementById('sms-launch'),
@@ -237,7 +238,7 @@
     });
   }
 
-  function rideRequestBody(result) {
+  function rideRequestBody(result, promo) {
     const lines = [
       'Hello,',
       '',
@@ -266,6 +267,13 @@
     }
     if (result && !result.callForQuote && typeof result.total === 'number') {
       lines.push('Estimated total: ' + money(result.total));
+      if (promo) {
+        var offer = Math.round(result.total * 0.9 * 100) / 100;
+        lines.push('Website offer: 10% off. Offer total: ' + money(offer));
+        lines.push('Offer terms: book by Nov 30, pay in full, no cancel within 24h, at least 48h ahead. Rides through Dec 31.');
+      }
+    } else if (promo) {
+      lines.push('Website offer: 10% off. Book by Nov 30, pay in full, no cancel within 24h, at least 48h ahead. Rides through Dec 31.');
     }
     lines.push('', 'This is a ride request only, not a booking confirmation.');
     return lines.join('\n');
@@ -298,7 +306,7 @@
     els.requestConfirm.textContent = 'Request ready. Send the text to 936-261-7878. Your details stay on this page.';
   }
 
-  function openRideText(event, result) {
+  function openRideText(event, result, promo) {
     updateFlightDetails();
     if (!els.form.reportValidity()) {
       if (event) event.preventDefault();
@@ -312,11 +320,12 @@
     }
     if (els.textRequestNote) els.textRequestNote.hidden = true;
     saveDraft();
-    const url = smsUrl(rideRequestBody(result));
+    const url = smsUrl(rideRequestBody(result, promo));
     if (els.textRequestButton) els.textRequestButton.href = url;
+    if (els.promoBookButton) els.promoBookButton.href = url;
     if (els.smsLaunch) els.smsLaunch.href = url;
     showConfirmation();
-    if (event && event.currentTarget === els.textRequestButton) return true;
+    if (event && (event.currentTarget === els.textRequestButton || event.currentTarget === els.promoBookButton)) return true;
     if (els.smsLaunch) els.smsLaunch.click();
     return true;
   }
@@ -568,8 +577,13 @@
       if (result) openRideText(null, result);
     });
     els.textRequestButton.addEventListener('click', (event) => {
-      if (!openRideText(event, lastEstimate)) event.preventDefault();
+      if (!openRideText(event, lastEstimate, false)) event.preventDefault();
     });
+    if (els.promoBookButton) {
+      els.promoBookButton.addEventListener('click', (event) => {
+        if (!openRideText(event, lastEstimate, true)) event.preventDefault();
+      });
+    }
     els.tripType.addEventListener('change', updateFlightDetails);
     [
       els.pickupStreet, els.pickupCity, els.pickupState,
