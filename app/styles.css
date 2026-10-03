@@ -555,3 +555,13 @@ a.btn + .btn, .btn + a.btn, a.btn + a.btn { margin-top: 8px; }
   margin: 0 0 10px;
   display: block;
 }
+
+.welcome-hero {
+  width: 100%;
+  height: 210px;
+  object-fit: cover;
+  object-position: center 40%;
+  border-radius: 16px;
+  margin: 0 0 10px;
+  display: block;
+}

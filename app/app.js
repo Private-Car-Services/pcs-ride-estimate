@@ -1091,6 +1091,7 @@
   function accountGate() {
     var page = ROLE === "driver" ? "driver" : "rider";
     return (
+      '<img class="welcome-hero" alt="Private Car Services on a Houston highway at sunset" src="' + welcomeSrc("welcome-skyline.jpg") + '">' +
       '<img class="welcome-photo" alt="Private Car Services vehicle" src="' + welcomeSrc("welcome-suv.jpg") + '">' +
       '<img class="welcome-photo" alt="" src="' + welcomeSrc("welcome-trip.jpg") + '">' +
       "<h2>Welcome</h2>" +
