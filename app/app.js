@@ -1,4 +1,4 @@
-/* Private Car Services starter. Preview only: no texts, no charges, no API key. */
+/* Private Car Services starter. Preview only: no texts, no charges, no API key. Shared rides use Firebase REST when PCS_SYNC.databaseURL is set. */
 (function () {
   var BUSINESS_PHONE = "936-261-7878";
   var BASE_CENTS = 1100;
@@ -37,6 +37,12 @@
 
   var ROLE = document.body && document.body.getAttribute("data-app") === "driver" ? "driver" : "customer";
   var STORE = "pcs-beta-ride";
+  var DRIVER_CODE = "pcs-driver-code";
+  var CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  var lastDriverPatchAt = 0;
+  var lastDriverPatchLat = null;
+  var lastDriverPatchLng = null;
+  var rideLookup = 0;
 
   var state = {
     mode: ROLE,
@@ -56,7 +62,12 @@
     stops: 0,
     holiday: false,
     driverLat: null,
-    driverLng: null
+    driverLng: null,
+    code: "",
+    driverCode: "",
+    codeError: "",
+    codeDraft: "",
+    remoteLoading: false
   };
 
   var rafId = 0;
@@ -404,6 +415,272 @@
     });
   }
 
+
+  function databaseURL() {
+    var cfg = window.PCS_SYNC || {};
+    var url = cfg.databaseURL ? String(cfg.databaseURL).trim() : "";
+    return url.replace(/\/+$/, "");
+  }
+
+  function syncOn() {
+    return !!databaseURL();
+  }
+
+  function makeRideCode() {
+    var out = "";
+    var i;
+    var buf;
+    if (window.crypto && window.crypto.getRandomValues) {
+      buf = new Uint8Array(8);
+      window.crypto.getRandomValues(buf);
+      for (i = 0; i < 8; i += 1) out += CODE_ALPHABET[buf[i] % CODE_ALPHABET.length];
+      return out;
+    }
+    for (i = 0; i < 8; i += 1) {
+      out += CODE_ALPHABET[Math.floor(Math.random() * CODE_ALPHABET.length)];
+    }
+    return out;
+  }
+
+  function normalizeCode(raw) {
+    return String(raw || "").toUpperCase().replace(/\s+/g, "");
+  }
+
+  function rideUrl(code) {
+    return databaseURL() + "/rides/" + encodeURIComponent(code) + ".json";
+  }
+
+  function coordNum(v) {
+    return isCoord(v) ? +v : null;
+  }
+
+  function asRide(data) {
+    if (!data || typeof data !== "object" || Array.isArray(data)) return null;
+    return data;
+  }
+
+  function getRide(code) {
+    return fetch(rideUrl(code)).then(function (res) {
+      if (res.status === 404) return null;
+      if (!res.ok) throw new Error("ride");
+      return res.text().then(function (text) {
+        if (!text) return null;
+        try { return asRide(JSON.parse(text)); } catch (err) { return null; }
+      });
+    });
+  }
+
+  function putRide(code, ride) {
+    return fetch(rideUrl(code), {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(ride)
+    }).then(function (res) {
+      if (!res.ok) throw new Error("ride");
+      return res.text().then(function () {});
+    });
+  }
+
+  function patchRide(code, partial) {
+    return fetch(rideUrl(code), {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(partial)
+    }).then(function (res) {
+      if (!res.ok) throw new Error("ride");
+      return res.text().then(function () {});
+    });
+  }
+
+  function readDriverCode() {
+    try { return localStorage.getItem(DRIVER_CODE) || ""; } catch (err) { return ""; }
+  }
+
+  function writeDriverCode(code) {
+    try {
+      if (code) localStorage.setItem(DRIVER_CODE, code);
+      else localStorage.removeItem(DRIVER_CODE);
+    } catch (err) {}
+  }
+
+  function rememberRemote(ride) {
+    if (!ride || typeof ride !== "object") return;
+    try { localStorage.setItem(STORE, JSON.stringify(ride)); } catch (err) {}
+    applyRide(ride);
+  }
+
+  function publishRide(code, created) {
+    return putRide(code, created).then(function () {
+      var latest = currentRide();
+      var patch = {};
+      if (latest && latest.code === code) {
+        if (latest.status && latest.status !== created.status) patch.status = latest.status;
+        if (isCoord(latest.driverLat) && coordNum(latest.driverLat) !== coordNum(created.driverLat)) {
+          patch.driverLat = +latest.driverLat;
+        }
+        if (isCoord(latest.driverLng) && coordNum(latest.driverLng) !== coordNum(created.driverLng)) {
+          patch.driverLng = +latest.driverLng;
+        }
+        if (isCoord(latest.pickupLat) && coordNum(latest.pickupLat) !== coordNum(created.pickupLat)) {
+          patch.pickupLat = +latest.pickupLat;
+          patch.pickupLng = +latest.pickupLng;
+        }
+        if (isCoord(latest.dropLat) && coordNum(latest.dropLat) !== coordNum(created.dropLat)) {
+          patch.dropLat = +latest.dropLat;
+          patch.dropLng = +latest.dropLng;
+        }
+      }
+      if (!patch.status && !isCoord(patch.driverLat) && !isCoord(patch.driverLng) && !isCoord(patch.pickupLat) && !isCoord(patch.dropLat)) {
+        return;
+      }
+      return patchRide(code, patch);
+    });
+  }
+
+  function pushPlaceCoords() {
+    if (!syncOn() || ROLE !== "customer" || !state.code) return;
+    var patch = {};
+    if (isCoord(state.pickupLat) && isCoord(state.pickupLng)) {
+      patch.pickupLat = +state.pickupLat;
+      patch.pickupLng = +state.pickupLng;
+    }
+    if (isCoord(state.dropLat) && isCoord(state.dropLng)) {
+      patch.dropLat = +state.dropLat;
+      patch.dropLng = +state.dropLng;
+    }
+    if (!isCoord(patch.pickupLat) && !isCoord(patch.dropLat)) return;
+    patchRide(state.code, patch).catch(function () {});
+  }
+
+  function maybePatchDriverLocation() {
+    if (!syncOn() || ROLE !== "driver" || state.screen !== "trip") return;
+    var code = state.driverCode || readDriverCode();
+    if (!code) return;
+    if (!isCoord(state.hereLat) || !isCoord(state.hereLng)) return;
+    var lat = +state.hereLat;
+    var lng = +state.hereLng;
+    if (lastDriverPatchLat === lat && lastDriverPatchLng === lng) return;
+    var now = Date.now();
+    if (now - lastDriverPatchAt < 3000) return;
+    lastDriverPatchAt = now;
+    lastDriverPatchLat = lat;
+    lastDriverPatchLng = lng;
+    patchRide(code, { driverLat: lat, driverLng: lng }).catch(function () {
+      if (lastDriverPatchLat === lat && lastDriverPatchLng === lng) {
+        lastDriverPatchLat = null;
+        lastDriverPatchLng = null;
+      }
+    });
+  }
+
+  function rideCodeBanner() {
+    if (!syncOn() || !state.code) return "";
+    return '<p class="ride-code-label">Tell your driver this code</p>' +
+      '<p class="ride-code">' + esc(state.code) + "</p>";
+  }
+
+  function differentCodeButton() {
+    return '<button class="btn ghost" type="button" id="different-code">Different code</button>';
+  }
+
+  function driverCodeForm() {
+    return (
+      "<h2>Open requests</h2>" +
+      '<form id="code-form" autocomplete="off">' +
+      field("ride-code", "Ride code", state.codeDraft || "", 'autocapitalize="characters" autocomplete="off" spellcheck="false"') +
+      '<p class="error" id="code-error" role="alert">' + esc(state.codeError || "") + "</p>" +
+      '<button class="btn" type="submit"' + (state.remoteLoading ? " disabled" : "") + ">" +
+      (state.remoteLoading ? "Opening ride…" : "Open ride") + "</button>" +
+      "</form>"
+    );
+  }
+
+  function ingestCustomerRide(ride) {
+    if (!ride) return;
+    var statusChanged = (ride.status || "") !== (state.rideStatus || "");
+    var placesChanged = coordNum(ride.pickupLat) !== coordNum(state.pickupLat) ||
+      coordNum(ride.pickupLng) !== coordNum(state.pickupLng) ||
+      coordNum(ride.dropLat) !== coordNum(state.dropLat) ||
+      coordNum(ride.dropLng) !== coordNum(state.dropLng);
+    var driverChanged = coordNum(ride.driverLat) !== coordNum(state.driverLat) ||
+      coordNum(ride.driverLng) !== coordNum(state.driverLng);
+    var codeChanged = !!(ride.code && ride.code !== state.code);
+    if (!statusChanged && !placesChanged && !driverChanged && !codeChanged) return;
+    var screen = state.screen;
+    applyRide(ride);
+    if (screen === "waiting" && ride.status === "accepted") state.screen = "trip";
+    var onlyDriver = !statusChanged && !placesChanged && driverChanged && state.screen === screen;
+    if (onlyDriver && carMarker && isCoord(state.driverLat) && isCoord(state.driverLng)) {
+      carMarker.setLatLng([+state.driverLat, +state.driverLng]);
+      return;
+    }
+    render();
+  }
+
+  function pullRemoteRide() {
+    if (!syncOn() || ROLE !== "customer") return;
+    if (state.screen !== "waiting" && state.screen !== "trip") return;
+    var code = state.code;
+    if (!code) {
+      var local = currentRide();
+      code = local && local.code;
+    }
+    if (!code) return;
+    getRide(code).then(function (ride) {
+      if (!ride) return;
+      if (ROLE !== "customer") return;
+      if (state.screen !== "waiting" && state.screen !== "trip") return;
+      if ((state.screen === "waiting" || state.screen === "trip") && state.code && ride.code && ride.code !== state.code) return;
+      try { localStorage.setItem(STORE, JSON.stringify(ride)); } catch (err) {}
+      ingestCustomerRide(ride);
+    }).catch(function () {});
+  }
+
+  function openDriverCode(code, opts) {
+    var keepOnMiss = opts && opts.keepLocal;
+    var seq = ++rideLookup;
+    state.remoteLoading = true;
+    state.codeError = "";
+    getRide(code).then(function (ride) {
+      if (seq !== rideLookup) return;
+      state.remoteLoading = false;
+      if (!ride) {
+        writeDriverCode("");
+        state.driverCode = "";
+        state.codeDraft = code;
+        state.codeError = "That code was not found.";
+        clearRideFields();
+        state.screen = "home";
+        render();
+        return;
+      }
+      if (!ride.code) ride.code = code;
+      writeDriverCode(code);
+      state.driverCode = code;
+      state.codeDraft = code;
+      state.codeError = "";
+      rememberRemote(ride);
+      state.screen = "home";
+      render();
+    }).catch(function () {
+      if (seq !== rideLookup) return;
+      state.remoteLoading = false;
+      if (!keepOnMiss) {
+        render();
+        return;
+      }
+      var local = currentRide();
+      if (local && (!local.code || local.code === code)) {
+        if (!local.code) local.code = code;
+        writeDriverCode(code);
+        state.driverCode = code;
+        state.codeDraft = code;
+        rememberRemote(local);
+      }
+      render();
+    });
+  }
+
   function customerHome() {
     return (
       "<h2>Request a ride</h2>" +
@@ -568,7 +845,7 @@
     }
     var legend = both
       ? '<p class="legend"><span><i class="swatch you"></i> Pickup</span><span><i class="swatch drop"></i> Drop-off</span>' +
-        (driverPoint ? '<span><i class="swatch"></i> Driver</span>' : "") + "</p>"
+        (driverPoint ? '<span><i class="swatch"></i> Your driver</span>' : "") + "</p>"
       : "";
     return (
       '<div class="map-stage">' +
@@ -585,7 +862,7 @@
     var driver = savedDriverPoint();
     var caption = !both
       ? "Sample map · Willis"
-      : (driver ? "Your route" : "Driver location shows once they accept on a linked phone.");
+      : (driver ? "Your driver" : "Driver location shows once they accept on a linked phone.");
     return (
       '<button class="btn ghost" type="button" id="back-home">← Request</button>' +
       '<div class="status"><i></i><span>Driver on the way</span></div>' +
@@ -599,13 +876,19 @@
 
   function customerWaiting() {
     var both = !!(placeCoords("pickup") && placeCoords("drop"));
+    var driver = savedDriverPoint();
+    var caption = !both ? "Sample map · Willis" : (driver ? "Your driver" : "Your route");
+    var note = syncOn()
+      ? "This screen changes when a driver accepts. Nothing is texted."
+      : "Open the driver app and accept this ride. This screen changes when a driver accepts.";
     return (
       '<button class="btn ghost" type="button" id="back-home">← Request</button>' +
       '<div class="status"><i></i><span>Waiting for a driver</span></div>' +
       "<p class=\"lede\">" + esc(pickupLine()) + " → " + esc(dropLine()) + "<br>" + esc(prettyWhen()) + "</p>" +
-      customerMapBlock(both ? "Your route" : "Sample map · Willis", null) +
+      rideCodeBanner() +
+      customerMapBlock(caption, driver) +
       moneyCard() +
-      '<p class="note">Open the driver app and accept this ride. This screen changes when a driver accepts.</p>'
+      '<p class="note">' + note + "</p>"
     );
   }
 
@@ -631,6 +914,7 @@
     if (ride.passengers != null) state.passengers = ride.passengers;
     if (ride.stops != null) state.stops = ride.stops;
     state.holiday = !!ride.holiday;
+    if (ride.code) state.code = ride.code;
   }
 
   function currentRide() {
@@ -651,7 +935,7 @@
       if (!isCoord(driverLat) && isCoord(prev.driverLat)) driverLat = +prev.driverLat;
       if (!isCoord(driverLng) && isCoord(prev.driverLng)) driverLng = +prev.driverLng;
     }
-    localStorage.setItem(STORE, JSON.stringify({
+    var rideOut = {
       name: state.name,
       phone: state.phone,
       pickupStreet: state.pickupStreet,
@@ -672,7 +956,9 @@
       passengers: ridePassengers(),
       stops: rideStops(),
       holiday: !!state.holiday
-    }));
+    };
+    if (state.code) rideOut.code = state.code;
+    localStorage.setItem(STORE, JSON.stringify(rideOut));
   }
 
   function clearRideFields() {
@@ -692,9 +978,14 @@
     state.passengers = 2;
     state.stops = 0;
     state.holiday = false;
+    state.code = "";
   }
 
   function driverHome() {
+    if (syncOn() && state.remoteLoading && !state.pickupStreet) {
+      return "<h2>Open requests</h2><p class=\"lede\">Opening ride…</p>" + differentCodeButton();
+    }
+    if (syncOn() && !state.pickupStreet) return driverCodeForm();
     var est = estimate();
     return (
       "<h2>Open requests</h2>" +
@@ -709,7 +1000,8 @@
           '<div class="route-line"><p>' + esc(pickupLine()) + "</p><p>" + esc(dropLine()) + "</p></div>" +
           '<p class="fine">' + (est.ready ? est.raw.toFixed(2) + " miles, billed as " + est.billed + "." : "Miles appear when both places are found.") + "</p>" +
           '<button class="btn" type="button" id="accept-ride">' +
-          (state.rideStatus === "accepted" ? "Open trip" : "Accept") + "</button></article>"
+          (state.rideStatus === "accepted" ? "Open trip" : "Accept") + "</button></article>" +
+          (syncOn() ? differentCodeButton() : "")
         : '<p class="lede">No open requests. A ride from the passenger app shows up here.</p>')
     );
   }
@@ -810,10 +1102,13 @@
         state.customerGeocodeTried = false;
         state.driverLat = null;
         state.driverLng = null;
+        state.code = syncOn() ? makeRideCode() : "";
         geocodeMissing().then(function () {
           saveRide("requested", { clearDriver: true });
+          var created = currentRide();
           state.screen = "waiting";
           render();
+          if (syncOn() && state.code && created) publishRide(state.code, created).catch(function () {});
         });
       });
     }
@@ -837,8 +1132,40 @@
     if (accept) {
       accept.addEventListener("click", function () {
         saveRide("accepted");
+        var code = state.driverCode || state.code || readDriverCode();
+        if (syncOn() && code) patchRide(code, { status: "accepted" }).catch(function () {});
         state.mode = "driver";
         state.screen = "trip";
+        render();
+      });
+    }
+    var codeForm = document.getElementById("code-form");
+    if (codeForm) {
+      codeForm.addEventListener("submit", function (event) {
+        event.preventDefault();
+        var input = document.getElementById("ride-code");
+        var code = normalizeCode(input ? input.value : "");
+        state.codeDraft = code;
+        if (!code) {
+          state.codeError = "Enter the ride code.";
+          render();
+          return;
+        }
+        openDriverCode(code, { keepLocal: true });
+        render();
+      });
+    }
+    var different = document.getElementById("different-code");
+    if (different) {
+      different.addEventListener("click", function () {
+        rideLookup += 1;
+        writeDriverCode("");
+        state.driverCode = "";
+        state.codeDraft = "";
+        state.codeError = "";
+        state.remoteLoading = false;
+        clearRideFields();
+        state.screen = "home";
         render();
       });
     }
@@ -865,6 +1192,7 @@
       if (state.screen !== "waiting" && state.screen !== "trip") return;
       if (placeCoords("pickup") || placeCoords("drop")) {
         saveRide(state.rideStatus || (state.screen === "trip" ? "accepted" : "requested"));
+        pushPlaceCoords();
       }
       render();
     });
@@ -1114,11 +1442,16 @@
       state.driverLat = state.hereLat;
       state.driverLng = state.hereLng;
       var ride = currentRide();
+      if (syncOn()) {
+        var driverCode = state.driverCode || readDriverCode();
+        if (!ride || !driverCode || ride.code !== driverCode) ride = null;
+      }
       if (ride && (ride.driverLat !== state.hereLat || ride.driverLng !== state.hereLng)) {
         ride.driverLat = state.hereLat;
         ride.driverLng = state.hereLng;
         localStorage.setItem(STORE, JSON.stringify(ride));
       }
+      maybePatchDriverLocation();
       if (carMarker) {
         placeCar(state.hereLat, state.hereLng, bearing(
           { lat: state.hereLat, lng: state.hereLng },
@@ -1151,7 +1484,13 @@
       if (event.key === "Escape") closePreview();
     });
     if (ROLE === "driver") {
-      applyRide(currentRide());
+      if (syncOn()) {
+        state.driverCode = readDriverCode();
+        state.codeDraft = state.driverCode;
+        if (state.driverCode) openDriverCode(state.driverCode, { keepLocal: true });
+      } else {
+        applyRide(currentRide());
+      }
       followGps();
     }
     window.addEventListener("storage", function (event) {
@@ -1161,13 +1500,20 @@
     setInterval(function () {
       syncRide();
     }, 1000);
+    setInterval(pullRemoteRide, 3000);
     render();
   });
 
   function syncRide() {
     var ride = currentRide();
     if (ROLE === "driver") {
-      var stamp = ride ? ride.status + "|" + ride.pickupStreet + "|" + ride.name : "";
+      if (syncOn()) {
+        if (state.remoteLoading) return;
+        var want = state.driverCode || readDriverCode();
+        if (!want) return;
+        if (!ride || ride.code !== want) return;
+      }
+      var stamp = ride ? ride.status + "|" + ride.pickupStreet + "|" + ride.name + "|" + (ride.code || "") : "";
       if (stamp === state.syncStamp) return;
       state.syncStamp = stamp;
       if (!ride || !ride.pickupStreet) clearRideFields();
@@ -1179,18 +1525,6 @@
     }
     if (state.screen !== "waiting" && state.screen !== "trip") return;
     if (!ride) return;
-    var statusChanged = ride.status !== state.rideStatus;
-    var placesChanged = ride.pickupLat !== state.pickupLat || ride.pickupLng !== state.pickupLng ||
-      ride.dropLat !== state.dropLat || ride.dropLng !== state.dropLng;
-    var driverChanged = ride.driverLat !== state.driverLat || ride.driverLng !== state.driverLng;
-    if (!statusChanged && !placesChanged && !driverChanged) return;
-    if (state.screen === "waiting" && !statusChanged && !placesChanged) return;
-    applyRide(ride);
-    if (state.screen === "waiting" && ride.status === "accepted") state.screen = "trip";
-    if (!statusChanged && !placesChanged && state.screen === "trip" && carMarker && isCoord(state.driverLat)) {
-      carMarker.setLatLng([+state.driverLat, +state.driverLng]);
-      return;
-    }
-    render();
+    ingestCustomerRide(ride);
   }
 })();
