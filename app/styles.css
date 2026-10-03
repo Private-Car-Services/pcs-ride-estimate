@@ -544,3 +544,5 @@ img.avatar[hidden] { display: none !important; }
 }
 
 .who h2, .who .lede { margin: 0; }
+a.btn { display: block; text-align: center; text-decoration: none; }
+a.btn + .btn, .btn + a.btn, a.btn + a.btn { margin-top: 8px; }

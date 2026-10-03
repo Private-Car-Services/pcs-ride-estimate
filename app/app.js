@@ -76,7 +76,9 @@
     codeDraft: "",
     remoteLoading: false,
     dropFix: null,
-    pickupFromHere: false
+    pickupFromHere: false,
+    loginError: "",
+    gateStep: ""
   };
 
   var rafId = 0;
@@ -948,6 +950,7 @@
   function driverCodeForm() {
     return (
       driverProfileLink() +
+      logoutLine() +
       "<h2>Open requests</h2>" +
       '<form id="code-form" autocomplete="off">' +
       field("ride-code", "Ride code", state.codeDraft || "", 'autocapitalize="characters" autocomplete="off" spellcheck="false"') +
@@ -1048,8 +1051,70 @@
     });
   }
 
+
+  function sessionKey() {
+    return ROLE === "driver" ? "pcs-driver-session" : "pcs-rider-session";
+  }
+
+  function readSession() {
+    try { return localStorage.getItem(sessionKey()) || ""; } catch (err) { return ""; }
+  }
+
+  function writeSession(username) {
+    try {
+      if (username) localStorage.setItem(sessionKey(), username);
+      else localStorage.removeItem(sessionKey());
+    } catch (err) {}
+  }
+
+  function signedIn() {
+    return !!readSession();
+  }
+
+  function accountForRole() {
+    return ROLE === "driver" ? readDriverAccount() : readRiderAccount();
+  }
+
+  function sha256Hex(text) {
+    var data = new TextEncoder().encode(text);
+    return crypto.subtle.digest("SHA-256", data).then(function (buf) {
+      return Array.prototype.map.call(new Uint8Array(buf), function (b) {
+        return b.toString(16).padStart(2, "0");
+      }).join("");
+    });
+  }
+
+  function accountGate() {
+    if (state.gateStep !== "login") {
+      return (
+        "<h2>Private Car Services</h2>" +
+        '<p class="lede">Log in to open the ' + (ROLE === "driver" ? "driver" : "rider") + ' page, or create an account. The account stays on this phone.</p>' +
+        '<button class="btn" type="button" id="show-login">Log in</button>' +
+        '<a class="btn secondary" href="signup/">Create an account</a>'
+      );
+    }
+    return (
+      '<button class="btn ghost" type="button" id="gate-back">← Back</button>' +
+      "<h2>Log in</h2>" +
+      '<p class="lede">This opens the ' + (ROLE === "driver" ? "driver" : "rider") + ' page. The account stays on this phone.</p>' +
+      '<form id="login-form" autocomplete="off">' +
+      '<label for="login-user">Username</label>' +
+      '<input id="login-user" name="username" type="text" autocapitalize="none" autocomplete="username" spellcheck="false" required>' +
+      '<label for="login-pass">Password</label>' +
+      '<input id="login-pass" name="password" type="password" autocomplete="current-password" required>' +
+      '<p class="error" id="login-error" role="alert">' + esc(state.loginError || "") + "</p>" +
+      '<button class="btn" type="submit">Log in</button>' +
+      "</form>"
+    );
+  }
+
+  function logoutLine() {
+    return '<p class="fine"><button class="btn ghost" type="button" id="log-out">Log out</button></p>';
+  }
+
   function customerHome() {
     return (
+      logoutLine() +
       "<h2>Request a ride</h2>" +
       "<p class=\"lede\">Nothing is sent, and nothing is charged.</p>" +
       "<form id=\"ride-form\" autocomplete=\"off\">" +
@@ -1463,15 +1528,18 @@
     stopMotion();
     var app = document.getElementById("app");
     var html = "";
-    if (ROLE === "driver" && state.screen === "home") html = driverHome();
+    if (!signedIn()) html = accountGate();
+    else if (ROLE === "driver" && state.screen === "home") html = driverHome();
     else if (ROLE === "driver") html = driverTrip();
     else if (state.screen === "waiting") html = customerWaiting();
     else if (state.screen === "trip") html = customerTrip();
     else html = customerHome();
     app.innerHTML = html;
     bind();
-    var customerRide = ROLE === "customer" && (state.screen === "waiting" || state.screen === "trip");
-    if (customerRide) {
+    var customerRide = signedIn() && ROLE === "customer" && (state.screen === "waiting" || state.screen === "trip");
+    if (!signedIn()) {
+      /* stay on the login page */
+    } else if (customerRide) {
       startCustomerMap();
       ensureCustomerCoords();
     } else if (ROLE === "driver" && (state.screen === "trip" || (state.screen === "home" && state.pickupStreet))) {
@@ -1523,6 +1591,75 @@
   }
 
   function bind() {
+    var showLogin = document.getElementById("show-login");
+    if (showLogin) {
+      showLogin.addEventListener("click", function () {
+        state.gateStep = "login";
+        state.loginError = "";
+        render();
+      });
+    }
+    var gateBack = document.getElementById("gate-back");
+    if (gateBack) {
+      gateBack.addEventListener("click", function () {
+        state.gateStep = "";
+        state.loginError = "";
+        render();
+      });
+    }
+    var loginForm = document.getElementById("login-form");
+    if (loginForm) {
+      loginForm.addEventListener("submit", function (event) {
+        event.preventDefault();
+        state.loginError = "";
+        var userEl = document.getElementById("login-user");
+        var passEl = document.getElementById("login-pass");
+        var username = userEl ? userEl.value.trim() : "";
+        var password = passEl ? passEl.value : "";
+        var account = accountForRole();
+        if (!account || !account.username || !account.passwordHash) {
+          state.loginError = "No account on this phone yet. Create one first.";
+          render();
+          return;
+        }
+        if (username.toLowerCase() !== String(account.username).toLowerCase()) {
+          state.loginError = "That username or password does not match the account on this phone.";
+          render();
+          return;
+        }
+        if (!window.crypto || !crypto.subtle) {
+          state.loginError = "This browser cannot check the password. Try Safari or Chrome.";
+          render();
+          return;
+        }
+        sha256Hex(password).then(function (hex) {
+          if (hex !== account.passwordHash) {
+            state.loginError = "That username or password does not match the account on this phone.";
+            render();
+            return;
+          }
+          writeSession(account.username);
+          state.loginError = "";
+          state.gateStep = "";
+          state.screen = "home";
+          if (ROLE === "driver") followGps();
+          render();
+        }).catch(function () {
+          state.loginError = "Could not check the password on this phone.";
+          render();
+        });
+      });
+    }
+    var logout = document.getElementById("log-out");
+    if (logout) {
+      logout.addEventListener("click", function () {
+        writeSession("");
+        state.loginError = "";
+        state.gateStep = "";
+        state.screen = "home";
+        render();
+      });
+    }
     var customerBtn = document.getElementById("mode-customer");
     var driverBtn = document.getElementById("mode-driver");
     if (customerBtn) {
@@ -1969,7 +2106,7 @@
     document.addEventListener("keydown", function (event) {
       if (event.key === "Escape") closePreview();
     });
-    if (ROLE === "driver") {
+    if (ROLE === "driver" && signedIn()) {
       if (syncOn()) {
         state.driverCode = readDriverCode();
         state.codeDraft = state.driverCode;
@@ -1987,7 +2124,7 @@
       syncRide();
     }, 1000);
     setInterval(pullRemoteRide, 3000);
-    if (ROLE !== "driver") {
+    if (ROLE !== "driver" && signedIn()) {
       var savedRide = currentRide();
       if (savedRide && savedRide.pickupStreet && savedRide.dropStreet &&
           (savedRide.status === "requested" || savedRide.status === "accepted")) {
@@ -1999,6 +2136,7 @@
   });
 
   function syncRide() {
+    if (!signedIn()) return;
     var ride = currentRide();
     if (ROLE === "driver") {
       if (syncOn()) {
