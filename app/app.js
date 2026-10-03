@@ -75,6 +75,9 @@
     driverCode: "",
     codeError: "",
     codeDraft: "",
+    pin: "",
+    pinDraft: "",
+    pinError: "",
     remoteLoading: false,
     dropFix: null,
     pickupFromHere: false,
@@ -887,8 +890,24 @@
     return out;
   }
 
+  function makeRidePin() {
+    var n;
+    if (window.crypto && window.crypto.getRandomValues) {
+      var buf = new Uint16Array(1);
+      window.crypto.getRandomValues(buf);
+      n = buf[0] % 10000;
+    } else {
+      n = Math.floor(Math.random() * 10000);
+    }
+    return String(n).padStart(4, "0");
+  }
+
   function normalizeCode(raw) {
     return String(raw || "").toUpperCase().replace(/\s+/g, "");
+  }
+
+  function normalizePin(raw) {
+    return String(raw || "").replace(/\D/g, "").slice(0, 4);
   }
 
   function rideUrl(code) {
@@ -1154,10 +1173,15 @@
     });
   }
 
-  function rideCodeBanner() {
-    if (!syncOn() || !state.code) return "";
-    return '<p class="ride-code-label">Tell your driver this code</p>' +
-      '<p class="ride-code">' + esc(state.code) + "</p>";
+  function riderPinBanner() {
+    if (!state.pin) return "";
+    return (
+      '<div class="pin-box">' +
+      '<p class="ride-pin-label">Give your driver this PIN when they arrive</p>' +
+      '<p class="ride-pin">' + esc(state.pin) + "</p>" +
+      '<p class="fine">They find your ride on the map. This PIN only starts the trip.</p>' +
+      "</div>"
+    );
   }
 
   function driverProfileLink() {
@@ -1232,7 +1256,8 @@
     if (!statusChanged && !placesChanged && !driverChanged && !codeChanged && !identityChanged) return;
     var screen = state.screen;
     applyRide(ride);
-    if (screen === "waiting" && ride.status === "accepted") state.screen = "trip";
+    if (screen === "waiting" && (ride.status === "accepted" || ride.status === "started")) state.screen = "trip";
+    if ((ride.status === "accepted" || ride.status === "started") && state.screen !== "trip") state.screen = "trip";
     var onlyDriver = !statusChanged && !placesChanged && !identityChanged && driverChanged && state.screen === screen;
     if (onlyDriver && carMarker && isCoord(state.driverLat) && isCoord(state.driverLng)) {
       carMarker.setLatLng([+state.driverLat, +state.driverLng]);
@@ -1361,14 +1386,14 @@
       return false;
     }
     if (savedRide.pickupStreet && savedRide.dropStreet &&
-        (savedRide.status === "requested" || savedRide.status === "accepted")) {
+        (savedRide.status === "requested" || savedRide.status === "accepted" || savedRide.status === "started")) {
       if (isPickupInPast(savedRide.date, savedRide.time)) {
         discardStoredRide();
         state.screen = "home";
         return false;
       }
       applyRide(savedRide);
-      state.screen = savedRide.status === "accepted" ? "trip" : "waiting";
+      state.screen = (savedRide.status === "accepted" || savedRide.status === "started") ? "trip" : "waiting";
       return true;
     }
     return false;
@@ -1612,13 +1637,17 @@
       ? "Sample map · Willis"
       : (driver ? "Your driver" : "Driver location shows once they accept on a linked phone.");
     var near = driverNearPickup();
+    var started = state.rideStatus === "started";
     return (
       '<button class="btn ghost" type="button" id="back-home">← Request</button>' +
-      (near
-        ? '<div class="status"><i></i><span>Driver on the way</span></div>'
-        : unavailableCall()) +
+      (started
+        ? '<div class="status"><i></i><span>Ride started</span></div>'
+        : (near
+          ? '<div class="status"><i></i><span>Driver on the way</span></div>'
+          : unavailableCall())) +
       driverIdentityLine() +
       "<p class=\"lede\">" + esc(pickupLine()) + " → " + esc(dropLine()) + "<br>" + esc(prettyWhen()) + "</p>" +
+      (started ? "" : riderPinBanner()) +
       customerMapBlock(caption, driver) +
       moneyCard() +
       '<p class="note">A live request would text ' + BUSINESS_PHONE + ". This button does not open Messages and does not send anything.</p>" +
@@ -1641,7 +1670,7 @@
         : unavailableCall()) +
       driverIdentityLine() +
       "<p class=\"lede\">" + esc(pickupLine()) + " → " + esc(dropLine()) + "<br>" + esc(prettyWhen()) + "</p>" +
-      rideCodeBanner() +
+      riderPinBanner() +
       customerMapBlock(caption, driver) +
       moneyCard() +
       '<p class="note">' + note + "</p>"
@@ -1681,6 +1710,7 @@
     if (ride.stops != null) state.stops = ride.stops;
     state.holiday = !!ride.holiday;
     if (ride.code) state.code = ride.code;
+    if (ride.pin) state.pin = String(ride.pin);
   }
 
   function currentRide() {
@@ -1752,6 +1782,7 @@
       holiday: !!state.holiday
     };
     if (state.code) rideOut.code = state.code;
+    if (state.pin) rideOut.pin = state.pin;
     localStorage.setItem(STORE, JSON.stringify(rideOut));
     if (ROLE === "customer") writeRideOwner(readSession());
   }
@@ -1780,6 +1811,9 @@
     state.stops = 0;
     state.holiday = false;
     state.code = "";
+    state.pin = "";
+    state.pinDraft = "";
+    state.pinError = "";
     state.dropFix = null;
     state.pickupFromHere = false;
   }
@@ -1808,12 +1842,29 @@
   }
 
   function driverTrip() {
+    var started = state.rideStatus === "started";
+    var pinGate = "";
+    if (!started) {
+      pinGate = (
+        '<div class="card pin-gate">' +
+        '<p class="tag">Start the ride</p>' +
+        '<p class="lede">Ask the rider for their 4-digit PIN, then enter it here.</p>' +
+        '<form id="start-pin-form" autocomplete="off">' +
+        '<label for="start-pin">PIN</label>' +
+        '<input id="start-pin" name="pin" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="4" autocomplete="one-time-code" value="' +
+        esc(state.pinDraft || "") + '">' +
+        '<p class="error" id="pin-error" role="alert">' + esc(state.pinError || "") + "</p>" +
+        '<button class="btn" type="submit">Start ride</button>' +
+        "</form></div>"
+      );
+    }
     return (
       '<button class="btn ghost" type="button" id="back-driver">← Requests</button>' +
-      '<div class="status"><i></i><span>Heading to pickup</span></div>' +
+      '<div class="status"><i></i><span>' + (started ? "Ride started" : "Heading to pickup") + "</span></div>" +
       '<div class="who">' + photoImg(state.riderPhoto) +
       "<p class=\"lede\">" + esc(state.name || "Rider") + " is at " + esc(pickupLine()) + ".</p></div>" +
       mapBlock("Customer") +
+      pinGate +
       '<div class="card"><p class="tag">This ride</p>' +
       "<p><strong>Drop-off</strong><br>" + esc(dropLine()) + "</p>" +
       commissionLine() +
@@ -2011,6 +2062,9 @@
           state.driverLat = null;
           state.driverLng = null;
           state.code = syncOn() ? makeRideCode() : "";
+          state.pin = makeRidePin();
+          state.pinDraft = "";
+          state.pinError = "";
           geocodeMissing().then(function () {
             saveRide("requested", { clearDriver: true });
             var created = currentRide();
@@ -2062,6 +2116,35 @@
     if (deny) {
       deny.addEventListener("click", function () {
         denySelectedOpenRide();
+      });
+    }
+    var pinForm = document.getElementById("start-pin-form");
+    if (pinForm) {
+      pinForm.addEventListener("submit", function (event) {
+        event.preventDefault();
+        var input = document.getElementById("start-pin");
+        var entered = normalizePin(input ? input.value : "");
+        state.pinDraft = entered;
+        state.pinError = "";
+        if (entered.length !== 4) {
+          state.pinError = "Enter the 4-digit PIN from the rider.";
+          render();
+          return;
+        }
+        if (!state.pin || entered !== String(state.pin)) {
+          state.pinError = "That PIN does not match. Ask the rider again.";
+          render();
+          return;
+        }
+        saveRide("started");
+        var code = state.driverCode || state.code || readDriverCode();
+        if (syncOn() && code) {
+          patchRide(code, { status: "started" }).catch(function () {});
+        }
+        state.pinDraft = "";
+        state.pinError = "";
+        state.screen = "trip";
+        render();
       });
     }
     var preview = document.getElementById("preview-only");
@@ -2609,8 +2692,8 @@
       state.syncStamp = stamp;
       if (!ride || !ride.pickupStreet) clearRideFields();
       else applyRide(ride);
-      if (state.screen === "trip" && ride && ride.status === "accepted") return;
-      if (state.screen !== "home" && (!ride || ride.status !== "accepted")) state.screen = "home";
+      if (state.screen === "trip" && ride && (ride.status === "accepted" || ride.status === "started")) return;
+      if (state.screen !== "home" && (!ride || (ride.status !== "accepted" && ride.status !== "started"))) state.screen = "home";
       render();
       return;
     }

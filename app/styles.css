@@ -475,7 +475,8 @@ input:focus {
 }
 .suggest-item span { color: var(--muted); font-size: 13px; }
 
-.ride-code-label {
+.ride-code-label,
+.ride-pin-label {
   margin: 4px 0 2px;
   color: var(--gold-2);
   font-size: 13px;
@@ -484,13 +485,25 @@ input:focus {
   text-transform: uppercase;
 }
 
-.ride-code {
-  margin: 0 0 12px;
+.ride-code,
+.ride-pin {
+  margin: 0 0 6px;
   font-size: 32px;
   font-weight: 800;
   letter-spacing: 0.12em;
   color: var(--gold-2);
   line-height: 1.15;
+}
+
+.pin-box {
+  margin: 0 0 12px;
+}
+
+.pin-gate input#start-pin {
+  letter-spacing: 0.2em;
+  font-size: 22px;
+  font-weight: 700;
+  text-align: center;
 }
 
 .btn:disabled {
