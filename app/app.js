@@ -1095,7 +1095,8 @@
       '<img class="welcome-photo" alt="Private Car Services vehicle" src="' + welcomeSrc("welcome-suv.jpg") + '">' +
       '<img class="welcome-photo" alt="" src="' + welcomeSrc("welcome-trip.jpg") + '">' +
       "<h2>Welcome</h2>" +
-      '<p class="lede">Our private car services ensure you reach your destination on time, every time. With a focus on punctuality and dependability, you can trust us to get you where you need to go without the stress.</p>' +
+      '<p class="lede">Our private car services ensure you reach your destination on time, every time. With a focus on punctuality and dependability, you can trust us to get you where you need to go without the stress. All our drivers are highly trained professionals who prioritize your safety and comfort. With extensive knowledge of the local area, they provide a smooth and enjoyable ride tailored to your needs. Travel in style and comfort with our fleet of clean, well-maintained vehicles. Each ride is designed to provide a relaxing atmosphere, making your journey as pleasant as possible. Whether you need a ride for a few hours or a full day, our flexible booking options cater to your schedule. Enjoy the convenience of door-to-door service that fits your lifestyle.</p>' +
+      '<p class="fine">-Matthew Wragge founder&amp;owner</p>' +
       '<p class="fine">Log in to open the ' + page + " page, or create an account. It stays on this phone.</p>" +
       '<form id="login-form" autocomplete="off">' +
       '<label for="login-user">Username</label>' +
