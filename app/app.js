@@ -1084,9 +1084,15 @@
     });
   }
 
+  function welcomeSrc(file) {
+    return (ROLE === "driver" ? "../" : "") + file;
+  }
+
   function accountGate() {
     var page = ROLE === "driver" ? "driver" : "rider";
     return (
+      '<img class="welcome-photo" alt="Private Car Services vehicle" src="' + welcomeSrc("welcome-suv.jpg") + '">' +
+      '<img class="welcome-photo" alt="" src="' + welcomeSrc("welcome-trip.jpg") + '">' +
       "<h2>Welcome</h2>" +
       '<p class="lede">Log in here to open the ' + page + " page. Or create an account. It stays on this phone.</p>" +
       '<form id="login-form" autocomplete="off">' +
