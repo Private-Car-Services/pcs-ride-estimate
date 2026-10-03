@@ -39,7 +39,7 @@
     </div>
 
     <div class="layout">
-      <form id="estimate-form" class="card form-card" novalidate>
+      <form id="estimate-form" class="card form-card" method="post" action="#" novalidate onsubmit="return false;">
         <fieldset>
           <legend>Trip details</legend>
 
@@ -47,16 +47,16 @@
             <legend>Pickup address</legend>
             <div class="field">
               <label for="pickup-street">Street address</label>
-              <input type="text" id="pickup-street" name="pickup-street" autocomplete="street-address" required maxlength="120" placeholder="502 W. Montgomery St" />
+              <input type="text" id="pickup-street" name="pickup-street" autocomplete="section-pickup street-address" required maxlength="120" placeholder="502 W. Montgomery St" />
             </div>
             <div class="row two">
               <div class="field">
                 <label for="pickup-city">City</label>
-                <input type="text" id="pickup-city" name="pickup-city" autocomplete="address-level2" required maxlength="80" placeholder="Willis" />
+                <input type="text" id="pickup-city" name="pickup-city" autocomplete="section-pickup address-level2" required maxlength="80" placeholder="Willis" />
               </div>
               <div class="field">
                 <label for="pickup-state">State</label>
-                <input type="text" id="pickup-state" name="pickup-state" autocomplete="address-level1" required maxlength="30" placeholder="TX" />
+                <input type="text" id="pickup-state" name="pickup-state" autocomplete="section-pickup address-level1" required maxlength="30" placeholder="TX" />
               </div>
             </div>
           </fieldset>
@@ -65,16 +65,16 @@
             <legend>Drop-off address</legend>
             <div class="field">
               <label for="dropoff-street">Street address</label>
-              <input type="text" id="dropoff-street" name="dropoff-street" autocomplete="street-address" required maxlength="120" placeholder="502 W. Montgomery St" />
+              <input type="text" id="dropoff-street" name="dropoff-street" autocomplete="section-dropoff street-address" required maxlength="120" placeholder="502 W. Montgomery St" />
             </div>
             <div class="row two">
               <div class="field">
                 <label for="dropoff-city">City</label>
-                <input type="text" id="dropoff-city" name="dropoff-city" autocomplete="address-level2" required maxlength="80" placeholder="Willis" />
+                <input type="text" id="dropoff-city" name="dropoff-city" autocomplete="section-dropoff address-level2" required maxlength="80" placeholder="Willis" />
               </div>
               <div class="field">
                 <label for="dropoff-state">State</label>
-                <input type="text" id="dropoff-state" name="dropoff-state" autocomplete="address-level1" required maxlength="30" placeholder="TX" />
+                <input type="text" id="dropoff-state" name="dropoff-state" autocomplete="section-dropoff address-level1" required maxlength="30" placeholder="TX" />
               </div>
             </div>
           </fieldset>
@@ -162,11 +162,13 @@
           </div>
         </fieldset>
 
-        <button type="submit" class="btn btn-primary btn-estimate" id="estimate-btn">
+        <button type="button" class="btn btn-primary btn-estimate" id="estimate-btn">
           Get estimate
         </button>
         <a class="btn btn-secondary" id="text-request-btn" href="sms:9362617878">Text ride request</a>
         <p class="route-status" id="text-request-note" hidden></p>
+        <div id="request-confirm" class="banner" hidden></div>
+        <a id="sms-launch" hidden href="sms:9362617878">Send text</a>
       </form>
 
       <aside class="results-col">
@@ -235,6 +237,6 @@
     </div>
   </footer>
 
-  <script src="app.js?v=4"></script>
+  <script src="app.js?v=5"></script>
 </body>
 </html>
