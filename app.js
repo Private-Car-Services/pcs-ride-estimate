@@ -135,7 +135,11 @@
     const tier = resolveTier(dateStr, timeStr, isHoliday);
     const pax = Math.max(1, Number(passengers) || 1);
     const extraStops = Math.max(0, Number(stops) || 0);
-    const mi = Math.max(0, Number(miles) || 0);
+    const actualMiles = Math.max(0, Number(miles) || 0);
+    const shownMiles = Math.round(actualMiles * 10) / 10;
+    const mi = shownMiles > 0 && shownMiles !== Math.floor(shownMiles)
+      ? Math.ceil(shownMiles)
+      : shownMiles;
 
     const items = [];
     let subtotal = 0;
@@ -201,6 +205,7 @@
       callForQuote: false,
       tier,
       miles: mi,
+      actualMiles: shownMiles,
       items,
       total,
       over75: mi > 75,
@@ -353,7 +358,11 @@
     }
 
     els.callQuote.hidden = true;
-    els.milesLine.textContent = `One-way driving distance: ${result.miles.toFixed(1)} miles`;
+    const driven = typeof result.actualMiles === 'number' ? result.actualMiles : result.miles;
+    const billedNote = driven !== result.miles
+      ? ` (billed as ${result.miles} miles)`
+      : '';
+    els.milesLine.textContent = `One-way driving distance: ${driven.toFixed(1)} miles${billedNote}`;
     els.tierLine.textContent = `Rate tier: ${result.tier.label}`;
     els.lineItems.innerHTML = result.items
       .map(
