@@ -2,7 +2,12 @@
 (function () {
   var BUSINESS_PHONE = "936-261-7878";
   var BASE_CENTS = 1100;
-  var PER_MILE_CENTS = 138;
+  var EXTRA_PAX_CENTS = 500;
+  var EXTRA_STOP_CENTS = 1100;
+  var DAY_MILE_CENTS = 110;
+  var NIGHT_MILE_CENTS = 138;
+  var LATE_MILE_CENTS = 143;
+  var SHORT_NOTICE_PCT = 0.25;
   var TAX_RATE = 0.0825;
 
   var SAMPLE = {
@@ -46,7 +51,12 @@
     dropState: SAMPLE.dropState,
     date: tomorrowISO(),
     time: SAMPLE.time,
-    error: ""
+    error: "",
+    passengers: 2,
+    stops: 0,
+    holiday: false,
+    driverLat: null,
+    driverLng: null
   };
 
   var rafId = 0;
@@ -96,11 +106,28 @@
     return 2 * R * Math.asin(Math.sqrt(h));
   }
 
+  function isCoord(v) {
+    return v != null && v !== "" && isFinite(+v);
+  }
+
+  function pointFrom(lat, lng) {
+    if (!isCoord(lat) || !isCoord(lng)) return null;
+    return { lat: +lat, lng: +lng };
+  }
+
+  function placeCoords(prefix) {
+    return pointFrom(state[prefix + "Lat"], state[prefix + "Lng"]);
+  }
+
+  function savedDriverPoint() {
+    return pointFrom(state.driverLat, state.driverLng);
+  }
+
   function routePoints() {
-    var pickup = isFinite(state.pickupLat) ? { lat: +state.pickupLat, lng: +state.pickupLng } : GEO.pickup;
-    var dropoff = isFinite(state.dropLat) ? { lat: +state.dropLat, lng: +state.dropLng } : GEO.dropoff;
-    var live = isFinite(state.pickupLat) && isFinite(state.dropLat);
-    var here = isFinite(state.hereLat) ? { lat: +state.hereLat, lng: +state.hereLng } : null;
+    var pickup = placeCoords("pickup") || GEO.pickup;
+    var dropoff = placeCoords("drop") || GEO.dropoff;
+    var live = !!(placeCoords("pickup") && placeCoords("drop"));
+    var here = pointFrom(state.hereLat, state.hereLng);
     var driver = here || (live
       ? {
           lat: pickup.lat - (dropoff.lat - pickup.lat) * 0.3 - 0.008,
@@ -111,22 +138,72 @@
   }
 
   function tripMiles() {
-    var route = routePoints();
-    var hundredths = Math.round(haversine(route.pickup, route.dropoff) * 100) / 100;
+    var pickup = placeCoords("pickup");
+    var dropoff = placeCoords("drop");
+    if (!pickup || !dropoff) return { raw: 0, billed: 0, ready: false };
+    var hundredths = Math.round(haversine(pickup, dropoff) * 100) / 100;
     var billed = Math.ceil(hundredths);
     if (billed < 1) billed = 1;
-    return { raw: hundredths, billed: billed };
+    return { raw: hundredths, billed: billed, ready: true };
+  }
+
+  function resolveTier(dateStr, timeStr, isHoliday) {
+    var daytime = { cents: DAY_MILE_CENTS, label: "Weekday daytime" };
+    var weekendNight = { cents: NIGHT_MILE_CENTS, label: "Nights, weekends & holidays" };
+    var late = { cents: LATE_MILE_CENTS, label: "Late night" };
+    if (!dateStr || !timeStr) return daytime;
+    var ymd = dateStr.split("-");
+    var hm = timeStr.split(":");
+    var date = new Date(Number(ymd[0]), Number(ymd[1]) - 1, Number(ymd[2]), Number(hm[0]), Number(hm[1] || 0), 0, 0);
+    var day = date.getDay();
+    var hour = Number(hm[0]);
+    if (hour >= 22 || hour < 6) return late;
+    if (day === 0 || day === 6 || isHoliday || (hour >= 18 && hour <= 21)) return weekendNight;
+    return daytime;
+  }
+
+  function ridePassengers() {
+    var n = Number(state.passengers);
+    return n >= 1 ? n : 2;
+  }
+
+  function rideStops() {
+    var n = Number(state.stops);
+    return n > 0 ? n : 0;
+  }
+
+  function isShortNotice() {
+    if (!state.date || !state.time) return false;
+    var ymd = state.date.split("-");
+    var hm = state.time.split(":");
+    var when = new Date(Number(ymd[0]), Number(ymd[1]) - 1, Number(ymd[2]), Number(hm[0]), Number(hm[1] || 0), 0, 0);
+    return when.getTime() - Date.now() < 24 * 60 * 60 * 1000;
   }
 
   function estimate() {
     var miles = tripMiles();
-    var mileage = miles.billed * PER_MILE_CENTS;
-    var sub = BASE_CENTS + mileage;
+    var tier = resolveTier(state.date, state.time, !!state.holiday);
+    var extraPax = Math.max(0, ridePassengers() - 2);
+    var extraStops = rideStops();
+    var mileage = miles.ready ? miles.billed * tier.cents : 0;
+    var paxCents = extraPax * EXTRA_PAX_CENTS;
+    var stopCents = extraStops * EXTRA_STOP_CENTS;
+    var beforeNotice = BASE_CENTS + mileage + paxCents + stopCents;
+    var notice = miles.ready && isShortNotice() ? Math.round(beforeNotice * SHORT_NOTICE_PCT) : 0;
+    var sub = beforeNotice + notice;
     var tax = Math.round(sub * TAX_RATE);
     return {
+      ready: miles.ready,
       raw: miles.raw,
       billed: miles.billed,
+      perMileCents: tier.cents,
+      tierLabel: tier.label,
       mileage: mileage,
+      base: BASE_CENTS,
+      extraPax: extraPax,
+      paxCents: paxCents,
+      stopCents: stopCents,
+      notice: notice,
       sub: sub,
       tax: tax,
       total: sub + tax
@@ -365,17 +442,26 @@
 
   function moneyCard() {
     var est = estimate();
+    if (!est.ready) {
+      return (
+        '<div class="card">' +
+        '<p class="tag">Estimate only · not a charge</p>' +
+        '<p class="fine">Not a charge. Miles and the fare show when both places are found.</p>' +
+        "</div>"
+      );
+    }
+    var noticeNote = est.notice
+      ? " Includes 25% for under 24 hours' notice."
+      : "";
     return (
       '<div class="card">' +
-      '<p class="tag">Estimate only</p>' +
-      '<div class="money-row"><span>' + (routePoints().live ? "Distance" : "Sample distance") + '</span><span>' + est.raw.toFixed(2) + " miles</span></div>" +
-      '<div class="money-row"><span>Billed miles</span><span>' + est.billed + " (rounded up)</span></div>" +
-      '<div class="money-row"><span>Base</span><span>' + money(BASE_CENTS) + "</span></div>" +
-      '<div class="money-row"><span>Mileage ' + est.billed + " × " + money(PER_MILE_CENTS) + "</span><span>" + money(est.mileage) + "</span></div>" +
+      '<p class="tag">Estimate only · not a charge</p>' +
+      '<div class="money-row"><span>Miles</span><span>' + est.raw.toFixed(2) + " mi, billed as " + est.billed + " (rounded up)</span></div>" +
+      '<div class="money-row"><span>Fare before tax</span><span>' + money(est.sub) + "</span></div>" +
       '<div class="money-row"><span>Texas tax 8.25%</span><span>' + money(est.tax) + "</span></div>" +
-      '<div class="total-row"><span>Preview total</span><span>' + money(est.total) + "</span></div>" +
-      '<p class="fine">Not a charge. Tax is shown so the estimate matches the quote page.' +
-      (routePoints().live ? " The route uses the places you chose." : " The map is a sample until both places are found.") + "</p>" +
+      '<div class="total-row"><span>Estimated total</span><span>' + money(est.total) + "</span></div>" +
+      '<p class="fine">Not a charge. ' + esc(est.tierLabel) + " " + money(est.perMileCents) +
+      "/mi, local base " + money(est.base) + " for 2 passengers." + noticeNote + "</p>" +
       "</div>"
     );
   }
@@ -431,12 +517,80 @@
     );
   }
 
+  function fitProject(point, points) {
+    var lats = points.map(function (p) { return p.lat; });
+    var lngs = points.map(function (p) { return p.lng; });
+    var minLat = Math.min.apply(null, lats);
+    var maxLat = Math.max.apply(null, lats);
+    var minLng = Math.min.apply(null, lngs);
+    var maxLng = Math.max.apply(null, lngs);
+    var padLat = Math.max((maxLat - minLat) * 0.35, 0.01);
+    var padLng = Math.max((maxLng - minLng) * 0.35, 0.01);
+    minLat -= padLat;
+    maxLat += padLat;
+    minLng -= padLng;
+    maxLng += padLng;
+    return {
+      x: ((point.lng - minLng) / (maxLng - minLng)) * 100,
+      y: ((maxLat - point.lat) / (maxLat - minLat)) * 100
+    };
+  }
+
+  function customerMapBlock(caption, driverPoint) {
+    var pickup = placeCoords("pickup");
+    var drop = placeCoords("drop");
+    var both = !!(pickup && drop);
+    var points = [];
+    if (pickup) points.push(pickup);
+    if (drop) points.push(drop);
+    if (driverPoint) points.push(driverPoint);
+    var illus = "";
+    if (both) {
+      var a = fitProject(pickup, points);
+      var b = fitProject(drop, points);
+      var car = "";
+      if (driverPoint) {
+        var c = fitProject(driverPoint, points);
+        car = '<div class="pin pin-car" id="pin-car" style="left:' + c.x + '%;top:' + c.y + '%"><div class="car-face" id="illus-car">' + CAR_SVG + "</div></div>";
+      }
+      illus = (
+        '<div class="illus" id="illus">' +
+        '<svg class="illus-svg" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">' +
+        '<rect width="100" height="100" fill="#163455"/>' +
+        '<polyline points="' + a.x + "," + a.y + " " + b.x + "," + b.y +
+        '" fill="none" stroke="#e7c56a" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>' +
+        "</svg>" +
+        pin("pin-pickup", "pin-you", "Pickup", a) +
+        pin("pin-drop", "pin-drop", "Drop-off", b) +
+        car +
+        "</div>"
+      );
+    }
+    var legend = both
+      ? '<p class="legend"><span><i class="swatch you"></i> Pickup</span><span><i class="swatch drop"></i> Drop-off</span>' +
+        (driverPoint ? '<span><i class="swatch"></i> Driver</span>' : "") + "</p>"
+      : "";
+    return (
+      '<div class="map-stage">' +
+      '<div id="live-map" role="img" aria-label="' + (both ? "Route map" : "Sample map") + '"></div>' +
+      illus +
+      '<p class="map-caption">' + esc(caption) + "</p>" +
+      "</div>" +
+      legend
+    );
+  }
+
   function customerTrip() {
+    var both = !!(placeCoords("pickup") && placeCoords("drop"));
+    var driver = savedDriverPoint();
+    var caption = !both
+      ? "Sample map · Willis"
+      : (driver ? "Your route" : "Driver location shows once they accept on a linked phone.");
     return (
       '<button class="btn ghost" type="button" id="back-home">← Request</button>' +
       '<div class="status"><i></i><span>Driver on the way</span></div>' +
       "<p class=\"lede\">" + esc(pickupLine()) + " → " + esc(dropLine()) + "<br>" + esc(prettyWhen()) + "</p>" +
-      mapBlock("You") +
+      customerMapBlock(caption, driver) +
       moneyCard() +
       '<p class="note">A live request would text ' + BUSINESS_PHONE + ". This button does not open Messages and does not send anything.</p>" +
       '<button class="btn" type="button" id="preview-only">Preview only</button>'
@@ -444,10 +598,13 @@
   }
 
   function customerWaiting() {
+    var both = !!(placeCoords("pickup") && placeCoords("drop"));
     return (
       '<button class="btn ghost" type="button" id="back-home">← Request</button>' +
       '<div class="status"><i></i><span>Waiting for a driver</span></div>' +
       "<p class=\"lede\">" + esc(pickupLine()) + " → " + esc(dropLine()) + "<br>" + esc(prettyWhen()) + "</p>" +
+      customerMapBlock(both ? "Your route" : "Sample map · Willis", null) +
+      moneyCard() +
       '<p class="note">Open the driver app and accept this ride. This screen changes when a driver accepts.</p>'
     );
   }
@@ -469,6 +626,11 @@
     state.pickupLng = ride.pickupLng;
     state.dropLat = ride.dropLat;
     state.dropLng = ride.dropLng;
+    state.driverLat = isCoord(ride.driverLat) ? +ride.driverLat : null;
+    state.driverLng = isCoord(ride.driverLng) ? +ride.driverLng : null;
+    if (ride.passengers != null) state.passengers = ride.passengers;
+    if (ride.stops != null) state.stops = ride.stops;
+    state.holiday = !!ride.holiday;
   }
 
   function currentRide() {
@@ -479,8 +641,16 @@
     }
   }
 
-  function saveRide(status) {
+  function saveRide(status, opts) {
     state.rideStatus = status;
+    var prev = currentRide() || {};
+    var clearDriver = opts && opts.clearDriver;
+    var driverLat = isCoord(state.driverLat) ? +state.driverLat : null;
+    var driverLng = isCoord(state.driverLng) ? +state.driverLng : null;
+    if (!clearDriver) {
+      if (!isCoord(driverLat) && isCoord(prev.driverLat)) driverLat = +prev.driverLat;
+      if (!isCoord(driverLng) && isCoord(prev.driverLng)) driverLng = +prev.driverLng;
+    }
     localStorage.setItem(STORE, JSON.stringify({
       name: state.name,
       phone: state.phone,
@@ -496,7 +666,12 @@
       pickupLat: state.pickupLat,
       pickupLng: state.pickupLng,
       dropLat: state.dropLat,
-      dropLng: state.dropLng
+      dropLng: state.dropLng,
+      driverLat: driverLat,
+      driverLng: driverLng,
+      passengers: ridePassengers(),
+      stops: rideStops(),
+      holiday: !!state.holiday
     }));
   }
 
@@ -512,6 +687,11 @@
     state.pickupLng = null;
     state.dropLat = null;
     state.dropLng = null;
+    state.driverLat = null;
+    state.driverLng = null;
+    state.passengers = 2;
+    state.stops = 0;
+    state.holiday = false;
   }
 
   function driverHome() {
@@ -527,7 +707,7 @@
           '<h2 style="font-size:18px">' + esc(state.name || "Rider") + "</h2>" +
           '<p class="fine">' + esc(prettyWhen()) + (state.phone ? " · " + esc(state.phone) : "") + "</p>" +
           '<div class="route-line"><p>' + esc(pickupLine()) + "</p><p>" + esc(dropLine()) + "</p></div>" +
-          '<p class="fine">' + est.raw.toFixed(2) + " miles, billed as " + est.billed + ".</p>" +
+          '<p class="fine">' + (est.ready ? est.raw.toFixed(2) + " miles, billed as " + est.billed + "." : "Miles appear when both places are found.") + "</p>" +
           '<button class="btn" type="button" id="accept-ride">' +
           (state.rideStatus === "accepted" ? "Open trip" : "Accept") + "</button></article>"
         : '<p class="lede">No open requests. A ride from the passenger app shows up here.</p>')
@@ -557,8 +737,14 @@
     else html = customerHome();
     app.innerHTML = html;
     bind();
-    if (state.screen === "trip" || (ROLE === "driver" && state.screen === "home" && state.pickupStreet)) startMap();
-    if (ROLE === "driver" && state.pickupStreet && !isFinite(state.pickupLat) && !state.geocodeTried) {
+    var customerRide = ROLE === "customer" && (state.screen === "waiting" || state.screen === "trip");
+    if (customerRide) {
+      startCustomerMap();
+      ensureCustomerCoords();
+    } else if (ROLE === "driver" && (state.screen === "trip" || (state.screen === "home" && state.pickupStreet))) {
+      startMap();
+    }
+    if (ROLE === "driver" && state.pickupStreet && !placeCoords("pickup") && !state.geocodeTried) {
       state.geocodeTried = true;
       geocodeMissing().then(function () { render(); });
     }
@@ -621,8 +807,11 @@
           return;
         }
         state.error = "";
+        state.customerGeocodeTried = false;
+        state.driverLat = null;
+        state.driverLng = null;
         geocodeMissing().then(function () {
-          saveRide("requested");
+          saveRide("requested", { clearDriver: true });
           state.screen = "waiting";
           render();
         });
@@ -665,12 +854,28 @@
     }).catch(function () { return null; });
   }
 
+  function ensureCustomerCoords() {
+    if (ROLE !== "customer") return;
+    if (state.screen !== "waiting" && state.screen !== "trip") return;
+    if (placeCoords("pickup") && placeCoords("drop")) return;
+    if (state.customerGeocodeTried) return;
+    state.customerGeocodeTried = true;
+    geocodeMissing().then(function () {
+      if (ROLE !== "customer") return;
+      if (state.screen !== "waiting" && state.screen !== "trip") return;
+      if (placeCoords("pickup") || placeCoords("drop")) {
+        saveRide(state.rideStatus || (state.screen === "trip" ? "accepted" : "requested"));
+      }
+      render();
+    });
+  }
+
   function geocodeMissing() {
     var jobs = [];
-    if (!isFinite(state.pickupLat)) {
+    if (!placeCoords("pickup")) {
       jobs.push(geocodeQuery(pickupLine()).then(function (feature) { if (feature) setCoords("pickup", feature); }));
     }
-    if (!isFinite(state.dropLat)) {
+    if (!placeCoords("drop")) {
       jobs.push(geocodeQuery(dropLine()).then(function (feature) { if (feature) setCoords("drop", feature); }));
     }
     return Promise.all(jobs);
@@ -719,6 +924,65 @@
       el.style.transform = "rotate(" + deg + "deg)";
     });
     if (carMarker) carMarker.setLatLng([lat, lng]);
+  }
+
+  function startCustomerMap() {
+    if (!placeCoords("pickup") || !placeCoords("drop")) return;
+    if (!window.L || !document.getElementById("live-map")) return;
+    var pickup = placeCoords("pickup");
+    var drop = placeCoords("drop");
+    var driver = state.screen === "trip" ? savedDriverPoint() : null;
+    try {
+      liveMap = window.L.map("live-map", {
+        zoomControl: true,
+        scrollWheelZoom: false,
+        attributionControl: true
+      });
+      var layer = window.L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+        maxZoom: 19,
+        attribution: "&copy; OpenStreetMap"
+      }).addTo(liveMap);
+      var line = [[pickup.lat, pickup.lng], [drop.lat, drop.lng]];
+      var bounds = [[pickup.lat, pickup.lng], [drop.lat, drop.lng]];
+      if (driver) {
+        line = [[driver.lat, driver.lng], [pickup.lat, pickup.lng], [drop.lat, drop.lng]];
+        bounds.push([driver.lat, driver.lng]);
+      }
+      window.L.polyline(line, { color: "#d4b15a", weight: 4, opacity: 0.9 }).addTo(liveMap);
+      window.L.marker([pickup.lat, pickup.lng], { icon: pinIcon("Pickup", "pin-you") }).addTo(liveMap);
+      window.L.marker([drop.lat, drop.lng], { icon: pinIcon("Drop-off", "pin-drop") }).addTo(liveMap);
+      if (driver) {
+        carMarker = window.L.marker([driver.lat, driver.lng], {
+          icon: window.L.divIcon({
+            className: "pin-icon",
+            html: '<div class="car-face">' + CAR_SVG + "</div>",
+            iconSize: [44, 44],
+            iconAnchor: [22, 22]
+          }),
+          zIndexOffset: 500
+        }).addTo(liveMap);
+      }
+      liveMap.fitBounds(window.L.latLngBounds(bounds), { padding: [28, 28], maxZoom: 14 });
+      layer.on("tileload", function () {
+        if (tilesOk) return;
+        tilesOk = true;
+        var illus = document.getElementById("illus");
+        if (illus) illus.classList.add("is-hidden");
+        setTimeout(function () {
+          if (liveMap) liveMap.invalidateSize();
+        }, 60);
+      });
+      var tileErrors = 0;
+      layer.on("tileerror", function () {
+        tileErrors += 1;
+        if (tileErrors >= 6 && !tilesOk) fallbackMap();
+      });
+      tileTimer = setTimeout(function () {
+        if (!tilesOk) fallbackMap();
+      }, 5000);
+    } catch (err) {
+      fallbackMap();
+    }
   }
 
   function startMap() {
@@ -847,6 +1111,14 @@
       var first = !isFinite(state.hereLat);
       state.hereLat = pos.coords.latitude;
       state.hereLng = pos.coords.longitude;
+      state.driverLat = state.hereLat;
+      state.driverLng = state.hereLng;
+      var ride = currentRide();
+      if (ride && (ride.driverLat !== state.hereLat || ride.driverLng !== state.hereLng)) {
+        ride.driverLat = state.hereLat;
+        ride.driverLng = state.hereLng;
+        localStorage.setItem(STORE, JSON.stringify(ride));
+      }
       if (carMarker) {
         placeCar(state.hereLat, state.hereLng, bearing(
           { lat: state.hereLat, lng: state.hereLng },
@@ -905,9 +1177,20 @@
       render();
       return;
     }
-    if (state.screen === "waiting" && ride && ride.status === "accepted") {
-      state.screen = "trip";
-      render();
+    if (state.screen !== "waiting" && state.screen !== "trip") return;
+    if (!ride) return;
+    var statusChanged = ride.status !== state.rideStatus;
+    var placesChanged = ride.pickupLat !== state.pickupLat || ride.pickupLng !== state.pickupLng ||
+      ride.dropLat !== state.dropLat || ride.dropLng !== state.dropLng;
+    var driverChanged = ride.driverLat !== state.driverLat || ride.driverLng !== state.driverLng;
+    if (!statusChanged && !placesChanged && !driverChanged) return;
+    if (state.screen === "waiting" && !statusChanged && !placesChanged) return;
+    applyRide(ride);
+    if (state.screen === "waiting" && ride.status === "accepted") state.screen = "trip";
+    if (!statusChanged && !placesChanged && state.screen === "trip" && carMarker && isCoord(state.driverLat)) {
+      carMarker.setLatLng([+state.driverLat, +state.driverLng]);
+      return;
     }
+    render();
   }
 })();
