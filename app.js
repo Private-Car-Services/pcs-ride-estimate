@@ -1,5 +1,5 @@
 /**
- * Private Car Services — Ride Fare Estimator
+ * Private Car Services â€” Ride Fare Estimator
  * Rates mirror ptstaxiservices.com (estimate only).
  */
 (function () {
@@ -12,19 +12,19 @@
     extraStop: 11,
     shortNoticePct: 0.25,
     daytime: {
-      label: 'Mon–Fri daytime (6:00 am–5:59 pm)',
+      label: 'Monâ€“Fri daytime (6:00 amâ€“5:59 pm)',
       perMile: 1.1,
       airportDrop: 15.5,
       airportPick: 25,
     },
     weekendNight: {
-      label: 'Nights, holidays & weekends (6:00–9:59 pm band / weekend daytime)',
+      label: 'Nights, holidays & weekends (6:00â€“9:59 pm band / weekend daytime)',
       perMile: 1.38,
       airportDrop: 20,
       airportPick: 30,
     },
     late: {
-      label: 'Late nights (10:00 pm–5:59 am)',
+      label: 'Late nights (10:00 pmâ€“5:59 am)',
       perMile: 1.43,
       airportDrop: 30,
       airportPick: 50,
@@ -48,6 +48,9 @@
     flightDirection: document.getElementById('flight-direction'),
     textRequestButton: document.getElementById('text-request-btn'),
     textRequestNote: document.getElementById('text-request-note'),
+    requestConfirm: document.getElementById('request-confirm'),
+    smsLaunch: document.getElementById('sms-launch'),
+    estimateButton: document.getElementById('estimate-btn'),
     manualMilesField: document.getElementById('manual-miles-field'),
     manualMiles: document.getElementById('manual-miles'),
     tripType: document.getElementById('trip-type'),
@@ -100,9 +103,9 @@
 
   /**
    * Tier selection (per product requirements):
-   * 1) hour 22:00–05:59 → late
-   * 2) weekend OR holiday OR hour 18:00–21:59 → weekend/night ($1.38)
-   * 3) else → weekday daytime ($1.10)
+   * 1) hour 22:00â€“05:59 â†’ late
+   * 2) weekend OR holiday OR hour 18:00â€“21:59 â†’ weekend/night ($1.38)
+   * 3) else â†’ weekday daytime ($1.10)
    */
   function resolveTier(dateStr, timeStr, isHoliday) {
     if (!dateStr || !timeStr) return RATES.daytime;
@@ -110,7 +113,7 @@
     const [y, m, d] = dateStr.split('-').map(Number);
     const [hh, mm] = timeStr.split(':').map(Number);
     const date = new Date(y, m - 1, d, hh, mm || 0, 0, 0);
-    const day = date.getDay(); // 0 Sun … 6 Sat
+    const day = date.getDay(); // 0 Sun â€¦ 6 Sat
     const isWeekend = day === 0 || day === 6;
     const hour = hh;
 
@@ -152,7 +155,7 @@
 
     const mileage = mi * tier.perMile;
     items.push({
-      label: `Mileage (${mi.toFixed(1)} mi × $${tier.perMile.toFixed(2)})`,
+      label: `Mileage (${mi.toFixed(1)} mi Ã— $${tier.perMile.toFixed(2)})`,
       amount: mileage,
     });
     subtotal += mileage;
@@ -161,7 +164,7 @@
     if (extraPax > 0) {
       const amt = extraPax * RATES.extraPassenger;
       items.push({
-        label: `Extra passengers (${extraPax} × $${RATES.extraPassenger})`,
+        label: `Extra passengers (${extraPax} Ã— $${RATES.extraPassenger})`,
         amount: amt,
       });
       subtotal += amt;
@@ -170,7 +173,7 @@
     if (extraStops > 0) {
       const amt = extraStops * RATES.extraStop;
       items.push({
-        label: `Extra stops (${extraStops} × $${RATES.extraStop})`,
+        label: `Extra stops (${extraStops} Ã— $${RATES.extraStop})`,
         amount: amt,
       });
       subtotal += amt;
@@ -180,7 +183,7 @@
     if (shortNotice) {
       const surcharge = subtotal * RATES.shortNoticePct;
       items.push({
-        label: 'Less than 24 hours’ notice (+25%)',
+        label: 'Less than 24 hoursâ€™ notice (+25%)',
         amount: surcharge,
       });
       total += surcharge;
@@ -268,20 +271,54 @@
     return lines.join('\n');
   }
 
-  function composeRideRequest(event, result) {
+  function saveDraft() {
+    const data = {};
+    els.form.querySelectorAll('input, select, textarea').forEach((field) => {
+      if (!field.id) return;
+      data[field.id] = field.type === 'checkbox' ? field.checked : field.value;
+    });
+    try { sessionStorage.setItem('pcs-quote', JSON.stringify(data)); } catch (err) {}
+  }
+
+  function restoreDraft() {
+    let data;
+    try { data = JSON.parse(sessionStorage.getItem('pcs-quote') || 'null'); } catch (err) { data = null; }
+    if (!data) return;
+    Object.keys(data).forEach((id) => {
+      const field = document.getElementById(id);
+      if (!field) return;
+      if (field.type === 'checkbox') field.checked = !!data[id];
+      else field.value = data[id];
+    });
+  }
+
+  function showConfirmation() {
+    if (!els.requestConfirm) return;
+    els.requestConfirm.hidden = false;
+    els.requestConfirm.textContent = 'Request ready. Send the text to 936-261-7878. Your details stay on this page.';
+  }
+
+  function openRideText(event, result) {
     updateFlightDetails();
     if (!els.form.reportValidity()) {
-      event.preventDefault();
+      if (event) event.preventDefault();
       const bad = els.form.querySelector(':invalid');
       if (bad && bad.scrollIntoView) bad.scrollIntoView({ block: 'center' });
       if (els.textRequestNote) {
         els.textRequestNote.hidden = false;
-        els.textRequestNote.textContent = 'Fill the highlighted field, then tap Text ride request again.';
+        els.textRequestNote.textContent = 'Fill the highlighted field, then tap again.';
       }
-      return;
+      return false;
     }
     if (els.textRequestNote) els.textRequestNote.hidden = true;
-    els.textRequestButton.href = smsUrl(rideRequestBody(result));
+    saveDraft();
+    const url = smsUrl(rideRequestBody(result));
+    if (els.textRequestButton) els.textRequestButton.href = url;
+    if (els.smsLaunch) els.smsLaunch.href = url;
+    showConfirmation();
+    if (event && event.currentTarget === els.textRequestButton) return true;
+    if (els.smsLaunch) els.smsLaunch.click();
+    return true;
   }
 
   function renderEstimate(result) {
@@ -423,8 +460,9 @@
 
     const tripType = els.tripType.value;
     if (tripType === 'hourly' || tripType === 'van') {
-      renderEstimate({ callForQuote: true, tripType });
-      return;
+      const quote = { callForQuote: true, tripType };
+      renderEstimate(quote);
+      return quote;
     }
 
     let miles = null;
@@ -432,7 +470,7 @@
     if (mapsReady) {
       miles = await fetchDrivingMiles();
     } else if (!hasApiKey()) {
-      showRouteStatus('Looking up driving miles…');
+      showRouteStatus('Looking up driving milesâ€¦');
       miles = await fetchPublicDrivingMiles();
     }
 
@@ -460,6 +498,7 @@
     });
 
     renderEstimate(result);
+    return result;
   }
 
   function initManualMode() {
@@ -501,7 +540,7 @@
         els.apiBanner.hidden = true;
         // Keep manual miles available as fallback
         els.manualMilesField.hidden = false;
-        showRouteStatus('Map ready — enter pickup and drop-off, then Get estimate.');
+        showRouteStatus('Map ready â€” enter pickup and drop-off, then Get estimate.');
       } catch (err) {
         console.error(err);
         initManualMode();
@@ -512,9 +551,22 @@
 
   function init() {
     if (els.year) els.year.textContent = String(new Date().getFullYear());
-    setDefaultDateTime();
-    els.form.addEventListener('submit', onSubmit);
-    els.textRequestButton.addEventListener('click', (event) => composeRideRequest(event, lastEstimate));
+    restoreDraft();
+    if (!els.rideDate.value || !els.rideTime.value) setDefaultDateTime();
+    if (sessionStorage.getItem('pcs-quote')) showConfirmation();
+    els.form.addEventListener('submit', (event) => {
+      event.preventDefault();
+    });
+    els.form.addEventListener('input', saveDraft);
+    els.form.addEventListener('change', saveDraft);
+    els.estimateButton.addEventListener('click', async (event) => {
+      event.preventDefault();
+      const result = await onSubmit(event);
+      if (result) openRideText(null, result);
+    });
+    els.textRequestButton.addEventListener('click', (event) => {
+      if (!openRideText(event, lastEstimate)) event.preventDefault();
+    });
     els.tripType.addEventListener('change', updateFlightDetails);
     [
       els.pickupStreet, els.pickupCity, els.pickupState,
