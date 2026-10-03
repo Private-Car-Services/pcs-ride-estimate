@@ -269,11 +269,11 @@
       lines.push('Estimated total: ' + money(result.total));
       if (promo) {
         var offer = Math.round(result.total * 0.9 * 100) / 100;
-        lines.push('Website offer: 10% off. Offer total: ' + money(offer));
+        lines.push('10% website booking. Please apply the discount. Offer total: ' + money(offer));
         lines.push('Offer terms: book by Nov 30, pay in full, no cancel within 24h, at least 48h ahead. Rides through Dec 31.');
       }
     } else if (promo) {
-      lines.push('Website offer: 10% off. Book by Nov 30, pay in full, no cancel within 24h, at least 48h ahead. Rides through Dec 31.');
+      lines.push('10% website booking. Please apply the discount. Book by Nov 30, pay in full, no cancel within 24h, at least 48h ahead. Rides through Dec 31.');
     }
     lines.push('', 'This is a ride request only, not a booking confirmation.');
     return lines.join('\n');
