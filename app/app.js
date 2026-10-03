@@ -1123,7 +1123,7 @@
 
   function accountGate() {
     return (
-      '<img class="welcome-logo" alt="Private Car Services" src="' + welcomeSrc("icon-rider.png") + '">' +
+      '<img class="welcome-logo" alt="Private Car Services" src="' + welcomeSrc(ROLE === "driver" ? "welcome-logo-driver.png" : "welcome-logo.png") + '">' +
       '<form id="login-form" autocomplete="off">' +
       '<label for="login-user">Username</label>' +
       '<input id="login-user" name="username" type="text" autocapitalize="none" autocomplete="username" spellcheck="false" required>' +
