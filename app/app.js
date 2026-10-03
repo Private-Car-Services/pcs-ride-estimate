@@ -1095,7 +1095,8 @@
       '<img class="welcome-photo" alt="Private Car Services vehicle" src="' + welcomeSrc("welcome-suv.jpg") + '">' +
       '<img class="welcome-photo" alt="" src="' + welcomeSrc("welcome-trip.jpg") + '">' +
       "<h2>Welcome</h2>" +
-      '<p class="lede">Log in here to open the ' + page + " page. Or create an account. It stays on this phone.</p>" +
+      '<p class="lede">Our private car services ensure you reach your destination on time, every time. With a focus on punctuality and dependability, you can trust us to get you where you need to go without the stress.</p>' +
+      '<p class="fine">Log in to open the ' + page + " page, or create an account. It stays on this phone.</p>" +
       '<form id="login-form" autocomplete="off">' +
       '<label for="login-user">Username</label>' +
       '<input id="login-user" name="username" type="text" autocapitalize="none" autocomplete="username" spellcheck="false" required>' +
