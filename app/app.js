@@ -100,12 +100,13 @@
     var pickup = isFinite(state.pickupLat) ? { lat: +state.pickupLat, lng: +state.pickupLng } : GEO.pickup;
     var dropoff = isFinite(state.dropLat) ? { lat: +state.dropLat, lng: +state.dropLng } : GEO.dropoff;
     var live = isFinite(state.pickupLat) && isFinite(state.dropLat);
-    var driver = live
+    var here = isFinite(state.hereLat) ? { lat: +state.hereLat, lng: +state.hereLng } : null;
+    var driver = here || (live
       ? {
           lat: pickup.lat - (dropoff.lat - pickup.lat) * 0.3 - 0.008,
           lng: pickup.lng - (dropoff.lng - pickup.lng) * 0.3 - 0.008
         }
-      : GEO.driver;
+      : GEO.driver);
     return { pickup: pickup, dropoff: dropoff, driver: driver, live: live };
   }
 
@@ -393,9 +394,9 @@
       pin("pin-drop", "pin-drop", "Drop-off", drop) +
       '<div class="pin pin-car" id="pin-car" style="left:' + start.x + '%;top:' + start.y + '%"><div class="car-face" id="illus-car">' + CAR_SVG + "</div></div>" +
       "</div>" +
-      '<p class="map-caption">' + (route.live ? "Your route" : "Sample map · Willis") + "</p>" +
+      '<p class="map-caption">' + (isFinite(state.hereLat) && route.live ? "You, pickup, and drop-off" : (route.live ? "Your route" : "Sample map · Willis")) + "</p>" +
       "</div>" +
-      '<p class="legend"><span><i class="swatch"></i> Sample car</span>' +
+      '<p class="legend"><span><i class="swatch"></i> ' + (isFinite(state.hereLat) ? "You" : "Sample car") + "</span>" +
       '<span><i class="swatch you"></i> ' + esc(youLabel) + "</span>" +
       '<span><i class="swatch drop"></i> Drop-off</span></p>'
     );
@@ -519,6 +520,8 @@
       "<h2>Open requests</h2>" +
       (state.pickupStreet
         ? '<p class="lede">From the passenger app.</p>' +
+          mapBlock("Pickup") +
+          (isFinite(state.hereLat) ? "" : '<p class="fine">Allow location to put you on this map.</p>') +
           '<article class="card">' +
           '<p class="tag">' + (state.rideStatus === "accepted" ? "Accepted" : "New") + "</p>" +
           '<h2 style="font-size:18px">' + esc(state.name || "Rider") + "</h2>" +
@@ -554,7 +557,11 @@
     else html = customerHome();
     app.innerHTML = html;
     bind();
-    if (state.screen === "trip") startMap();
+    if (state.screen === "trip" || (ROLE === "driver" && state.screen === "home" && state.pickupStreet)) startMap();
+    if (ROLE === "driver" && state.pickupStreet && !isFinite(state.pickupLat) && !state.geocodeTried) {
+      state.geocodeTried = true;
+      geocodeMissing().then(function () { render(); });
+    }
   }
 
   function readForm() {
@@ -744,7 +751,9 @@
 
     tryLiveMap();
 
-    if (reduce) {
+    if (isFinite(state.hereLat)) {
+      placeCar(+state.hereLat, +state.hereLng, bearing({ lat: +state.hereLat, lng: +state.hereLng }, dest));
+    } else if (reduce) {
       var midLat = origin.lat + (dest.lat - origin.lat) * 0.45;
       var midLng = origin.lng + (dest.lng - origin.lng) * 0.45;
       placeCar(midLat, midLng, bearing({ lat: midLat, lng: midLng }, dest));
@@ -832,6 +841,23 @@
     if (illus) illus.classList.remove("is-hidden");
   }
 
+  function followGps() {
+    if (!navigator.geolocation || state.gpsWatch) return;
+    state.gpsWatch = navigator.geolocation.watchPosition(function (pos) {
+      var first = !isFinite(state.hereLat);
+      state.hereLat = pos.coords.latitude;
+      state.hereLng = pos.coords.longitude;
+      if (carMarker) {
+        placeCar(state.hereLat, state.hereLng, bearing(
+          { lat: state.hereLat, lng: state.hereLng },
+          routePoints().pickup
+        ));
+      } else if (first) {
+        render();
+      }
+    }, function () {}, { enableHighAccuracy: true, maximumAge: 2000, timeout: 10000 });
+  }
+
   document.addEventListener("DOMContentLoaded", function () {
     var sheetHost = document.createElement("div");
     sheetHost.id = "sheet";
@@ -852,7 +878,10 @@
     document.addEventListener("keydown", function (event) {
       if (event.key === "Escape") closePreview();
     });
-    if (ROLE === "driver") applyRide(currentRide());
+    if (ROLE === "driver") {
+      applyRide(currentRide());
+      followGps();
+    }
     window.addEventListener("storage", function (event) {
       if (event.key !== STORE) return;
       syncRide();
