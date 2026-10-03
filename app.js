@@ -11,29 +11,7 @@
     extraPassenger: 5,
     extraStop: 11,
     shortNoticePct: 0.25,
-    daytime: {function updateRequestLink(result) {
-          const link = document.getElementById('request-ride-link');
-          if (!link) return;
-          const value = (id) => document.getElementById(id).value.trim() || 'Not provided';
-          const body = [
-                  'Hello Matthew,', '',
-                  'I would like to request a ride. Please confirm availability and the final fare.', '',
-                  'Pickup: ' + value('pickup'),
-                  'Drop-off: ' + value('dropoff'),
-                  'Driving miles: ' + (result && !result.callForQuote ? result.miles.toFixed(1) : 'Not available'),
-                  'Estimated fare: ' + (result && !result.callForQuote ? money(result.total) : 'Custom quote requested'),
-                  'Trip type: ' + document.getElementById('trip-type').options[document.getElementById('trip-type').selectedIndex].text,
-                  'Passengers: ' + value('passengers'),
-                  'Stops: ' + value('stops'),
-                  'Ride date: ' + value('ride-date'),
-                  'Ride time: ' + value('ride-time'), '',
-                  'This is a ride request only, not a booking confirmation. Please reply with availability and the confirmed fare.'
-                ].join('\n');
-          link.href = 'mailto:mwragge@privatetaxiservices.net?subject=' + encodeURIComponent('Ride request') + '&body=' + encodeURIComponent(body);
-    }
-
-                function renderEstimate(result) {updateRequestLink(result);
-                                                     els.resultsEmpty.hidden = true;
+    daytime: {
       label: 'Mon–Fri daytime (6:00 am–5:59 pm)',
       perMile: 1.1,
       airportDrop: 15.5,
@@ -77,6 +55,7 @@
     totalAmount: document.getElementById('total-amount'),
     returnNote: document.getElementById('return-note'),
     callQuote: document.getElementById('call-quote'),
+    requestRideLink: document.getElementById('request-ride-link'),
     year: document.getElementById('year'),
   };
 
@@ -88,6 +67,7 @@
   let dropoffAutocomplete = null;
   let lastDrivingMiles = null;
   let mapsReady = false;
+  let lastEstimate = null;
 
   function money(n) {
     return n.toLocaleString('en-US', { style: 'currency', currency: 'USD' });
@@ -206,7 +186,31 @@
     };
   }
 
+  function updateRequestLink(result) {
+    if (!els.requestRideLink) return;
+    const lines = [
+      'Hello Matthew,',
+      '',
+      'I would like to request a ride. Please confirm availability and the final fare.',
+      '',
+      `Pickup: ${els.pickup.value.trim() || 'Not provided'}`,
+      `Drop-off: ${els.dropoff.value.trim() || 'Not provided'}`,
+      `Driving miles: ${result && !result.callForQuote ? result.miles.toFixed(1) : 'Not available'}`,
+      `Estimated fare: ${result && !result.callForQuote ? money(result.total) : 'Custom quote requested'}`,
+      `Trip type: ${els.tripType.options[els.tripType.selectedIndex].text}`,
+      `Passengers: ${els.passengers.value}`,
+      `Stops: ${els.stops.value}`,
+      `Ride date: ${els.rideDate.value || 'Not provided'}`,
+      `Ride time: ${els.rideTime.value || 'Not provided'}`,
+      '',
+      'This is a ride request only, not a booking confirmation. Please reply with availability and the confirmed fare.'
+    ];
+    els.requestRideLink.href = `mailto:mwragge@privatetaxiservices.net?subject=${encodeURIComponent('Ride request')}&body=${encodeURIComponent(lines.join('\n'))}`;
+  }
+
   function renderEstimate(result) {
+    lastEstimate = result;
+    updateRequestLink(result);
     els.resultsEmpty.hidden = true;
     els.resultsBody.hidden = false;
 

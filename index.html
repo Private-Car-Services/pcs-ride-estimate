@@ -11,7 +11,7 @@
   <link rel="stylesheet" href="styles.css" />
   <script src="config.js"></script>
 </head>
-<body>Email a ride requesthref="mailto:mwragge@privatetaxiservices.net?subject=Ride%20request" id="request-ride-link"
+<body>
   <header class="site-header">
     <div class="wrap header-inner">
       <div class="brand">
@@ -45,12 +45,12 @@
 
           <div class="field">
             <label for="pickup">Pickup address</label>
-            <input type="text" id="pickup" name="pickup" autocomplete="street-address" placeholder="Where should we pick you up?" />
+            <input type="text" id="pickup" name="pickup" autocomplete="street-address" maxlength="120" placeholder="Where should we pick you up?" />
           </div>
 
           <div class="field">
             <label for="dropoff">Drop-off address</label>
-            <input type="text" id="dropoff" name="dropoff" autocomplete="street-address" placeholder="Where are you going?" />
+            <input type="text" id="dropoff" name="dropoff" autocomplete="street-address" maxlength="120" placeholder="Where are you going?" />
           </div>
 
           <div class="field" id="manual-miles-field" hidden>
@@ -150,8 +150,8 @@
           <h3>Ready to book?</h3>
           <p>We’ll confirm your fare, then you can hold the ride with a Square deposit if needed.</p>
           <a class="btn btn-primary" href="tel:9362617878">Call 936-261-7878</a>
-          <a class="btn btn-secondary" href="https://www.ptstaxiservices.com/" target="_blank" rel="noopener">Request a ride on our site</a>
-          <p class="cta-note">Deposit via Square comes after Matthew confirms your trip.</p>
+          <a class="btn btn-secondary" id="request-ride-link" href="mailto:mwragge@privatetaxiservices.net?subject=Ride%20request">Email a ride request</a>
+          <p class="cta-note">Your email will include the details entered and any estimate shown. This is a request, not a booking confirmation. Deposit via Square comes after Matthew confirms your trip.</p>
         </div>
       </aside>
     </div>
