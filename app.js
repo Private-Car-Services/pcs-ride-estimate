@@ -33,11 +33,9 @@
 
   const els = {
     form: document.getElementById('estimate-form'),
-    pickupHouse: document.getElementById('pickup-house'),
     pickupStreet: document.getElementById('pickup-street'),
     pickupCity: document.getElementById('pickup-city'),
     pickupState: document.getElementById('pickup-state'),
-    dropoffHouse: document.getElementById('dropoff-house'),
     dropoffStreet: document.getElementById('dropoff-street'),
     dropoffCity: document.getElementById('dropoff-city'),
     dropoffState: document.getElementById('dropoff-state'),
@@ -197,17 +195,16 @@
     };
   }
 
-  function composeAddress(houseEl, streetEl, cityEl, stateEl) {
-    const streetLine = [houseEl.value.trim(), streetEl.value.trim()].filter(Boolean).join(' ');
-    return [streetLine, cityEl.value.trim(), stateEl.value.trim()].filter(Boolean).join(', ');
+  function composeAddress(streetEl, cityEl, stateEl) {
+    return [streetEl.value.trim(), cityEl.value.trim(), stateEl.value.trim()].filter(Boolean).join(', ');
   }
 
   function pickupAddress() {
-    return composeAddress(els.pickupHouse, els.pickupStreet, els.pickupCity, els.pickupState);
+    return composeAddress(els.pickupStreet, els.pickupCity, els.pickupState);
   }
 
   function dropoffAddress() {
-    return composeAddress(els.dropoffHouse, els.dropoffStreet, els.dropoffCity, els.dropoffState);
+    return composeAddress(els.dropoffStreet, els.dropoffCity, els.dropoffState);
   }
 
   function isAppleSmsDevice() {
@@ -318,6 +315,61 @@
     els.routeStatus.classList.toggle('error', !!isError);
   }
 
+  async function fetchJson(url) {
+    const controller = new AbortController();
+    const timer = setTimeout(function () { controller.abort(); }, 12000);
+    try {
+      const response = await fetch(url, { signal: controller.signal });
+      if (!response.ok) return null;
+      return await response.json();
+    } catch (err) {
+      return null;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  async function geocodeAddress(address) {
+    const url = 'https://photon.komoot.io/api/?q=' + encodeURIComponent(address) + '&limit=1';
+    const data = await fetchJson(url);
+    const feature = data && data.features && data.features[0];
+    const coords = feature && feature.geometry && feature.geometry.coordinates;
+    if (!coords || coords.length < 2) return null;
+    const lon = Number(coords[0]);
+    const lat = Number(coords[1]);
+    if (!Number.isFinite(lon) || !Number.isFinite(lat)) return null;
+    if (lat < -90 || lat > 90 || lon < -180 || lon > 180) return null;
+    return { lon: lon, lat: lat };
+  }
+
+  async function fetchOsrmMiles(origin, destination) {
+    const url = 'https://router.project-osrm.org/route/v1/driving/' +
+      origin.lon + ',' + origin.lat + ';' +
+      destination.lon + ',' + destination.lat +
+      '?overview=false';
+    const data = await fetchJson(url);
+    const route = data && data.code === 'Ok' && data.routes && data.routes[0];
+    const meters = route && route.distance;
+    if (!Number.isFinite(meters) || meters <= 0) return null;
+    return meters / 1609.344;
+  }
+
+  async function fetchPublicDrivingMiles() {
+    const originAddress = pickupAddress();
+    const destinationAddress = dropoffAddress();
+    if (!originAddress || !destinationAddress) return null;
+
+    const origin = await geocodeAddress(originAddress);
+    const destination = await geocodeAddress(destinationAddress);
+    if (!origin || !destination) return null;
+
+    const miles = await fetchOsrmMiles(origin, destination);
+    if (miles == null) return null;
+    lastDrivingMiles = miles;
+    showRouteStatus('Route found: ' + miles.toFixed(1) + ' miles driving');
+    return miles;
+  }
+
   async function fetchDrivingMiles() {
     if (!mapsReady || !directionsService) return null;
 
@@ -368,6 +420,9 @@
 
     if (mapsReady) {
       miles = await fetchDrivingMiles();
+    } else if (!hasApiKey()) {
+      showRouteStatus('Looking up driving miles…');
+      miles = await fetchPublicDrivingMiles();
     }
 
     if (miles == null) {
@@ -451,8 +506,8 @@
     els.textRequestButton.addEventListener('click', () => composeRideRequest(lastEstimate));
     els.tripType.addEventListener('change', updateFlightDetails);
     [
-      els.pickupHouse, els.pickupStreet, els.pickupCity, els.pickupState,
-      els.dropoffHouse, els.dropoffStreet, els.dropoffCity, els.dropoffState,
+      els.pickupStreet, els.pickupCity, els.pickupState,
+      els.dropoffStreet, els.dropoffCity, els.dropoffState,
     ].forEach((field) => field.addEventListener('input', updateFlightDetails));
     updateFlightDetails();
 

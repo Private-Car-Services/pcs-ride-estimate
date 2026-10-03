@@ -35,7 +35,7 @@
     </section>
 
     <div id="api-banner" class="banner banner-warn" hidden>
-      Map lookup needs an API key — enter miles manually for now.
+      Driving miles are looked up from the addresses. Enter miles below if that fails.
     </div>
 
     <div class="layout">
@@ -45,15 +45,9 @@
 
           <fieldset class="address-group">
             <legend>Pickup address</legend>
-            <div class="row two">
-              <div class="field">
-                <label for="pickup-house">House number</label>
-                <input type="text" id="pickup-house" name="pickup-house" inputmode="numeric" autocomplete="off" required maxlength="20" placeholder="502" />
-              </div>
-              <div class="field">
-                <label for="pickup-street">Street name</label>
-                <input type="text" id="pickup-street" name="pickup-street" autocomplete="off" required maxlength="80" placeholder="Montgomery St" />
-              </div>
+            <div class="field">
+              <label for="pickup-street">Street address</label>
+              <input type="text" id="pickup-street" name="pickup-street" autocomplete="street-address" required maxlength="120" placeholder="502 W. Montgomery St" />
             </div>
             <div class="row two">
               <div class="field">
@@ -69,15 +63,9 @@
 
           <fieldset class="address-group">
             <legend>Drop-off address</legend>
-            <div class="row two">
-              <div class="field">
-                <label for="dropoff-house">House number</label>
-                <input type="text" id="dropoff-house" name="dropoff-house" inputmode="numeric" autocomplete="off" required maxlength="20" placeholder="502" />
-              </div>
-              <div class="field">
-                <label for="dropoff-street">Street name</label>
-                <input type="text" id="dropoff-street" name="dropoff-street" autocomplete="off" required maxlength="80" placeholder="Montgomery St" />
-              </div>
+            <div class="field">
+              <label for="dropoff-street">Street address</label>
+              <input type="text" id="dropoff-street" name="dropoff-street" autocomplete="street-address" required maxlength="120" placeholder="502 W. Montgomery St" />
             </div>
             <div class="row two">
               <div class="field">
