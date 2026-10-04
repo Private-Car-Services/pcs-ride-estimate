@@ -1,0 +1,367 @@
+:root {
+  --green: #193819;
+  --green-2: #234d23;
+  --green-3: #0f2810;
+  --gold: #d4b15a;
+  --gold-2: #f0d48a;
+  --ink: #f4efe4;
+  --muted: #b7c3b0;
+  --line: rgba(212, 177, 90, 0.38);
+  --danger: #c97878;
+  --panel: rgba(15, 40, 16, 0.92);
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+  background: #0a160a;
+  color: var(--ink);
+  font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+}
+
+button, input {
+  font: inherit;
+  color: inherit;
+}
+
+#root {
+  min-height: 100dvh;
+}
+
+/* —— Login —— */
+.login-wrap {
+  min-height: 100dvh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px 16px;
+  background:
+    radial-gradient(900px 420px at 50% -8%, #2a5a2a 0%, transparent 55%),
+    #0a160a;
+}
+
+.login-card {
+  width: 100%;
+  max-width: 400px;
+  background: linear-gradient(180deg, var(--green-2) 0%, var(--green) 40%);
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  padding: 28px 24px 24px;
+  box-shadow: 0 18px 40px rgba(0, 0, 0, 0.35);
+}
+
+.login-card .eyebrow {
+  margin: 0 0 4px;
+  color: var(--gold);
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  font-size: 11px;
+}
+
+.login-card h1 {
+  margin: 0 0 6px;
+  font-family: Georgia, "Palatino Linotype", Palatino, serif;
+  font-size: 28px;
+  font-weight: 500;
+}
+
+.login-card .lede {
+  margin: 0 0 22px;
+  color: var(--muted);
+  line-height: 1.45;
+  font-size: 14px;
+}
+
+.field {
+  margin-bottom: 14px;
+}
+
+.field label {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--gold-2);
+  font-size: 12px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.field input {
+  width: 100%;
+  padding: 12px 14px;
+  border-radius: 12px;
+  border: 1px solid var(--line);
+  background: rgba(6, 20, 8, 0.55);
+  outline: none;
+}
+
+.field input:focus {
+  border-color: var(--gold);
+}
+
+.login-error {
+  min-height: 1.2em;
+  margin: 0 0 12px;
+  color: var(--danger);
+  font-size: 13px;
+}
+
+.btn {
+  border: 0;
+  border-radius: 12px;
+  padding: 12px 16px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.btn-gold {
+  width: 100%;
+  background: linear-gradient(180deg, var(--gold-2), var(--gold));
+  color: var(--green-3);
+}
+
+.btn-ghost {
+  background: transparent;
+  border: 1px solid var(--line);
+  color: var(--gold-2);
+  padding: 8px 12px;
+  font-size: 13px;
+}
+
+.login-note {
+  margin: 14px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+/* —— Shell —— */
+.shell {
+  display: grid;
+  grid-template-rows: auto 1fr;
+  min-height: 100dvh;
+  height: 100dvh;
+}
+
+.topbar {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 16px;
+  background: linear-gradient(180deg, var(--green-2), var(--green));
+  border-bottom: 1px solid var(--line);
+}
+
+.topbar .eyebrow {
+  margin: 0 0 2px;
+  color: var(--gold);
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  font-size: 11px;
+}
+
+.topbar h1 {
+  margin: 0;
+  font-family: Georgia, "Palatino Linotype", Palatino, serif;
+  font-size: 22px;
+  font-weight: 500;
+}
+
+.topbar .who {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.top-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.status-pill {
+  margin: 0;
+  padding: 6px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  color: var(--gold-2);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+
+.workspace {
+  display: grid;
+  grid-template-columns: minmax(280px, 360px) 1fr;
+  min-height: 0;
+}
+
+@media (max-width: 860px) {
+  .workspace {
+    grid-template-columns: 1fr;
+    grid-template-rows: 42vh 1fr;
+  }
+}
+
+.side {
+  overflow: auto;
+  padding: 14px 14px 20px;
+  background: var(--panel);
+  border-right: 1px solid var(--line);
+}
+
+.side h2 {
+  margin: 0 0 8px;
+  font-size: 15px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--gold);
+}
+
+.side-section + .side-section {
+  margin-top: 18px;
+}
+
+.empty {
+  margin: 0;
+  padding: 12px;
+  border: 1px dashed rgba(212, 177, 90, 0.28);
+  border-radius: 12px;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.card {
+  background: rgba(6, 20, 8, 0.45);
+  border: 1px solid rgba(212, 177, 90, 0.22);
+  border-radius: 14px;
+  padding: 12px;
+  margin-bottom: 10px;
+}
+
+.card.paired {
+  border-color: var(--gold);
+  box-shadow: 0 0 0 1px rgba(212, 177, 90, 0.25);
+}
+
+.card h3 {
+  margin: 0 0 6px;
+  font-size: 15px;
+}
+
+.card .meta {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.card .meta strong {
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.badge {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  color: var(--gold-2);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  vertical-align: middle;
+}
+
+.badge.on-trip {
+  background: rgba(212, 177, 90, 0.18);
+}
+
+.map-pane {
+  position: relative;
+  min-height: 280px;
+}
+
+#god-map {
+  position: absolute;
+  inset: 0;
+  background: #122412;
+  z-index: 0;
+}
+
+.map-hint {
+  position: absolute;
+  z-index: 500;
+  left: 12px;
+  bottom: 12px;
+  max-width: min(360px, calc(100% - 24px));
+  margin: 0;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: rgba(15, 40, 16, 0.88);
+  border: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+  pointer-events: none;
+}
+
+/* Leaflet markers */
+.god-pin {
+  background: transparent;
+  border: 0;
+}
+
+.god-marker {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  transform: translateY(-6px);
+}
+
+.god-marker .face {
+  width: 40px;
+  height: 40px;
+  display: grid;
+  place-items: center;
+  filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.45));
+}
+
+.god-marker .name-tag {
+  max-width: 110px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: rgba(15, 40, 16, 0.92);
+  border: 1px solid var(--line);
+  color: var(--gold-2);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.2;
+  text-align: center;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.god-marker.paired .name-tag {
+  max-width: 140px;
+  border-color: var(--gold);
+  color: var(--ink);
+  background: rgba(25, 56, 25, 0.95);
+}
+
+.god-marker.paired .face {
+  width: 46px;
+  height: 46px;
+}
+
+.leaflet-container {
+  background: #122412;
+  font: inherit;
+}
