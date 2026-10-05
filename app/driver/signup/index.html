@@ -14,8 +14,11 @@
   <link rel="icon" href="../../icon-driver.png">
   <link rel="manifest" href="manifest.webmanifest">
   <title>PCS Driver</title>
-  <link rel="stylesheet" href="../../styles.css?v=21">
-  <script src="../sync-config.js?v=1"></script>
+  <link rel="stylesheet" href="../../styles.css?v=23">
+  <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-auth-compat.js"></script>
+  <script src="../sync-config.js?v=3"></script>
+  <script src="../pcs-auth.js?v=1"></script>
 </head>
 <body>
   <div class="phone">
@@ -27,7 +30,7 @@
     </header>
     <main id="signup-main">
       <h2>Create a driver account</h2>
-      <p class="lede">Invitation sign-up. This phone keeps the account. Nothing is charged.</p>
+      <p class="lede">Creates a Firebase Auth driver account (email + password). Matthew must Approve you in God mode before you go online. Nothing is charged here.</p>
       <form id="signup-form" autocomplete="off">
         <label>Profile picture</label>
         <div class="photo-pick">
@@ -654,7 +657,7 @@
               name: name,
               phone: phone,
               email: account.email || "",
-              passwordHash: account.passwordHash || "",
+              uid: account.uid || "",
               photo: parts[0],
               carYear: Number(carYear),
               carMake: carMake,
@@ -752,72 +755,140 @@
           showError("Add a photo of your car from the front right angle.");
           return;
         }
-        if (!window.crypto || !crypto.subtle || !crypto.subtle.digest) {
-          showError("This browser cannot save a password safely. Try Safari or Chrome.");
-          return;
-        }
+        var a = window.PCS_AUTH;
+        var authReady = !!(a && a.hasConfig && a.hasConfig());
 
         var photoFile = signupPhotoCtl.getFile();
         var photoReady = photoFile ? readPhotoFile(photoFile) : Promise.resolve("");
         var carReady = readCarPhotoFile(carFile);
         Promise.all([photoReady, carReady]).then(function (parts) {
-          return sha256Hex(password).then(function (hex) {
-          var profile = {
-            name: name,
-            phone: phone,
-            email: email,
-            passwordHash: hex,
-            photo: parts[0],
-            carYear: Number(carYear),
-            carMake: carMake,
-            carModel: carModel,
-            carPlate: carPlate,
-            carSeats: Number(carSeats),
-            carPhoto: parts[1]
-          };
-          localStorage.setItem("pcs-driver-account", JSON.stringify(profile));
-          localStorage.setItem("pcs-driver-session", email);
-          document.getElementById("password").value = "";
-          document.getElementById("confirm").value = "";
-          try {
-            var sync = window.PCS_SYNC || {};
-            var db = String(sync.databaseURL || "").replace(/\/+$/, "");
-            if (db) {
-              var rid = email.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 48);
-              var row = {
-                name: profile.name,
-                phone: profile.phone,
+          if (!authReady) {
+            return sha256Hex(password).then(function (hex) {
+              var profile = {
+                name: name,
+                phone: phone,
                 email: email,
-                commissionPct: 70,
-                active: false,
-                approvalStatus: "pending",
-                signedUpAt: Date.now(),
-                updatedAt: Date.now(),
-                carYear: profile.carYear,
-                carMake: profile.carMake,
-                carModel: profile.carModel,
-                carPlate: profile.carPlate,
-                carSeats: profile.carSeats
+                passwordHash: hex,
+                photo: parts[0],
+                carYear: Number(carYear),
+                carMake: carMake,
+                carModel: carModel,
+                carPlate: carPlate,
+                carSeats: Number(carSeats),
+                carPhoto: parts[1]
               };
-              fetch(db + "/rides/DRVRCMMS/" + encodeURIComponent(rid) + ".json").then(function (res) {
-                return res.text().then(function (text) {
-                  var existing = null;
-                  if (text && text !== "null") { try { existing = JSON.parse(text); } catch (e) {} }
-                  if (existing && existing.active === true) return;
-                  if (existing && String(existing.approvalStatus || "").toLowerCase() === "approved") return;
-                  return fetch(db + "/rides/DRVRCMMS/" + encodeURIComponent(rid) + ".json", {
-                    method: "PUT",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify(row)
-                  });
+              localStorage.setItem("pcs-driver-account", JSON.stringify(profile));
+              localStorage.setItem("pcs-driver-session", email);
+              document.getElementById("password").value = "";
+              document.getElementById("confirm").value = "";
+              try {
+                var sync = window.PCS_SYNC || {};
+                var db = String(sync.databaseURL || "").replace(/\/+$/, "");
+                if (db) {
+                  var rid = email.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 48);
+                  var row = {
+                    name: profile.name,
+                    phone: profile.phone,
+                    email: email,
+                    commissionPct: 70,
+                    active: false,
+                    approvalStatus: "pending",
+                    signedUpAt: Date.now(),
+                    updatedAt: Date.now(),
+                    carYear: profile.carYear,
+                    carMake: profile.carMake,
+                    carModel: profile.carModel,
+                    carPlate: profile.carPlate,
+                    carSeats: profile.carSeats
+                  };
+                  var url = db + "/rides/DRVRCMMS/" + encodeURIComponent(rid) + ".json";
+                  fetch(url).then(function (res) {
+                    return res.text().then(function (text) {
+                      var existing = null;
+                      if (text && text !== "null") { try { existing = JSON.parse(text); } catch (e) {} }
+                      if (existing && (existing.active === true || String(existing.approvalStatus || "").toLowerCase() === "approved")) return;
+                      return fetch(url, { method: existing ? "PATCH" : "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(existing ? Object.assign({}, existing, { name: row.name, phone: row.phone, carYear: row.carYear, carMake: row.carMake, carModel: row.carModel, carPlate: row.carPlate, carSeats: row.carSeats, updatedAt: Date.now() }) : row) });
+                    });
+                  }).catch(function () {});
+                }
+              } catch (pubErr) {}
+              showSaved();
+            });
+          }
+          return a.createEmailPassword(email, password).then(function (cred) {
+            var uid = (cred && cred.user && cred.user.uid) || (a.currentUser() && a.currentUser().uid) || "";
+            var profile = {
+              name: name,
+              phone: phone,
+              email: email,
+              uid: uid,
+              photo: parts[0],
+              carYear: Number(carYear),
+              carMake: carMake,
+              carModel: carModel,
+              carPlate: carPlate,
+              carSeats: Number(carSeats),
+              carPhoto: parts[1]
+            };
+            localStorage.setItem("pcs-driver-account", JSON.stringify(profile));
+            localStorage.setItem("pcs-driver-session", email);
+            document.getElementById("password").value = "";
+            document.getElementById("confirm").value = "";
+            try {
+              var sync = window.PCS_SYNC || {};
+              var db = String(sync.databaseURL || "").replace(/\/+$/, "");
+              if (db && uid && a.getIdToken) {
+                var rid = email.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 48);
+                var row = {
+                  name: profile.name,
+                  phone: profile.phone,
+                  email: email,
+                  uid: uid,
+                  commissionPct: 70,
+                  active: false,
+                  approvalStatus: "pending",
+                  signedUpAt: Date.now(),
+                  updatedAt: Date.now(),
+                  carYear: profile.carYear,
+                  carMake: profile.carMake,
+                  carModel: profile.carModel,
+                  carPlate: profile.carPlate,
+                  carSeats: profile.carSeats
+                };
+                a.getIdToken(false).then(function (token) {
+                  if (!token) return;
+                  var authQ = "?auth=" + encodeURIComponent(token);
+                  var url = db + "/rides/DRVRCMMS/" + encodeURIComponent(rid) + ".json" + authQ;
+                  return fetch(url).then(function (res) {
+                    return res.text().then(function (text) {
+                      var existing = null;
+                      if (text && text !== "null") { try { existing = JSON.parse(text); } catch (e) {} }
+                      if (existing && existing.active === true) return;
+                      if (existing && String(existing.approvalStatus || "").toLowerCase() === "approved") return;
+                      var body = existing
+                        ? { name: row.name, phone: row.phone, email: row.email, uid: row.uid, carYear: row.carYear, carMake: row.carMake, carModel: row.carModel, carPlate: row.carPlate, carSeats: row.carSeats, updatedAt: Date.now() }
+                        : row;
+                      return fetch(url, {
+                        method: existing ? "PATCH" : "PUT",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify(body)
+                      });
+                    });
+                  }).then(function () {
+                    var acctUrl = db + "/rides/USRACCTS/" + encodeURIComponent(uid) + ".json" + authQ;
+                    return fetch(acctUrl, {
+                      method: "PUT",
+                      headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify({ uid: uid, role: "driver", name: name, phone: phone, email: email, updatedAt: Date.now() })
+                    });
+                  }).catch(function () {});
                 });
-              }).catch(function () {});
-            }
-          } catch (pubErr) {}
-          showSaved();
+              }
+            } catch (pubErr) {}
+            showSaved();
           });
-        }).catch(function () {
-          showError("Could not save the account on this phone. Nothing was stored.");
+        }).catch(function (err) {
+          showError((authReady && a && a.authErrorMessage && a.authErrorMessage(err)) || (authReady ? "Could not create the Firebase driver account." : "Could not save the account on this phone."));
         });
       });
     })();
