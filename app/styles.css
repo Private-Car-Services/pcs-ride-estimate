@@ -700,3 +700,44 @@ a.btn + .btn, .btn + a.btn, a.btn + a.btn { margin-top: 8px; }
   color: var(--gold-2);
   font-weight: 700;
 }
+
+
+.when-modes {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px;
+  padding: 4px;
+  background: rgba(6, 16, 28, 0.45);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  margin: 0 0 10px;
+}
+
+.when-modes button {
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  border-radius: 10px;
+  padding: 12px 8px;
+  font-weight: 700;
+}
+
+.when-modes button[aria-selected="true"] {
+  background: linear-gradient(180deg, var(--gold-2), var(--gold));
+  color: var(--navy);
+}
+
+.when-asap-hint {
+  margin: 0 0 8px;
+}
+
+.driver-eta {
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid rgba(143, 208, 168, 0.45);
+  background: rgba(143, 208, 168, 0.12);
+  color: var(--ok);
+  font-weight: 700;
+  font-size: 15px;
+}

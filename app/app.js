@@ -67,6 +67,7 @@
     dropState: SAMPLE.dropState,
     date: "",
     time: SAMPLE.time,
+    asap: true,
     error: "",
     passengers: 2,
     stops: 0,
@@ -189,6 +190,27 @@
     var now = chicagoNowStamp();
     if (want == null || now == null) return false;
     return want < now;
+  }
+
+  function isAsapValue(v) {
+    if (v === true || v === 1) return true;
+    var s = String(v == null ? "" : v).trim().toLowerCase();
+    return s === "asap" || s === "true" || s === "1";
+  }
+
+  function rideIsAsap(ride) {
+    if (!ride) return !!state.asap;
+    if (isAsapValue(ride.asap)) return true;
+    if (isAsapValue(ride.when)) return true;
+    if (String(ride.time || "").trim().toLowerCase() === "asap") return true;
+    return false;
+  }
+
+  function stampAsapNow() {
+    var now = chicagoParts(new Date());
+    state.date = now.date;
+    state.time = now.time;
+    state.asap = true;
   }
 
   function esc(value) {
@@ -544,6 +566,56 @@
     return haversine(driver, pickup) <= 20;
   }
 
+  /* City driving ETA to pickup: haversine miles at ~22 mph, floor 2 min. */
+  var CITY_DRIVE_MPH = 22;
+  var ETA_FLOOR_MIN = 2;
+
+  function driverPickupEta() {
+    var driver = savedDriverPoint();
+    var pickup = placeCoords("pickup");
+    if (!driver || !pickup) return null;
+    var miles = haversine(driver, pickup);
+    if (!isFinite(miles) || miles < 0) return null;
+    var minutes = Math.max(ETA_FLOOR_MIN, Math.round((miles / CITY_DRIVE_MPH) * 60));
+    if (miles <= 0.08) minutes = 1;
+    return { miles: miles, minutes: minutes };
+  }
+
+  function driverEtaText() {
+    if (state.rideStatus !== "accepted") return "";
+    var eta = driverPickupEta();
+    if (!eta) return "";
+    if (eta.miles <= 0.08) return "Driver is arriving";
+    return "Driver is " + eta.miles.toFixed(1) + " mi away · ~" + eta.minutes + " min";
+  }
+
+  function driverEtaLine() {
+    var label = driverEtaText();
+    if (!label) return "";
+    return '<p class="driver-eta" id="driver-eta">' + esc(label) + "</p>";
+  }
+
+  function refreshDriverEtaDom() {
+    var el = document.getElementById("driver-eta");
+    var label = driverEtaText();
+    if (!label) {
+      if (el && el.parentNode) el.parentNode.removeChild(el);
+      return;
+    }
+    if (el) {
+      el.textContent = label;
+      return;
+    }
+    var host = document.querySelector(".driver-identity") || document.querySelector(".status");
+    if (!host || !host.parentNode) return;
+    var p = document.createElement("p");
+    p.className = "driver-eta";
+    p.id = "driver-eta";
+    p.textContent = label;
+    if (host.nextSibling) host.parentNode.insertBefore(p, host.nextSibling);
+    else host.parentNode.appendChild(p);
+  }
+
   function unavailableCall() {
     return (
       '<div class="status"><i></i><span>No one is available</span></div>' +
@@ -710,6 +782,7 @@
   }
 
   function isShortNotice() {
+    if (state.asap || isAsapValue(state.time)) return true;
     if (!state.date || !state.time) return false;
     var ymd = state.date.split("-");
     var hm = state.time.split(":");
@@ -720,6 +793,7 @@
   var busyCache = null;
 
   function pickupInstant() {
+    if (state.asap || isAsapValue(state.time)) return new Date();
     var ymd = (state.date || "").split("-");
     var hm = (state.time || "").split(":");
     return new Date(Number(ymd[0]), Number(ymd[1]) - 1, Number(ymd[2]), Number(hm[0]), Number(hm[1] || 0), 0, 0);
@@ -752,7 +826,14 @@
 
   function estimate() {
     var miles = tripMiles();
-    var tier = resolveTier(state.date, state.time, !!state.holiday);
+    var tierDate = state.date;
+    var tierTime = state.time;
+    if (state.asap || isAsapValue(state.time) || !tierDate || !tierTime || String(tierTime).toLowerCase() === "asap") {
+      var nowParts = chicagoParts(new Date());
+      tierDate = nowParts.date;
+      tierTime = nowParts.time;
+    }
+    var tier = resolveTier(tierDate, tierTime, !!state.holiday);
     var extraPax = Math.max(0, ridePassengers() - 2);
     var extraStops = rideStops();
     var mileage = miles.ready ? miles.billed * tier.cents : 0;
@@ -931,6 +1012,7 @@
   }
 
   function prettyWhen() {
+    if (state.asap || isAsapValue(state.time)) return "ASAP";
     if (!state.date || !state.time) return "";
     var parts = state.date.split("-");
     var dt = new Date(Number(parts[0]), Number(parts[1]) - 1, Number(parts[2]));
@@ -938,6 +1020,7 @@
     var hm = state.time.split(":");
     var hh = Number(hm[0]);
     var mm = hm[1] || "00";
+    if (!isFinite(hh)) return "";
     var suffix = hh >= 12 ? "PM" : "AM";
     var h12 = hh % 12 || 12;
     return day + " at " + h12 + ":" + mm + " " + suffix;
@@ -1497,6 +1580,8 @@
       dropState: (ride && ride.dropState) || "TX",
       date: (ride && ride.date) || "",
       time: (ride && ride.time) || "",
+      asap: !!(ride && rideIsAsap(ride)),
+      when: (ride && rideIsAsap(ride)) ? "asap" : ((ride && ride.when) || ""),
       pickupLat: ride ? ride.pickupLat : null,
       pickupLng: ride ? ride.pickupLng : null,
       dropLat: ride ? ride.dropLat : null,
@@ -1872,6 +1957,7 @@
     var onlyDriver = !statusChanged && !placesChanged && !identityChanged && driverChanged && state.screen === screen;
     if (onlyDriver && carMarker && isCoord(state.driverLat) && isCoord(state.driverLng)) {
       carMarker.setLatLng([+state.driverLat, +state.driverLng]);
+      refreshDriverEtaDom();
       return;
     }
     render();
@@ -2006,7 +2092,7 @@
     if (savedRide.pickupStreet && savedRide.dropStreet &&
         (savedRide.status === "requested" || savedRide.status === "accepted" ||
          savedRide.status === "started" || savedRide.status === "completed")) {
-      if (savedRide.status !== "completed" && isPickupInPast(savedRide.date, savedRide.time)) {
+      if (savedRide.status !== "completed" && !rideIsAsap(savedRide) && isPickupInPast(savedRide.date, savedRide.time)) {
         discardStoredRide();
         state.screen = "home";
         return false;
@@ -2064,10 +2150,18 @@
   }
 
   function customerHome() {
-    if (isPickupInPast(state.date, state.time)) {
+    if (!state.asap && isPickupInPast(state.date, state.time)) {
       state.date = "";
       state.time = "";
     }
+    var whenSchedule = !state.asap;
+    var scheduleFields = whenSchedule
+      ? ('<div class="row when-schedule-fields" id="when-schedule-fields"><div class="city">' +
+        field("ride-date", "Date", state.date, 'type="date" min="' + chicagoParts(new Date()).date + '"') +
+        '</div><div class="city">' +
+        field("ride-time", "Time", state.time, 'type="time"') +
+        "</div></div>")
+      : "";
     return (
       '<div class="app-nav">' + logoutLine() + "</div>" +
       "<h2>Request a ride</h2>" +
@@ -2087,11 +2181,14 @@
       '</div><div class="state">' +
       field("drop-state", "State", state.dropState, 'required maxlength="2"') +
       "</div></div></div>" +
-      '<div class="group"><p class="group-title">When</p><div class="row"><div class="city">' +
-      field("ride-date", "Date", state.date, 'type="date" required min="' + chicagoParts(new Date()).date + '"') +
-      '</div><div class="city">' +
-      field("ride-time", "Time", state.time, 'type="time" required') +
-      "</div></div></div>" +
+      '<div class="group"><p class="group-title">When</p>' +
+      '<div class="when-modes" role="tablist" aria-label="Pickup time">' +
+      '<button type="button" role="tab" id="when-asap" aria-selected="' + (state.asap ? "true" : "false") + '">ASAP</button>' +
+      '<button type="button" role="tab" id="when-schedule" aria-selected="' + (whenSchedule ? "true" : "false") + '">Schedule</button>' +
+      "</div>" +
+      (state.asap ? '<p class="fine when-asap-hint">Pickup as soon as a driver accepts.</p>' : "") +
+      scheduleFields +
+      "</div>" +
       '<div class="group"><p class="group-title">Rider</p>' +
       field("rider-name", "Name", state.name, "required") +
       field("rider-phone", "Phone", state.phone, 'type="tel" inputmode="tel" required') +
@@ -2277,6 +2374,7 @@
           ? '<div class="status"><i></i><span>Ride started</span></div>'
           : waitingStatusBlock(near || state.driverName ? "Driver on the way" : "Drivers are available"))) +
       driverIdentityLine() +
+      driverEtaLine() +
       "<p class=\"lede\">" + esc(pickupLine()) + " → " + esc(dropLine()) + "<br>" + esc(prettyWhen()) + "</p>" +
       (started || completed ? "" : riderPinBanner()) +
       customerMapBlock(caption, driver) +
@@ -2314,6 +2412,7 @@
       '<button class="btn ghost" type="button" id="back-home">← Request</button>' +
       waitingStatusBlock(waitLabel) +
       driverIdentityLine() +
+      driverEtaLine() +
       "<p class=\"lede\">" + esc(pickupLine()) + " → " + esc(dropLine()) + "<br>" + esc(prettyWhen()) + "</p>" +
       riderPinBanner() +
       customerMapBlock(caption, driver) +
@@ -2340,12 +2439,18 @@
     state.dropStreet = ride.dropStreet || "";
     state.dropCity = ride.dropCity || "";
     state.dropState = ride.dropState || "TX";
-    if (ride.date && ride.time && isPickupInPast(ride.date, ride.time)) {
+    state.asap = rideIsAsap(ride);
+    if (!state.asap && ride.date && ride.time && isPickupInPast(ride.date, ride.time)) {
       state.date = "";
       state.time = "";
     } else {
       state.date = ride.date || state.date;
-      state.time = ride.time || state.time;
+      state.time = (state.asap && String(ride.time || "").toLowerCase() === "asap") ? "" : (ride.time || state.time);
+      if (state.asap && (!state.date || !state.time || String(state.time).toLowerCase() === "asap")) {
+        var nowAsap = chicagoParts(new Date());
+        if (!state.date) state.date = nowAsap.date;
+        if (!state.time || String(state.time).toLowerCase() === "asap") state.time = nowAsap.time;
+      }
     }
     state.rideStatus = ride.status || "";
     state.pickupLat = ride.pickupLat;
@@ -2450,6 +2555,8 @@
       dropState: state.dropState,
       date: state.date,
       time: state.time,
+      asap: !!state.asap,
+      when: state.asap ? "asap" : prettyWhen(),
       status: status,
       pickupLat: state.pickupLat,
       pickupLng: state.pickupLng,
@@ -2490,6 +2597,7 @@
     state.dropCity = "";
     state.date = "";
     state.time = "";
+    state.asap = true;
     state.rideStatus = "";
     state.pickupLat = null;
     state.pickupLng = null;
@@ -2754,16 +2862,22 @@
     state.dropStreet = val("drop-street");
     state.dropCity = val("drop-city");
     state.dropState = val("drop-state").toUpperCase();
-    state.date = val("ride-date");
-    state.time = val("ride-time");
+    if (state.asap) {
+      stampAsapNow();
+    } else {
+      state.date = val("ride-date");
+      state.time = val("ride-time");
+      state.asap = false;
+    }
     state.name = val("rider-name");
     state.phone = val("rider-phone");
   }
 
   function formComplete() {
+    var whenOk = state.asap || (state.date && state.time);
     return state.pickupStreet && state.pickupCity && state.pickupState &&
       state.dropStreet && state.dropCity && state.dropState &&
-      state.date && state.time && state.name && state.phone;
+      whenOk && state.name && state.phone;
   }
 
   function bind() {
@@ -2954,17 +3068,40 @@
     wireSearch("pickup-street", "pickup-results", "pickup");
     wireSearch("drop-street", "drop-results", "drop");
     wireLocation();
+    var whenAsapBtn = document.getElementById("when-asap");
+    var whenSchedBtn = document.getElementById("when-schedule");
+    if (whenAsapBtn) {
+      whenAsapBtn.addEventListener("click", function () {
+        state.asap = false; /* temporarily so readForm keeps addresses without stamping */
+        if (document.getElementById("ride-form")) readForm();
+        state.asap = true;
+        stampAsapNow();
+        state.error = "";
+        render();
+      });
+    }
+    if (whenSchedBtn) {
+      whenSchedBtn.addEventListener("click", function () {
+        state.asap = false;
+        if (document.getElementById("ride-form")) readForm();
+        if (!state.date) state.date = chicagoParts(new Date()).date;
+        state.error = "";
+        render();
+      });
+    }
     var form = document.getElementById("ride-form");
     if (form) {
       form.addEventListener("submit", function (event) {
         event.preventDefault();
         readForm();
         if (!formComplete()) {
-          state.error = "Add pickup, drop-off, date, time, name, and phone.";
+          state.error = state.asap
+            ? "Add pickup, drop-off, name, and phone."
+            : "Add pickup, drop-off, date, time, name, and phone.";
           render();
           return;
         }
-        if (isPickupInPast(state.date, state.time)) {
+        if (!state.asap && isPickupInPast(state.date, state.time)) {
           state.error = "Pick a date and time that have not passed yet.";
           render();
           return;
