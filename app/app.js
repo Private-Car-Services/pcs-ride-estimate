@@ -279,6 +279,8 @@
     dropFix: null,
     pickupFromHere: false,
     loginError: "",
+    loginSetupEmail: "",
+    loginSetupDraft: "",
     gateStep: "",
     isTest: false,
     openRides: [],
@@ -3227,6 +3229,111 @@
     });
   }
 
+  /* ---- v46: roster-backed driver login (temporary, until Firebase Auth keys are set) ---- */
+  function rosterIdsForEmail(email) {
+    var e = String(email || "").trim().toLowerCase();
+    var a = e.replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 48);
+    var b = e.replace(/[^a-z0-9]/g, "_").replace(/^_+|_+$/g, "").slice(0, 48);
+    return a === b ? [a] : [a, b];
+  }
+
+  function fetchRosterByEmail(email) {
+    var ids = rosterIdsForEmail(email).filter(Boolean);
+    var e = String(email || "").trim().toLowerCase();
+    function next(i) {
+      if (i >= ids.length) return Promise.resolve(null);
+      return authFetch(rosterUrl(ids[i])).then(function (res) {
+        if (res.status === 404) return "";
+        if (!res.ok) throw new Error("roster");
+        return res.text();
+      }).then(function (text) {
+        var row = null;
+        if (text && text !== "null") { try { row = JSON.parse(text); } catch (err) { row = null; } }
+        if (row && typeof row === "object" && (!row.email || String(row.email).trim().toLowerCase() === e)) {
+          if (!row.email) row.email = e;
+          return { id: ids[i], row: row };
+        }
+        return next(i + 1);
+      });
+    }
+    return next(0);
+  }
+
+  function bytesToHex(buf) {
+    return Array.prototype.map.call(new Uint8Array(buf), function (b) {
+      return b.toString(16).padStart(2, "0");
+    }).join("");
+  }
+
+  function hexToBytes(hex) {
+    hex = String(hex || "");
+    var out = new Uint8Array(Math.floor(hex.length / 2));
+    for (var i = 0; i < out.length; i++) out[i] = parseInt(hex.substr(i * 2, 2), 16);
+    return out;
+  }
+
+  var ROSTER_PW_ITER = 100000;
+
+  function pbkdf2Hex(password, saltHex, iter) {
+    return crypto.subtle.importKey("raw", new TextEncoder().encode(password), "PBKDF2", false, ["deriveBits"]).then(function (key) {
+      return crypto.subtle.deriveBits({ name: "PBKDF2", hash: "SHA-256", salt: hexToBytes(saltHex), iterations: iter || ROSTER_PW_ITER }, key, 256);
+    }).then(bytesToHex);
+  }
+
+  function rosterPasswordOk(row, password) {
+    if (row && row.pwHash && row.pwSalt) {
+      return pbkdf2Hex(password, row.pwSalt, Number(row.pwIter) || ROSTER_PW_ITER).then(function (hex) { return hex === row.pwHash; });
+    }
+    if (row && row.passwordHash) {
+      return sha256Hex(password).then(function (hex) { return hex === row.passwordHash; });
+    }
+    return Promise.resolve(false);
+  }
+
+  function writeRosterPassword(id, password) {
+    /* Password fields only: never approvalStatus / active / commissionPct. Salted PBKDF2, never plain. */
+    var salt = new Uint8Array(16);
+    crypto.getRandomValues(salt);
+    var saltHex = bytesToHex(salt);
+    return pbkdf2Hex(password, saltHex, ROSTER_PW_ITER).then(function (hex) {
+      return authFetch(rosterUrl(id), {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ pwHash: hex, pwSalt: saltHex, pwIter: ROSTER_PW_ITER, pwAlgo: "pbkdf2-sha256", pwSetAt: Date.now() })
+      });
+    }).then(function (res) {
+      if (res && !res.ok) throw new Error("roster-pw");
+    });
+  }
+
+  function backfillRosterPassword(email, password) {
+    /* After a good on-phone login, store a salted hash on the roster row if none exists yet,
+       so the same driver can log in from the Home Screen app or another phone. */
+    if (ROLE !== "driver" || !syncOn()) return;
+    fetchRosterByEmail(email).then(function (found) {
+      if (!found || found.row.pwHash || found.row.passwordHash) return;
+      return writeRosterPassword(found.id, password);
+    }).catch(function () {});
+  }
+
+  function saveRosterAccountLocally(row, password, prev) {
+    return sha256Hex(password).then(function (hex) {
+      var email = String(row.email || "").trim().toLowerCase();
+      var keep = prev && String(prev.email || "").trim().toLowerCase() === email ? prev : {};
+      var account = Object.assign({}, keep, {
+        name: row.name || keep.name || "",
+        phone: row.phone || keep.phone || "",
+        email: email,
+        passwordHash: hex
+      });
+      ["carYear", "carMake", "carModel", "carPlate", "carSeats"].forEach(function (k) {
+        if (row[k] != null && row[k] !== "" && (account[k] == null || account[k] === "")) account[k] = row[k];
+      });
+      try { localStorage.setItem("pcs-driver-account", JSON.stringify(account)); } catch (err) {}
+      return account;
+    });
+  }
+
   function welcomeSrc(file) {
     return (ROLE === "driver" ? "../" : "") + file;
   }
@@ -3236,16 +3343,20 @@
       '<img class="welcome-logo" alt="Private Car Services" src="' + welcomeSrc(ROLE === "driver" ? "welcome-logo-driver.png" : "welcome-logo.png") + '">' +
       '<form id="login-form" autocomplete="off" novalidate>' +
       '<label for="login-email">Email</label>' +
-      '<input id="login-email" name="email" type="email" autocapitalize="none" autocomplete="email" spellcheck="false" required>' +
+      '<input id="login-email" name="email" type="email" autocapitalize="none" autocomplete="email" spellcheck="false" required value="' + esc(state.loginSetupDraft || "") + '">' +
       '<label for="login-pass">Password</label>' +
       '<input id="login-pass" name="password" type="password" autocomplete="current-password" required>' +
+      (state.loginSetupEmail
+        ? '<label for="login-confirm">Confirm password</label>' +
+          '<input id="login-confirm" name="confirm" type="password" autocomplete="new-password">'
+        : "") +
       '<p class="error" id="login-error" role="alert">' + esc(state.loginError || "") + "</p>" +
       '<p class="fine">' + (function () {
         var a = pcsAuth();
         if (a && a.hasConfig && a.hasConfig()) {
           return "Accounts use Firebase Auth (email + password).";
         }
-        return "Temporary login: uses the account saved on this phone until Firebase Auth keys are finished.";
+        return "Temporary login: uses the account saved on this phone, or your driver roster record, until Firebase Auth keys are finished.";
       })() + "</p>" +
       '<button class="btn" type="submit">Log in</button>' +
       "</form>" +
@@ -4225,32 +4336,90 @@
           maybeRestoreCustomerRide();
           render();
         }
+        function loginFail(msg) {
+          state.loginError = msg;
+          render();
+        }
         function tryLocalLogin() {
-          var account = accountForRole();
-          if (!account || (!account.email && !account.username) || !account.passwordHash) {
-            state.loginError = "No account on this phone yet. Create one first (or finish Firebase Auth keys).";
-            render();
-            return;
-          }
-          var emailMatches = account.email && loginEmail === String(account.email).trim().toLowerCase();
-          var legacyUsernameMatches = account.username && loginEmail === String(account.username).trim().toLowerCase();
-          if (!emailMatches && !legacyUsernameMatches) {
-            state.loginError = "That email or password does not match the account on this phone.";
-            render();
-            return;
-          }
           if (!window.crypto || !crypto.subtle) {
-            state.loginError = "This browser cannot check the password. Try Safari or Chrome.";
-            render();
+            loginFail("This browser cannot check the password. Try Safari or Chrome.");
+            return;
+          }
+          var account = accountForRole();
+          var hasLocal = !!(account && (account.email || account.username) && account.passwordHash);
+          var emailMatches = hasLocal && account.email && loginEmail === String(account.email).trim().toLowerCase();
+          var legacyUsernameMatches = hasLocal && account.username && loginEmail === String(account.username).trim().toLowerCase();
+          if (!hasLocal || (!emailMatches && !legacyUsernameMatches)) {
+            /* v46: account not in this app's storage (iOS Home Screen app has separate storage from
+               Safari, or another phone). Fall back to the driver roster record. */
+            tryRosterLogin(null);
             return;
           }
           sha256Hex(password).then(function (hex) {
             if (hex !== account.passwordHash) {
-              state.loginError = "That email or password does not match the account on this phone.";
-              render();
+              /* Password may have been set on another device: check the roster hash if one exists. */
+              tryRosterLogin(account);
               return;
             }
+            if (ROLE === "driver") backfillRosterPassword(loginEmail, password);
             afterLocalLogin(account);
+          });
+        }
+        function tryRosterLogin(localSame) {
+          var noAccountMsg = "No driver account found for that email. Tap Create an account first.";
+          var mismatchMsg = "That email or password does not match your driver account.";
+          if (ROLE !== "driver" || !syncOn()) {
+            loginFail(localSame ? "That email or password does not match the account on this phone." : "No account on this phone yet. Create one first (or finish Firebase Auth keys).");
+            return;
+          }
+          fetchRosterByEmail(loginEmail).then(function (found) {
+            if (!found) {
+              loginFail(localSame ? mismatchMsg : noAccountMsg);
+              return;
+            }
+            var row = found.row;
+            var hasHash = !!((row.pwHash && row.pwSalt) || row.passwordHash);
+            if (hasHash) {
+              return rosterPasswordOk(row, password).then(function (ok) {
+                if (!ok) {
+                  loginFail(mismatchMsg);
+                  return;
+                }
+                state.loginSetupEmail = "";
+                state.loginSetupDraft = "";
+                return saveRosterAccountLocally(row, password, localSame).then(afterLocalLogin);
+              });
+            }
+            if (localSame) {
+              /* Local account exists for this email; roster has no password to override it. */
+              loginFail(mismatchMsg);
+              return;
+            }
+            /* First login in this app for a roster driver with no password stored yet:
+               confirm the password, then save it on this phone + (salted) to the roster. */
+            if (password.length < 8) {
+              loginFail("Password must be at least 8 characters.");
+              return;
+            }
+            var confirmEl = document.getElementById("login-confirm");
+            var confirmPw = confirmEl ? confirmEl.value : "";
+            if (state.loginSetupEmail !== loginEmail || !confirmEl) {
+              state.loginSetupEmail = loginEmail;
+              state.loginSetupDraft = loginEmail;
+              loginFail("Found your driver account" + (row.name ? " (" + row.name + ")" : "") + ". Set your password for this app: type it in Password and again in Confirm password, then tap Log in.");
+              return;
+            }
+            if (confirmPw !== password) {
+              loginFail("Password and confirm password must match.");
+              return;
+            }
+            return writeRosterPassword(found.id, password).catch(function () {}).then(function () {
+              state.loginSetupEmail = "";
+              state.loginSetupDraft = "";
+              return saveRosterAccountLocally(row, password, null).then(afterLocalLogin);
+            });
+          }).catch(function () {
+            loginFail("Could not reach the driver roster. Check signal and try again.");
           });
         }
         if (!a || !a.hasConfig || !a.hasConfig()) {
