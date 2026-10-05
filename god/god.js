@@ -822,6 +822,11 @@
   }
 
   function putRosterRow(id, row) {
+    /* v46: keep the driver's roster login password (salted hash) when God mode rewrites the row. */
+    var prevRow = (state.roster && state.roster[id]) || {};
+    ["pwHash", "pwSalt", "pwIter", "pwAlgo", "pwSetAt"].forEach(function (k) {
+      if (row[k] == null && prevRow[k] != null) row[k] = prevRow[k];
+    });
     return fetch(rosterUrl(id), {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
