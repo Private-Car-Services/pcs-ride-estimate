@@ -7,6 +7,8 @@
   var OPEN_HUB = "REQUESTS";
   /* Roster + commission hub: 8-char ride-code alphabet (no I/O/0/1). DRVRCOMM has O — use DRVRCMMS. */
   var ROSTER_HUB = "DRVRCMMS";
+  /* Miles hub: 8-char alphabet (no I/O). DRVMILES contains I — use DRVRMILZ. */
+  var MILES_HUB = "DRVRMILZ";
   var DEFAULT_COMMISSION_PCT = 70;
   var SESSION_KEY = "pcs-god-session";
   /* Allowed owner email only. A real private password comes next — do not store one in this file. */
@@ -71,7 +73,9 @@
     hirePct: String(DEFAULT_COMMISSION_PCT),
     hireError: "",
     hireNotice: "",
-    actionNotice: ""
+    actionNotice: "",
+    miles: {},
+    milesError: ""
   };
 
   var map = null;
@@ -112,6 +116,71 @@
 
   function presenceDriverUrl(id) {
     return baseUrl() + "/rides/" + encodeURIComponent(PRESENCE_HUB) + "/drivers/" + encodeURIComponent(id) + ".json";
+  }
+
+  function milesUrl(driverId) {
+    var root = baseUrl() + "/rides/" + encodeURIComponent(MILES_HUB);
+    if (driverId) return root + "/" + encodeURIComponent(driverId) + ".json";
+    return root + ".json";
+  }
+
+  function chicagoToday() {
+    var parts = {};
+    new Intl.DateTimeFormat("en-US", {
+      timeZone: "America/Chicago",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit"
+    }).formatToParts(new Date()).forEach(function (part) {
+      if (part.type !== "literal") parts[part.type] = part.value;
+    });
+    return parts.year + "-" + parts.month + "-" + parts.day;
+  }
+
+  function carLabel(row) {
+    if (!row) return "";
+    return [row.carYear, row.carMake, row.carModel].filter(Boolean).join(" ");
+  }
+
+  function listDriverMiles(driverId) {
+    if (!driverId) return Promise.resolve({});
+    return fetch(milesUrl(driverId)).then(function (res) {
+      if (res.status === 401 || res.status === 403) {
+        var err = new Error("miles-denied");
+        err.denied = true;
+        throw err;
+      }
+      if (!res.ok) throw new Error("miles");
+      return res.text().then(function (text) {
+        if (!text || text === "null") return {};
+        try {
+          var data = JSON.parse(text);
+          return data && typeof data === "object" ? data : {};
+        } catch (e) {
+          return {};
+        }
+      });
+    });
+  }
+
+  function last14Days() {
+    var out = [];
+    var now = new Date();
+    var i;
+    for (i = 0; i < 14; i += 1) {
+      var d = new Date(now.getTime() - i * 86400000);
+      var parts = {};
+      new Intl.DateTimeFormat("en-US", {
+        timeZone: "America/Chicago",
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit"
+      }).formatToParts(d).forEach(function (part) {
+        if (part.type !== "literal") parts[part.type] = part.value;
+      });
+      out.push(parts.year + "-" + parts.month + "-" + parts.day);
+    }
+    return out;
   }
 
   function sanitizeDriverId(email) {
@@ -664,7 +733,30 @@
       });
     });
 
-    Promise.all([rosterP, driversP, ridesP]).then(function () {
+    var milesP = driversP.then(function () {
+      var ids = {};
+      Object.keys(state.roster || {}).forEach(function (id) { ids[id] = true; });
+      (state.drivers || []).forEach(function (d) { if (d && d.id) ids[d.id] = true; });
+      var list = Object.keys(ids);
+      return Promise.all(list.map(function (id) {
+        return listDriverMiles(id).then(function (days) {
+          return { id: id, days: days };
+        }).catch(function () {
+          return { id: id, days: state.miles[id] || {} };
+        });
+      })).then(function (rows) {
+        var next = {};
+        rows.forEach(function (row) {
+          if (row && row.id) next[row.id] = row.days || {};
+        });
+        state.miles = next;
+        state.milesError = "";
+      }).catch(function (err) {
+        state.milesError = err && err.denied ? "denied" : "error";
+      });
+    });
+
+    Promise.all([rosterP, driversP, ridesP, milesP]).then(function () {
       state.loading = false;
       state.lastRefreshAt = Date.now();
       renderBoardLists();
@@ -785,7 +877,8 @@
 
       var dName = shortName((driver && driver.name) || ride.driverName, "Driver");
       var rName = shortName(ride.name, "Rider");
-      var label = dName + " + " + rName;
+      var plateBit = (driver && driver.carPlate) || ride.driverCarPlate || "";
+      var label = dName + (plateBit ? " (" + String(plateBit) + ")" : "") + " + " + rName;
 
       var lat = null;
       var lng = null;
@@ -825,8 +918,12 @@
       if (matchDriverToRide(driver, rides)) return;
       if (!isCoord(driver.lat) || !isCoord(driver.lng)) return;
       var here = [+driver.lat, +driver.lng];
+      var freeLabel = shortName(driver.name, "Driver");
+      var freeCar = carLabel(driver);
+      if (freeCar) freeLabel += " · " + freeCar;
+      if (driver.carPlate) freeLabel += " · " + String(driver.carPlate);
       window.L.marker(here, {
-        icon: markerIcon("car", shortName(driver.name, "Driver")),
+        icon: markerIcon("car", freeLabel),
         zIndexOffset: 500
       }).addTo(markerLayer);
       bounds.push(here);
@@ -872,7 +969,12 @@
         lng: null,
         fromRoster: true,
         active: row.active !== false,
-        commissionPct: row.commissionPct
+        commissionPct: row.commissionPct,
+        carYear: row.carYear || "",
+        carMake: row.carMake || "",
+        carModel: row.carModel || "",
+        carPlate: row.carPlate || "",
+        carSeats: row.carSeats || ""
       };
     });
     (state.drivers || []).forEach(function (d) {
@@ -885,7 +987,12 @@
         email: d.email || "",
         fromRoster: false,
         active: true,
-        commissionPct: null
+        commissionPct: null,
+        carYear: "",
+        carMake: "",
+        carModel: "",
+        carPlate: "",
+        carSeats: ""
       };
       prev.online = true;
       prev.at = d.at || prev.at;
@@ -893,6 +1000,13 @@
       prev.lng = d.lng;
       if (d.name) prev.name = d.name;
       if (d.phone) prev.phone = d.phone;
+      if (d.carYear) prev.carYear = d.carYear;
+      if (d.carMake) prev.carMake = d.carMake;
+      if (d.carModel) prev.carModel = d.carModel;
+      if (d.carPlate) prev.carPlate = d.carPlate;
+      if (d.carSeats) prev.carSeats = d.carSeats;
+      if (d.gpsMilesToday != null) prev.gpsMilesToday = d.gpsMilesToday;
+      if (d.startOdometer != null) prev.startOdometer = d.startOdometer;
       if (!prev.active && prev.fromRoster) {
         /* Fired: do not treat as online in the panel. */
         prev.online = false;
@@ -967,6 +1081,22 @@
         var contact = [];
         if (d.phone) contact.push(esc(d.phone));
         if (d.email) contact.push(esc(d.email));
+        var car = carLabel(d);
+        var plate = d.carPlate ? String(d.carPlate) : "";
+        var day = chicagoToday();
+        var mileDays = (state.miles && state.miles[d.id]) || {};
+        var todayMiles = mileDays[day] || {};
+        var startOdo = todayMiles.startOdometer != null ? todayMiles.startOdometer : d.startOdometer;
+        var gpsToday = todayMiles.gpsMiles != null ? todayMiles.gpsMiles : d.gpsMilesToday;
+        var hist = last14Days().map(function (ymd) {
+          var row = mileDays[ymd];
+          if (!row) return null;
+          var gps = row.gpsMiles != null ? Number(row.gpsMiles).toFixed(1) : "0.0";
+          var start = row.startOdometer != null ? String(row.startOdometer) : "—";
+          var end = row.endOdometer != null ? String(row.endOdometer) : "—";
+          return "<li><strong>" + esc(ymd) + "</strong> start " + esc(start) +
+            " · GPS " + esc(gps) + " mi · end " + esc(end) + "</li>";
+        }).filter(Boolean);
         var cardClass = "card";
         if (trip) cardClass += " paired";
         if (!d.active) cardClass += " fired";
@@ -975,11 +1105,21 @@
             "<h3>" + esc(displayName(d.name, "Driver")) + badge + "</h3>" +
             '<p class="meta">' +
             (contact.length ? contact.join(" · ") + "<br>" : "") +
+            (car || plate
+              ? "<strong>Car</strong> " + esc(car || "—") +
+                (plate ? " · Plate " + esc(plate) : "") +
+                (d.carSeats ? " · " + esc(String(d.carSeats)) + " seats" : "") + "<br>"
+              : "") +
             "<strong>Last seen</strong> " + esc(fmtClock(d.at)) + "<br>" +
             "<strong>Map</strong> " + esc(where) + "<br>" +
+            "<strong>Today start odo</strong> " + esc(startOdo != null ? String(startOdo) : "—") + "<br>" +
+            "<strong>GPS miles today</strong> " + esc(gpsToday != null ? Number(gpsToday).toFixed(1) + " mi" : "—") + "<br>" +
             "<strong>Revenue</strong> " + esc(rev.label) +
             (trip ? "<br><strong>With</strong> " + esc(displayName(trip.name, "Rider")) : "") +
             "</p>" +
+            (hist.length
+              ? '<details class="miles-history"><summary>Last 14 days</summary><ul>' + hist.join("") + "</ul></details>"
+              : '<p class="fine">No mileage days saved yet.</p>') +
             '<div class="commission-row">' +
               '<label class="commission-label" for="comm-' + esc(d.id) + '">Commission %</label>' +
               '<input class="commission-input" id="comm-' + esc(d.id) + '" data-driver-id="' + esc(d.id) + '" type="number" min="0" max="100" step="1" value="' + esc(String(pct)) + '"' + (d.active ? "" : " disabled") + ">" +

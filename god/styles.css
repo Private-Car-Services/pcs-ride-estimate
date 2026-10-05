@@ -492,3 +492,24 @@ button, input {
 .badge.off {
   opacity: 0.85;
 }
+
+.miles-history {
+  margin: 8px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.miles-history summary {
+  cursor: pointer;
+  color: var(--gold-2);
+  font-weight: 700;
+}
+
+.miles-history ul {
+  margin: 8px 0 0;
+  padding-left: 18px;
+}
+
+.miles-history li {
+  margin: 4px 0;
+}
