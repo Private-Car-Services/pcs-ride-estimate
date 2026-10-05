@@ -1,4 +1,4 @@
-/* Private Car Services — PCS God mode (Matthew only). Local preview. Do not publish. */
+/* Private Car Services — PCS God mode (Matthew only). v24: stay signed in + tap driver to locate. */
 (function () {
   "use strict";
 
@@ -11,7 +11,10 @@
   var MILES_HUB = "DRVRMLES";
   var HISTORY_HUB = "DRVRHSTY"; /* completed ride logs; 8-char no I/O */
   var DEFAULT_COMMISSION_PCT = 70;
-  var SESSION_KEY = "pcs-god-session";
+  var SESSION_KEY = "pcs-god-session"; /* legacy pre-v24 key — cleared, never trusted */
+  /* v24: owner sign-in survives iOS app switching (localStorage) until Sign out. */
+  var KEEP_KEY = "pcs-god-keep-v1";
+  var FOCUS_ZOOM = 15;
   /* Allowed owner email only. A real private password comes next — do not store one in this file. */
   var OWNER_EMAIL = "mwragge78@gmail.com";
   var ONLINE_MS = 2 * 60 * 1000;
@@ -82,7 +85,9 @@
     selectedDriverId: "",
     driverDetailDay: "",
     pendingAlertCodes: {},
-    pendingBanner: ""
+    pendingBanner: "",
+    focusDriverId: "",
+    focusNote: ""
   };
 
   var map = null;
@@ -90,6 +95,8 @@
   var routeLayer = null;
   var pollTimer = null;
   var mapReady = false;
+  var driverMarkers = {}; /* driverId -> Leaflet marker (rebuilt every syncMap) */
+  var focusFlyPending = false; /* animate once on tap; later polls just follow */
 
   function esc(s) {
     return String(s == null ? "" : s)
@@ -304,42 +311,77 @@
     return String(raw || "").trim().toLowerCase();
   }
 
-  function sessionStore() {
-    try { return window.sessionStorage; } catch (err) { return null; }
+  function storeOf(kind) {
+    try { return kind === "local" ? window.localStorage : window.sessionStorage; } catch (err) { return null; }
   }
 
-  function readSession() {
-    try {
-      var store = sessionStore();
-      if (!store) return null;
-      var raw = store.getItem(SESSION_KEY);
-      if (!raw) return null;
-      var data = JSON.parse(raw);
-      if (!data || normalizeEmail(data.email) !== OWNER_EMAIL) return null;
-      if (!data.authOk) return null;
-      return data;
-    } catch (err) {
-      return null;
+  /* Session tag is bound to the current password hash + owner email.
+     Changing the God password (new hash in god-auth.js) invalidates every kept sign-in. */
+  function keepTag(email) {
+    var h = expectedGodHash();
+    if (!h || !window.crypto || !window.crypto.subtle) return Promise.resolve("");
+    return sha256Hex("pcs-god-keep|" + h + "|" + normalizeEmail(email));
+  }
+
+  function readKeepRaw() {
+    var kinds = ["local", "session"];
+    for (var i = 0; i < kinds.length; i += 1) {
+      try {
+        var store = storeOf(kinds[i]);
+        if (!store) continue;
+        var raw = store.getItem(KEEP_KEY);
+        if (!raw) continue;
+        var data = JSON.parse(raw);
+        if (!data || normalizeEmail(data.email) !== OWNER_EMAIL) continue;
+        if (!/^[a-f0-9]{64}$/.test(String(data.tag || ""))) continue;
+        return data;
+      } catch (err) {}
     }
+    return null;
+  }
+
+  /* Resolves to the owner email when a kept sign-in is valid for the current hash, else "". */
+  function restoreSession() {
+    var data = readKeepRaw();
+    if (!data) return Promise.resolve("");
+    return keepTag(data.email).then(function (tag) {
+      if (tag && tag === data.tag) return OWNER_EMAIL;
+      clearSession();
+      return "";
+    }).catch(function () { return ""; });
   }
 
   function writeSession(email) {
-    try {
-      var store = sessionStore();
-      if (!store) return;
-      store.setItem(SESSION_KEY, JSON.stringify({
-        email: normalizeEmail(email),
-        authOk: true,
-        at: Date.now()
-      }));
-    } catch (err) {}
+    return keepTag(email).then(function (tag) {
+      if (!tag) return;
+      var payload = JSON.stringify({ email: normalizeEmail(email), tag: tag, at: Date.now() });
+      ["local", "session"].forEach(function (kind) {
+        try {
+          var store = storeOf(kind);
+          if (store) store.setItem(KEEP_KEY, payload);
+        } catch (err) {}
+      });
+    }).catch(function () {});
   }
 
+  function clearLegacySession() {
+    ["local", "session"].forEach(function (kind) {
+      try {
+        var store = storeOf(kind);
+        if (store) store.removeItem(SESSION_KEY);
+      } catch (err) {}
+    });
+  }
+
+  /* Only called from Sign out (or when a kept tag no longer matches the hash). */
   function clearSession() {
-    try {
-      var store = sessionStore();
-      if (store) store.removeItem(SESSION_KEY);
-    } catch (err) {}
+    ["local", "session"].forEach(function (kind) {
+      try {
+        var store = storeOf(kind);
+        if (store) store.removeItem(KEEP_KEY);
+      } catch (err) {}
+    });
+    clearLegacySession();
   }
 
   function sha256Hex(text) {
@@ -454,11 +496,12 @@
         state.loginError = "Wrong email or password.";
         return false;
       }
-      writeSession(e);
-      state.sessionEmail = e;
-      state.screen = "board";
-      state.loginError = "";
-      return true;
+      return writeSession(e).then(function () {
+        state.sessionEmail = e;
+        state.screen = "board";
+        state.loginError = "";
+        return true;
+      });
     }).catch(function () {
       state.loginError = "Could not verify password.";
       return false;
@@ -483,6 +526,8 @@
     state.hireError = "";
     state.hireNotice = "";
     state.actionNotice = "";
+    state.focusDriverId = "";
+    state.focusNote = "";
     stopPoll();
     tearMap();
     render();
@@ -1178,6 +1223,7 @@
     markerLayer = null;
     routeLayer = null;
     mapReady = false;
+    driverMarkers = {};
   }
 
   function ensureMap() {
@@ -1221,9 +1267,9 @@
     }
   }
 
-  function markerIcon(kind, label) {
+  function markerIcon(kind, label, focused) {
     var svg = kind === "car" ? CAR_SVG : kind === "paired" ? PAIRED_SVG : PERSON_SVG;
-    var cls = "god-marker" + (kind === "paired" ? " paired" : "");
+    var cls = "god-marker" + (kind === "paired" ? " paired" : "") + (focused ? " focused" : "");
     return window.L.divIcon({
       className: "god-pin",
       html:
@@ -1236,10 +1282,112 @@
     });
   }
 
+  /* Where a driver is on the map right now (presence lat/lng, else on-trip ride driverLat/Lng). */
+  function focusTarget(driverId) {
+    if (!driverId) return null;
+    var drivers = state.drivers || [];
+    var d = null;
+    for (var i = 0; i < drivers.length; i += 1) {
+      if (drivers[i] && drivers[i].id === driverId) { d = drivers[i]; break; }
+    }
+    if (!d) return null;
+    if (isCoord(d.lat) && isCoord(d.lng)) {
+      return { latlng: [+d.lat, +d.lng], name: displayName(d.name, "Driver") };
+    }
+    var ride = matchDriverToRide(d, state.rides || []);
+    if (ride && isCoord(ride.driverLat) && isCoord(ride.driverLng)) {
+      return { latlng: [+ride.driverLat, +ride.driverLng], name: displayName(d.name, "Driver") };
+    }
+    return null;
+  }
+
+  function driverNameById(driverId) {
+    var rows = knownDriverRows();
+    for (var i = 0; i < rows.length; i += 1) {
+      if (rows[i].id === driverId) return displayName(rows[i].name, "Driver");
+    }
+    return "That driver";
+  }
+
+  function bindMarkerFocus(marker, driverId) {
+    marker.on("click", function () { focusDriver(driverId); });
+  }
+
+  function setFocusBar() {
+    var bar = document.getElementById("map-focus-bar");
+    if (!bar) return;
+    var label = document.getElementById("map-focus-label");
+    if (state.focusDriverId) {
+      bar.hidden = false;
+      if (label) label.textContent = "Following " + driverNameById(state.focusDriverId);
+    } else if (state.focusNote) {
+      bar.hidden = false;
+      if (label) label.textContent = state.focusNote;
+    } else {
+      bar.hidden = true;
+    }
+    var allBtn = document.getElementById("map-show-all");
+    if (allBtn) allBtn.hidden = !state.focusDriverId;
+  }
+
+  function flashFocusNote(msg) {
+    state.focusNote = msg;
+    setFocusBar();
+    setTimeout(function () {
+      if (state.focusNote === msg) {
+        state.focusNote = "";
+        setFocusBar();
+      }
+    }, 4500);
+  }
+
+  function scrollMapIntoViewIfStacked() {
+    var pane = document.querySelector(".map-pane");
+    if (!pane || !pane.getBoundingClientRect) return;
+    var r = pane.getBoundingClientRect();
+    var vh = window.innerHeight || document.documentElement.clientHeight || 0;
+    /* Only scroll when the map is essentially off-screen (stacked phone layout scrolled down/up). */
+    if (r.bottom < 120 || r.top > vh - 120) {
+      try { pane.scrollIntoView({ behavior: "smooth", block: "start" }); } catch (e) { pane.scrollIntoView(); }
+    }
+  }
+
+  /* Tap a driver name / Locate → pan + zoom the map to them and keep following on refresh. */
+  function focusDriver(driverId) {
+    if (!driverId) return;
+    var target = focusTarget(driverId);
+    if (!target) {
+      state.focusDriverId = "";
+      focusFlyPending = false;
+      flashFocusNote(driverNameById(driverId) + " is not sharing a location right now (offline or GPS off).");
+      return;
+    }
+    state.focusDriverId = driverId;
+    state.focusNote = "";
+    focusFlyPending = true;
+    setFocusBar();
+    scrollMapIntoViewIfStacked();
+    if (ensureMap()) {
+      setTimeout(function () { if (map) map.invalidateSize(); }, 50);
+      syncMap();
+    }
+    renderBoardLists();
+  }
+
+  function clearFocus() {
+    state.focusDriverId = "";
+    state.focusNote = "";
+    focusFlyPending = false;
+    setFocusBar();
+    syncMap();
+    renderBoardLists();
+  }
+
   function syncMap() {
     if (!ensureMap()) return;
     markerLayer.clearLayers();
     routeLayer.clearLayers();
+    driverMarkers = {};
 
     var bounds = [];
     var drivers = state.drivers || [];
@@ -1276,10 +1424,15 @@
         lng = +ride.pickupLng;
       }
       if (lat != null) {
-        window.L.marker([lat, lng], {
-          icon: markerIcon("paired", label),
-          zIndexOffset: 700
+        var pairedFocused = !!(driver && state.focusDriverId && driver.id === state.focusDriverId);
+        var pairedMarker = window.L.marker([lat, lng], {
+          icon: markerIcon("paired", label, pairedFocused),
+          zIndexOffset: pairedFocused ? 1000 : 700
         }).addTo(markerLayer);
+        if (driver && driver.id) {
+          driverMarkers[driver.id] = pairedMarker;
+          bindMarkerFocus(pairedMarker, driver.id);
+        }
         bounds.push([lat, lng]);
       }
 
@@ -1305,10 +1458,15 @@
       var freeCar = carLabel(driver);
       if (freeCar) freeLabel += " · " + freeCar;
       if (driver.carPlate) freeLabel += " · " + String(driver.carPlate);
-      window.L.marker(here, {
-        icon: markerIcon("car", freeLabel),
-        zIndexOffset: 500
+      var freeFocused = !!(state.focusDriverId && driver.id === state.focusDriverId);
+      var freeMarker = window.L.marker(here, {
+        icon: markerIcon("car", freeLabel, freeFocused),
+        zIndexOffset: freeFocused ? 1000 : 500
       }).addTo(markerLayer);
+      if (driver.id) {
+        driverMarkers[driver.id] = freeMarker;
+        bindMarkerFocus(freeMarker, driver.id);
+      }
       bounds.push(here);
     });
 
@@ -1324,7 +1482,29 @@
       bounds.push(here);
     });
 
-    if (bounds.length >= 2) {
+    var focused = state.focusDriverId ? focusTarget(state.focusDriverId) : null;
+    if (state.focusDriverId && focused && focused.latlng) {
+      /* Follow the tapped driver; do not snap back to the whole-board view on each 5s poll. */
+      var z = Math.max(map.getZoom() || 0, FOCUS_ZOOM);
+      if (focusFlyPending && map.flyTo) {
+        focusFlyPending = false;
+        map.flyTo(focused.latlng, z, { duration: 0.8 });
+      } else {
+        map.setView(focused.latlng, map.getZoom() >= 12 ? map.getZoom() : z, { animate: false });
+      }
+    } else if (state.focusDriverId && !focused) {
+      /* Driver went offline or stopped sharing — fall back to the full board. */
+      state.focusDriverId = "";
+      focusFlyPending = false;
+      flashFocusNote("That driver is no longer sharing a location. Showing everyone.");
+      if (bounds.length >= 2) {
+        map.fitBounds(window.L.latLngBounds(bounds), { padding: [40, 40], maxZoom: 13 });
+      } else if (bounds.length === 1) {
+        map.setView(bounds[0], 12);
+      } else {
+        map.setView([BOARD_CENTER.lat, BOARD_CENTER.lng], 11);
+      }
+    } else if (bounds.length >= 2) {
       map.fitBounds(window.L.latLngBounds(bounds), { padding: [40, 40], maxZoom: 13 });
     } else if (bounds.length === 1) {
       map.setView(bounds[0], 12);
@@ -1559,9 +1739,21 @@
         var cardClass = "card";
         if (trip) cardClass += " paired";
         if (!d.active) cardClass += " fired";
+        if (state.focusDriverId && state.focusDriverId === d.id) cardClass += " focused";
+        var canLocate = d.online && !!focusTarget(d.id);
+        var nameHtml =
+          '<button type="button" class="driver-name-btn btn-locate-driver' + (canLocate ? "" : " no-loc") + '" data-driver-id="' + esc(d.id) + '"' +
+          ' title="' + (canLocate ? "Show on map" : "No live location") + '">' +
+          esc(displayName(d.name, "Driver")) + "</button>";
+        var locateBtn = d.online
+          ? '<button type="button" class="btn btn-ghost btn-locate btn-locate-driver" data-driver-id="' + esc(d.id) + '"' +
+            (canLocate ? "" : ' aria-disabled="true"') + ">" +
+            (canLocate ? "&#128205; Locate on map" : "No live location") + "</button>"
+          : "";
         return (
           '<article class="' + cardClass + '" data-driver-id="' + esc(d.id) + '">' +
-            "<h3>" + esc(displayName(d.name, "Driver")) + badge + "</h3>" +
+            "<h3>" + nameHtml + badge + "</h3>" +
+            locateBtn +
             '<p class="meta">' +
             (contact.length ? contact.join(" · ") + "<br>" : "") +
             (car || plate
@@ -1600,6 +1792,17 @@
     }
     parts.push('<p class="action-notice" id="drivers-action-notice">' + esc(state.actionNotice) + "</p>");
     return parts.join("");
+  }
+
+  function rideDriverNameHtml(ride) {
+    var drivers = state.drivers || [];
+    for (var i = 0; i < drivers.length; i += 1) {
+      if (matchDriverToRide(drivers[i], [ride]) && focusTarget(drivers[i].id)) {
+        return '<button type="button" class="driver-name-btn btn-locate-driver" data-driver-id="' + esc(drivers[i].id) + '" title="Show on map">' +
+          esc(ride.driverName) + "</button>";
+      }
+    }
+    return esc(ride.driverName);
   }
 
   function ridesPanelHtml() {
@@ -1645,7 +1848,7 @@
           "<strong>Pickup</strong> " + esc([r.pickupStreet, r.pickupCity, r.pickupState].filter(Boolean).join(", ") || "—") + "<br>" +
           "<strong>Drop-off</strong> " + esc([r.dropStreet, r.dropCity, r.dropState].filter(Boolean).join(", ") || "—") +
           (r.phone ? "<br><strong>Phone</strong> " + esc(r.phone) : "") +
-          (active && r.driverName ? "<br><strong>Driver</strong> " + esc(r.driverName) : "") +
+          (active && r.driverName ? "<br><strong>Driver</strong> " + rideDriverNameHtml(r) : "") +
           "</p>" +
           actions +
         "</article>"
@@ -1661,6 +1864,21 @@
     if (r) r.innerHTML = ridesPanelHtml();
     bindDriverActions();
     bindBookingActions();
+    bindLocateActions();
+    setFocusBar();
+  }
+
+  function bindLocateActions() {
+    ["drivers-list", "rides-list"].forEach(function (listId) {
+      var list = document.getElementById(listId);
+      if (!list) return;
+      Array.prototype.forEach.call(list.querySelectorAll(".btn-locate-driver"), function (btn) {
+        btn.addEventListener("click", function (ev) {
+          ev.preventDefault();
+          focusDriver(btn.getAttribute("data-driver-id"));
+        });
+      });
+    });
   }
 
   function bindBookingActions() {
@@ -1749,7 +1967,11 @@
           "</aside>" +
           '<div class="map-pane">' +
             '<div id="god-map" role="presentation"></div>' +
-            '<p class="map-hint">Car = free driver · Person = requesting rider · Car+person = on a trip (route highlighted)</p>' +
+            '<div class="map-focus-bar" id="map-focus-bar" hidden>' +
+              '<span id="map-focus-label"></span>' +
+              '<button type="button" class="btn btn-ghost" id="map-show-all" hidden>Show everyone</button>' +
+            "</div>" +
+            '<p class="map-hint">Car = free driver · Person = requesting rider · Car+person = on a trip (route highlighted) · Tap a driver name to find them</p>' +
           "</div>" +
         "</div>" +
       "</div>"
@@ -1944,8 +2166,13 @@
     if (out) {
       out.addEventListener("click", function () { logout(); });
     }
+    var showAll = document.getElementById("map-show-all");
+    if (showAll) {
+      showAll.addEventListener("click", function () { clearFocus(); });
+    }
     bindHireForm();
     bindDriverActions();
+    bindLocateActions();
   }
 
   function render() {
@@ -1962,20 +2189,32 @@
     bind();
     ensureMap();
     syncMap();
+    setFocusBar();
   }
 
   function boot() {
-    try { localStorage.removeItem(SESSION_KEY); } catch (e) {} /* drop pre-hash sessions */
-    var session = readSession();
-    if (session && session.email) {
-      state.sessionEmail = normalizeEmail(session.email);
-      state.screen = "board";
-      render();
-      startPoll();
-      return;
-    }
+    clearLegacySession(); /* drop pre-v24 sessionStorage/localStorage authOk junk */
     state.screen = "login";
-    render();
+    restoreSession().then(function (email) {
+      if (email) {
+        state.sessionEmail = email;
+        state.screen = "board";
+        render();
+        startPoll();
+        return;
+      }
+      render();
+    });
+
+    /* Coming back from another app (iOS PWA): refresh immediately instead of showing stale data. */
+    document.addEventListener("visibilitychange", function () {
+      if (document.visibilityState !== "visible" || state.screen !== "board") return;
+      if (map) setTimeout(function () { if (map) map.invalidateSize(); }, 60);
+      startPoll();
+    });
+    window.addEventListener("pageshow", function (ev) {
+      if (ev && ev.persisted && state.screen === "board") startPoll();
+    });
   }
 
   if (document.readyState === "loading") {

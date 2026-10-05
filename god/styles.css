@@ -533,3 +533,93 @@ button, input {
   font-weight: 700;
 }
 .btn-approve { margin-left: 4px; }
+
+/* —— v24: tap driver name → locate on map —— */
+.driver-name-btn {
+  appearance: none;
+  background: none;
+  border: 0;
+  padding: 0;
+  margin: 0;
+  font: inherit;
+  font-weight: 700;
+  color: var(--gold-2);
+  text-decoration: underline;
+  text-decoration-color: rgba(212, 177, 90, 0.45);
+  text-underline-offset: 3px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.driver-name-btn.no-loc {
+  color: var(--ink);
+  text-decoration: none;
+}
+
+.card .meta .driver-name-btn {
+  font-size: inherit;
+}
+
+.btn.btn-locate {
+  display: inline-block;
+  margin: 2px 0 8px;
+  padding: 6px 10px;
+  font-size: 12px;
+}
+
+.btn.btn-locate[aria-disabled="true"] {
+  opacity: 0.55;
+}
+
+.card.focused {
+  border-color: var(--gold);
+  box-shadow: 0 0 0 2px rgba(240, 212, 138, 0.55);
+}
+
+.god-marker.focused .face {
+  border-radius: 50%;
+  box-shadow: 0 0 0 4px rgba(240, 212, 138, 0.9), 0 0 18px 6px rgba(240, 212, 138, 0.55);
+}
+
+.god-marker.focused .name-tag {
+  border-color: var(--gold);
+  color: var(--ink);
+  background: rgba(25, 56, 25, 0.98);
+}
+
+.map-focus-bar {
+  position: absolute;
+  z-index: 600;
+  top: 10px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  max-width: calc(100% - 70px);
+  padding: 6px 8px 6px 12px;
+  border-radius: 999px;
+  background: rgba(15, 40, 16, 0.94);
+  border: 1px solid var(--gold);
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.map-focus-bar[hidden],
+.map-focus-bar [hidden] {
+  display: none;
+}
+
+#map-focus-label {
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.map-focus-bar .btn {
+  padding: 5px 10px;
+  font-size: 12px;
+  white-space: nowrap;
+}
