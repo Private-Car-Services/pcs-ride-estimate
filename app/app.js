@@ -789,8 +789,9 @@
       lastUpdate: now
     };
     if (row.startOdometer == null || !isFinite(Number(row.startOdometer))) return;
-    /* Closed shift (ending miles logged): do not add until a new opening odo. */
-    if (row.shiftClosed || (row.endOdometer != null && isFinite(Number(row.endOdometer)))) return;
+    /* Ignore a leftover endOdometer from an earlier logout so beta miles still count. */
+    if (row.endOdometer != null) delete row.endOdometer;
+    if (row.shiftClosed) delete row.shiftClosed;
     row.gpsMiles = Math.round(((Number(row.gpsMiles) || 0) + dist) * 100) / 100;
     row.lastUpdate = now;
     if (!row.startedAt) row.startedAt = now;
