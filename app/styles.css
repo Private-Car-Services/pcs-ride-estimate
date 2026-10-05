@@ -780,3 +780,27 @@ a.btn + .btn, .btn + a.btn, a.btn + a.btn { margin-top: 8px; }
   font-weight: 700;
   font-size: 15px;
 }
+
+
+/* Driver home hub + payment testing */
+.app-nav .home-btn {
+  color: var(--gold-2);
+  border-color: rgba(240, 212, 138, 0.45);
+  font-weight: 700;
+}
+.hub-stats .money-row,
+.hub-week { margin-top: 8px; }
+.hub-day-btn {
+  display: block;
+  width: 100%;
+  margin: 0 0 8px;
+  text-align: left;
+}
+.hub-week-nav {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 8px;
+}
+.payment-card .btn.ghost { margin-top: 8px; }
+.approval-gate { border-color: rgba(240, 212, 138, 0.55); }

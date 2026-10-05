@@ -21,3 +21,10 @@ A secure backend (Cloud Function, Cloud Run, etc.) that:
 5. Voids the auth if you choose not to charge.
 
 Do **not** put Square secret keys in `config.js`, GitHub Pages, or this repo.
+
+
+## Testing (no live Square charge yet)
+- Payment UI is shown on request / waiting / completed screens.
+- With `localStorage.PCS_TEST_SKIP_PAY` unset or `true` (default), **Skip for testing** appears and payment is not required.
+- Set `PCS_TEST_SKIP_PAY=false` later to hide the skip when real holds go live.
+- Driver start PIN: ride PIN still shown to rider; **0001** is always accepted as an alternate test start PIN.

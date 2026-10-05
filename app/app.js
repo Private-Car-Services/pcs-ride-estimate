@@ -47,6 +47,9 @@
   var PRESENCE_HUB = "AVLBLDRV";
   var OPEN_HUB = "REQUESTS";
   var MILES_HUB = "DRVRMILZ"; /* 8-char hub (no I/O); not DRVMILES */
+  var ROSTER_HUB = "DRVRCMMS"; /* hire / approve / commission */
+  var HISTORY_HUB = "DRVRHSTY"; /* completed ride history per driver */
+  var TEST_START_PIN = "0001"; /* always accepted as alternate start PIN */
   var lastDriverPatchAt = 0;
   var lastDriverPatchLat = null;
   var lastDriverPatchLng = null;
@@ -117,7 +120,15 @@
     openListStamp: "",
     onlineDrivers: [],
     onlineStamp: "",
-    boardMarkers: null
+    boardMarkers: null,
+    hubOpen: false,
+    hubView: "menu",
+    hubDay: "",
+    commHidden: false,
+    paymentSkipped: false,
+    rosterStatus: "",
+    rosterPct: Math.round(DRIVER_COMMISSION_RATE * 100),
+    dayRequested: 0
   };
 
   var rafId = 0;
@@ -380,7 +391,33 @@
   function canGoOnline() {
     if (ROLE !== "driver" || !signedIn()) return false;
     if (driverMidRide()) return true;
-    return hasCompleteCar(readDriverAccount()) && !state.milesNeedStart;
+    return hasCompleteCar(readDriverAccount()) && !state.milesNeedStart && isDriverApproved();
+  }
+
+  function isDriverApproved() {
+    if (!syncOn()) return true;
+    if (state.rosterStatus === "approved") return true;
+    /* Legacy hired rows with active:true and no approvalStatus count as approved. */
+    return false;
+  }
+
+  function approvalGateCard() {
+    if (ROLE !== "driver" || !signedIn() || driverMidRide()) return "";
+    if (!syncOn()) return "";
+    if (isDriverApproved()) return "";
+    var st = state.rosterStatus || "pending";
+    var title = st === "rejected" ? "Application rejected" : (st === "fired" ? "Account inactive" : "Waiting for approval");
+    var body = st === "rejected"
+      ? "Matthew declined this driver account. You cannot go online or accept rides."
+      : (st === "fired"
+        ? "This driver account was fired. Contact Private Car Services to be rehired."
+        : "Your sign-up is pending. Matthew must Approve you in God mode before you can see open rides or go online.");
+    return (
+      '<div class="card approval-gate">' +
+      '<p class="tag">' + esc(title) + "</p>" +
+      '<p class="lede">' + esc(body) + "</p>" +
+      '<p class="fine">Status: ' + esc(st || "pending") + "</p></div>"
+    );
   }
 
   function trackDailyMiles(pos) {
@@ -432,7 +469,7 @@
       '<div class="card vehicle-needed">' +
       '<p class="tag">Car details required</p>' +
       '<p class="lede">Add your car year, make, model, plate, seats, and a front-right photo before going online.</p>' +
-      '<a class="btn" href="signup/?v=20">Complete vehicle profile</a>' +
+      '<a class="btn" href="signup/?v=21">Complete vehicle profile</a>' +
       "</div>"
     );
   }
@@ -485,11 +522,12 @@
 
 
   function commissionLine() {
-    var rate = DRIVER_COMMISSION_RATE;
+    var pct = state.rosterPct != null ? Number(state.rosterPct) : Math.round(DRIVER_COMMISSION_RATE * 100);
+    if (!isFinite(pct)) pct = Math.round(DRIVER_COMMISSION_RATE * 100);
+    var rate = pct / 100;
     if (rate == null || typeof rate !== "number" || rate < 0 || rate > 1) {
       return '<p class="fine">Commission: rate not set yet</p>';
     }
-    var pct = Math.round(rate * 100);
     var est = estimate();
     if (!est.ready) {
       return '<p class="fine">Your commission is ' + pct + '% of the fare before tax and fees. Estimate only · not a payout.</p>';
@@ -880,14 +918,35 @@
     return Math.max(pct, floor);
   }
 
+  function testSkipPayEnabled() {
+    try {
+      var v = localStorage.getItem("PCS_TEST_SKIP_PAY");
+      if (v === "false" || v === "0") return false;
+      /* Default on until live Square charges exist. */
+      return true;
+    } catch (err) {
+      return true;
+    }
+  }
+
   function paymentHoldCopy() {
+    var testing = testSkipPayEnabled();
+    var skipped = !!state.paymentSkipped;
+    var skipBlock = "";
+    if (testing) {
+      skipBlock = skipped
+        ? '<p class="fine" id="pay-skip-status">Testing: payment skipped — no charge.</p>'
+        : ('<button class="btn ghost" type="button" id="skip-pay-btn">Skip for testing</button>' +
+          '<p class="fine">Testing only · payment not required · no real Square charge.</p>');
+    }
     return (
-      '<div class="card">' +
-      '<p class="tag">Card on file · charged after the ride</p>' +
+      '<div class="card payment-card">' +
+      '<p class="tag">Payment' + (testing ? " · testing" : "") + "</p>" +
       '<p class="lede">Add your card before the ride. You are not charged until after drop-off, so you can add a tip.</p>' +
-      '<p class="fine">A real card hold uses Square on a secure server or Square payment link. This starter never stores a card number or Square secret.</p>' +
+      '<p class="fine">A real card hold uses Square on a secure server. This screen never stores a card number or Square secret.</p>' +
       '<button class="btn secondary" type="button" id="square-hold-btn">Continue to Square (card setup)</button>' +
       '<p class="fine" id="square-hold-help"></p>' +
+      skipBlock +
       "</div>"
     );
   }
@@ -944,6 +1003,7 @@
     }
     state.rideStatus = "completed";
     syncActiveTripFare({ status: "completed" });
+    try { appendCompletedRideLog(); } catch (logErr) {}
     var code = state.driverCode || state.code || readDriverCode();
     if (syncOn() && code) deleteOpenRide(code).catch(function () {});
     state.screen = "trip";
@@ -1496,6 +1556,13 @@
     return String(raw || "").replace(/\D/g, "").slice(0, 4);
   }
 
+  function pinAccepted(entered) {
+    var e = normalizeStoredPin(entered);
+    if (!e || e.length !== 4) return false;
+    if (e === TEST_START_PIN) return true;
+    return e === normalizeStoredPin(state.pin);
+  }
+
   function rideUrl(code) {
     return databaseURL() + "/rides/" + encodeURIComponent(code) + ".json";
   }
@@ -1561,6 +1628,217 @@
     var id = String(session).toLowerCase().replace(/[^a-z0-9]/g, "_").replace(/^_+|_+$/g, "");
     return (id || "driver").slice(0, 48);
   }
+
+  function rosterUrl(id) {
+    var base = databaseURL() + "/rides/" + encodeURIComponent(ROSTER_HUB);
+    if (id) return base + "/" + encodeURIComponent(id) + ".json";
+    return base + ".json";
+  }
+
+  function historyUrl(driverId, rideCode) {
+    var base = databaseURL() + "/rides/" + encodeURIComponent(HISTORY_HUB) + "/" + encodeURIComponent(driverId);
+    if (rideCode) return base + "/" + encodeURIComponent(rideCode) + ".json";
+    return base + ".json";
+  }
+
+  function applyRosterRow(row) {
+    if (!row || typeof row !== "object") {
+      state.rosterStatus = syncOn() ? "pending" : "approved";
+      return;
+    }
+    if (row.commissionPct != null && isFinite(+row.commissionPct)) {
+      state.rosterPct = Math.round(+row.commissionPct);
+      DRIVER_COMMISSION_RATE = state.rosterPct / 100;
+    }
+    var approval = String(row.approvalStatus || "").toLowerCase();
+    if (approval === "pending") state.rosterStatus = "pending";
+    else if (approval === "rejected") state.rosterStatus = "rejected";
+    else if (row.active === false) state.rosterStatus = "fired";
+    else state.rosterStatus = "approved";
+  }
+
+  function refreshRosterStatus() {
+    if (ROLE !== "driver" || !signedIn() || !syncOn()) {
+      if (!syncOn()) state.rosterStatus = "approved";
+      return Promise.resolve();
+    }
+    return fetch(rosterUrl(driverPresenceId())).then(function (res) {
+      if (res.status === 404) {
+        applyRosterRow(null);
+        return null;
+      }
+      if (!res.ok) throw new Error("roster");
+      return res.text().then(function (text) {
+        if (!text || text === "null") {
+          applyRosterRow(null);
+          return null;
+        }
+        try { return JSON.parse(text); } catch (e) { return null; }
+      });
+    }).then(function (row) {
+      if (row !== undefined) applyRosterRow(row);
+    }).catch(function () {});
+  }
+
+  function publishPendingSignup(account) {
+    if (!syncOn() || !account || !account.email) return Promise.resolve();
+    var id = String(account.email).toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 48);
+    if (!id) return Promise.resolve();
+    return fetch(rosterUrl(id)).then(function (res) {
+      return res.text().then(function (text) {
+        var existing = null;
+        if (text && text !== "null") {
+          try { existing = JSON.parse(text); } catch (e) { existing = null; }
+        }
+        if (existing && existing.active === true) return existing;
+        if (existing && String(existing.approvalStatus || "").toLowerCase() === "approved") return existing;
+        var row = {
+          name: account.name || "",
+          phone: account.phone || "",
+          email: String(account.email || "").toLowerCase(),
+          commissionPct: (existing && existing.commissionPct != null) ? existing.commissionPct : Math.round(DRIVER_COMMISSION_RATE * 100),
+          active: false,
+          approvalStatus: "pending",
+          signedUpAt: (existing && existing.signedUpAt) || Date.now(),
+          updatedAt: Date.now(),
+          carYear: account.carYear || "",
+          carMake: account.carMake || "",
+          carModel: account.carModel || "",
+          carPlate: normalizePlate(account.carPlate),
+          carSeats: account.carSeats || ""
+        };
+        return fetch(rosterUrl(id), {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(row)
+        }).then(function () { return row; });
+      });
+    }).catch(function () {});
+  }
+
+  function rideLogStorageKey() {
+    return "pcs-driver-ride-log-" + driverPresenceId();
+  }
+
+  function dayStatStorageKey(day) {
+    return "pcs-driver-day-stats-" + driverPresenceId() + "-" + (day || chicagoToday());
+  }
+
+  function readRideLog() {
+    try {
+      var raw = localStorage.getItem(rideLogStorageKey());
+      var list = raw ? JSON.parse(raw) : [];
+      return Array.isArray(list) ? list : [];
+    } catch (err) {
+      return [];
+    }
+  }
+
+  function writeRideLog(list) {
+    try {
+      localStorage.setItem(rideLogStorageKey(), JSON.stringify(list.slice(0, 500)));
+    } catch (err) {}
+  }
+
+  function readDayStats(day) {
+    try {
+      var raw = localStorage.getItem(dayStatStorageKey(day));
+      var row = raw ? JSON.parse(raw) : null;
+      if (!row || typeof row !== "object") return { requested: 0, completed: 0, commissionCents: 0, rideTotalCents: 0 };
+      return {
+        requested: Number(row.requested) || 0,
+        completed: Number(row.completed) || 0,
+        commissionCents: Number(row.commissionCents) || 0,
+        rideTotalCents: Number(row.rideTotalCents) || 0
+      };
+    } catch (err) {
+      return { requested: 0, completed: 0, commissionCents: 0, rideTotalCents: 0 };
+    }
+  }
+
+  function writeDayStats(day, row) {
+    try {
+      localStorage.setItem(dayStatStorageKey(day), JSON.stringify(row));
+    } catch (err) {}
+  }
+
+  function bumpDayRequested() {
+    var day = chicagoToday();
+    var row = readDayStats(day);
+    row.requested += 1;
+    writeDayStats(day, row);
+    state.dayRequested = row.requested;
+  }
+
+  function mondayOfWeek(ymd) {
+    var parts = String(ymd || chicagoToday()).split("-");
+    var y = Number(parts[0]);
+    var m = Number(parts[1]);
+    var d = Number(parts[2]);
+    if (!isFinite(y) || !isFinite(m) || !isFinite(d)) return chicagoToday();
+    var dt = new Date(y, m - 1, d);
+    var dow = dt.getDay();
+    var offset = dow === 0 ? -6 : 1 - dow;
+    dt.setDate(dt.getDate() + offset);
+    return dt.getFullYear() + "-" + String(dt.getMonth() + 1).padStart(2, "0") + "-" + String(dt.getDate()).padStart(2, "0");
+  }
+
+  function addDaysYmd(ymd, n) {
+    var parts = String(ymd).split("-");
+    var dt = new Date(Number(parts[0]), Number(parts[1]) - 1, Number(parts[2]));
+    dt.setDate(dt.getDate() + n);
+    return dt.getFullYear() + "-" + String(dt.getMonth() + 1).padStart(2, "0") + "-" + String(dt.getDate()).padStart(2, "0");
+  }
+
+  function ridesForDay(day) {
+    return readRideLog().filter(function (e) { return e && e.day === day; });
+  }
+
+  function appendCompletedRideLog() {
+    var snap = fareSnapshot();
+    var pct = state.rosterPct != null ? Number(state.rosterPct) : Math.round(DRIVER_COMMISSION_RATE * 100);
+    if (!isFinite(pct)) pct = 70;
+    var fareSub = snap ? Number(snap.fareSub) || 0 : 0;
+    var fareTotal = snap ? Number(snap.fareTotal) || 0 : 0;
+    var base = fareSub - EXTRA_FEE;
+    if (base < 0) base = 0;
+    var commissionCents = Math.round(base * (pct / 100));
+    var day = chicagoToday();
+    var code = state.driverCode || state.code || readDriverCode() || ("LOCAL" + Date.now());
+    var entry = {
+      code: code,
+      day: day,
+      completedAt: Date.now(),
+      when: prettyWhen(),
+      pickup: pickupLine(),
+      drop: dropLine(),
+      rawMiles: snap ? snap.rawMiles : null,
+      billedMiles: snap ? snap.billedMiles : null,
+      fareSub: fareSub,
+      fareTax: snap ? snap.fareTax : 0,
+      fareTotal: fareTotal,
+      commissionPct: pct,
+      commissionCents: commissionCents,
+      riderName: state.name || ""
+    };
+    var list = readRideLog().filter(function (e) { return !e || e.code !== code; });
+    list.unshift(entry);
+    writeRideLog(list);
+    var stats = readDayStats(day);
+    stats.completed += 1;
+    stats.commissionCents += commissionCents;
+    stats.rideTotalCents += fareTotal;
+    writeDayStats(day, stats);
+    if (syncOn()) {
+      fetch(historyUrl(driverPresenceId(), code), {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(entry)
+      }).catch(function () {});
+    }
+    return entry;
+  }
+
 
   function refusalUrl(id) {
     return databaseURL() + "/refusals/" + encodeURIComponent(id) + ".json";
@@ -1870,7 +2148,7 @@
   }
 
   function driverProfileLink() {
-    return '<a class="nav-link" href="signup/?v=20">Profile</a>';
+    return '<a class="nav-link" href="signup/?v=21">Profile</a>';
   }
 
   function selectedOpenRide() {
@@ -2137,7 +2415,7 @@
       '<p class="error" id="login-error" role="alert">' + esc(state.loginError || "") + "</p>" +
       '<button class="btn" type="submit">Log in</button>' +
       "</form>" +
-      '<a class="btn secondary" href="signup/?v=20">Create an account</a>'
+      '<a class="btn secondary" href="signup/?v=21">Create an account</a>'
     );
   }
 
@@ -2146,7 +2424,14 @@
   }
 
   function accountNav() {
-    return '<div class="app-nav">' + driverProfileLink() + logoutLine() + "</div>";
+    if (ROLE === "driver") {
+      return (
+        '<div class="app-nav">' +
+        '<button class="btn ghost home-btn" type="button" id="open-hub" aria-label="Home menu">Home</button>' +
+        "</div>"
+      );
+    }
+    return '<div class="app-nav">' + logoutLine() + "</div>";
   }
 
   function customerHome() {
@@ -2380,8 +2665,13 @@
       customerMapBlock(caption, driver) +
       moneyCard() +
       (completed
-        ? '<div class="card"><p class="tag">Pay after the ride</p>' +
-          '<p class="lede">Your card on file is charged after drop-off so you can add a tip. Nothing is charged on this starter screen.</p></div>'
+        ? '<div class="card payment-card"><p class="tag">Pay after the ride' + (testSkipPayEnabled() ? " · testing" : "") + "</p>" +
+          '<p class="lede">Your card on file is charged after drop-off so you can add a tip.</p>' +
+          (state.paymentSkipped || testSkipPayEnabled()
+            ? '<p class="fine">Testing: no real Square charge on this screen.</p>' +
+              (state.paymentSkipped ? "" : '<button class="btn ghost" type="button" id="skip-pay-btn">Skip for testing</button>')
+            : '<button class="btn secondary" type="button" id="square-hold-btn">Continue to Square</button>') +
+          "</div>"
         : "") +
       (state.rideStatus === "accepted"
         ? '<div class="card">' +
@@ -2635,6 +2925,114 @@
     return incoming;
   }
 
+  function driverHubMenu() {
+    return (
+      '<button class="btn ghost" type="button" id="close-hub">← Back to map</button>' +
+      "<h2>Home</h2>" +
+      '<p class="lede">Keep the map clean. Open today\'s numbers, history, or profile here.</p>' +
+      '<button class="btn" type="button" id="hub-today">Today</button>' +
+      '<button class="btn secondary" type="button" id="hub-history">Earnings & history</button>' +
+      '<a class="btn secondary" href="signup/?v=21">Profile</a>' +
+      logoutLine()
+    );
+  }
+
+  function driverHubToday() {
+    var day = chicagoToday();
+    var stats = readDayStats(day);
+    var comm = state.commHidden ? "••••" : money(stats.commissionCents);
+    return (
+      '<button class="btn ghost" type="button" id="hub-back-menu">← Home menu</button>' +
+      "<h2>Today</h2>" +
+      '<p class="fine">' + esc(day) + " · Chicago · pay week Mon–Sun</p>" +
+      '<div class="card hub-stats">' +
+      '<div class="money-row"><span>Rides requested</span><span>' + esc(String(stats.requested)) + "</span></div>" +
+      '<div class="money-row"><span>Rides completed</span><span>' + esc(String(stats.completed)) + "</span></div>" +
+      '<div class="money-row"><span>Daily commission</span><span id="hub-comm-value">' + comm + "</span></div>" +
+      '<button class="btn ghost" type="button" id="toggle-comm-hide">' +
+      (state.commHidden ? "Show commission" : "Hide commission") +
+      "</button>" +
+      '<p class="fine">Hide when a client is in the car.</p>' +
+      "</div>"
+    );
+  }
+
+  function driverHubHistory() {
+    var today = chicagoToday();
+    var monday = mondayOfWeek(state.hubDay || today);
+    var days = [];
+    var i;
+    for (i = 0; i < 7; i += 1) days.push(addDaysYmd(monday, i));
+    var weekTotalComm = 0;
+    var weekTotalRide = 0;
+    var cards = days.map(function (d) {
+      var stats = readDayStats(d);
+      var rides = ridesForDay(d);
+      weekTotalComm += stats.commissionCents;
+      weekTotalRide += stats.rideTotalCents;
+      var label = d === today ? d + " · today" : d;
+      return (
+        '<button class="btn secondary hub-day-btn" type="button" data-hub-day="' + esc(d) + '">' +
+        esc(label) + " · " + rides.length + " rides · " + money(stats.commissionCents) +
+        "</button>"
+      );
+    }).join("");
+    return (
+      '<button class="btn ghost" type="button" id="hub-back-menu">← Home menu</button>' +
+      "<h2>Earnings & history</h2>" +
+      '<p class="lede">Pay week ' + esc(monday) + " → " + esc(addDaysYmd(monday, 6)) + " (Mon–Sun)</p>" +
+      '<div class="card">' +
+      '<div class="money-row"><span>Week ride total</span><span>' + money(weekTotalRide) + "</span></div>" +
+      '<div class="money-row"><span>Week commission</span><span>' + money(weekTotalComm) + "</span></div>" +
+      "</div>" +
+      '<div class="hub-week">' + cards + "</div>" +
+      '<div class="row hub-week-nav">' +
+      '<button class="btn ghost" type="button" id="hub-week-prev">← Prev week</button>' +
+      '<button class="btn ghost" type="button" id="hub-week-next">Next week →</button>' +
+      "</div>"
+    );
+  }
+
+  function driverHubDay() {
+    var day = state.hubDay || chicagoToday();
+    var rides = ridesForDay(day);
+    var stats = readDayStats(day);
+    var list;
+    if (!rides.length) {
+      list = '<p class="fine">No completed rides logged this day.</p>';
+    } else {
+      list = rides.map(function (r) {
+        return (
+          '<article class="card">' +
+          "<p class=\"tag\">" + esc(r.code || "Ride") + "</p>" +
+          "<p><strong>" + esc(r.riderName || "Rider") + "</strong></p>" +
+          "<p class=\"fine\">" + esc(r.pickup || "") + " → " + esc(r.drop || "") + "</p>" +
+          '<div class="money-row"><span>Ride total</span><span>' + money(r.fareTotal || 0) + "</span></div>" +
+          '<div class="money-row"><span>Commission (' + esc(String(r.commissionPct || "")) + "%)</span><span>" +
+          money(r.commissionCents || 0) + "</span></div>" +
+          (r.billedMiles != null ? '<p class="fine">' + esc(String(r.billedMiles)) + " billed mi</p>" : "") +
+          "</article>"
+        );
+      }).join("");
+    }
+    return (
+      '<button class="btn ghost" type="button" id="hub-back-history">← Week</button>' +
+      "<h2>" + esc(day) + "</h2>" +
+      '<div class="card">' +
+      '<div class="money-row"><span>Ride total</span><span>' + money(stats.rideTotalCents) + "</span></div>" +
+      '<div class="money-row"><span>Commission total</span><span>' + money(stats.commissionCents) + "</span></div>" +
+      '<div class="money-row"><span>Completed</span><span>' + esc(String(stats.completed)) + "</span></div>" +
+      "</div>" + list
+    );
+  }
+
+  function driverHub() {
+    if (state.hubView === "today") return driverHubToday();
+    if (state.hubView === "history") return driverHubHistory();
+    if (state.hubView === "day") return driverHubDay();
+    return driverHubMenu();
+  }
+
   function driverHome() {
     if (state.milesEndPrompt) {
       return (
@@ -2642,10 +3040,12 @@
         milesEndCard()
       );
     }
+    if (state.hubOpen) return driverHub();
     var gated = !canGoOnline();
     return (
       accountNav() +
       '<p class="fine" id="miles-today">' + esc(milesTodayLabel()) + "</p>" +
+      approvalGateCard() +
       vehicleNeededCard() +
       milesStartCard() +
       (gated
@@ -2704,6 +3104,7 @@
         esc(state.pinDraft || "") + '">' +
         '<p class="error" id="pin-error" role="alert">' + esc(state.pinError || "") + "</p>" +
         '<button class="btn" type="submit">Start ride</button>' +
+        '<p class="fine">Testing: PIN 0001 also starts any ride.</p>' +
         "</form></div>"
       );
     }
@@ -2769,7 +3170,7 @@
   }
 
   function render() {
-    var stayOnBoard = ROLE === "driver" && state.screen === "home" && signedIn();
+    var stayOnBoard = ROLE === "driver" && state.screen === "home" && signedIn() && !state.hubOpen;
     var keptBoard = null;
     if (stayOnBoard && boardMapStillMounted()) {
       keptBoard = document.querySelector(".map-stage.board-map");
@@ -2824,7 +3225,7 @@
       startCustomerMap();
       ensureCustomerCoords();
       refreshOnlineDrivers();
-    } else if (ROLE === "driver" && state.screen === "home") {
+    } else if (ROLE === "driver" && state.screen === "home" && !state.hubOpen) {
       startDriverBoardMap();
     } else if (ROLE === "driver" && state.screen === "trip") {
       startMap();
@@ -2938,10 +3339,14 @@
           if (ROLE === "driver") {
             ensureMilesDayReady();
             followGps();
-            if (canGoOnline()) {
-              refreshOpenRides(true);
-              publishDriverPresence();
-            }
+            refreshRosterStatus().then(function () {
+              if (canGoOnline()) {
+                refreshOpenRides(true);
+                publishDriverPresence();
+              }
+              render();
+            });
+            return;
           } else {
             maybeRestoreCustomerRide();
           }
@@ -3116,6 +3521,7 @@
           state.pin = makeRidePin();
           state.pinDraft = "";
           state.pinError = "";
+          state.paymentSkipped = false;
           geocodeMissing().then(function () {
             saveRide("requested", { clearDriver: true });
             var created = currentRide();
@@ -3182,7 +3588,7 @@
           render();
           return;
         }
-        if (entered !== normalizeStoredPin(state.pin)) {
+        if (!pinAccepted(entered)) {
           state.pinError = "That PIN does not match. Ask the rider again.";
           render();
           return;
@@ -3243,6 +3649,91 @@
         openSquareCardSetup();
       });
     }
+    var skipPay = document.getElementById("skip-pay-btn");
+    if (skipPay) {
+      skipPay.addEventListener("click", function () {
+        state.paymentSkipped = true;
+        try { localStorage.setItem("PCS_TEST_SKIP_PAY", "true"); } catch (e) {}
+        render();
+      });
+    }
+    var openHub = document.getElementById("open-hub");
+    if (openHub) {
+      openHub.addEventListener("click", function () {
+        state.hubOpen = true;
+        state.hubView = "menu";
+        render();
+      });
+    }
+    var closeHub = document.getElementById("close-hub");
+    if (closeHub) {
+      closeHub.addEventListener("click", function () {
+        state.hubOpen = false;
+        state.hubView = "menu";
+        render();
+      });
+    }
+    var hubToday = document.getElementById("hub-today");
+    if (hubToday) {
+      hubToday.addEventListener("click", function () {
+        state.hubView = "today";
+        render();
+      });
+    }
+    var hubHistory = document.getElementById("hub-history");
+    if (hubHistory) {
+      hubHistory.addEventListener("click", function () {
+        state.hubView = "history";
+        state.hubDay = mondayOfWeek(chicagoToday());
+        render();
+      });
+    }
+    var hubBackMenu = document.getElementById("hub-back-menu");
+    if (hubBackMenu) {
+      hubBackMenu.addEventListener("click", function () {
+        state.hubView = "menu";
+        render();
+      });
+    }
+    var hubBackHistory = document.getElementById("hub-back-history");
+    if (hubBackHistory) {
+      hubBackHistory.addEventListener("click", function () {
+        state.hubView = "history";
+        render();
+      });
+    }
+    var toggleComm = document.getElementById("toggle-comm-hide");
+    if (toggleComm) {
+      toggleComm.addEventListener("click", function () {
+        state.commHidden = !state.commHidden;
+        render();
+      });
+    }
+    var hubWeekPrev = document.getElementById("hub-week-prev");
+    if (hubWeekPrev) {
+      hubWeekPrev.addEventListener("click", function () {
+        var mon = mondayOfWeek(state.hubDay || chicagoToday());
+        state.hubDay = addDaysYmd(mon, -7);
+        state.hubView = "history";
+        render();
+      });
+    }
+    var hubWeekNext = document.getElementById("hub-week-next");
+    if (hubWeekNext) {
+      hubWeekNext.addEventListener("click", function () {
+        var mon = mondayOfWeek(state.hubDay || chicagoToday());
+        state.hubDay = addDaysYmd(mon, 7);
+        state.hubView = "history";
+        render();
+      });
+    }
+    Array.prototype.forEach.call(document.querySelectorAll("[data-hub-day]"), function (btn) {
+      btn.addEventListener("click", function () {
+        state.hubDay = btn.getAttribute("data-hub-day") || chicagoToday();
+        state.hubView = "day";
+        render();
+      });
+    });
     var preview = document.getElementById("preview-only");
     if (preview) preview.addEventListener("click", openPreview);
   }
@@ -3439,6 +3930,11 @@
 
   function acceptSelectedOpenRide() {
     if (!state.selectedOpenCode && !state.code) return;
+    if (!isDriverApproved()) {
+      state.openListError = "pending-approval";
+      render();
+      return;
+    }
     var account = readDriverAccount();
     if (account && account.name) state.driverName = account.name;
     if (account && account.phone) state.driverPhone = account.phone;
@@ -3458,6 +3954,7 @@
       writeDriverCode(code);
     }
     saveRide("accepted");
+    try { bumpDayRequested(); } catch (e) {}
     if (syncOn() && code) {
       var patch = { status: "accepted" };
       if (state.driverName) patch.driverName = state.driverName;
@@ -3860,10 +4357,13 @@
     if (ROLE === "driver" && signedIn()) {
       ensureMilesDayReady();
       followGps();
-      if (canGoOnline()) {
-        refreshOpenRides(true);
-        publishDriverPresence();
-      }
+      refreshRosterStatus().then(function () {
+        if (canGoOnline()) {
+          refreshOpenRides(true);
+          publishDriverPresence();
+        }
+        render();
+      });
     }
     window.addEventListener("storage", function (event) {
       if (event.key !== STORE) return;
@@ -3874,11 +4374,19 @@
     }, 1000);
     setInterval(pullRemoteRide, 3000);
     setInterval(function () {
-      if (ROLE === "driver" && signedIn() && state.screen === "home") refreshOpenRides();
+      if (ROLE === "driver" && signedIn() && state.screen === "home" && canGoOnline() && !state.hubOpen) refreshOpenRides();
     }, 3000);
     setInterval(function () {
       if (ROLE === "driver" && signedIn()) publishDriverPresence();
     }, 20000);
+    setInterval(function () {
+      if (ROLE === "driver" && signedIn()) {
+        var prev = state.rosterStatus;
+        refreshRosterStatus().then(function () {
+          if (state.rosterStatus !== prev) render();
+        });
+      }
+    }, 15000);
     setInterval(function () {
       if (ROLE === "customer" && signedIn()) refreshOnlineDrivers();
     }, 5000);
