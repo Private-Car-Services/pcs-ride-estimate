@@ -432,7 +432,7 @@
       '<div class="card vehicle-needed">' +
       '<p class="tag">Car details required</p>' +
       '<p class="lede">Add your car year, make, model, plate, seats, and a front-right photo before going online.</p>' +
-      '<a class="btn" href="signup/">Complete vehicle profile</a>' +
+      '<a class="btn" href="signup/?v=20">Complete vehicle profile</a>' +
       "</div>"
     );
   }
@@ -1870,7 +1870,7 @@
   }
 
   function driverProfileLink() {
-    return '<a class="nav-link" href="signup/">Profile</a>';
+    return '<a class="nav-link" href="signup/?v=20">Profile</a>';
   }
 
   function selectedOpenRide() {
@@ -2137,7 +2137,7 @@
       '<p class="error" id="login-error" role="alert">' + esc(state.loginError || "") + "</p>" +
       '<button class="btn" type="submit">Log in</button>' +
       "</form>" +
-      '<a class="btn secondary" href="signup/">Create an account</a>'
+      '<a class="btn secondary" href="signup/?v=20">Create an account</a>'
     );
   }
 
