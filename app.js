@@ -5,7 +5,10 @@
 (function () {
   'use strict';
 
+  // Business line shown to customers on the page.
   const PHONE = '9362617878';
+  // Lead SMS recipients only (not shown in page copy). Personal second.
+  const LEAD_SMS_NUMBERS = ['9362617878', '9365227347'];
   const RATES = {
     localBase: 11,
     extraPassenger: 5,
@@ -306,8 +309,14 @@
   }
 
   function smsUrl(body) {
-    const separator = isAppleSmsDevice() ? '&' : '?';
-    return 'sms:9362617878' + separator + 'body=' + encodeURIComponent(body);
+    const encoded = encodeURIComponent(body);
+    const joined = LEAD_SMS_NUMBERS.join(',');
+    // iOS: undocumented multi-recipient form. Android: RFC comma list + ?body=.
+    // Customer Messages To: will list both; page copy still shows business only.
+    if (isAppleSmsDevice()) {
+      return 'sms:/open?addresses=' + joined + '&body=' + encoded;
+    }
+    return 'sms:' + joined + '?body=' + encoded;
   }
 
   function needsFlightDetails() {
