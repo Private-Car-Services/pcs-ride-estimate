@@ -3,6 +3,9 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+  <meta http-equiv="Pragma" content="no-cache">
+  <meta http-equiv="Expires" content="0">
   <meta name="theme-color" content="#0b1c33">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="mobile-web-app-capable" content="yes">
@@ -11,7 +14,7 @@
   <link rel="icon" href="../../icon-driver.png">
   <link rel="manifest" href="manifest.webmanifest">
   <title>PCS Driver</title>
-  <link rel="stylesheet" href="../../styles.css?v=19">
+  <link rel="stylesheet" href="../../styles.css?v=20">
 </head>
 <body>
   <div class="phone">
@@ -86,6 +89,7 @@
         </div>
         <p class="fine">Required. Take a photo or choose one from your library.</p>
 
+        <p class="fine" id="form-version">Form v20</p>
         <p class="error" id="form-error" role="alert"></p>
         <button class="btn" type="submit">Save account</button>
       </form>
@@ -580,6 +584,11 @@
         btn.type = "submit";
         btn.textContent = "Update profile";
         updateForm.appendChild(btn);
+        var formVer = document.createElement("p");
+        formVer.className = "fine";
+        formVer.id = "form-version";
+        formVer.textContent = "Form v20";
+        updateForm.appendChild(formVer);
         main.appendChild(updateForm);
 
         var link = document.createElement("a");
