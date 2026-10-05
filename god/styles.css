@@ -623,3 +623,161 @@ button, input {
   font-size: 12px;
   white-space: nowrap;
 }
+
+/* —— Scheduled rides / day board (TV wall) —— */
+.day-board {
+  margin: 0 18px 14px;
+  padding: 18px 18px 12px;
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: linear-gradient(180deg, rgba(35, 77, 35, 0.92), rgba(15, 40, 16, 0.96));
+  box-shadow: 0 12px 28px rgba(0, 0, 0, 0.28);
+}
+
+.day-board h2 {
+  margin: 0 0 8px;
+  font-family: Georgia, "Palatino Linotype", Palatino, serif;
+  font-size: clamp(28px, 3.2vw, 42px);
+  font-weight: 500;
+  color: var(--gold-2);
+}
+
+.day-board-hint {
+  margin: 0 0 14px;
+  color: var(--muted);
+  font-size: clamp(14px, 1.35vw, 18px);
+  line-height: 1.45;
+  max-width: 1100px;
+}
+
+.day-board-hint code {
+  color: var(--gold-2);
+  font-size: 0.95em;
+}
+
+.board-notice {
+  margin: 0 0 12px;
+  color: var(--gold-2);
+  font-size: clamp(15px, 1.5vw, 20px);
+  font-weight: 700;
+}
+
+.day-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 14px;
+}
+
+.day-card {
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  padding: 16px 16px 14px;
+  background: rgba(6, 20, 8, 0.55);
+  min-height: 180px;
+}
+
+.day-card.status-assigned {
+  border-color: rgba(240, 212, 138, 0.65);
+  box-shadow: inset 0 0 0 1px rgba(240, 212, 138, 0.18);
+}
+
+.day-card.status-completed {
+  opacity: 0.78;
+}
+
+.day-card-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.day-time {
+  margin: 0;
+  color: var(--gold);
+  font-size: clamp(18px, 2vw, 26px);
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.day-rider {
+  margin: 0 0 10px;
+  font-size: clamp(22px, 2.4vw, 32px);
+  font-weight: 600;
+  line-height: 1.15;
+}
+
+.day-line {
+  margin: 0 0 8px;
+  font-size: clamp(16px, 1.6vw, 22px);
+  line-height: 1.35;
+  color: var(--ink);
+}
+
+.day-line span {
+  display: inline-block;
+  min-width: 5.5em;
+  color: var(--gold-2);
+  font-size: 0.78em;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  font-weight: 700;
+}
+
+.day-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin-top: 12px;
+}
+
+.day-assign,
+.day-fare {
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid var(--line);
+  background: rgba(6, 20, 8, 0.65);
+  color: var(--ink);
+  font-size: 15px;
+  min-width: 160px;
+}
+
+.day-fare {
+  min-width: 110px;
+  width: 120px;
+}
+
+.fare-label {
+  width: 100%;
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.btn-assign-ride,
+.btn-complete-ride {
+  font-size: 14px;
+  padding: 10px 14px;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+@media (min-width: 1200px) {
+  .day-grid {
+    grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  }
+}

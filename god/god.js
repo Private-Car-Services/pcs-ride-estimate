@@ -1,4 +1,4 @@
-/* Private Car Services — PCS God mode (Matthew only). v24: stay signed in + tap driver to locate. */
+/* Private Car Services — PCS God mode (Matthew only). v25/v45: day board from PCS calendar + assign/commission. */
 (function () {
   "use strict";
 
@@ -10,6 +10,7 @@
   /* Miles hub: 8-char alphabet (no I/O). DRVRMILZ wrongly contained I — use DRVRMLES. */
   var MILES_HUB = "DRVRMLES";
   var HISTORY_HUB = "DRVRHSTY"; /* completed ride logs; 8-char no I/O */
+  var CALENDAR_HUB = "PCSCALND"; /* scheduled PCS calendar rides for day board */
   var DEFAULT_COMMISSION_PCT = 70;
   var SESSION_KEY = "pcs-god-session"; /* legacy pre-v24 key — cleared, never trusted */
   /* v24: owner sign-in survives iOS app switching (localStorage) until Sign out. */
@@ -87,7 +88,13 @@
     pendingAlertCodes: {},
     pendingBanner: "",
     focusDriverId: "",
-    focusNote: ""
+    focusNote: "",
+    calendar: [],
+    calendarError: "",
+    calendarUpdated: "",
+    assignDrafts: {},
+    fareDrafts: {},
+    boardNotice: ""
   };
 
   var map = null;
@@ -137,6 +144,234 @@
     if (driverId) return root + "/" + encodeURIComponent(driverId) + ".json";
     return root + ".json";
   }
+
+  function calendarUrl(eventId) {
+    var root = baseUrl() + "/rides/" + encodeURIComponent(CALENDAR_HUB);
+    if (eventId) return root + "/" + encodeURIComponent(eventId) + ".json";
+    return root + ".json";
+  }
+
+  function riderFromPcsTitle(title) {
+    var t = String(title || "").trim();
+    t = t.replace(/^pcs\b[\s\u2013\u2014\-:|]*/i, "").trim();
+    return t || "Scheduled rider";
+  }
+
+  function dropoffFromNotes(notes) {
+    var text = String(notes || "").replace(/\r/g, "");
+    var lines = text.split("\n");
+    var i;
+    for (i = 0; i < lines.length; i += 1) {
+      var line = String(lines[i] || "").trim();
+      var m = line.match(/^(?:drop[\s-]?off|to)\s*:\s*(.+)$/i);
+      if (m && m[1]) return String(m[1]).trim();
+    }
+    return text.trim();
+  }
+
+  function normalizeCalendarRow(id, raw) {
+    if (!raw || typeof raw !== "object") return null;
+    var title = String(raw.title || raw.summary || "").trim();
+    return {
+      id: String(raw.id || id || ""),
+      title: title,
+      rider: String(raw.rider || riderFromPcsTitle(title)),
+      pickup: String(raw.pickup || raw.location || ""),
+      dropoff: String(raw.dropoff || dropoffFromNotes(raw.description || raw.notes || "")),
+      start: String(raw.start || ""),
+      end: String(raw.end || ""),
+      description: String(raw.description || raw.notes || ""),
+      assignedDriverId: String(raw.assignedDriverId || ""),
+      assignedDriverName: String(raw.assignedDriverName || ""),
+      status: String(raw.status || "open").toLowerCase(),
+      code: String(raw.code || ""),
+      fareBeforeTax: raw.fareBeforeTax != null ? Number(raw.fareBeforeTax) : null,
+      commissionCents: raw.commissionCents != null ? Number(raw.commissionCents) : null,
+      completedAt: raw.completedAt || null
+    };
+  }
+
+  function listCalendarRides() {
+    return fetch(calendarUrl()).then(function (res) {
+      if (res.status === 401 || res.status === 403) {
+        var err = new Error("calendar-denied");
+        err.denied = true;
+        throw err;
+      }
+      if (!res.ok) throw new Error("calendar");
+      return res.text().then(function (text) {
+        if (!text || text === "null") return [];
+        try {
+          var data = JSON.parse(text);
+          if (!data || typeof data !== "object") return [];
+          return Object.keys(data).map(function (id) {
+            return normalizeCalendarRow(id, data[id]);
+          }).filter(Boolean);
+        } catch (e) {
+          return [];
+        }
+      });
+    });
+  }
+
+  function putCalendarRide(row) {
+    if (!row || !row.id) return Promise.reject(new Error("calendar-id"));
+    return fetch(calendarUrl(row.id), {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(row)
+    }).then(function (res) {
+      if (!res.ok) throw new Error("calendar-put");
+      return res.text().then(function () { return row; });
+    });
+  }
+
+  function fmtBoardWhen(iso) {
+    if (!iso) return "—";
+    try {
+      var d = new Date(iso);
+      if (!isFinite(d.getTime())) return String(iso);
+      return d.toLocaleString("en-US", {
+        timeZone: "America/Chicago",
+        weekday: "short",
+        month: "short",
+        day: "numeric",
+        hour: "numeric",
+        minute: "2-digit"
+      });
+    } catch (err) {
+      return String(iso);
+    }
+  }
+
+  function boardDayKey(iso) {
+    if (!iso) return "";
+    try {
+      var parts = {};
+      new Intl.DateTimeFormat("en-US", {
+        timeZone: "America/Chicago",
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit"
+      }).formatToParts(new Date(iso)).forEach(function (part) {
+        if (part.type !== "literal") parts[part.type] = part.value;
+      });
+      return parts.year + "-" + parts.month + "-" + parts.day;
+    } catch (err) {
+      return "";
+    }
+  }
+
+  function upcomingCalendarRides() {
+    var today = chicagoToday();
+    return (state.calendar || []).filter(function (r) {
+      if (!r) return false;
+      if (r.status === "cancelled") return false;
+      var day = boardDayKey(r.start) || today;
+      return day >= today;
+    }).sort(function (a, b) {
+      return String(a.start || "").localeCompare(String(b.start || ""));
+    });
+  }
+
+  function approvedDriversForAssign() {
+    return knownDriverRows().filter(function (d) {
+      return d && d.active !== false && approvalOf(d) === "approved";
+    });
+  }
+
+  function makeScheduleCode(eventId) {
+    var raw = "PCS" + String(eventId || "").replace(/[^A-Za-z0-9]/g, "").toUpperCase();
+    var alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+    var out = "";
+    var i;
+    for (i = 0; i < raw.length && out.length < 8; i += 1) {
+      var ch = raw.charAt(i);
+      if (alphabet.indexOf(ch) >= 0) out += ch;
+    }
+    i = 0;
+    while (out.length < 8) {
+      out += alphabet[i % alphabet.length];
+      i += 1;
+    }
+    return out.slice(0, 8);
+  }
+
+  function assignCalendarRide(eventId, driverId) {
+    var row = null;
+    (state.calendar || []).forEach(function (r) {
+      if (r && r.id === eventId) row = r;
+    });
+    if (!row) return Promise.reject(new Error("missing"));
+    var driver = null;
+    approvedDriversForAssign().forEach(function (d) {
+      if (d.id === driverId) driver = d;
+    });
+    if (!driver) return Promise.reject(new Error("driver"));
+    var next = Object.assign({}, row, {
+      assignedDriverId: driver.id,
+      assignedDriverName: driver.name || driver.id,
+      status: row.status === "completed" ? "completed" : "assigned",
+      code: row.code || makeScheduleCode(eventId),
+      updatedAt: Date.now()
+    });
+    return putCalendarRide(next).then(function () {
+      state.boardNotice = "Assigned " + (next.rider || "ride") + " → " + (driver.name || driver.id);
+      return refresh();
+    });
+  }
+
+  function completeCalendarRide(eventId, fareBeforeTax) {
+    var row = null;
+    (state.calendar || []).forEach(function (r) {
+      if (r && r.id === eventId) row = r;
+    });
+    if (!row) return Promise.reject(new Error("missing"));
+    if (!row.assignedDriverId) return Promise.reject(new Error("unassigned"));
+    var fare = Number(fareBeforeTax);
+    if (!isFinite(fare) || fare < 0) fare = Number(row.fareBeforeTax) || 0;
+    var pct = commissionPctFor(row.assignedDriverId);
+    var commissionCents = Math.round(fare * (pct / 100));
+    var day = boardDayKey(row.start) || chicagoToday();
+    var code = row.code || makeScheduleCode(eventId);
+    var entry = {
+      code: code,
+      day: day,
+      completedAt: Date.now(),
+      when: fmtBoardWhen(row.start),
+      pickup: row.pickup || "",
+      drop: row.dropoff || "",
+      rawMiles: null,
+      billedMiles: null,
+      fareSub: fare,
+      fareTax: 0,
+      fareTotal: fare,
+      commissionPct: pct,
+      commissionCents: commissionCents,
+      riderName: row.rider || "",
+      source: "calendar"
+    };
+    var next = Object.assign({}, row, {
+      status: "completed",
+      completedAt: Date.now(),
+      code: code,
+      fareBeforeTax: fare,
+      commissionCents: commissionCents,
+      updatedAt: Date.now()
+    });
+    return putCalendarRide(next).then(function () {
+      return fetch(historyUrl(row.assignedDriverId, code), {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(entry)
+      });
+    }).then(function (res) {
+      if (res && !res.ok) throw new Error("history");
+      state.boardNotice = "Completed · " + fmtCents(commissionCents) + " commission to " + (row.assignedDriverName || row.assignedDriverId);
+      return refresh();
+    });
+  }
+
 
   function chicagoToday() {
     var parts = {};
@@ -1184,7 +1419,15 @@
       });
     });
 
-    Promise.all([rosterP, driversP, ridesP, milesP, historyP]).then(function () {
+    var calendarP = listCalendarRides().then(function (rows) {
+      state.calendar = rows || [];
+      state.calendarError = "";
+      state.calendarUpdated = new Date().toISOString();
+    }).catch(function (err) {
+      state.calendarError = err && err.denied ? "denied" : "error";
+    });
+
+    Promise.all([rosterP, driversP, ridesP, milesP, historyP, calendarP]).then(function () {
       state.loading = false;
       state.lastRefreshAt = Date.now();
       renderBoardLists();
@@ -1860,12 +2103,72 @@
   function renderBoardLists() {
     var d = document.getElementById("drivers-list");
     var r = document.getElementById("rides-list");
+    var b = document.getElementById("day-board");
     if (d) d.innerHTML = driversPanelHtml();
     if (r) r.innerHTML = ridesPanelHtml();
+    if (b) {
+      var wrap = document.createElement("div");
+      wrap.innerHTML = dayBoardHtml();
+      var next = wrap.firstChild;
+      if (next) b.replaceWith(next);
+    }
     bindDriverActions();
     bindBookingActions();
     bindLocateActions();
+    bindDayBoardActions();
     setFocusBar();
+  }
+
+  function bindDayBoardActions() {
+    var board = document.getElementById("day-board");
+    if (!board) return;
+    Array.prototype.forEach.call(board.querySelectorAll(".day-fare"), function (input) {
+      input.addEventListener("input", function () {
+        var id = input.getAttribute("data-event-id");
+        if (!id) return;
+        state.fareDrafts[id] = input.value;
+      });
+    });
+    Array.prototype.forEach.call(board.querySelectorAll(".btn-assign-ride"), function (btn) {
+      btn.addEventListener("click", function () {
+        var id = btn.getAttribute("data-event-id");
+        if (!id) return;
+        var sel = document.getElementById("assign-" + id);
+        var driverId = sel ? sel.value : "";
+        if (!driverId) {
+          state.boardNotice = "Pick an approved driver first.";
+          renderBoardLists();
+          return;
+        }
+        btn.disabled = true;
+        assignCalendarRide(id, driverId).then(function () {
+          btn.disabled = false;
+        }).catch(function () {
+          btn.disabled = false;
+          state.boardNotice = "Could not assign that ride.";
+          renderBoardLists();
+        });
+      });
+    });
+    Array.prototype.forEach.call(board.querySelectorAll(".btn-complete-ride"), function (btn) {
+      btn.addEventListener("click", function () {
+        var id = btn.getAttribute("data-event-id");
+        if (!id) return;
+        var fareInput = document.getElementById("fare-" + id);
+        var fare = fareInput ? fareInput.value : state.fareDrafts[id];
+        if (!window.confirm("Mark complete and credit commission into this driver's Mon–Sun pay week?")) return;
+        btn.disabled = true;
+        completeCalendarRide(id, fare).then(function () {
+          btn.disabled = false;
+        }).catch(function (err) {
+          btn.disabled = false;
+          state.boardNotice = err && err.message === "unassigned"
+            ? "Assign a driver before completing."
+            : "Could not complete / credit that ride.";
+          renderBoardLists();
+        });
+      });
+    });
   }
 
   function bindLocateActions() {
@@ -1939,6 +2242,87 @@
     );
   }
 
+
+  function dayBoardHtml() {
+    var rows = upcomingCalendarRides();
+    var drivers = approvedDriversForAssign();
+    var notice = state.boardNotice
+      ? '<p class="board-notice">' + esc(state.boardNotice) + "</p>"
+      : "";
+    var err = "";
+    if (state.calendarError === "denied") {
+      err = '<p class="empty">Calendar hub /rides/' + esc(CALENDAR_HUB) + " cannot be read (permission denied). Sync routine + rules needed.</p>";
+    } else if (state.calendarError) {
+      err = '<p class="empty">Could not load scheduled rides.</p>';
+    }
+    var hint = (
+      '<p class="day-board-hint">Shows Google Calendar events whose <strong>title starts with PCS</strong> (example: <em>PCS – John Smith</em>). ' +
+      "Pickup = event Location. Drop-off = a <code>Drop-off:</code> or <code>To:</code> line in the notes, else the whole notes. " +
+      "Wall-TV friendly. Assign an approved driver; they see it on their app. Completing credits Mon–Sun commission.</p>"
+    );
+    if (!rows.length && !err) {
+      return (
+        '<section class="day-board" id="day-board">' +
+        "<h2>Scheduled rides</h2>" +
+        hint + notice +
+        '<p class="empty">No upcoming PCS-titled rides in the hub yet. Title calendar events with <strong>PCS</strong> and run the calendar sync routine.</p>' +
+        "</section>"
+      );
+    }
+    var cards = rows.map(function (r) {
+      var st = r.status || "open";
+      var badge = st === "completed"
+        ? '<span class="badge">Done</span>'
+        : (st === "assigned"
+          ? '<span class="badge online">Assigned</span>'
+          : '<span class="badge pending">Open</span>');
+      var options = ['<option value="">Assign driver…</option>'].concat(drivers.map(function (d) {
+        var sel = d.id === r.assignedDriverId ? " selected" : "";
+        return '<option value="' + esc(d.id) + '"' + sel + ">" + esc(d.name || d.id) + "</option>";
+      }));
+      var fareVal = state.fareDrafts[r.id] != null
+        ? state.fareDrafts[r.id]
+        : (r.fareBeforeTax != null ? String(r.fareBeforeTax) : "");
+      var assignDisabled = st === "completed" ? " disabled" : "";
+      var completeDisabled = (st === "completed" || !r.assignedDriverId) ? " disabled" : "";
+      return (
+        '<article class="day-card status-' + esc(st) + '">' +
+          '<div class="day-card-top">' +
+            '<p class="day-time">' + esc(fmtBoardWhen(r.start)) + "</p>" +
+            badge +
+          "</div>" +
+          '<h3 class="day-rider">' + esc(r.rider) + "</h3>" +
+          '<p class="day-line"><span>Pickup</span> ' + esc(r.pickup || "—") + "</p>" +
+          '<p class="day-line"><span>Drop-off</span> ' + esc(r.dropoff || "—") + "</p>" +
+          (r.assignedDriverName
+            ? '<p class="day-line"><span>Driver</span> ' + esc(r.assignedDriverName) + "</p>"
+            : "") +
+          (st === "completed"
+            ? '<p class="day-line"><span>Commission</span> ' + esc(fmtCents(r.commissionCents)) + "</p>"
+            : (
+              '<div class="day-actions">' +
+                '<label class="sr-only" for="assign-' + esc(r.id) + '">Assign driver</label>' +
+                '<select id="assign-' + esc(r.id) + '" class="day-assign" data-event-id="' + esc(r.id) + '"' + assignDisabled + ">" +
+                  options.join("") +
+                "</select>" +
+                '<button type="button" class="btn btn-gold btn-assign-ride" data-event-id="' + esc(r.id) + '"' + assignDisabled + ">Assign</button>" +
+                '<label class="fare-label" for="fare-' + esc(r.id) + '">Fare before tax $</label>' +
+                '<input id="fare-' + esc(r.id) + '" class="day-fare" data-event-id="' + esc(r.id) + '" type="number" min="0" step="0.01" value="' + esc(fareVal) + '"' + completeDisabled + ">" +
+                '<button type="button" class="btn btn-ghost btn-complete-ride" data-event-id="' + esc(r.id) + '"' + completeDisabled + ">Complete + credit</button>" +
+              "</div>"
+            )) +
+        "</article>"
+      );
+    }).join("");
+    return (
+      '<section class="day-board" id="day-board">' +
+        "<h2>Scheduled rides</h2>" +
+        hint + notice + err +
+        '<div class="day-grid">' + cards + "</div>" +
+      "</section>"
+    );
+  }
+
   function renderBoard() {
     return (
       '<div class="shell">' +
@@ -1953,6 +2337,7 @@
             '<button type="button" class="btn btn-ghost" id="god-logout">Sign out</button>' +
           "</div>" +
         "</header>" +
+        dayBoardHtml() +
         '<div class="workspace">' +
           '<aside class="side">' +
             '<section class="side-section">' +
@@ -2172,7 +2557,9 @@
     }
     bindHireForm();
     bindDriverActions();
+    bindBookingActions();
     bindLocateActions();
+    bindDayBoardActions();
   }
 
   function render() {
