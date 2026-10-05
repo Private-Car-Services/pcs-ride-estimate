@@ -1,0 +1,2 @@
+/* Copy to god-auth.js and set window.PCS_GOD_PASSWORD_HASH to the SHA-256 hex of the God password. Never commit god-auth.js. */
+window.PCS_GOD_PASSWORD_HASH = "";

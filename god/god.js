@@ -7,8 +7,8 @@
   var OPEN_HUB = "REQUESTS";
   /* Roster + commission hub: 8-char ride-code alphabet (no I/O/0/1). DRVRCOMM has O — use DRVRCMMS. */
   var ROSTER_HUB = "DRVRCMMS";
-  /* Miles hub: 8-char alphabet (no I/O). DRVMILES contains I — use DRVRMILZ. */
-  var MILES_HUB = "DRVRMILZ";
+  /* Miles hub: 8-char alphabet (no I/O). DRVRMILZ wrongly contained I — use DRVRMLES. */
+  var MILES_HUB = "DRVRMLES";
   var HISTORY_HUB = "DRVRHSTY"; /* completed ride logs; 8-char no I/O */
   var DEFAULT_COMMISSION_PCT = 70;
   var SESSION_KEY = "pcs-god-session";
@@ -80,7 +80,9 @@
     history: {},
     historyError: "",
     selectedDriverId: "",
-    driverDetailDay: ""
+    driverDetailDay: "",
+    pendingAlertCodes: {},
+    pendingBanner: ""
   };
 
   var map = null;
@@ -302,12 +304,19 @@
     return String(raw || "").trim().toLowerCase();
   }
 
+  function sessionStore() {
+    try { return window.sessionStorage; } catch (err) { return null; }
+  }
+
   function readSession() {
     try {
-      var raw = localStorage.getItem(SESSION_KEY);
+      var store = sessionStore();
+      if (!store) return null;
+      var raw = store.getItem(SESSION_KEY);
       if (!raw) return null;
       var data = JSON.parse(raw);
       if (!data || normalizeEmail(data.email) !== OWNER_EMAIL) return null;
+      if (!data.authOk) return null;
       return data;
     } catch (err) {
       return null;
@@ -316,15 +325,37 @@
 
   function writeSession(email) {
     try {
-      localStorage.setItem(SESSION_KEY, JSON.stringify({
+      var store = sessionStore();
+      if (!store) return;
+      store.setItem(SESSION_KEY, JSON.stringify({
         email: normalizeEmail(email),
+        authOk: true,
         at: Date.now()
       }));
     } catch (err) {}
   }
 
   function clearSession() {
-    try { localStorage.removeItem(SESSION_KEY); } catch (err) {}
+    try {
+      var store = sessionStore();
+      if (store) store.removeItem(SESSION_KEY);
+    } catch (err) {}
+  }
+
+  function sha256Hex(text) {
+    var data = new TextEncoder().encode(String(text || ""));
+    return crypto.subtle.digest("SHA-256", data).then(function (buf) {
+      return Array.prototype.map.call(new Uint8Array(buf), function (b) {
+        return b.toString(16).padStart(2, "0");
+      }).join("");
+    });
+  }
+
+  function expectedGodHash() {
+    var h = "";
+    try { h = String(window.PCS_GOD_PASSWORD_HASH || "").trim().toLowerCase(); } catch (err) { h = ""; }
+    if (!/^[a-f0-9]{64}$/.test(h)) return "";
+    return h;
   }
 
   function fmtMoney(n) {
@@ -399,21 +430,39 @@
     state.loginError = "";
     if (!e) {
       state.loginError = "Enter your email.";
-      return false;
+      return Promise.resolve(false);
     }
     if (e !== OWNER_EMAIL) {
       state.loginError = "This console is for the owner account only.";
-      return false;
+      return Promise.resolve(false);
     }
-    /* Password field is required for the form, but no real password is stored in this file yet. */
     if (!String(password || "").length) {
-      state.loginError = "Enter a password (private password comes next).";
-      return false;
+      state.loginError = "Enter your password.";
+      return Promise.resolve(false);
     }
-    writeSession(e);
-    state.sessionEmail = e;
-    state.screen = "board";
-    return true;
+    var expected = expectedGodHash();
+    if (!expected) {
+      state.loginError = "God login is not configured (missing password hash). See DEPLOY-NOTES.md.";
+      return Promise.resolve(false);
+    }
+    if (!window.crypto || !window.crypto.subtle) {
+      state.loginError = "This browser cannot verify the password securely.";
+      return Promise.resolve(false);
+    }
+    return sha256Hex(password).then(function (got) {
+      if (got !== expected) {
+        state.loginError = "Wrong email or password.";
+        return false;
+      }
+      writeSession(e);
+      state.sessionEmail = e;
+      state.screen = "board";
+      state.loginError = "";
+      return true;
+    }).catch(function () {
+      state.loginError = "Could not verify password.";
+      return false;
+    });
   }
 
   function logout() {
@@ -727,6 +776,148 @@
     });
   }
 
+  function isPendingOwner(ride) {
+    var st = String((ride && ride.status) || "").toLowerCase();
+    return st === "pending_owner" || st === "pending-owner";
+  }
+
+  function patchRide(code, partial) {
+    if (!code) return Promise.reject(new Error("code"));
+    return fetch(rideUrl(code), {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(partial)
+    }).then(function (res) {
+      if (!res.ok) throw new Error("ride");
+      return res.text().then(function () {});
+    });
+  }
+
+  function putOpenSummary(code, ride) {
+    if (!code) return Promise.resolve();
+    var summary = {
+      code: code,
+      kind: "ride",
+      name: (ride && ride.name) || "",
+      phone: (ride && ride.phone) || "",
+      pickupStreet: (ride && ride.pickupStreet) || "",
+      pickupCity: (ride && ride.pickupCity) || "",
+      pickupState: (ride && ride.pickupState) || "",
+      dropStreet: (ride && ride.dropStreet) || "",
+      dropCity: (ride && ride.dropCity) || "",
+      dropState: (ride && ride.dropState) || "",
+      date: (ride && ride.date) || "",
+      time: (ride && ride.time) || "",
+      asap: !!(ride && (ride.asap === true || String(ride.asap).toLowerCase() === "true" || String(ride.when || "").toLowerCase() === "asap")),
+      when: (ride && ride.when) || "",
+      status: (ride && ride.status) || "requested",
+      pickupLat: ride ? ride.pickupLat : null,
+      pickupLng: ride ? ride.pickupLng : null,
+      dropLat: ride ? ride.dropLat : null,
+      dropLng: ride ? ride.dropLng : null,
+      updatedAt: Date.now(),
+      requestedAt: (ride && (ride.requestedAt || ride.createdAt)) || Date.now()
+    };
+    return fetch(openUrl().replace(/\.json$/, "/") + encodeURIComponent(code) + ".json", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(summary)
+    }).then(function (res) {
+      if (!res.ok) throw new Error("open");
+      return res.text().then(function () {});
+    });
+  }
+
+  function approveBooking(code) {
+    code = String(code || "").toUpperCase();
+    if (!code) return Promise.resolve(false);
+    return getRide(code).then(function (ride) {
+      if (!ride) throw new Error("missing");
+      var next = Object.assign({}, ride, {
+        status: "requested",
+        ownerApprovedAt: Date.now(),
+        updatedAt: Date.now()
+      });
+      delete next.ownerDeniedAt;
+      delete next.denyReason;
+      return patchRide(code, {
+        status: "requested",
+        ownerApprovedAt: next.ownerApprovedAt,
+        updatedAt: next.updatedAt
+      }).then(function () {
+        return putOpenSummary(code, next);
+      }).then(function () {
+        state.actionNotice = "Approved booking " + code + " — drivers can accept it now.";
+        state.pendingBanner = "";
+        return true;
+      });
+    }).catch(function () {
+      state.actionNotice = "Could not approve booking " + code + ".";
+      return false;
+    });
+  }
+
+  function denyBooking(code) {
+    code = String(code || "").toUpperCase();
+    if (!code) return Promise.resolve(false);
+    return getRide(code).then(function (ride) {
+      if (!ride) throw new Error("missing");
+      var when = Date.now();
+      return patchRide(code, {
+        status: "denied",
+        ownerDeniedAt: when,
+        updatedAt: when,
+        denyReason: "Owner declined this booking"
+      }).then(function () {
+        return fetch(openUrl().replace(/\.json$/, "/") + encodeURIComponent(code) + ".json", { method: "DELETE" }).catch(function () {});
+      }).then(function () {
+        state.actionNotice = "Denied booking " + code + ". Rider will see it in-app.";
+        return true;
+      });
+    }).catch(function () {
+      state.actionNotice = "Could not deny booking " + code + ".";
+      return false;
+    });
+  }
+
+  function pendingBookings() {
+    return (state.rides || []).filter(isPendingOwner);
+  }
+
+  function requestDesktopNotify(title, body) {
+    try {
+      if (!("Notification" in window)) return;
+      var show = function () {
+        try { new Notification(title, { body: body || "", tag: "pcs-booking" }); } catch (e) {}
+      };
+      if (Notification.permission === "granted") show();
+      else if (Notification.permission !== "denied") {
+        Notification.requestPermission().then(function (p) { if (p === "granted") show(); });
+      }
+    } catch (err) {}
+  }
+
+  function bookingAlertBannerHtml() {
+    var pending = pendingBookings();
+    if (!pending.length) return "";
+    var first = pending[0];
+    var label = displayName(first.name, "Rider") + " · " + (fmtWhen(first.date, first.time, first));
+    var mail = "mailto:mwragge78@gmail.com?subject=" + encodeURIComponent("PCS booking pending " + (first.code || "")) +
+      "&body=" + encodeURIComponent("Pending booking " + (first.code || "") + " from " + label);
+    var sms = "sms:9362617878?&body=" + encodeURIComponent("PCS pending booking " + (first.code || "") + " " + label);
+    return (
+      '<div class="card booking-alert" id="booking-alert" style="border:2px solid var(--gold);margin:0 0 12px;padding:12px;background:#1a2e1a">' +
+      '<p class="tag">New booking needs your OK</p>' +
+      '<p class="lede"><strong>' + esc(String(pending.length)) + '</strong> pending · ' + esc(label) + "</p>" +
+      '<p class="fine">Approve so drivers can see it. Deny notifies the rider in-app.</p>' +
+      '<div class="row-actions" style="display:flex;flex-wrap:wrap;gap:8px">' +
+      '<a class="btn btn-ghost" href="' + mail + '">Email me a reminder</a>' +
+      '<a class="btn btn-ghost" href="' + sms + '">Text reminder</a>' +
+      '<button type="button" class="btn btn-ghost" id="enable-booking-notify">Enable browser alerts</button>' +
+      "</div></div>"
+    );
+  }
+
   function listOpenRides() {
     return fetch(openUrl()).then(function (res) {
       if (res.status === 401 || res.status === 403) {
@@ -805,7 +996,7 @@
 
   function isOpenRequest(ride) {
     var st = String((ride && ride.status) || "requested").toLowerCase();
-    return st === "requested" || st === "waiting" || !st;
+    return st === "requested" || st === "waiting" || st === "pending_owner" || st === "pending-owner" || !st;
   }
 
   function driverOnTripId(ride) {
@@ -870,6 +1061,19 @@
       state.ridesError = "";
       return enrichPairedRides(rows).then(function (merged) {
         state.rides = merged;
+        var pending = (merged || []).filter(isPendingOwner);
+        pending.forEach(function (r) {
+          var code = String((r && r.code) || "");
+          if (!code || state.pendingAlertCodes[code]) return;
+          state.pendingAlertCodes[code] = true;
+          requestDesktopNotify(
+            "PCS: booking needs approval",
+            (r.name || "Rider") + " · " + fmtWhen(r.date, r.time, r)
+          );
+        });
+        if (pending.length) {
+          state.pendingBanner = pending.length + " booking(s) waiting for your OK";
+        }
       });
     }).catch(function (err) {
       state.rides = [];
@@ -1406,32 +1610,48 @@
       return '<p class="empty">Could not load ride requests. Showing none.</p>';
     }
     if (!state.rides.length) {
-      return '<p class="empty">No riders requesting a ride right now.</p>';
+      return bookingAlertBannerHtml() + '<p class="empty">No riders requesting a ride right now.</p>';
     }
-    return state.rides.map(function (r) {
+    var cards = state.rides.map(function (r) {
       var active = isActiveTrip(r);
+      var pending = isPendingOwner(r);
+      var denied = String(r.status || "").toLowerCase() === "denied";
       var requestAt = r.updatedAt || r.requestedAt || r.createdAt || null;
       var pickupWhen = fmtWhen(r.date, r.time, r);
       var dropWhen = r.dropTime || r.dropoffTime || r.etaDrop || null;
       if (!dropWhen) dropWhen = "—";
       var badge = active
         ? '<span class="badge on-trip">' + esc(r.status || "on trip") + "</span>"
-        : '<span class="badge">Requesting</span>';
+        : (pending
+          ? '<span class="badge pending">Needs your OK</span>'
+          : (denied
+            ? '<span class="badge">Denied</span>'
+            : '<span class="badge">Open to drivers</span>'));
+      var actions = pending
+        ? ('<div class="commission-row" style="margin-top:8px">' +
+          '<button type="button" class="btn btn-gold btn-approve-booking" data-ride-code="' + esc(r.code || "") + '">Approve booking</button>' +
+          '<button type="button" class="btn btn-fire btn-deny-booking" data-ride-code="' + esc(r.code || "") + '">Deny</button>' +
+          "</div>")
+        : "";
       return (
-        '<article class="card' + (active ? " paired" : "") + '">' +
+        '<article class="card' + (active ? " paired" : "") + (pending ? " pending-booking" : "") + '">' +
           "<h3>" + esc(displayName(r.name, "Rider")) + badge + "</h3>" +
           '<p class="meta">' +
+          "<strong>Code</strong> " + esc(r.code || "—") + "<br>" +
           "<strong>Request time</strong> " + esc(fmtClock(requestAt)) + "<br>" +
           "<strong>Wait time</strong> " + esc(waitLabel(requestAt)) + "<br>" +
           "<strong>Pickup time</strong> " + esc(pickupWhen) + "<br>" +
           "<strong>Drop-off time</strong> " + esc(String(dropWhen)) + "<br>" +
           "<strong>Pickup</strong> " + esc([r.pickupStreet, r.pickupCity, r.pickupState].filter(Boolean).join(", ") || "—") + "<br>" +
           "<strong>Drop-off</strong> " + esc([r.dropStreet, r.dropCity, r.dropState].filter(Boolean).join(", ") || "—") +
+          (r.phone ? "<br><strong>Phone</strong> " + esc(r.phone) : "") +
           (active && r.driverName ? "<br><strong>Driver</strong> " + esc(r.driverName) : "") +
           "</p>" +
+          actions +
         "</article>"
       );
     }).join("");
+    return bookingAlertBannerHtml() + cards;
   }
 
   function renderBoardLists() {
@@ -1440,6 +1660,41 @@
     if (d) d.innerHTML = driversPanelHtml();
     if (r) r.innerHTML = ridesPanelHtml();
     bindDriverActions();
+    bindBookingActions();
+  }
+
+  function bindBookingActions() {
+    var list = document.getElementById("rides-list");
+    if (!list) return;
+    Array.prototype.forEach.call(list.querySelectorAll(".btn-approve-booking"), function (btn) {
+      btn.addEventListener("click", function () {
+        var code = btn.getAttribute("data-ride-code");
+        if (!code) return;
+        btn.disabled = true;
+        approveBooking(code).then(function () {
+          btn.disabled = false;
+          refresh();
+        });
+      });
+    });
+    Array.prototype.forEach.call(list.querySelectorAll(".btn-deny-booking"), function (btn) {
+      btn.addEventListener("click", function () {
+        var code = btn.getAttribute("data-ride-code");
+        if (!code) return;
+        if (!window.confirm("Deny booking " + code + "? The rider will see it as denied.")) return;
+        btn.disabled = true;
+        denyBooking(code).then(function () {
+          btn.disabled = false;
+          refresh();
+        });
+      });
+    });
+    var notifyBtn = document.getElementById("enable-booking-notify");
+    if (notifyBtn) {
+      notifyBtn.addEventListener("click", function () {
+        requestDesktopNotify("PCS bookings", "Browser alerts enabled for pending bookings.");
+      });
+    }
   }
 
   function renderLogin() {
@@ -1671,13 +1926,18 @@
         var passEl = document.getElementById("god-password");
         state.emailInput = emailEl ? emailEl.value : "";
         state.passwordInput = passEl ? passEl.value : "";
-        if (tryLogin(state.emailInput, state.passwordInput)) {
-          render();
-          startPoll();
-        } else {
-          var err = document.getElementById("god-login-error");
-          if (err) err.textContent = state.loginError;
-        }
+        var submitBtn = form.querySelector('button[type="submit"]');
+        if (submitBtn) submitBtn.disabled = true;
+        tryLogin(state.emailInput, state.passwordInput).then(function (ok) {
+          if (submitBtn) submitBtn.disabled = false;
+          if (ok) {
+            render();
+            startPoll();
+          } else {
+            var err = document.getElementById("god-login-error");
+            if (err) err.textContent = state.loginError;
+          }
+        });
       });
     }
     var out = document.getElementById("god-logout");
@@ -1705,6 +1965,7 @@
   }
 
   function boot() {
+    try { localStorage.removeItem(SESSION_KEY); } catch (e) {} /* drop pre-hash sessions */
     var session = readSession();
     if (session && session.email) {
       state.sessionEmail = normalizeEmail(session.email);
