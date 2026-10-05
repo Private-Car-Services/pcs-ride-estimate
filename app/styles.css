@@ -28,7 +28,7 @@ body {
   justify-content: center;
 }
 
-button, input { font: inherit; color: inherit; }
+button, input, select { font: inherit; color: inherit; }
 
 .phone {
   width: 100%;
@@ -145,7 +145,7 @@ label {
   text-transform: uppercase;
 }
 
-input {
+input, select {
   width: 100%;
   background: var(--navy-3);
   border: 1px solid var(--line);
@@ -154,7 +154,7 @@ input {
   font-size: 16px;
 }
 
-input:focus {
+input:focus, select:focus {
   outline: 2px solid var(--gold-2);
   outline-offset: 1px;
 }
@@ -207,12 +207,17 @@ input:focus {
 
 .btn.ghost {
   background: transparent;
-  color: var(--muted);
+  color: var(--gold-2);
   border: 0;
   padding: 10px 0;
-  font-size: 15px;
-  font-weight: 700;
+  font-size: 16px;
+  font-weight: 800;
   text-align: left;
+}
+
+.btn.ghost:hover,
+.btn.ghost:focus-visible {
+  color: var(--gold);
 }
 
 .error {
@@ -519,9 +524,47 @@ input:focus {
 
 .steps li { margin: 6px 0; }
 
-a.back-link {
+a.back-link,
+a.nav-link,
+.app-nav a,
+p.fine > a {
   color: var(--gold-2);
-  font-weight: 700;
+  font-weight: 800;
+  font-size: 16px;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+a.back-link:hover,
+a.nav-link:hover,
+.app-nav a:hover,
+p.fine > a:hover,
+a.back-link:focus-visible,
+a.nav-link:focus-visible,
+.app-nav a:focus-visible,
+p.fine > a:focus-visible {
+  color: var(--gold);
+}
+
+.app-nav {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 18px;
+  margin: 0 0 12px;
+}
+
+.app-nav .btn.ghost {
+  width: auto;
+  padding: 4px 0;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.app-nav p.fine {
+  margin: 0;
+  color: inherit;
+  font-size: inherit;
 }
 
 img.avatar[hidden] { display: none !important; }
@@ -618,4 +661,42 @@ a.btn + .btn, .btn + a.btn, a.btn + a.btn { margin-top: 8px; }
 
 .map-stage.board-map .leaflet-tile-pane {
   opacity: 1;
+}
+
+.car-thumb {
+  width: 100%;
+  max-width: 220px;
+  height: 120px;
+  object-fit: cover;
+  border-radius: 12px;
+  border: 2px solid var(--gold);
+  background: var(--navy-3);
+  display: block;
+  margin: 8px 0 4px;
+}
+
+.photo-pick .car-thumb {
+  width: 96px;
+  height: 64px;
+  max-width: 96px;
+  margin: 0;
+  flex: 0 0 auto;
+}
+
+.driver-identity .car-thumb {
+  max-width: 160px;
+  height: 96px;
+}
+
+.vehicle-needed, .miles-gate, .seats-warn {
+  border-color: rgba(240, 212, 138, 0.55);
+}
+
+.driver-car-line {
+  margin: 4px 0 0;
+}
+
+#miles-today {
+  color: var(--gold-2);
+  font-weight: 700;
 }

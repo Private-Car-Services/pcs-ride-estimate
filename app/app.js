@@ -46,6 +46,7 @@
   // /rides/{8-char} rules work without /open or /drivers paths.
   var PRESENCE_HUB = "AVLBLDRV";
   var OPEN_HUB = "REQUESTS";
+  var MILES_HUB = "DRVRMILZ"; /* 8-char hub (no I/O); not DRVMILES */
   var lastDriverPatchAt = 0;
   var lastDriverPatchLat = null;
   var lastDriverPatchLng = null;
@@ -76,6 +77,23 @@
     driverPhone: "",
     riderPhoto: "",
     driverPhoto: "",
+    driverCarYear: "",
+    driverCarMake: "",
+    driverCarModel: "",
+    driverCarPlate: "",
+    driverCarSeats: "",
+    driverCarPhoto: "",
+    milesToday: 0,
+    milesStartOdo: null,
+    milesNeedStart: false,
+    milesOdoDraft: "",
+    milesOdoError: "",
+    milesEndPrompt: false,
+    milesEndDraft: "",
+    milesEndError: "",
+    milesTrackLat: null,
+    milesTrackLng: null,
+    milesTrackAt: 0,
     code: "",
     driverCode: "",
     codeError: "",
@@ -220,6 +238,230 @@
     }
   }
 
+
+  function normalizePlate(value) {
+    return String(value || "").trim().toUpperCase().replace(/\s+/g, " ");
+  }
+
+  function hasCompleteCar(account) {
+    if (!account) return false;
+    var year = Number(account.carYear);
+    var seats = Number(account.carSeats);
+    return year >= 1980 && year <= 2100 &&
+      String(account.carMake || "").trim() &&
+      String(account.carModel || "").trim() &&
+      normalizePlate(account.carPlate) &&
+      seats >= 1 && seats <= 7 &&
+      !!safePhoto(account.carPhoto);
+  }
+
+  function carLineFrom(accountOrRide) {
+    if (!accountOrRide) return "";
+    return [accountOrRide.carYear || accountOrRide.driverCarYear,
+      accountOrRide.carMake || accountOrRide.driverCarMake,
+      accountOrRide.carModel || accountOrRide.driverCarModel].filter(Boolean).join(" ");
+  }
+
+  function carPhotoImg(value) {
+    var photo = safePhoto(value);
+    if (!photo) return "";
+    return '<img class="car-thumb" alt="Driver car" src="' + photo + '">';
+  }
+
+  function driverMidRide() {
+    return ROLE === "driver" && state.screen === "trip" &&
+      (state.rideStatus === "accepted" || state.rideStatus === "started");
+  }
+
+  function chicagoToday() {
+    return chicagoParts(new Date()).date;
+  }
+
+  function milesStoreKey() {
+    return "pcs-driver-miles-" + driverPresenceId();
+  }
+
+  function readMilesLocal() {
+    try {
+      var raw = localStorage.getItem(milesStoreKey());
+      if (!raw) return {};
+      var data = JSON.parse(raw);
+      return data && typeof data === "object" ? data : {};
+    } catch (err) {
+      return {};
+    }
+  }
+
+  function writeMilesLocal(map) {
+    try {
+      localStorage.setItem(milesStoreKey(), JSON.stringify(map || {}));
+    } catch (err) {}
+  }
+
+  function todayMilesRow() {
+    var map = readMilesLocal();
+    var day = chicagoToday();
+    var row = map[day];
+    if (!row || typeof row !== "object") return null;
+    return row;
+  }
+
+  function milesUrl(driverId, day) {
+    var root = databaseURL() + "/rides/" + encodeURIComponent(MILES_HUB);
+    if (driverId && day) {
+      return root + "/" + encodeURIComponent(driverId) + "/" + encodeURIComponent(day) + ".json";
+    }
+    if (driverId) {
+      return root + "/" + encodeURIComponent(driverId) + ".json";
+    }
+    return root + ".json";
+  }
+
+  function persistMilesRow(row) {
+    if (!row) return Promise.resolve();
+    var day = chicagoToday();
+    var map = readMilesLocal();
+    map[day] = row;
+    writeMilesLocal(map);
+    state.milesToday = Number(row.gpsMiles) || 0;
+    state.milesStartOdo = row.startOdometer != null ? Number(row.startOdometer) : null;
+    if (!syncOn()) return Promise.resolve();
+    return fetch(milesUrl(driverPresenceId(), day), {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(row)
+    }).then(function (res) {
+      if (!res.ok) throw new Error("miles");
+      return res.text().then(function () {});
+    }).catch(function () {});
+  }
+
+  function ensureMilesDayReady() {
+    if (ROLE !== "driver" || !signedIn()) return;
+    var row = todayMilesRow();
+    if (row && row.startOdometer != null && isFinite(Number(row.startOdometer))) {
+      state.milesNeedStart = false;
+      state.milesToday = Number(row.gpsMiles) || 0;
+      state.milesStartOdo = Number(row.startOdometer);
+      return;
+    }
+    if (driverMidRide()) {
+      state.milesNeedStart = false;
+      state.milesToday = Number(row && row.gpsMiles) || 0;
+      return;
+    }
+    state.milesNeedStart = true;
+    state.milesToday = 0;
+    state.milesStartOdo = null;
+  }
+
+  function canGoOnline() {
+    if (ROLE !== "driver" || !signedIn()) return false;
+    if (driverMidRide()) return true;
+    return hasCompleteCar(readDriverAccount()) && !state.milesNeedStart;
+  }
+
+  function trackDailyMiles(pos) {
+    if (ROLE !== "driver" || !signedIn() || state.milesNeedStart) return;
+    if (!pos || !pos.coords) return;
+    var acc = Number(pos.coords.accuracy);
+    if (isFinite(acc) && acc > 50) return;
+    var lat = Number(pos.coords.latitude);
+    var lng = Number(pos.coords.longitude);
+    if (!isFinite(lat) || !isFinite(lng)) return;
+    var now = Date.now();
+    var prevLat = state.milesTrackLat;
+    var prevLng = state.milesTrackLng;
+    var prevAt = state.milesTrackAt || 0;
+    state.milesTrackLat = lat;
+    state.milesTrackLng = lng;
+    state.milesTrackAt = now;
+    if (!isFinite(prevLat) || !isFinite(prevLng) || !prevAt) return;
+    var dist = haversine({ lat: prevLat, lng: prevLng }, { lat: lat, lng: lng });
+    if (!(dist >= 0.009)) return; /* ~15m in miles */
+    var hours = (now - prevAt) / 3600000;
+    if (hours <= 0) return;
+    var mph = dist / hours;
+    if (mph > 100) return; /* implausible for this app */
+    var row = todayMilesRow() || {
+      startOdometer: state.milesStartOdo,
+      gpsMiles: 0,
+      startedAt: now,
+      lastUpdate: now
+    };
+    if (row.startOdometer == null || !isFinite(Number(row.startOdometer))) return;
+    row.gpsMiles = Math.round(((Number(row.gpsMiles) || 0) + dist) * 10) / 10;
+    row.lastUpdate = now;
+    if (!row.startedAt) row.startedAt = now;
+    persistMilesRow(row);
+    var el = document.getElementById("miles-today");
+    if (el) el.textContent = "Today: " + row.gpsMiles.toFixed(1) + " mi";
+  }
+
+  function milesTodayLabel() {
+    var n = Number(state.milesToday) || 0;
+    return "Today: " + n.toFixed(1) + " mi";
+  }
+
+  function vehicleNeededCard() {
+    if (ROLE !== "driver" || !signedIn() || driverMidRide()) return "";
+    if (hasCompleteCar(readDriverAccount())) return "";
+    return (
+      '<div class="card vehicle-needed">' +
+      '<p class="tag">Car details required</p>' +
+      '<p class="lede">Add your car year, make, model, plate, seats, and a front-right photo before going online.</p>' +
+      '<a class="btn" href="signup/">Complete vehicle profile</a>' +
+      "</div>"
+    );
+  }
+
+  function milesStartCard() {
+    if (ROLE !== "driver" || !signedIn() || !state.milesNeedStart) return "";
+    if (!hasCompleteCar(readDriverAccount())) return "";
+    if (driverMidRide()) return "";
+    return (
+      '<div class="card miles-gate" id="miles-gate">' +
+      '<p class="tag">Starting mileage</p>' +
+      '<p class="lede">Enter the starting odometer for today before you go online. Chicago calendar day.</p>' +
+      '<form id="miles-start-form" autocomplete="off">' +
+      '<label for="miles-start-odo">Starting odometer</label>' +
+      '<input id="miles-start-odo" name="odo" type="number" inputmode="decimal" min="0" step="0.1" required value="' +
+      esc(state.milesOdoDraft || "") + '">' +
+      '<p class="error" id="miles-odo-error" role="alert">' + esc(state.milesOdoError || "") + "</p>" +
+      '<button class="btn" type="submit">Save and go online</button>' +
+      "</form></div>"
+    );
+  }
+
+  function milesEndCard() {
+    if (!state.milesEndPrompt) return "";
+    return (
+      '<div class="card miles-gate" id="miles-end-gate">' +
+      '<p class="tag">Ending mileage (optional)</p>' +
+      '<p class="lede">You can save the ending odometer for today, or skip.</p>' +
+      '<form id="miles-end-form" autocomplete="off">' +
+      '<label for="miles-end-odo">Ending odometer</label>' +
+      '<input id="miles-end-odo" name="odo" type="number" inputmode="decimal" min="0" step="0.1" value="' +
+      esc(state.milesEndDraft || "") + '">' +
+      '<p class="error" id="miles-end-error" role="alert">' + esc(state.milesEndError || "") + "</p>" +
+      '<div class="row-actions">' +
+      '<button class="btn" type="submit">Save and log out</button>' +
+      '<button class="btn secondary" type="button" id="miles-end-skip">Skip</button>' +
+      "</div></form></div>"
+    );
+  }
+
+  function seatsWarningForRide(ride, account) {
+    if (!ride || !account) return "";
+    var seats = Number(account.carSeats);
+    var pax = Number(ride.passengers);
+    if (!(seats >= 1) || !(pax >= 1)) return "";
+    if (pax <= seats) return "";
+    return '<p class="note seats-warn">This request lists ' + esc(String(pax)) +
+      " passengers; your car seats " + esc(String(seats)) + ". You can still accept.</p>";
+  }
+
+
   function commissionLine() {
     var rate = DRIVER_COMMISSION_RATE;
     if (rate == null || typeof rate !== "number" || rate < 0 || rate > 1) {
@@ -239,15 +481,32 @@
 
   function driverIdentityLine() {
     var img = photoImg(state.driverPhoto);
-    if (!state.driverName && !img) return "";
+    var carImg = carPhotoImg(state.driverCarPhoto);
+    if (!state.driverName && !img && !carImg && !state.driverCarPlate) return "";
     var phone = "";
     if (state.driverPhone) {
       var tel = String(state.driverPhone).replace(/[^\d+]/g, "");
       phone = ' <a href="tel:' + esc(tel) + '">' + esc(state.driverPhone) + "</a>";
     }
     var who = state.driverName ? esc(state.driverName) : "your driver";
-    return '<div class="who">' + img +
-      '<p class="lede">Your driver is ' + who + "." + phone + "</p></div>";
+    var carBits = [];
+    var carName = carLineFrom({
+      carYear: state.driverCarYear,
+      carMake: state.driverCarMake,
+      carModel: state.driverCarModel
+    });
+    if (carName) carBits.push(esc(carName));
+    if (state.driverCarPlate) carBits.push("Plate " + esc(normalizePlate(state.driverCarPlate)));
+    if (state.driverCarSeats) carBits.push(esc(String(state.driverCarSeats)) + " seats");
+    var carHtml = carBits.length
+      ? '<p class="fine driver-car-line">' + carBits.join(" · ") + "</p>"
+      : "";
+    return '<div class="who driver-identity">' + img +
+      "<div>" +
+      '<p class="lede">Your driver is ' + who + "." + phone + "</p>" +
+      carHtml +
+      carImg +
+      "</div></div>";
   }
 
   function haversine(a, b) {
@@ -1348,6 +1607,8 @@
 
   function publishDriverPresence() {
     if (!syncOn() || ROLE !== "driver" || !signedIn()) return Promise.resolve();
+    if (state.milesEndPrompt) return Promise.resolve();
+    if (!canGoOnline()) return Promise.resolve();
     var account = readDriverAccount() || {};
     var body = {
       online: true,
@@ -1355,7 +1616,14 @@
       name: account.name || state.driverName || "",
       phone: account.phone || state.driverPhone || "",
       lat: isCoord(state.hereLat) ? +state.hereLat : null,
-      lng: isCoord(state.hereLng) ? +state.hereLng : null
+      lng: isCoord(state.hereLng) ? +state.hereLng : null,
+      carYear: account.carYear || "",
+      carMake: account.carMake || "",
+      carModel: account.carModel || "",
+      carPlate: normalizePlate(account.carPlate),
+      carSeats: account.carSeats || "",
+      gpsMilesToday: Number(state.milesToday) || 0,
+      startOdometer: state.milesStartOdo
     };
     return fetch(driversUrl(driverPresenceId()), {
       method: "PUT",
@@ -1517,7 +1785,7 @@
   }
 
   function driverProfileLink() {
-    return '<p class="fine"><a href="signup/">Profile</a></p>';
+    return '<a class="nav-link" href="signup/">Profile</a>';
   }
 
   function selectedOpenRide() {
@@ -1546,6 +1814,7 @@
         ? est.raw.toFixed(2) + " mi, billed as " + est.billed + " · about " + money(est.total)
         : "Miles and fare show when both places are found.") + "</p>" +
       commissionLine() +
+      seatsWarningForRide(state, readDriverAccount()) +
       '<div class="row-actions">' +
       '<button class="btn" type="button" id="accept-ride">Accept</button>' +
       '<button class="btn secondary" type="button" id="deny-ride">Deny</button>' +
@@ -1588,7 +1857,13 @@
     var codeChanged = !!(ride.code && ride.code !== state.code);
     var identityChanged = (ride.driverName || "") !== (state.driverName || "") ||
       (ride.driverPhone || "") !== (state.driverPhone || "") ||
-      safePhoto(ride.driverPhoto) !== safePhoto(state.driverPhoto);
+      safePhoto(ride.driverPhoto) !== safePhoto(state.driverPhoto) ||
+      (ride.driverCarPlate || "") !== (state.driverCarPlate || "") ||
+      safePhoto(ride.driverCarPhoto) !== safePhoto(state.driverCarPhoto) ||
+      String(ride.driverCarYear || "") !== String(state.driverCarYear || "") ||
+      String(ride.driverCarMake || "") !== String(state.driverCarMake || "") ||
+      String(ride.driverCarModel || "") !== String(state.driverCarModel || "") ||
+      String(ride.driverCarSeats || "") !== String(state.driverCarSeats || "");
     if (!statusChanged && !placesChanged && !driverChanged && !codeChanged && !identityChanged) return;
     var screen = state.screen;
     applyRide(ride);
@@ -1781,7 +2056,11 @@
   }
 
   function logoutLine() {
-    return '<p class="fine"><button class="btn ghost" type="button" id="log-out">Log out</button></p>';
+    return '<button class="btn ghost" type="button" id="log-out">Log out</button>';
+  }
+
+  function accountNav() {
+    return '<div class="app-nav">' + driverProfileLink() + logoutLine() + "</div>";
   }
 
   function customerHome() {
@@ -1790,7 +2069,7 @@
       state.time = "";
     }
     return (
-      logoutLine() +
+      '<div class="app-nav">' + logoutLine() + "</div>" +
       "<h2>Request a ride</h2>" +
       "<p class=\"lede\">Nothing is sent, and nothing is charged.</p>" +
       "<form id=\"ride-form\" autocomplete=\"off\">" +
@@ -2080,6 +2359,12 @@
     state.driverPhone = ride.driverPhone || "";
     state.riderPhoto = safePhoto(ride.riderPhoto);
     state.driverPhoto = safePhoto(ride.driverPhoto);
+    state.driverCarYear = ride.driverCarYear || "";
+    state.driverCarMake = ride.driverCarMake || "";
+    state.driverCarModel = ride.driverCarModel || "";
+    state.driverCarPlate = normalizePlate(ride.driverCarPlate || "");
+    state.driverCarSeats = ride.driverCarSeats || "";
+    state.driverCarPhoto = safePhoto(ride.driverCarPhoto);
     if (ride.passengers != null) state.passengers = ride.passengers;
     if (ride.stops != null) state.stops = ride.stops;
     state.holiday = !!ride.holiday;
@@ -2105,15 +2390,33 @@
     var driverName = state.driverName || "";
     var driverPhone = state.driverPhone || "";
     var driverPhoto = safePhoto(state.driverPhoto);
+    var driverCarYear = state.driverCarYear || "";
+    var driverCarMake = state.driverCarMake || "";
+    var driverCarModel = state.driverCarModel || "";
+    var driverCarPlate = normalizePlate(state.driverCarPlate || "");
+    var driverCarSeats = state.driverCarSeats || "";
+    var driverCarPhoto = safePhoto(state.driverCarPhoto);
     var riderPhoto = safePhoto(state.riderPhoto);
     if (clearDriver) {
       driverName = "";
       driverPhone = "";
       driverPhoto = "";
+      driverCarYear = "";
+      driverCarMake = "";
+      driverCarModel = "";
+      driverCarPlate = "";
+      driverCarSeats = "";
+      driverCarPhoto = "";
     } else {
       if (!driverName && prev.driverName) driverName = prev.driverName;
       if (!driverPhone && prev.driverPhone) driverPhone = prev.driverPhone;
       if (!driverPhoto) driverPhoto = safePhoto(prev.driverPhoto);
+      if (!driverCarYear && prev.driverCarYear) driverCarYear = prev.driverCarYear;
+      if (!driverCarMake && prev.driverCarMake) driverCarMake = prev.driverCarMake;
+      if (!driverCarModel && prev.driverCarModel) driverCarModel = prev.driverCarModel;
+      if (!driverCarPlate && prev.driverCarPlate) driverCarPlate = normalizePlate(prev.driverCarPlate);
+      if (!driverCarSeats && prev.driverCarSeats) driverCarSeats = prev.driverCarSeats;
+      if (!driverCarPhoto) driverCarPhoto = safePhoto(prev.driverCarPhoto);
     }
     if (ROLE === "customer") {
       var riderAccount = readRiderAccount();
@@ -2125,6 +2428,12 @@
     state.driverName = driverName;
     state.driverPhone = driverPhone;
     state.driverPhoto = driverPhoto;
+    state.driverCarYear = driverCarYear;
+    state.driverCarMake = driverCarMake;
+    state.driverCarModel = driverCarModel;
+    state.driverCarPlate = driverCarPlate;
+    state.driverCarSeats = driverCarSeats;
+    state.driverCarPhoto = driverCarPhoto;
     state.riderPhoto = riderPhoto;
     if (!clearDriver) {
       if (!isCoord(driverLat) && isCoord(prev.driverLat)) driverLat = +prev.driverLat;
@@ -2151,6 +2460,12 @@
       driverName: driverName,
       driverPhone: driverPhone,
       driverPhoto: driverPhoto,
+      driverCarYear: driverCarYear,
+      driverCarMake: driverCarMake,
+      driverCarModel: driverCarModel,
+      driverCarPlate: driverCarPlate,
+      driverCarSeats: driverCarSeats,
+      driverCarPhoto: driverCarPhoto,
       riderPhoto: riderPhoto,
       passengers: ridePassengers(),
       stops: rideStops(),
@@ -2185,6 +2500,12 @@
     state.driverName = "";
     state.driverPhone = "";
     state.driverPhoto = "";
+    state.driverCarYear = "";
+    state.driverCarMake = "";
+    state.driverCarModel = "";
+    state.driverCarPlate = "";
+    state.driverCarSeats = "";
+    state.driverCarPhoto = "";
     state.riderPhoto = "";
     state.passengers = 2;
     state.stops = 0;
@@ -2207,19 +2528,32 @@
   }
 
   function driverHome() {
+    if (state.milesEndPrompt) {
+      return (
+        '<p class="fine" id="miles-today">' + esc(milesTodayLabel()) + "</p>" +
+        milesEndCard()
+      );
+    }
+    var gated = !canGoOnline();
     return (
-      driverProfileLink() +
-      logoutLine() +
-      "<h2>Open requests</h2>" +
-      driverBoardStatus() +
-      '<div class="map-stage board-map">' +
-      '<div id="live-map" role="img" aria-label="Open ride requests map"></div>' +
-      '<p class="map-caption">You and open rider pickups</p>' +
-      "</div>" +
-      (isFinite(state.hereLat) ? "" : '<p class="fine">Allow location so the map can show where you are.</p>') +
-      '<p class="legend"><span><i class="swatch"></i> You</span>' +
-      '<span><i class="swatch you"></i> Rider pickup</span></p>' +
-      openRideCard()
+      accountNav() +
+      '<p class="fine" id="miles-today">' + esc(milesTodayLabel()) + "</p>" +
+      vehicleNeededCard() +
+      milesStartCard() +
+      (gated
+        ? '<p class="lede">Finish the steps above to go online and see open requests.</p>'
+        : (
+          "<h2>Open requests</h2>" +
+          driverBoardStatus() +
+          '<div class="map-stage board-map">' +
+          '<div id="live-map" role="img" aria-label="Open ride requests map"></div>' +
+          '<p class="map-caption">You and open rider pickups</p>' +
+          "</div>" +
+          (isFinite(state.hereLat) ? "" : '<p class="fine">Allow location so the map can show where you are.</p>') +
+          '<p class="legend"><span><i class="swatch"></i> You</span>' +
+          '<span><i class="swatch you"></i> Rider pickup</span></p>' +
+          openRideCard()
+        ))
     );
   }
 
@@ -2299,6 +2633,7 @@
     var statusLabel = completed ? "Ride complete" : (started ? "Ride started" : "Heading to pickup");
     return (
       (completed ? "" : '<button class="btn ghost" type="button" id="back-driver">← Requests</button>') +
+      '<p class="fine" id="miles-today">' + esc(milesTodayLabel()) + "</p>" +
       '<div class="status"><i></i><span>' + statusLabel + "</span></div>" +
       '<div class="who">' + photoImg(state.riderPhoto) +
       "<p class=\"lede\">" + esc(state.name || "Rider") +
@@ -2487,9 +2822,12 @@
           state.gateStep = "";
           state.screen = "home";
           if (ROLE === "driver") {
+            ensureMilesDayReady();
             followGps();
-            refreshOpenRides(true);
-            publishDriverPresence();
+            if (canGoOnline()) {
+              refreshOpenRides(true);
+              publishDriverPresence();
+            }
           } else {
             maybeRestoreCustomerRide();
           }
@@ -2503,14 +2841,95 @@
     var logout = document.getElementById("log-out");
     if (logout) {
       logout.addEventListener("click", function () {
-        if (ROLE === "driver") clearDriverPresence();
-        writeSession("");
-        state.loginError = "";
-        state.gateStep = "";
-        state.screen = "home";
-        state.onlineDrivers = [];
-        state.onlineStamp = "";
-        render();
+        if (ROLE === "driver" && !state.milesNeedStart && todayMilesRow() && !state.milesEndPrompt) {
+          clearDriverPresence();
+          state.milesEndPrompt = true;
+          state.milesEndDraft = "";
+          state.milesEndError = "";
+          render();
+          return;
+        }
+        finishDriverLogout();
+      });
+    }
+    function finishDriverLogout() {
+      if (ROLE === "driver") {
+        clearDriverPresence();
+        state.milesEndPrompt = false;
+        state.milesTrackLat = null;
+        state.milesTrackLng = null;
+        state.milesTrackAt = 0;
+      }
+      writeSession("");
+      state.loginError = "";
+      state.gateStep = "";
+      state.screen = "home";
+      state.onlineDrivers = [];
+      state.onlineStamp = "";
+      render();
+    }
+    var milesStartForm = document.getElementById("miles-start-form");
+    if (milesStartForm) {
+      milesStartForm.addEventListener("submit", function (event) {
+        event.preventDefault();
+        var raw = document.getElementById("miles-start-odo").value;
+        var odo = Number(raw);
+        if (!isFinite(odo) || odo < 0 || String(raw).trim() === "") {
+          state.milesOdoError = "Enter the starting odometer for today.";
+          state.milesOdoDraft = raw;
+          render();
+          return;
+        }
+        var now = Date.now();
+        var row = {
+          startOdometer: odo,
+          gpsMiles: 0,
+          startedAt: now,
+          lastUpdate: now
+        };
+        state.milesOdoError = "";
+        state.milesOdoDraft = "";
+        state.milesNeedStart = false;
+        state.milesStartOdo = odo;
+        state.milesToday = 0;
+        persistMilesRow(row).then(function () {
+          followGps();
+          refreshOpenRides(true);
+          publishDriverPresence();
+          render();
+        });
+      });
+    }
+    var milesEndForm = document.getElementById("miles-end-form");
+    if (milesEndForm) {
+      milesEndForm.addEventListener("submit", function (event) {
+        event.preventDefault();
+        var raw = document.getElementById("miles-end-odo").value;
+        if (String(raw).trim() !== "") {
+          var odo = Number(raw);
+          if (!isFinite(odo) || odo < 0) {
+            state.milesEndError = "Enter a valid ending odometer, or skip.";
+            state.milesEndDraft = raw;
+            render();
+            return;
+          }
+          var row = todayMilesRow() || {
+            startOdometer: state.milesStartOdo,
+            gpsMiles: Number(state.milesToday) || 0,
+            startedAt: Date.now(),
+            lastUpdate: Date.now()
+          };
+          row.endOdometer = odo;
+          row.lastUpdate = Date.now();
+          persistMilesRow(row);
+        }
+        finishDriverLogout();
+      });
+    }
+    var milesEndSkip = document.getElementById("miles-end-skip");
+    if (milesEndSkip) {
+      milesEndSkip.addEventListener("click", function () {
+        finishDriverLogout();
       });
     }
     var customerBtn = document.getElementById("mode-customer");
@@ -2887,6 +3306,14 @@
     if (account && account.name) state.driverName = account.name;
     if (account && account.phone) state.driverPhone = account.phone;
     if (account && safePhoto(account.photo)) state.driverPhoto = safePhoto(account.photo);
+    if (account) {
+      state.driverCarYear = account.carYear || "";
+      state.driverCarMake = account.carMake || "";
+      state.driverCarModel = account.carModel || "";
+      state.driverCarPlate = normalizePlate(account.carPlate);
+      state.driverCarSeats = account.carSeats || "";
+      if (safePhoto(account.carPhoto)) state.driverCarPhoto = safePhoto(account.carPhoto);
+    }
     var code = state.driverCode || state.code || state.selectedOpenCode || readDriverCode();
     if (code) {
       state.code = code;
@@ -2899,6 +3326,12 @@
       if (state.driverName) patch.driverName = state.driverName;
       if (state.driverPhone) patch.driverPhone = state.driverPhone;
       if (safePhoto(state.driverPhoto)) patch.driverPhoto = safePhoto(state.driverPhoto);
+      if (state.driverCarYear) patch.driverCarYear = state.driverCarYear;
+      if (state.driverCarMake) patch.driverCarMake = state.driverCarMake;
+      if (state.driverCarModel) patch.driverCarModel = state.driverCarModel;
+      if (state.driverCarPlate) patch.driverCarPlate = state.driverCarPlate;
+      if (state.driverCarSeats) patch.driverCarSeats = state.driverCarSeats;
+      if (safePhoto(state.driverCarPhoto)) patch.driverCarPhoto = safePhoto(state.driverCarPhoto);
       patchRide(code, patch).catch(function () {});
       deleteOpenRide(code).catch(function () {});
     }
@@ -3228,6 +3661,7 @@
       state.hereLng = pos.coords.longitude;
       state.driverLat = state.hereLat;
       state.driverLng = state.hereLng;
+      if (ROLE === "driver") trackDailyMiles(pos);
       var ride = currentRide();
       if (syncOn()) {
         var driverCode = state.driverCode || readDriverCode();
@@ -3287,9 +3721,12 @@
       if (event.key === "Escape") closePreview();
     });
     if (ROLE === "driver" && signedIn()) {
+      ensureMilesDayReady();
       followGps();
-      refreshOpenRides(true);
-      publishDriverPresence();
+      if (canGoOnline()) {
+        refreshOpenRides(true);
+        publishDriverPresence();
+      }
     }
     window.addEventListener("storage", function (event) {
       if (event.key !== STORE) return;
