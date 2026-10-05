@@ -1,0 +1,13 @@
+{
+  "rules": {
+    ".read": false,
+    ".write": false,
+    "rides": {
+      "$code": {
+        ".read": "$code.matches(/^[ABCDEFGHJKLMNPQRSTUVWXYZ23456789]{8}$/)",
+        ".write": "$code.matches(/^[ABCDEFGHJKLMNPQRSTUVWXYZ23456789]{8}$/)",
+        ".validate": "$code.matches(/^[ABCDEFGHJKLMNPQRSTUVWXYZ23456789]{8}$/)"
+      }
+    }
+  }
+}
