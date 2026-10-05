@@ -678,9 +678,28 @@
     }).catch(function () {});
   }
 
+  function shiftClosed(row) {
+    if (!row || typeof row !== "object") return false;
+    if (row.shiftClosed) return true;
+    return row.endOdometer != null && isFinite(Number(row.endOdometer));
+  }
+
   function ensureMilesDayReady() {
     if (ROLE !== "driver" || !signedIn()) return;
     var row = todayMilesRow();
+    /* Ending odometer (or skip-marked close) ends the shift — ask for opening miles again. */
+    if (shiftClosed(row)) {
+      if (driverMidRide()) {
+        state.milesNeedStart = false;
+        state.milesToday = Number(row && row.gpsMiles) || 0;
+        state.milesStartOdo = row && row.startOdometer != null ? Number(row.startOdometer) : null;
+        return;
+      }
+      state.milesNeedStart = true;
+      state.milesToday = 0;
+      state.milesStartOdo = null;
+      return;
+    }
     if (row && row.startOdometer != null && isFinite(Number(row.startOdometer))) {
       state.milesNeedStart = false;
       state.milesToday = Number(row.gpsMiles) || 0;
@@ -4123,12 +4142,15 @@
           return;
         }
         var now = Date.now();
+        var prev = todayMilesRow() || {};
         var row = {
           startOdometer: odo,
           gpsMiles: 0,
           startedAt: now,
-          lastUpdate: now
+          lastUpdate: now,
+          shiftClosed: false
         };
+        if (prev.endOdometer != null) row.priorEndOdometer = prev.endOdometer;
         state.milesOdoError = "";
         state.milesOdoDraft = "";
         state.milesNeedStart = false;
@@ -4162,8 +4184,16 @@
             lastUpdate: Date.now()
           };
           row.endOdometer = odo;
+          row.shiftClosed = true;
           row.lastUpdate = Date.now();
           persistMilesRow(row);
+        } else {
+          var closed = todayMilesRow();
+          if (closed) {
+            closed.shiftClosed = true;
+            closed.lastUpdate = Date.now();
+            persistMilesRow(closed);
+          }
         }
         finishDriverLogout();
       });
@@ -4171,6 +4201,12 @@
     var milesEndSkip = document.getElementById("miles-end-skip");
     if (milesEndSkip) {
       milesEndSkip.addEventListener("click", function () {
+        var closed = todayMilesRow();
+        if (closed) {
+          closed.shiftClosed = true;
+          closed.lastUpdate = Date.now();
+          persistMilesRow(closed);
+        }
         finishDriverLogout();
       });
     }
