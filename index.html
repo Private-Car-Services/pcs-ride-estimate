@@ -8,7 +8,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="styles.css" />
+  <link rel="stylesheet" href="styles.css?v=2" />
   <script src="config.js"></script>
 </head>
 <body>
@@ -42,6 +42,20 @@
       <form id="estimate-form" class="card form-card" method="post" action="#" novalidate onsubmit="return false;">
         <fieldset>
           <legend>Trip details</legend>
+
+          <fieldset class="area-group" id="service-area-group">
+            <legend>Service area <span class="required-tag">required</span></legend>
+            <div class="area-options">
+              <label class="area-option">
+                <input type="radio" id="service-area-houston" name="service-area" value="Greater Houston area" required />
+                <span>Greater Houston area</span>
+              </label>
+              <label class="area-option">
+                <input type="radio" id="service-area-waco" name="service-area" value="Waco area" />
+                <span>Waco area</span>
+              </label>
+            </div>
+          </fieldset>
 
           <fieldset class="address-group">
             <legend>Pickup address</legend>
@@ -180,6 +194,7 @@
           </p>
           <div id="results-body" hidden>
             <p class="estimate-badge">ESTIMATE ONLY</p>
+            <p class="area-line" id="area-line" hidden></p>
             <p class="miles-line" id="miles-line"></p>
             <p class="tier-line" id="tier-line"></p>
             <ul class="line-items" id="line-items"></ul>
@@ -238,6 +253,6 @@
     </div>
   </footer>
 
-  <script src="app.js?v=10"></script>
+  <script src="app.js?v=11"></script>
 </body>
 </html>

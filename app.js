@@ -7,8 +7,10 @@
 
   // Business line shown to customers on the page.
   const PHONE = '9362617878';
-  // Lead SMS recipients only (not shown in page copy). Personal second.
+  // Lead SMS recipients only (not shown in page copy). Business, then Matthew's personal.
   const LEAD_SMS_NUMBERS = ['9362617878', '9365227347'];
+  // Waco-area leads also go to Anson. Greater Houston leads do not.
+  const WACO_EXTRA_SMS_NUMBERS = ['2544981335'];
   const RATES = {
     localBase: 11,
     extraPassenger: 5,
@@ -77,6 +79,8 @@
     returnNote: document.getElementById('return-note'),
     callQuote: document.getElementById('call-quote'),
     year: document.getElementById('year'),
+    areaGroup: document.getElementById('service-area-group'),
+    areaLine: document.getElementById('area-line'),
   };
 
   let map = null;
@@ -216,6 +220,27 @@
     };
   }
 
+  function serviceArea() {
+    const picked = els.form.querySelector('input[name="service-area"]:checked');
+    return picked ? picked.value : '';
+  }
+
+  function updateAreaLine() {
+    if (!els.areaLine) return;
+    const area = serviceArea();
+    els.areaLine.hidden = !area;
+    els.areaLine.textContent = area ? 'Service area: ' + area : '';
+  }
+
+  function requireServiceArea() {
+    if (serviceArea()) return true;
+    const first = document.getElementById('service-area-houston');
+    if (els.areaGroup && els.areaGroup.scrollIntoView) els.areaGroup.scrollIntoView({ block: 'center' });
+    if (first && first.reportValidity) first.reportValidity();
+    showRouteStatus('Choose Greater Houston area or Waco area.', true);
+    return false;
+  }
+
   function composeAddress(streetEl, cityEl, stateEl) {
     return [streetEl.value.trim(), cityEl.value.trim(), stateEl.value.trim()].filter(Boolean).join(', ');
   }
@@ -308,9 +333,14 @@
     return navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1;
   }
 
-  function smsUrl(body) {
+  function leadNumbersFor(area) {
+    if (area === 'Waco area') return LEAD_SMS_NUMBERS.concat(WACO_EXTRA_SMS_NUMBERS);
+    return LEAD_SMS_NUMBERS.slice();
+  }
+
+  function smsUrl(body, area) {
     const encoded = encodeURIComponent(body);
-    const joined = LEAD_SMS_NUMBERS.join(',');
+    const joined = leadNumbersFor(area).join(',');
     // iOS: undocumented multi-recipient form. Android: RFC comma list + ?body=.
     // Customer Messages To: will list both; page copy still shows business only.
     if (isAppleSmsDevice()) {
@@ -339,6 +369,7 @@
       '',
       'I would like to request a ride. Please confirm availability and the final fare.',
       '',
+      'Service area: ' + serviceArea(),
       'Name: ' + els.contactName.value.trim(),
       'Phone: ' + els.contactPhone.value.trim(),
     ];
@@ -384,7 +415,7 @@
     const data = {};
     els.form.querySelectorAll('input, select, textarea').forEach((field) => {
       if (!field.id) return;
-      data[field.id] = field.type === 'checkbox' ? field.checked : field.value;
+      data[field.id] = (field.type === 'checkbox' || field.type === 'radio') ? field.checked : field.value;
     });
     try { sessionStorage.setItem('pcs-quote', JSON.stringify(data)); } catch (err) {}
   }
@@ -413,7 +444,7 @@
       if (/^stop-\d+-/.test(id) || id === 'stops') return;
       const field = document.getElementById(id);
       if (!field) return;
-      if (field.type === 'checkbox') field.checked = !!data[id];
+      if (field.type === 'checkbox' || field.type === 'radio') field.checked = !!data[id];
       else field.value = data[id];
     });
   }
@@ -438,7 +469,7 @@
     }
     if (els.textRequestNote) els.textRequestNote.hidden = true;
     saveDraft();
-    const url = smsUrl(rideRequestBody(result, promo));
+    const url = smsUrl(rideRequestBody(result, promo), serviceArea());
     if (els.textRequestButton) els.textRequestButton.href = url;
     if (els.promoBookButton) els.promoBookButton.href = url;
     if (els.smsLaunch) els.smsLaunch.href = url;
@@ -450,6 +481,7 @@
 
   function renderEstimate(result) {
     lastEstimate = result;
+    updateAreaLine();
     els.resultsEmpty.hidden = true;
     els.resultsBody.hidden = false;
 
@@ -599,6 +631,8 @@
   async function onSubmit(e) {
     e.preventDefault();
 
+    if (!requireServiceArea()) return;
+
     const tripType = els.tripType.value;
     if (tripType === 'hourly' || tripType === 'van') {
       const quote = { callForQuote: true, tripType };
@@ -704,6 +738,7 @@
   function init() {
     if (els.year) els.year.textContent = String(new Date().getFullYear());
     restoreDraft();
+    updateAreaLine();
     if (!els.rideDate.value || !els.rideTime.value) setDefaultDateTime();
     if (sessionStorage.getItem('pcs-quote')) showConfirmation();
     els.form.addEventListener('submit', (event) => {
@@ -728,6 +763,14 @@
       });
     }
     els.tripType.addEventListener('change', updateFlightDetails);
+    els.form.querySelectorAll('input[name="service-area"]').forEach((radio) => {
+      radio.addEventListener('change', () => {
+        updateAreaLine();
+        if (els.routeStatus.classList.contains('error') && /Greater Houston area or Waco area/.test(els.routeStatus.textContent)) {
+          showRouteStatus('');
+        }
+      });
+    });
     if (els.addStopButton) els.addStopButton.addEventListener('click', () => addStop());
     if (els.stopsList) {
       els.stopsList.addEventListener('click', (event) => {
@@ -765,6 +808,8 @@
   window.PCS_resolveTier = resolveTier;
   window.PCS_composeAddress = composeAddress;
   window.PCS_smsUrl = smsUrl;
+  window.PCS_leadNumbersFor = leadNumbersFor;
+  window.PCS_rideRequestBody = rideRequestBody;
 
   init();
 })();
