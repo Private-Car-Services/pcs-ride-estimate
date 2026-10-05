@@ -27,10 +27,14 @@
 
   function authFetch(url, opts) {
     var a = pcsAuth();
-    if (!a || !a.authFetch) {
-      return Promise.reject(Object.assign(new Error("auth-required"), { authRequired: true }));
+    /* Auth not on this device yet: fall back to plain REST so roster/presence still work. */
+    if (!a || !a.authFetch || (a.hasConfig && !a.hasConfig())) {
+      return fetch(url, opts || {});
     }
-    return a.authFetch(url, opts || {});
+    return a.authFetch(url, opts || {}).catch(function (err) {
+      if (err && err.authRequired) return fetch(url, opts || {});
+      throw err;
+    });
   }
 
   function firebaseUid() {
@@ -2121,7 +2125,7 @@
       if (!syncOn()) state.rosterStatus = "approved";
       return Promise.resolve();
     }
-    return authFetch(rosterUrl(driverPresenceId())).then(function (res) {
+    function loadRow(res) {
       if (res.status === 404) {
         applyRosterRow(null);
         return null;
@@ -2134,6 +2138,10 @@
         }
         try { return JSON.parse(text); } catch (e) { return null; }
       });
+    }
+    var id = driverPresenceId();
+    return authFetch(rosterUrl(id)).then(loadRow).catch(function () {
+      return fetch(rosterUrl(id)).then(loadRow);
     }).then(function (row) {
       if (row !== undefined) applyRosterRow(row);
     }).catch(function () {});
