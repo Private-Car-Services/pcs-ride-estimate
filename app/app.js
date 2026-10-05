@@ -83,6 +83,9 @@
     pin: "",
     pinDraft: "",
     pinError: "",
+    tripPath: [],
+    useDrivenMiles: false,
+    endedEarly: false,
     remoteLoading: false,
     dropFix: null,
     pickupFromHere: false,
@@ -374,16 +377,48 @@
     return [[a.lat, a.lng], [b.lat, b.lng]];
   }
 
+  function drivenPathMiles() {
+    var path = state.tripPath || [];
+    if (path.length < 2) return null;
+    var sum = 0;
+    var i;
+    for (i = 1; i < path.length; i += 1) {
+      sum += haversine(path[i - 1], path[i]);
+    }
+    return Math.round(sum * 100) / 100;
+  }
+
+  function recordTripPoint(lat, lng) {
+    if (!isCoord(lat) || !isCoord(lng)) return;
+    if (state.rideStatus !== "started") return;
+    var point = { lat: +lat, lng: +lng };
+    var path = state.tripPath || [];
+    var last = path.length ? path[path.length - 1] : null;
+    if (last && haversine(last, point) < 0.03) return;
+    path.push(point);
+    if (path.length > 400) path = path.slice(path.length - 400);
+    state.tripPath = path;
+  }
+
   function tripMiles() {
     var pickup = placeCoords("pickup");
     var dropoff = placeCoords("drop");
     if (!pickup || !dropoff) return { raw: 0, billed: 0, ready: false };
-    var key = routeKey(pickup, dropoff);
+    var driven = drivenPathMiles();
     var hundredths;
-    if (driving.key === key && driving.done && driving.miles != null) hundredths = driving.miles;
-    else {
-      hundredths = Math.round(haversine(pickup, dropoff) * 100) / 100;
-      if (!(driving.key === key && driving.done)) ensureDrivingRoute(pickup, dropoff);
+    if (state.useDrivenMiles && driven != null) {
+      hundredths = driven;
+    } else {
+      var key = routeKey(pickup, dropoff);
+      if (driving.key === key && driving.done && driving.miles != null) hundredths = driving.miles;
+      else {
+        hundredths = Math.round(haversine(pickup, dropoff) * 100) / 100;
+        if (!(driving.key === key && driving.done)) ensureDrivingRoute(pickup, dropoff);
+      }
+      // If the car drove farther than the planned route (extension / detour), bill the driven path.
+      if ((state.rideStatus === "started" || state.rideStatus === "completed") && driven != null && driven > hundredths) {
+        hundredths = driven;
+      }
     }
     var billed = Math.ceil(hundredths);
     if (billed < 1) billed = 1;
@@ -484,6 +519,143 @@
       tax: tax,
       total: sub + tax
     };
+  }
+
+  function fareSnapshot() {
+    var est = estimate();
+    if (!est.ready) return null;
+    return {
+      billedMiles: est.billed,
+      rawMiles: est.raw,
+      fareSub: est.sub,
+      fareTax: est.tax,
+      fareTotal: est.total
+    };
+  }
+
+  function cancelFeeCents() {
+    var est = estimate();
+    var pct = est.ready ? Math.round(est.total * 0.25) : 0;
+    var floor = 1000; // $10.00
+    return Math.max(pct, floor);
+  }
+
+  function paymentHoldCopy() {
+    return (
+      '<div class="card">' +
+      '<p class="tag">Card on file · charged after the ride</p>' +
+      '<p class="lede">Add your card before the ride. You are not charged until after drop-off, so you can add a tip.</p>' +
+      '<p class="fine">A real card hold uses Square on a secure server or Square payment link. This starter never stores a card number or Square secret.</p>' +
+      '<button class="btn secondary" type="button" id="square-hold-btn">Continue to Square (card setup)</button>' +
+      '<p class="fine" id="square-hold-help"></p>' +
+      "</div>"
+    );
+  }
+
+  function cancelWarningCopy() {
+    var fee = cancelFeeCents();
+    return (
+      "If you cancel before pickup, you will be charged " + money(fee) +
+      " (25% of the estimate or $10, whichever is more)."
+    );
+  }
+
+  var SQUARE_CARD_SETUP_URL = "https://squareup.com/appointments/book/L077DQHSNJAG6";
+
+  function openSquareCardSetup() {
+    var help = document.getElementById("square-hold-help");
+    if (!SQUARE_CARD_SETUP_URL) {
+      if (help) help.textContent = "Square card setup link is not configured yet. A real hold needs a server or Square payment link.";
+      return;
+    }
+    if (help) help.textContent = "Opening Square for card setup. You are not charged until after the ride.";
+    window.open(SQUARE_CARD_SETUP_URL, "_blank", "noopener,noreferrer");
+  }
+
+  function openTurnByTurnToDrop() {
+    var drop = placeCoords("drop");
+    if (!drop) return false;
+    var dest = (+drop.lat) + "," + (+drop.lng);
+    var ua = navigator.userAgent || "";
+    var ios = /iPhone|iPad|iPod/i.test(ua);
+    var url = ios
+      ? "https://maps.apple.com/?daddr=" + encodeURIComponent(dest) + "&dirflg=d"
+      : "https://www.google.com/maps/dir/?api=1&destination=" + encodeURIComponent(dest) + "&travelmode=driving";
+    window.open(url, "_blank", "noopener,noreferrer");
+    return true;
+  }
+
+  function completeActiveRide(opts) {
+    opts = opts || {};
+    if (ROLE !== "driver") return;
+    if (state.rideStatus !== "started" && state.rideStatus !== "accepted") return;
+    if (opts.endHere && isCoord(state.hereLat) && isCoord(state.hereLng)) {
+      recordTripPoint(state.hereLat, state.hereLng);
+      state.dropLat = +state.hereLat;
+      state.dropLng = +state.hereLng;
+      state.dropFix = { lat: +state.hereLat, lng: +state.hereLng };
+      if (!state.dropStreet) state.dropStreet = "Ended at current location";
+      state.endedEarly = true;
+      state.useDrivenMiles = true;
+      driving.key = "";
+      driving.done = false;
+      driving.miles = null;
+      driving.line = null;
+    }
+    state.rideStatus = "completed";
+    syncActiveTripFare({ status: "completed" });
+    var code = state.driverCode || state.code || readDriverCode();
+    if (syncOn() && code) deleteOpenRide(code).catch(function () {});
+    state.screen = "trip";
+    render();
+  }
+
+  function cancelRiderRide() {
+    if (ROLE !== "customer") return;
+    if (state.rideStatus === "started" || state.rideStatus === "completed") return;
+    if (state.rideStatus !== "requested" && state.rideStatus !== "accepted") return;
+    var msg = cancelWarningCopy() + "\n\nCancel this ride?";
+    if (!window.confirm(msg)) return;
+    var fee = cancelFeeCents();
+    var code = state.code;
+    if (syncOn() && code) {
+      patchRide(code, { status: "cancelled", cancelFeeCents: fee, cancelledBy: "rider" }).catch(function () {});
+      deleteOpenRide(code).catch(function () {});
+    }
+    try { localStorage.removeItem(STORE); } catch (err) {}
+    writeRideOwner("");
+    clearRideFields();
+    state.screen = "home";
+    render();
+  }
+
+  function syncActiveTripFare(extra) {
+    if (ROLE !== "driver") return;
+    if (state.rideStatus !== "started" && state.rideStatus !== "completed") return;
+    var status = state.rideStatus;
+    saveRide(status);
+    var code = state.driverCode || state.code || readDriverCode();
+    if (!syncOn() || !code) return;
+    var patch = {
+      status: status,
+      dropStreet: state.dropStreet,
+      dropCity: state.dropCity,
+      dropState: state.dropState,
+      dropLat: state.dropLat,
+      dropLng: state.dropLng
+    };
+    var snap = fareSnapshot();
+    if (snap) {
+      patch.billedMiles = snap.billedMiles;
+      patch.rawMiles = snap.rawMiles;
+      patch.fareSub = snap.fareSub;
+      patch.fareTax = snap.fareTax;
+      patch.fareTotal = snap.fareTotal;
+    }
+    if (extra && typeof extra === "object") {
+      Object.keys(extra).forEach(function (k) { patch[k] = extra[k]; });
+    }
+    patchRide(code, patch).catch(function () {});
   }
 
   function addressLine(street, city, stateName) {
@@ -614,7 +786,23 @@
     if (streetEl) streetEl.value = placeLine(p);
     if (cityEl && (p.city || p.county)) cityEl.value = p.city || p.county;
     if (stateEl) stateEl.value = stateCode(p.state);
+    state[prefix + "Street"] = streetEl ? streetEl.value : placeLine(p);
+    if (cityEl) state[prefix + "City"] = cityEl.value;
+    if (stateEl) state[prefix + "State"] = stateEl.value;
     setCoords(prefix, feature);
+    if (prefix === "drop") {
+      state.dropFix = pointFrom(state.dropLat, state.dropLng);
+      state.useDrivenMiles = false;
+      state.endedEarly = false;
+      driving.key = "";
+      driving.done = false;
+      driving.miles = null;
+      driving.line = null;
+      if (ROLE === "driver" && state.rideStatus === "started") {
+        syncActiveTripFare();
+        render();
+      }
+    }
   }
 
 
@@ -1296,6 +1484,7 @@
 
   function maybePatchDriverLocation() {
     if (!syncOn() || ROLE !== "driver" || state.screen !== "trip") return;
+    if (state.rideStatus === "completed" || state.rideStatus === "cancelled") return;
     var code = state.driverCode || readDriverCode();
     if (!code) return;
     if (!isCoord(state.hereLat) || !isCoord(state.hereLng)) return;
@@ -1403,8 +1592,8 @@
     if (!statusChanged && !placesChanged && !driverChanged && !codeChanged && !identityChanged) return;
     var screen = state.screen;
     applyRide(ride);
-    if (screen === "waiting" && (ride.status === "accepted" || ride.status === "started")) state.screen = "trip";
-    if ((ride.status === "accepted" || ride.status === "started") && state.screen !== "trip") state.screen = "trip";
+    if (screen === "waiting" && (ride.status === "accepted" || ride.status === "started" || ride.status === "completed")) state.screen = "trip";
+    if ((ride.status === "accepted" || ride.status === "started" || ride.status === "completed") && state.screen !== "trip") state.screen = "trip";
     var onlyDriver = !statusChanged && !placesChanged && !identityChanged && driverChanged && state.screen === screen;
     if (onlyDriver && carMarker && isCoord(state.driverLat) && isCoord(state.driverLng)) {
       carMarker.setLatLng([+state.driverLat, +state.driverLng]);
@@ -1540,15 +1729,20 @@
       return false;
     }
     if (savedRide.pickupStreet && savedRide.dropStreet &&
-        (savedRide.status === "requested" || savedRide.status === "accepted" || savedRide.status === "started")) {
-      if (isPickupInPast(savedRide.date, savedRide.time)) {
+        (savedRide.status === "requested" || savedRide.status === "accepted" ||
+         savedRide.status === "started" || savedRide.status === "completed")) {
+      if (savedRide.status !== "completed" && isPickupInPast(savedRide.date, savedRide.time)) {
         discardStoredRide();
         state.screen = "home";
         return false;
       }
       applyRide(savedRide);
       ensureRidePin();
-      state.screen = (savedRide.status === "accepted" || savedRide.status === "started") ? "trip" : "waiting";
+      if (savedRide.status === "completed" || savedRide.status === "accepted" || savedRide.status === "started") {
+        state.screen = "trip";
+      } else {
+        state.screen = "waiting";
+      }
       return true;
     }
     return false;
@@ -1624,6 +1818,8 @@
       field("rider-phone", "Phone", state.phone, 'type="tel" inputmode="tel" required') +
       "</div>" +
       '<p class="note">Miles round up to the next whole mile. Texas tax is 8.25% and is estimate-only, not a charge.</p>' +
+      paymentHoldCopy() +
+      '<p class="fine">Cancel before pickup: you will be charged 25% of the estimate or $10, whichever is more.</p>' +
       '<p class="error" id="form-error" role="alert">' + esc(state.error) + "</p>" +
       '<button class="btn" type="submit">Request this ride</button>' +
       "</form>" +
@@ -1646,11 +1842,11 @@
       : "";
     return (
       '<div class="card">' +
-      '<p class="tag">Estimate only · not a charge</p>' +
+      '<p class="tag">' + (state.rideStatus === "completed" ? "Final fare · not a charge" : "Estimate only · not a charge") + "</p>" +
       '<div class="money-row"><span>Miles</span><span>' + est.raw.toFixed(2) + " mi, billed as " + est.billed + " (rounded up)</span></div>" +
       '<div class="money-row"><span>Fare before tax</span><span>' + money(est.sub) + "</span></div>" +
       '<div class="money-row"><span>Texas tax 8.25%</span><span>' + money(est.tax) + "</span></div>" +
-      '<div class="total-row"><span>Estimated total</span><span>' + money(est.total) + "</span></div>" +
+      '<div class="total-row"><span>' + (state.rideStatus === "completed" ? "Final total" : "Estimated total") + "</span><span>" + money(est.total) + "</span></div>" +
       '<p class="fine">Not a charge. ' + esc(est.tierLabel) + " " + money(est.perMileCents) +
       "/mi, local base " + money(est.base) + " for 2 passengers." + noticeNote + "</p>" +
       "</div>"
@@ -1793,16 +1989,33 @@
       : (driver ? "Your driver" : "Driver location shows once they accept on a linked phone.");
     var near = driverNearPickup();
     var started = state.rideStatus === "started";
+    var completed = state.rideStatus === "completed";
     return (
       '<button class="btn ghost" type="button" id="back-home">← Request</button>' +
-      (started
-        ? '<div class="status"><i></i><span>Ride started</span></div>'
-        : waitingStatusBlock(near || state.driverName ? "Driver on the way" : "Drivers are available")) +
+      (completed
+        ? '<div class="status"><i></i><span>Ride complete</span></div>'
+        : (started
+          ? '<div class="status"><i></i><span>Ride started</span></div>'
+          : waitingStatusBlock(near || state.driverName ? "Driver on the way" : "Drivers are available"))) +
       driverIdentityLine() +
       "<p class=\"lede\">" + esc(pickupLine()) + " → " + esc(dropLine()) + "<br>" + esc(prettyWhen()) + "</p>" +
-      (started ? "" : riderPinBanner()) +
+      (started || completed ? "" : riderPinBanner()) +
       customerMapBlock(caption, driver) +
       moneyCard() +
+      (completed
+        ? '<div class="card"><p class="tag">Pay after the ride</p>' +
+          '<p class="lede">Your card on file is charged after drop-off so you can add a tip. Nothing is charged on this starter screen.</p></div>'
+        : "") +
+      (state.rideStatus === "accepted"
+        ? '<div class="card">' +
+          '<p class="tag">Cancel before pickup</p>' +
+          '<p class="lede">' + esc(cancelWarningCopy()) + "</p>" +
+          '<button class="btn secondary" type="button" id="cancel-ride">Cancel ride</button>' +
+          "</div>"
+        : "") +
+      (started
+        ? '<p class="fine">This ride has started. Only your driver can complete or end it.</p>'
+        : "") +
       '<p class="note">A live request would text ' + BUSINESS_PHONE + ". This button does not open Messages and does not send anything.</p>" +
       '<button class="btn" type="button" id="preview-only">Preview only</button>'
     );
@@ -1817,6 +2030,7 @@
       : "Open the driver app and accept this ride. This screen changes when a driver accepts.";
     var near = driverNearPickup();
     var waitLabel = near ? "Waiting for a driver" : (driversOnlineNow().length ? "Drivers are available" : "Waiting for a driver");
+    var canCancel = state.rideStatus === "requested" || state.rideStatus === "accepted";
     return (
       '<button class="btn ghost" type="button" id="back-home">← Request</button>' +
       waitingStatusBlock(waitLabel) +
@@ -1825,7 +2039,15 @@
       riderPinBanner() +
       customerMapBlock(caption, driver) +
       moneyCard() +
-      '<p class="note">' + note + "</p>"
+      paymentHoldCopy() +
+      '<p class="note">' + note + "</p>" +
+      (canCancel
+        ? '<div class="card">' +
+          '<p class="tag">Cancel before pickup</p>' +
+          '<p class="lede">' + esc(cancelWarningCopy()) + "</p>" +
+          '<button class="btn secondary" type="button" id="cancel-ride">Cancel ride</button>' +
+          "</div>"
+        : "")
     );
   }
 
@@ -1973,6 +2195,9 @@
     state.pinError = "";
     state.dropFix = null;
     state.pickupFromHere = false;
+    state.tripPath = [];
+    state.useDrivenMiles = false;
+    state.endedEarly = false;
   }
 
   function keptDropFromRide(ride) {
@@ -1998,10 +2223,35 @@
     );
   }
 
+  function driverFareCard(finalLabel) {
+    var est = estimate();
+    if (!est.ready) {
+      return (
+        '<div class="card" id="driver-fare-card">' +
+        '<p class="tag">' + (finalLabel || "Live fare") + "</p>" +
+        '<p class="fine">Miles and fare update when the route is ready.</p></div>'
+      );
+    }
+    return (
+      '<div class="card" id="driver-fare-card">' +
+      '<p class="tag">' + (finalLabel || "Live fare · updates with the trip") + "</p>" +
+      '<div class="money-row"><span>Miles</span><span>' + est.raw.toFixed(2) + " mi, billed as " + est.billed + "</span></div>" +
+      '<div class="money-row"><span>Fare before tax</span><span>' + money(est.sub) + "</span></div>" +
+      '<div class="money-row"><span>Texas tax 8.25%</span><span>' + money(est.tax) + "</span></div>" +
+      '<div class="total-row"><span>' + (finalLabel ? "Final total" : "Estimated total") + "</span><span>" + money(est.total) + "</span></div>" +
+      commissionLine() +
+      '<p class="fine">Miles round up. Tax is estimate-only, not a charge.</p></div>'
+    );
+  }
+
   function driverTrip() {
     var started = state.rideStatus === "started";
+    var completed = state.rideStatus === "completed";
     var pinGate = "";
-    if (!started) {
+    var dropEditor = "";
+    var completeBtn = "";
+    var doneBlock = "";
+    if (!started && !completed) {
       pinGate = (
         '<div class="card pin-gate">' +
         '<p class="tag">Start the ride</p>' +
@@ -2015,17 +2265,63 @@
         "</form></div>"
       );
     }
+    if (started) {
+      dropEditor = (
+        '<div class="card">' +
+        '<p class="tag">Change drop-off</p>' +
+        '<p class="lede">If the rider extends the trip or changes destination, update it here. Fare updates automatically.</p>' +
+        locateField("drop-street", "Street", state.dropStreet, "drop-results", "") +
+        '<div class="row"><div class="city">' +
+        field("drop-city", "City", state.dropCity, "") +
+        '</div><div class="state">' +
+        field("drop-state", "State", state.dropState || "TX", 'maxlength="2"') +
+        "</div></div>" +
+        '<button class="btn secondary" type="button" id="end-here">End ride here</button>' +
+        '<p class="fine">End ride here uses your current location as the final drop-off and recalculates the fare.</p>' +
+        "</div>"
+      );
+      completeBtn = (
+        '<button class="btn secondary" type="button" id="open-nav">Open turn-by-turn to drop-off</button>' +
+        '<button class="btn" type="button" id="complete-ride">Ride complete</button>'
+      );
+    }
+    if (completed) {
+      doneBlock = (
+        '<div class="card">' +
+        '<p class="tag">Ride complete</p>' +
+        '<p class="lede">This trip is finished. Location updates have stopped.</p>' +
+        "<p><strong>Final drop-off</strong><br>" + esc(dropLine()) + "</p>" +
+        "</div>" +
+        driverFareCard("Final fare") +
+        '<button class="btn secondary" type="button" id="back-driver">Back to requests</button>'
+      );
+    }
+    var statusLabel = completed ? "Ride complete" : (started ? "Ride started" : "Heading to pickup");
     return (
-      '<button class="btn ghost" type="button" id="back-driver">← Requests</button>' +
-      '<div class="status"><i></i><span>' + (started ? "Ride started" : "Heading to pickup") + "</span></div>" +
+      (completed ? "" : '<button class="btn ghost" type="button" id="back-driver">← Requests</button>') +
+      '<div class="status"><i></i><span>' + statusLabel + "</span></div>" +
       '<div class="who">' + photoImg(state.riderPhoto) +
-      "<p class=\"lede\">" + esc(state.name || "Rider") + " is at " + esc(pickupLine()) + ".</p></div>" +
-      mapBlock("Customer") +
+      "<p class=\"lede\">" + esc(state.name || "Rider") +
+      (completed ? " · trip finished." : (started ? " · en route." : " is at " + esc(pickupLine()) + ".")) +
+      "</p></div>" +
+      (completed ? "" : mapBlock("Customer")) +
       pinGate +
-      '<div class="card"><p class="tag">This ride</p>' +
-      "<p><strong>Drop-off</strong><br>" + esc(dropLine()) + "</p>" +
-      commissionLine() +
-      "<p class=\"fine\">" + esc(prettyWhen()) + ". Miles round up. Texas tax 8.25% stays estimate-only.</p></div>"
+      (started || completed ? "" : (
+        '<div class="card"><p class="tag">This ride</p>' +
+        "<p><strong>Drop-off</strong><br>" + esc(dropLine()) + "</p>" +
+        commissionLine() +
+        "<p class=\"fine\">" + esc(prettyWhen()) + ". Miles round up. Texas tax 8.25% stays estimate-only.</p></div>"
+      )) +
+      (started ? (
+        '<div class="card"><p class="tag">This ride</p>' +
+        "<p><strong>Pickup</strong><br>" + esc(pickupLine()) + "</p>" +
+        "<p><strong>Drop-off</strong><br>" + esc(dropLine()) + "</p>" +
+        "<p class=\"fine\">" + esc(prettyWhen()) + "</p></div>" +
+        driverFareCard("") +
+        dropEditor +
+        completeBtn
+      ) : "") +
+      doneBlock
     );
   }
 
@@ -2335,15 +2631,60 @@
           render();
           return;
         }
+        state.tripPath = [];
+        state.useDrivenMiles = false;
+        state.endedEarly = false;
+        if (isCoord(state.hereLat) && isCoord(state.hereLng)) {
+          recordTripPoint(state.hereLat, state.hereLng);
+        }
         saveRide("started");
         var code = state.driverCode || state.code || readDriverCode();
         if (syncOn() && code) {
-          patchRide(code, { status: "started" }).catch(function () {});
+          syncActiveTripFare({ status: "started" });
         }
         state.pinDraft = "";
         state.pinError = "";
         state.screen = "trip";
         render();
+        openTurnByTurnToDrop();
+      });
+    }
+    var completeRide = document.getElementById("complete-ride");
+    if (completeRide) {
+      completeRide.addEventListener("click", function () {
+        completeActiveRide();
+      });
+    }
+    var endHere = document.getElementById("end-here");
+    if (endHere) {
+      endHere.addEventListener("click", function () {
+        if (!isCoord(state.hereLat) || !isCoord(state.hereLng)) {
+          state.error = "Allow location to end the ride here.";
+          render();
+          return;
+        }
+        completeActiveRide({ endHere: true });
+      });
+    }
+    var openNav = document.getElementById("open-nav");
+    if (openNav) {
+      openNav.addEventListener("click", function () {
+        if (!openTurnByTurnToDrop()) {
+          state.error = "Drop-off location is not ready yet.";
+          render();
+        }
+      });
+    }
+    var cancelRide = document.getElementById("cancel-ride");
+    if (cancelRide) {
+      cancelRide.addEventListener("click", function () {
+        cancelRiderRide();
+      });
+    }
+    var squareHold = document.getElementById("square-hold-btn");
+    if (squareHold) {
+      squareHold.addEventListener("click", function () {
+        openSquareCardSetup();
       });
     }
     var preview = document.getElementById("preview-only");
@@ -2897,14 +3238,20 @@
         ride.driverLng = state.hereLng;
         localStorage.setItem(STORE, JSON.stringify(ride));
       }
+      recordTripPoint(state.hereLat, state.hereLng);
       maybePatchDriverLocation();
       if (ROLE === "driver" && state.screen === "home" && boardMapStillMounted()) {
         syncDriverBoardMarkers();
         publishDriverPresence();
       } else if (carMarker) {
-        var dest = state.screen === "home"
-          ? { lat: state.hereLat, lng: state.hereLng }
-          : routePoints().pickup;
+        var dest;
+        if (state.screen === "home") {
+          dest = { lat: state.hereLat, lng: state.hereLng };
+        } else if (state.rideStatus === "started" && placeCoords("drop")) {
+          dest = placeCoords("drop");
+        } else {
+          dest = routePoints().pickup;
+        }
         placeCar(state.hereLat, state.hereLng, bearing(
           { lat: state.hereLat, lng: state.hereLng },
           dest
@@ -2986,8 +3333,8 @@
       state.syncStamp = stamp;
       if (!ride || !ride.pickupStreet) clearRideFields();
       else applyRide(ride);
-      if (state.screen === "trip" && ride && (ride.status === "accepted" || ride.status === "started")) return;
-      if (state.screen !== "home" && (!ride || (ride.status !== "accepted" && ride.status !== "started"))) state.screen = "home";
+      if (state.screen === "trip" && ride && (ride.status === "accepted" || ride.status === "started" || ride.status === "completed")) return;
+      if (state.screen !== "home" && (!ride || (ride.status !== "accepted" && ride.status !== "started" && ride.status !== "completed"))) state.screen = "home";
       render();
       return;
     }
