@@ -750,10 +750,11 @@
 
   function trackDailyMiles(pos) {
     if (ROLE !== "driver" || !signedIn() || state.milesNeedStart) return;
+    if (!canGoOnline() && !driverMidRide()) return;
     if (!pos || !pos.coords) return;
     var acc = Number(pos.coords.accuracy);
-    /* City / pocket GPS often reports 40–70 m; 50 was dropping real fixes. */
-    if (isFinite(acc) && acc > 85) return;
+    /* iPhone city GPS often 50–120 m; only drop very bad fixes. */
+    if (isFinite(acc) && acc > 200) return;
     var lat = Number(pos.coords.latitude);
     var lng = Number(pos.coords.longitude);
     if (!isFinite(lat) || !isFinite(lng)) return;
@@ -768,21 +769,14 @@
       return;
     }
     var dist = haversine({ lat: prevLat, lng: prevLng }, { lat: lat, lng: lng });
-    /* Keep the previous anchor until we see real movement (~8 m). */
-    if (!(dist >= 0.005)) return;
+    /* ~5 m — still filters jitter, credits slow crawl / stop-and-go. */
+    if (!(dist >= 0.003)) return;
     var hours = (now - prevAt) / 3600000;
     if (!(hours > 0)) return;
     var mph = dist / hours;
-    var MAX_MPH = 90;
-    /*
-      Old bug: we advanced the GPS anchor, then discarded the segment when
-      mph > 100. After iOS throttled watchPosition (Maps / locked screen),
-      the next jump looked "too fast" and those miles were permanently lost —
-      counter frozen while the car kept driving.
-      Cap credit at MAX_MPH instead of dropping the segment.
-    */
+    var MAX_MPH = 95;
     if (mph > MAX_MPH) {
-      if (hours < 1 / 3600) return; /* sub-second spike — ignore, keep anchor */
+      if (hours < 1 / 3600) return;
       dist = MAX_MPH * hours;
     }
     state.milesTrackLat = lat;
@@ -795,12 +789,16 @@
       lastUpdate: now
     };
     if (row.startOdometer == null || !isFinite(Number(row.startOdometer))) return;
-    row.gpsMiles = Math.round(((Number(row.gpsMiles) || 0) + dist) * 10) / 10;
+    /* Closed shift (ending miles logged): do not add until a new opening odo. */
+    if (row.shiftClosed || (row.endOdometer != null && isFinite(Number(row.endOdometer)))) return;
+    row.gpsMiles = Math.round(((Number(row.gpsMiles) || 0) + dist) * 100) / 100;
     row.lastUpdate = now;
     if (!row.startedAt) row.startedAt = now;
     persistMilesRow(row);
+    state.milesToday = Number(row.gpsMiles) || 0;
     var el = document.getElementById("miles-today");
-    if (el) el.textContent = "Today: " + row.gpsMiles.toFixed(1) + " mi";
+    if (el) el.textContent = "Today: " + Number(row.gpsMiles).toFixed(1) + " mi";
+    if (syncOn() && canGoOnline()) publishDriverPresence();
   }
 
   function milesTodayLabel() {
