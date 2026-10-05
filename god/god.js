@@ -270,9 +270,17 @@
     }
   }
 
-  function fmtWhen(dateStr, timeStr) {
+  function fmtWhen(dateStr, timeStr, ride) {
+    if (ride) {
+      var asapFlag = ride.asap === true || ride.asap === 1 ||
+        String(ride.asap || "").toLowerCase() === "true" ||
+        String(ride.when || "").toLowerCase() === "asap" ||
+        String(ride.time || "").toLowerCase() === "asap";
+      if (asapFlag) return "ASAP";
+    }
     var d = String(dateStr || "").trim();
     var t = String(timeStr || "").trim();
+    if (t.toLowerCase() === "asap") return "ASAP";
     if (!d && !t) return "—";
     if (d && t) return d + " · " + t;
     return d || t;
@@ -1149,7 +1157,7 @@
     return state.rides.map(function (r) {
       var active = isActiveTrip(r);
       var requestAt = r.updatedAt || r.requestedAt || r.createdAt || null;
-      var pickupWhen = fmtWhen(r.date, r.time);
+      var pickupWhen = fmtWhen(r.date, r.time, r);
       var dropWhen = r.dropTime || r.dropoffTime || r.etaDrop || null;
       if (!dropWhen) dropWhen = "—";
       var badge = active
