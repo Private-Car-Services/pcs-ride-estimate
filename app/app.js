@@ -2982,7 +2982,13 @@
       '<label for="login-pass">Password</label>' +
       '<input id="login-pass" name="password" type="password" autocomplete="current-password" required>' +
       '<p class="error" id="login-error" role="alert">' + esc(state.loginError || "") + "</p>" +
-      '<p class="fine">Accounts use Firebase Auth (email + password). Old phone-only passwords no longer work — create an account again if needed.</p>' +
+      '<p class="fine">' + (function () {
+        var a = pcsAuth();
+        if (a && a.hasConfig && a.hasConfig()) {
+          return "Accounts use Firebase Auth (email + password).";
+        }
+        return "Temporary login: uses the account saved on this phone until Firebase Auth keys are finished.";
+      })() + "</p>" +
       '<button class="btn" type="submit">Log in</button>' +
       "</form>" +
       '<a class="btn secondary" href="signup/?v=21">Create an account</a>'
@@ -3933,14 +3939,63 @@
         var loginEmail = emailEl ? emailEl.value.trim().toLowerCase() : "";
         var password = passEl ? passEl.value : "";
         var a = pcsAuth();
-        if (!a || !a.hasConfig || !a.hasConfig()) {
-          state.loginError = (a && a.initError && a.initError()) || "Firebase Auth is not configured yet. Create a Firebase account after Matthew finishes Auth setup — local-only passwords no longer sign you in.";
-          render();
-          return;
-        }
         if (!loginEmail || !password) {
           state.loginError = "Enter email and password.";
           render();
+          return;
+        }
+        function afterLocalLogin(account) {
+          writeSession(account.email || account.username || loginEmail);
+          state.loginError = "";
+          state.gateStep = "";
+          state.screen = "home";
+          accountSyncTried = true;
+          syncAccountProfile(ROLE === "driver" ? "driver" : "rider", account);
+          if (ROLE === "driver") {
+            ensureMilesDayReady();
+            followGps();
+            refreshRosterStatus().then(function () {
+              if (canGoOnline()) {
+                refreshOpenRides(true);
+                publishDriverPresence();
+              }
+              render();
+            });
+            return;
+          }
+          maybeRestoreCustomerRide();
+          render();
+        }
+        function tryLocalLogin() {
+          var account = accountForRole();
+          if (!account || (!account.email && !account.username) || !account.passwordHash) {
+            state.loginError = "No account on this phone yet. Create one first (or finish Firebase Auth keys).";
+            render();
+            return;
+          }
+          var emailMatches = account.email && loginEmail === String(account.email).trim().toLowerCase();
+          var legacyUsernameMatches = account.username && loginEmail === String(account.username).trim().toLowerCase();
+          if (!emailMatches && !legacyUsernameMatches) {
+            state.loginError = "That email or password does not match the account on this phone.";
+            render();
+            return;
+          }
+          if (!window.crypto || !crypto.subtle) {
+            state.loginError = "This browser cannot check the password. Try Safari or Chrome.";
+            render();
+            return;
+          }
+          sha256Hex(password).then(function (hex) {
+            if (hex !== account.passwordHash) {
+              state.loginError = "That email or password does not match the account on this phone.";
+              render();
+              return;
+            }
+            afterLocalLogin(account);
+          });
+        }
+        if (!a || !a.hasConfig || !a.hasConfig()) {
+          tryLocalLogin();
           return;
         }
         a.signInEmailPassword(loginEmail, password).then(function () {
