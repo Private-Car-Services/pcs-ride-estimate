@@ -804,3 +804,12 @@ a.btn + .btn, .btn + a.btn, a.btn + a.btn { margin-top: 8px; }
 }
 .payment-card .btn.ghost { margin-top: 8px; }
 .approval-gate { border-color: rgba(240, 212, 138, 0.55); }
+
+
+.scheduled-ride-card h3 {
+  margin: 6px 0 4px;
+  font-size: 1.15rem;
+}
+.scheduled-ride-card .lede {
+  margin-top: 0;
+}

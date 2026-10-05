@@ -212,6 +212,7 @@
   var MILES_HUB = "DRVRMLES"; /* 8-char hub (no I/O); DRVRMILZ wrongly had I */
   var ROSTER_HUB = "DRVRCMMS"; /* hire / approve / commission */
   var HISTORY_HUB = "DRVRHSTY"; /* completed ride history per driver */
+  var CALENDAR_HUB = "PCSCALND"; /* God day board: PCS-titled calendar rides */
   var lastDriverPatchAt = 0;
   var lastDriverPatchLat = null;
   var lastDriverPatchLng = null;
@@ -295,7 +296,10 @@
     paymentSkipped: false,
     rosterStatus: "",
     rosterPct: Math.round(DRIVER_COMMISSION_RATE * 100),
-    dayRequested: 0
+    dayRequested: 0,
+    scheduledRides: [],
+    scheduledError: "",
+    scheduledStamp: ""
   };
 
   var rafId = 0;
@@ -678,9 +682,33 @@
     }).catch(function () {});
   }
 
+  function shiftClosed(row) {
+    if (!row || typeof row !== "object") return false;
+    if (row.shiftClosed) return true;
+    return row.endOdometer != null && isFinite(Number(row.endOdometer));
+  }
+
   function ensureMilesDayReady() {
     if (ROLE !== "driver" || !signedIn()) return;
     var row = todayMilesRow();
+    /*
+      After logout (ending odo or skip) the shift is closed. Next login must enter a
+      NEW opening odometer before GPS miles count again — miles while logged out stay
+      personal. Keep showing today's gpsMiles so the counter never looks "stuck at 0"
+      from a closed shift wiping the day total.
+    */
+    if (shiftClosed(row)) {
+      if (driverMidRide()) {
+        state.milesNeedStart = false;
+        state.milesToday = Number(row && row.gpsMiles) || 0;
+        state.milesStartOdo = row && row.startOdometer != null ? Number(row.startOdometer) : null;
+        return;
+      }
+      state.milesNeedStart = true;
+      state.milesToday = Number(row && row.gpsMiles) || 0;
+      state.milesStartOdo = null;
+      return;
+    }
     if (row && row.startOdometer != null && isFinite(Number(row.startOdometer))) {
       state.milesNeedStart = false;
       state.milesToday = Number(row.gpsMiles) || 0;
@@ -811,12 +839,20 @@
     if (ROLE !== "driver" || !signedIn() || !state.milesNeedStart) return "";
     if (!hasCompleteCar(readDriverAccount())) return "";
     if (driverMidRide()) return "";
+    var closed = shiftClosed(todayMilesRow());
+    var tag = closed ? "New shift — opening odometer" : "Starting mileage";
+    var lede = closed
+      ? "You logged out and closed the last shift. Enter a new opening odometer before miles count again. Miles while logged out stay personal (not counted). Today's GPS total so far stays on screen."
+      : "Enter the starting odometer for today before you go online. Chicago calendar day.";
     return (
       '<div class="card miles-gate" id="miles-gate">' +
-      '<p class="tag">Starting mileage</p>' +
-      '<p class="lede">Enter the starting odometer for today before you go online. Chicago calendar day.</p>' +
+      '<p class="tag">' + esc(tag) + "</p>" +
+      '<p class="lede">' + esc(lede) + "</p>" +
+      (closed && Number(state.milesToday) > 0
+        ? '<p class="fine">Today so far (before this shift): ' + Number(state.milesToday).toFixed(1) + " mi</p>"
+        : "") +
       '<form id="miles-start-form" autocomplete="off">' +
-      '<label for="miles-start-odo">Starting odometer</label>' +
+      '<label for="miles-start-odo">Opening odometer</label>' +
       '<input id="miles-start-odo" name="odo" type="number" inputmode="decimal" min="0" step="0.1" required value="' +
       esc(state.milesOdoDraft || "") + '">' +
       '<p class="error" id="miles-odo-error" role="alert">' + esc(state.milesOdoError || "") + "</p>" +
@@ -2109,6 +2145,222 @@
     if (rideCode) return base + "/" + encodeURIComponent(rideCode) + ".json";
     return base + ".json";
   }
+
+  function calendarHubUrl(eventId) {
+    var base = databaseURL() + "/rides/" + encodeURIComponent(CALENDAR_HUB);
+    if (eventId) return base + "/" + encodeURIComponent(eventId) + ".json";
+    return base + ".json";
+  }
+
+  function riderNameFromPcsTitle(title) {
+    var t = String(title || "").trim();
+    t = t.replace(/^pcs\b[\s\u2013\u2014\-:|]*/i, "").trim();
+    return t || "Scheduled rider";
+  }
+
+  function dropoffFromNotes(notes) {
+    var text = String(notes || "").replace(/\r/g, "");
+    var lines = text.split("\n");
+    var i;
+    for (i = 0; i < lines.length; i += 1) {
+      var line = String(lines[i] || "").trim();
+      var m = line.match(/^(?:drop[\s-]?off|to)\s*:\s*(.+)$/i);
+      if (m && m[1]) return String(m[1]).trim();
+    }
+    return text.trim();
+  }
+
+  function prettyScheduleWhen(iso) {
+    if (!iso) return "—";
+    try {
+      var d = new Date(iso);
+      if (!isFinite(d.getTime())) return String(iso);
+      return d.toLocaleString("en-US", {
+        timeZone: "America/Chicago",
+        weekday: "short",
+        month: "short",
+        day: "numeric",
+        hour: "numeric",
+        minute: "2-digit"
+      });
+    } catch (err) {
+      return String(iso);
+    }
+  }
+
+  function normalizeScheduleRow(id, raw) {
+    if (!raw || typeof raw !== "object") return null;
+    var title = String(raw.title || raw.summary || "").trim();
+    var status = String(raw.status || "open").toLowerCase();
+    return {
+      id: String(raw.id || id || ""),
+      title: title,
+      rider: String(raw.rider || riderNameFromPcsTitle(title)),
+      pickup: String(raw.pickup || raw.location || ""),
+      dropoff: String(raw.dropoff || dropoffFromNotes(raw.description || raw.notes || "")),
+      start: String(raw.start || ""),
+      end: String(raw.end || ""),
+      description: String(raw.description || raw.notes || ""),
+      assignedDriverId: String(raw.assignedDriverId || ""),
+      assignedDriverName: String(raw.assignedDriverName || ""),
+      status: status,
+      code: String(raw.code || ""),
+      fareBeforeTax: raw.fareBeforeTax != null ? Number(raw.fareBeforeTax) : null,
+      commissionCents: raw.commissionCents != null ? Number(raw.commissionCents) : null,
+      completedAt: raw.completedAt || null
+    };
+  }
+
+  function listScheduledRides() {
+    if (!syncOn()) return Promise.resolve([]);
+    return authFetch(calendarHubUrl()).then(function (res) {
+      if (res.status === 401 || res.status === 403) {
+        var err = new Error("calendar-denied");
+        err.denied = true;
+        throw err;
+      }
+      if (!res.ok) throw new Error("calendar");
+      return res.text().then(function (text) {
+        if (!text || text === "null") return [];
+        try {
+          var data = JSON.parse(text);
+          if (!data || typeof data !== "object") return [];
+          return Object.keys(data).map(function (id) {
+            return normalizeScheduleRow(id, data[id]);
+          }).filter(Boolean);
+        } catch (e) {
+          return [];
+        }
+      });
+    });
+  }
+
+  function myAssignedScheduled() {
+    var me = driverPresenceId();
+    if (!me) return [];
+    return (state.scheduledRides || []).filter(function (r) {
+      if (!r || r.status === "completed" || r.status === "cancelled") return false;
+      return String(r.assignedDriverId || "") === me;
+    }).sort(function (a, b) {
+      return String(a.start || "").localeCompare(String(b.start || ""));
+    });
+  }
+
+  function refreshScheduledRides(force) {
+    if (ROLE !== "driver" || !signedIn() || !syncOn()) return Promise.resolve();
+    return listScheduledRides().then(function (rows) {
+      state.scheduledRides = rows || [];
+      state.scheduledError = "";
+      state.scheduledStamp = String(Date.now());
+      if (force) render();
+    }).catch(function (err) {
+      state.scheduledError = err && err.denied ? "denied" : "error";
+      if (force) render();
+    });
+  }
+
+  function scheduledRidesCard() {
+    if (ROLE !== "driver" || !signedIn() || state.milesEndPrompt || state.hubOpen) return "";
+    var mine = myAssignedScheduled();
+    if (!mine.length) {
+      if (state.scheduledError === "denied") {
+        return '<p class="fine">Scheduled rides could not load (permission).</p>';
+      }
+      return "";
+    }
+    var cards = mine.map(function (r) {
+      return (
+        '<article class="card scheduled-ride-card" data-schedule-id="' + esc(r.id) + '">' +
+        '<p class="tag">Assigned scheduled ride</p>' +
+        "<h3>" + esc(r.rider) + "</h3>" +
+        '<p class="lede">' + esc(prettyScheduleWhen(r.start)) + "</p>" +
+        "<p><strong>Pickup</strong><br>" + esc(r.pickup || "—") + "</p>" +
+        "<p><strong>Drop-off</strong><br>" + esc(r.dropoff || "—") + "</p>" +
+        '<div class="row-actions">' +
+        '<button class="btn" type="button" data-complete-schedule="' + esc(r.id) + '">Mark complete</button>' +
+        "</div>" +
+        '<p class="fine">Matthew assigned this from the God day board. Completing credits your Mon–Sun commission week.</p>' +
+        "</article>"
+      );
+    }).join("");
+    return "<h2>Scheduled for you</h2>" + cards;
+  }
+
+  function completeScheduledRide(eventId) {
+    var row = null;
+    var i;
+    for (i = 0; i < (state.scheduledRides || []).length; i += 1) {
+      if (state.scheduledRides[i] && state.scheduledRides[i].id === eventId) {
+        row = state.scheduledRides[i];
+        break;
+      }
+    }
+    if (!row) return Promise.resolve();
+    var pct = state.rosterPct != null ? Number(state.rosterPct) : Math.round(DRIVER_COMMISSION_RATE * 100);
+    if (!isFinite(pct)) pct = 70;
+    var fareBefore = row.fareBeforeTax != null && isFinite(Number(row.fareBeforeTax))
+      ? Number(row.fareBeforeTax)
+      : 0;
+    var commissionCents = Math.round(fareBefore * (pct / 100));
+    var day = chicagoToday();
+    var code = row.code || ("PCS" + String(eventId).replace(/[^A-Za-z0-9]/g, "").toUpperCase().slice(0, 5));
+    if (code.length < 8) {
+      while (code.length < 8) code += CODE_ALPHABET[code.length % CODE_ALPHABET.length];
+      code = code.slice(0, 8);
+    }
+    var entry = {
+      code: code,
+      day: day,
+      completedAt: Date.now(),
+      when: prettyScheduleWhen(row.start),
+      pickup: row.pickup || "",
+      drop: row.dropoff || "",
+      rawMiles: null,
+      billedMiles: null,
+      fareSub: fareBefore,
+      fareTax: 0,
+      fareTotal: fareBefore,
+      commissionPct: pct,
+      commissionCents: commissionCents,
+      riderName: row.rider || "",
+      source: "calendar"
+    };
+    var list = readRideLog().filter(function (e) { return !e || e.code !== code; });
+    list.unshift(entry);
+    writeRideLog(list);
+    var stats = readDayStats(day);
+    stats.completed += 1;
+    stats.commissionCents += commissionCents;
+    stats.rideTotalCents += Math.round(fareBefore);
+    writeDayStats(day, stats);
+    var next = Object.assign({}, row, {
+      status: "completed",
+      completedAt: Date.now(),
+      code: code,
+      commissionCents: commissionCents,
+      assignedDriverId: driverPresenceId(),
+      assignedDriverName: (readDriverAccount() && readDriverAccount().name) || ""
+    });
+    var puts = [];
+    if (syncOn()) {
+      puts.push(authFetch(calendarHubUrl(eventId), {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(next)
+      }));
+      puts.push(authFetch(historyUrl(driverPresenceId(), code), {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(entry)
+      }));
+    }
+    return Promise.all(puts).then(function () {
+      return refreshScheduledRides(true);
+    }).catch(function () {
+      return refreshScheduledRides(true);
+    });
+  }
+
 
   function applyRosterRow(row) {
     if (!row || typeof row !== "object") {
@@ -3965,6 +4217,7 @@
                 refreshOpenRides(true);
                 publishDriverPresence();
               }
+              refreshScheduledRides(true);
               render();
             });
             return;
@@ -4032,6 +4285,7 @@
                 refreshOpenRides(true);
                 publishDriverPresence();
               }
+              refreshScheduledRides(true);
               render();
             });
             return;
@@ -4130,19 +4384,26 @@
         }
         var now = Date.now();
         var prev = todayMilesRow() || {};
+        var keepMiles = Number(prev.gpsMiles) || 0;
         var row = {
           startOdometer: odo,
-          gpsMiles: 0,
-          startedAt: now,
+          /* Same Chicago day: keep prior GPS total; only logged-out miles were skipped. */
+          gpsMiles: keepMiles,
+          startedAt: prev.startedAt || now,
           lastUpdate: now,
           shiftClosed: false
         };
         if (prev.endOdometer != null) row.priorEndOdometer = prev.endOdometer;
+        /* Explicitly reopen: no endOdometer / shiftClosed on the new shift row. */
         state.milesOdoError = "";
         state.milesOdoDraft = "";
         state.milesNeedStart = false;
         state.milesStartOdo = odo;
-        state.milesToday = 0;
+        state.milesToday = keepMiles;
+        /* Fresh GPS anchor so the first post-login jump is not counted as a teleport. */
+        state.milesTrackLat = null;
+        state.milesTrackLng = null;
+        state.milesTrackAt = 0;
         persistMilesRow(row).then(function () {
           followGps();
           refreshOpenRides(true);
@@ -4197,6 +4458,18 @@
         finishDriverLogout();
       });
     }
+    Array.prototype.forEach.call(document.querySelectorAll("[data-complete-schedule]"), function (btn) {
+      btn.addEventListener("click", function () {
+        var id = btn.getAttribute("data-complete-schedule");
+        if (!id) return;
+        if (!window.confirm("Mark this scheduled ride complete and credit commission for your pay week?")) return;
+        btn.disabled = true;
+        completeScheduledRide(id).then(function () {
+          btn.disabled = false;
+          render();
+        });
+      });
+    });
     var customerBtn = document.getElementById("mode-customer");
     var driverBtn = document.getElementById("mode-driver");
     if (customerBtn) {
@@ -5291,6 +5564,7 @@
           refreshOpenRides(true);
           publishDriverPresence();
         }
+        refreshScheduledRides(true);
         render();
       });
     }
@@ -5305,6 +5579,9 @@
     setInterval(function () {
       if (ROLE === "driver" && signedIn() && state.screen === "home" && canGoOnline() && !state.hubOpen) refreshOpenRides();
     }, 3000);
+    setInterval(function () {
+      if (ROLE === "driver" && signedIn() && !state.hubOpen) refreshScheduledRides(false);
+    }, 20000);
     setInterval(function () {
       if (ROLE === "driver" && signedIn()) publishDriverPresence();
     }, 20000);
