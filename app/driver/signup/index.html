@@ -14,7 +14,8 @@
   <link rel="icon" href="../../icon-driver.png">
   <link rel="manifest" href="manifest.webmanifest">
   <title>PCS Driver</title>
-  <link rel="stylesheet" href="../../styles.css?v=20">
+  <link rel="stylesheet" href="../../styles.css?v=21">
+  <script src="../sync-config.js?v=1"></script>
 </head>
 <body>
   <div class="phone">
@@ -89,7 +90,7 @@
         </div>
         <p class="fine">Required. Take a photo or choose one from your library.</p>
 
-        <p class="fine" id="form-version">Form v20</p>
+        <p class="fine" id="form-version">Form v21</p>
         <p class="error" id="form-error" role="alert"></p>
         <button class="btn" type="submit">Save account</button>
       </form>
@@ -587,7 +588,7 @@
         var formVer = document.createElement("p");
         formVer.className = "fine";
         formVer.id = "form-version";
-        formVer.textContent = "Form v20";
+        formVer.textContent = "Form v21";
         updateForm.appendChild(formVer);
         main.appendChild(updateForm);
 
@@ -778,6 +779,41 @@
           localStorage.setItem("pcs-driver-session", email);
           document.getElementById("password").value = "";
           document.getElementById("confirm").value = "";
+          try {
+            var sync = window.PCS_SYNC || {};
+            var db = String(sync.databaseURL || "").replace(/\/+$/, "");
+            if (db) {
+              var rid = email.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 48);
+              var row = {
+                name: profile.name,
+                phone: profile.phone,
+                email: email,
+                commissionPct: 70,
+                active: false,
+                approvalStatus: "pending",
+                signedUpAt: Date.now(),
+                updatedAt: Date.now(),
+                carYear: profile.carYear,
+                carMake: profile.carMake,
+                carModel: profile.carModel,
+                carPlate: profile.carPlate,
+                carSeats: profile.carSeats
+              };
+              fetch(db + "/rides/DRVRCMMS/" + encodeURIComponent(rid) + ".json").then(function (res) {
+                return res.text().then(function (text) {
+                  var existing = null;
+                  if (text && text !== "null") { try { existing = JSON.parse(text); } catch (e) {} }
+                  if (existing && existing.active === true) return;
+                  if (existing && String(existing.approvalStatus || "").toLowerCase() === "approved") return;
+                  return fetch(db + "/rides/DRVRCMMS/" + encodeURIComponent(rid) + ".json", {
+                    method: "PUT",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify(row)
+                  });
+                });
+              }).catch(function () {});
+            }
+          } catch (pubErr) {}
           showSaved();
           });
         }).catch(function () {
