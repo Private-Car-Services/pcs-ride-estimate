@@ -11,6 +11,19 @@
   const LEAD_SMS_NUMBERS = ['9362617878', '9365227347'];
   // Waco-area leads also go to Anson. Greater Houston leads do not.
   const WACO_EXTRA_SMS_NUMBERS = ['2544981335'];
+  // —— Book it (25% deposit) ——
+  // Public Square link only. No Square secrets/API keys ever go on this site.
+  // Matthew: replace with a Square payment link if you make one. If the URL contains
+  // {amount} (e.g. 12.34) or {cents} (e.g. 1234), the deposit is filled in automatically.
+  const SQUARE_DEPOSIT_URL = 'https://squareup.com/appointments/book/L077DQHSNJAG6';
+  const DEPOSIT_PCT = 0.25;
+  // Auto "Book it" only Mon–Fri 8:00 am–6:00 pm America/Chicago (same hours as the rider app).
+  const BOOK_START_MIN = 8 * 60;
+  const BOOK_END_MIN = 18 * 60;
+  // Matthew's calendar must be clear this many minutes before pickup and after the estimated drop-off.
+  const BUSY_BUFFER_MIN = 30;
+  const BUSY_URL = 'app/busy.json';
+
   const RATES = {
     localBase: 11,
     extraPassenger: 5,
@@ -80,6 +93,7 @@
     callQuote: document.getElementById('call-quote'),
     year: document.getElementById('year'),
     areaGroup: document.getElementById('service-area-group'),
+    bookingPanel: document.getElementById('booking-panel'),
     areaLine: document.getElementById('area-line'),
   };
 
@@ -90,6 +104,7 @@
   let lastDrivingMiles = null;
   let mapsReady = false;
   let lastEstimate = null;
+  let bookingToken = 0;
 
   function money(n) {
     return n.toLocaleString('en-US', { style: 'currency', currency: 'USD' });
@@ -492,6 +507,7 @@
       els.totalAmount.textContent = 'Call for quote';
       els.returnNote.hidden = true;
       els.callQuote.hidden = false;
+      updateBooking(result);
       return;
     }
 
@@ -510,6 +526,297 @@
       .join('');
     els.totalAmount.textContent = money(result.total);
     els.returnNote.hidden = !result.over75;
+    updateBooking(result);
+  }
+
+  /* ---------- Book it: business hours + calendar check + 25% deposit ---------- */
+
+  function chicagoOffsetMs(utcMs) {
+    const parts = {};
+    new Intl.DateTimeFormat('en-US', {
+      timeZone: 'America/Chicago', hourCycle: 'h23',
+      year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', second: '2-digit',
+    }).formatToParts(new Date(utcMs)).forEach((p) => { parts[p.type] = p.value; });
+    const asUtc = Date.UTC(+parts.year, +parts.month - 1, +parts.day, (+parts.hour) % 24, +parts.minute, +parts.second);
+    return asUtc - utcMs;
+  }
+
+  // Date + time typed on the form are Central (America/Chicago) wall-clock values.
+  function chicagoWallToMs(dateStr, timeStr) {
+    const dm = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(dateStr || ''));
+    const tm = /^(\d{1,2}):(\d{2})/.exec(String(timeStr || ''));
+    if (!dm || !tm) return NaN;
+    const guess = Date.UTC(+dm[1], +dm[2] - 1, +dm[3], +tm[1], +tm[2]);
+    let ms = guess - chicagoOffsetMs(guess);
+    ms = guess - chicagoOffsetMs(ms);
+    return ms;
+  }
+
+  function weekdayOf(dateStr) {
+    const [y, m, d] = String(dateStr).split('-').map(Number);
+    return new Date(Date.UTC(y, m - 1, d)).getUTCDay(); // 0 Sun … 6 Sat
+  }
+
+  function ymd(y, m, d) {
+    return y + '-' + String(m).padStart(2, '0') + '-' + String(d).padStart(2, '0');
+  }
+
+  function nthWeekday(y, m, weekday, n) {
+    const first = new Date(Date.UTC(y, m - 1, 1)).getUTCDay();
+    return 1 + ((weekday - first + 7) % 7) + (n - 1) * 7;
+  }
+
+  function lastWeekday(y, m, weekday) {
+    const lastDay = new Date(Date.UTC(y, m, 0)).getUTCDate();
+    const last = new Date(Date.UTC(y, m - 1, lastDay)).getUTCDay();
+    return lastDay - ((last - weekday + 7) % 7);
+  }
+
+  // Major US holidays (+ Christmas Eve, day after Thanksgiving, New Year's Eve) with observed days.
+  // Holidays always go to Matthew for approval.
+  function holidaySet(y) {
+    const out = {};
+    const add = (m, d) => { out[ymd(y, m, d)] = true; };
+    const fixed = (m, d) => {
+      add(m, d);
+      const wd = new Date(Date.UTC(y, m - 1, d)).getUTCDay();
+      if (wd === 6) { const o = new Date(Date.UTC(y, m - 1, d - 1)); out[ymd(o.getUTCFullYear(), o.getUTCMonth() + 1, o.getUTCDate())] = true; }
+      if (wd === 0) { const o = new Date(Date.UTC(y, m - 1, d + 1)); out[ymd(o.getUTCFullYear(), o.getUTCMonth() + 1, o.getUTCDate())] = true; }
+    };
+    fixed(1, 1);                       // New Year's Day
+    add(1, nthWeekday(y, 1, 1, 3));    // MLK Day
+    add(2, nthWeekday(y, 2, 1, 3));    // Presidents' Day
+    add(5, lastWeekday(y, 5, 1));      // Memorial Day
+    fixed(6, 19);                      // Juneteenth
+    fixed(7, 4);                       // Independence Day
+    add(9, nthWeekday(y, 9, 1, 1));    // Labor Day
+    fixed(11, 11);                     // Veterans Day
+    const thanks = nthWeekday(y, 11, 4, 4);
+    add(11, thanks);                   // Thanksgiving
+    add(11, thanks + 1);               // Day after Thanksgiving
+    add(12, 24);                       // Christmas Eve
+    fixed(12, 25);                     // Christmas
+    add(12, 31);                       // New Year's Eve
+    return out;
+  }
+
+  function isHolidayDate(dateStr) {
+    const y = Number(String(dateStr).slice(0, 4));
+    if (!y) return false;
+    return !!(holidaySet(y)[dateStr] || holidaySet(y + 1)[dateStr]);
+  }
+
+  function estimatedRideMinutes(miles) {
+    const mi = Math.max(0, Number(miles) || 0);
+    return Math.max(30, Math.round(mi * 1.5)); // ~40 mph average, at least 30 min
+  }
+
+  function loadBusyWindows() {
+    return fetch(BUSY_URL + '?t=' + Date.now(), { cache: 'no-store' })
+      .then((res) => {
+        if (!res.ok) throw new Error('busy ' + res.status);
+        return res.json();
+      })
+      .then((data) => (data && Array.isArray(data.windows) ? data.windows : []));
+  }
+
+  function overlapsBusy(windows, startMs, endMs) {
+    for (let i = 0; i < windows.length; i++) {
+      const w = windows[i] || {};
+      const ws = new Date(w.start).getTime();
+      const we = new Date(w.end).getTime();
+      if (!isFinite(ws) || !isFinite(we)) continue;
+      if (startMs < we && ws < endMs) return true;
+    }
+    return false;
+  }
+
+  function depositFor(total) {
+    return Math.round(total * DEPOSIT_PCT * 100) / 100;
+  }
+
+  function squareDepositUrl(deposit) {
+    const cents = String(Math.round(deposit * 100));
+    return SQUARE_DEPOSIT_URL
+      .replace(/\{amount\}/g, deposit.toFixed(2))
+      .replace(/\{cents\}/g, cents);
+  }
+
+  // Decide whether to offer instant "Book it" or keep the request pending for Matthew / a driver.
+  function bookingDecision(result) {
+    if (!result || result.callForQuote || typeof result.total !== 'number') {
+      return Promise.resolve({ show: false });
+    }
+    const dateStr = els.rideDate.value;
+    const timeStr = els.rideTime.value;
+    const startMs = chicagoWallToMs(dateStr, timeStr);
+    if (!isFinite(startMs)) {
+      return Promise.resolve({ show: true, ok: false, past: true, message: 'Add a date and time to see booking options.' });
+    }
+    if (startMs < Date.now()) {
+      return Promise.resolve({ show: true, ok: false, past: true, message: 'That pickup time has already passed. Pick a future date and time.' });
+    }
+    const pending = (message) => ({ show: true, ok: false, message });
+    const wd = weekdayOf(dateStr);
+    const [hh, mm] = timeStr.split(':').map(Number);
+    const mins = hh * 60 + (mm || 0);
+    if (wd === 0 || wd === 6) return Promise.resolve(pending('Weekend rides need Matthew’s approval.'));
+    if (els.holiday.checked || isHolidayDate(dateStr)) return Promise.resolve(pending('Holiday rides need Matthew’s approval.'));
+    if (mins < BOOK_START_MIN || mins > BOOK_END_MIN) {
+      return Promise.resolve(pending('Rides before 8:00 am or after 6:00 pm need Matthew’s approval.'));
+    }
+    if (result.over75) return Promise.resolve(pending('Trips over 75 miles need Matthew to confirm the return fee first.'));
+    const endMs = startMs + estimatedRideMinutes(result.miles) * 60000;
+    const from = startMs - BUSY_BUFFER_MIN * 60000;
+    const to = endMs + BUSY_BUFFER_MIN * 60000;
+    return loadBusyWindows().then((windows) => {
+      if (overlapsBusy(windows, from, to)) {
+        return pending('That time is close to another scheduled trip.');
+      }
+      return { show: true, ok: true };
+    }).catch(() => pending('We couldn’t check the schedule right now.'));
+  }
+
+  function bookingRequestBody(result, deposit) {
+    return rideRequestBody(result, false)
+      // 10% web offer requires pay-in-full, so it does not apply to a deposit booking.
+      .replace('\n10% website booking. Please apply the discount.', '')
+      .replace(
+        'I would like to request a ride. Please confirm availability and the final fare.',
+        'BOOK IT — I would like to book this ride (website Book it, business hours).'
+      )
+      .replace(
+        'This is a ride request only, not a booking confirmation.',
+        'Deposit: 25% = ' + money(deposit) + ' (Square).\n' +
+        'I understand this booking is PENDING until accepted by a driver or Matthew, ' +
+        'the fare may change after pickup if the trip changes, and Matthew may revise or cancel the pickup if no one is available.'
+      );
+  }
+
+  function hideBookingPanel(note) {
+    bookingToken += 1;
+    if (!els.bookingPanel) return;
+    if (note && !els.bookingPanel.hidden) {
+      els.bookingPanel.innerHTML = '<p class="book-note">' + escapeHtml(note) + '</p>';
+      return;
+    }
+    els.bookingPanel.hidden = true;
+    els.bookingPanel.innerHTML = '';
+  }
+
+  function renderBookingPanel(result, decision) {
+    const panel = els.bookingPanel;
+    if (!panel) return;
+    if (!decision || !decision.show) {
+      panel.hidden = true;
+      panel.innerHTML = '';
+      return;
+    }
+    panel.hidden = false;
+    if (decision.past) {
+      panel.innerHTML = '<p class="book-note">' + escapeHtml(decision.message) + '</p>';
+      return;
+    }
+    if (!decision.ok) {
+      panel.innerHTML =
+        '<p class="book-kicker pending">Pending approval</p>' +
+        '<p class="book-copy">' + escapeHtml(decision.message) +
+        ' Your request stays <strong>pending until Matthew or a driver accepts it</strong>. Text it to us and we’ll confirm.</p>' +
+        '<a class="btn btn-secondary" id="book-pending-text" href="sms:' + PHONE + '">Text my request</a>' +
+        '<p class="book-fine">Instant <strong>Book it</strong> is offered Mon–Fri 8:00 am–6:00 pm (Central) when the schedule is open.</p>';
+      const btn = document.getElementById('book-pending-text');
+      if (btn) {
+        btn.addEventListener('click', (event) => {
+          if (!openRideText(event, lastEstimate, false)) event.preventDefault();
+        });
+      }
+      return;
+    }
+    const deposit = depositFor(result.total);
+    panel.innerHTML =
+      '<p class="book-kicker">Open on the schedule</p>' +
+      '<div class="deposit-row"><span>25% deposit to book</span><strong>' + money(deposit) + '</strong></div>' +
+      '<p class="book-fine">25% of the ' + money(result.total) + ' estimate. The rest of your final fare is due after the ride.</p>' +
+      '<button type="button" class="btn btn-primary btn-book" id="book-it-btn">Book it</button>' +
+      '<div class="book-confirm" id="book-confirm" hidden>' +
+        '<div class="book-warning" role="alert">' +
+          '<p><strong>Heads up: your booking is pending until accepted by the driver or Matthew.</strong></p>' +
+          '<ul>' +
+            '<li>Deposit: <strong>' + money(deposit) + '</strong> (25% of the estimated total).</li>' +
+            '<li>Matthew may adjust the fare after pickup if the trip changes (stops, waits, route).</li>' +
+            '<li>If no one is available, Matthew will contact you to revise the pickup or cancel.</li>' +
+          '</ul>' +
+        '</div>' +
+        '<label class="check book-ack"><input type="checkbox" id="book-ack" /> <span>I understand my booking is pending until accepted.</span></label>' +
+        '<a class="btn btn-primary btn-book-step" id="book-text-btn" aria-disabled="true" href="sms:' + PHONE + '">1 · Text my booking to PCS</a>' +
+        '<a class="btn btn-secondary btn-book-step" id="book-square-btn" aria-disabled="true" target="_blank" rel="noopener" href="' +
+          escapeHtml(squareDepositUrl(deposit)) + '">2 · Pay ' + money(deposit) + ' deposit on Square</a>' +
+        '<p class="book-fine">Square opens in a new tab. Your deposit amount is ' + money(deposit) + '.</p>' +
+      '</div>';
+
+    const bookBtn = document.getElementById('book-it-btn');
+    const confirmBox = document.getElementById('book-confirm');
+    const ack = document.getElementById('book-ack');
+    const textBtn = document.getElementById('book-text-btn');
+    const squareBtn = document.getElementById('book-square-btn');
+    const syncAck = () => {
+      const on = !!(ack && ack.checked);
+      [textBtn, squareBtn].forEach((a) => { if (a) a.setAttribute('aria-disabled', on ? 'false' : 'true'); });
+    };
+    if (bookBtn) {
+      bookBtn.addEventListener('click', () => {
+        if (confirmBox) confirmBox.hidden = false;
+        bookBtn.hidden = true;
+        if (confirmBox && confirmBox.scrollIntoView) confirmBox.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+      });
+    }
+    if (ack) ack.addEventListener('change', syncAck);
+    const needAck = (event) => {
+      if (ack && ack.checked) return true;
+      event.preventDefault();
+      if (ack) {
+        ack.focus();
+        const label = ack.closest('label');
+        if (label) {
+          label.classList.add('shake');
+          setTimeout(() => label.classList.remove('shake'), 600);
+        }
+      }
+      return false;
+    };
+    if (textBtn) {
+      textBtn.addEventListener('click', (event) => {
+        if (!needAck(event)) return;
+        updateFlightDetails();
+        if (!els.form.reportValidity()) {
+          event.preventDefault();
+          const bad = els.form.querySelector(':invalid');
+          if (bad && bad.scrollIntoView) bad.scrollIntoView({ block: 'center' });
+          return;
+        }
+        saveDraft();
+        textBtn.href = smsUrl(bookingRequestBody(lastEstimate, deposit), serviceArea());
+      });
+    }
+    if (squareBtn) {
+      squareBtn.addEventListener('click', (event) => { needAck(event); });
+    }
+  }
+
+  function updateBooking(result) {
+    const token = ++bookingToken;
+    if (!els.bookingPanel) return;
+    if (!result || result.callForQuote) {
+      renderBookingPanel(result, { show: false });
+      return;
+    }
+    els.bookingPanel.hidden = false;
+    els.bookingPanel.innerHTML = '<p class="book-note">Checking the schedule…</p>';
+    bookingDecision(result).then((decision) => {
+      if (token !== bookingToken) return;
+      renderBookingPanel(result, decision);
+    });
   }
 
   function escapeHtml(str) {
@@ -749,6 +1056,16 @@
     });
     els.form.addEventListener('input', saveDraft);
     els.form.addEventListener('change', saveDraft);
+    const CONTACT_ONLY = ['contact-name', 'contact-email', 'contact-phone', 'airline', 'flight-number', 'flight-direction'];
+    const staleBooking = (event) => {
+      const id = event.target && event.target.id;
+      if (!id || CONTACT_ONLY.indexOf(id) !== -1) return;
+      if (els.bookingPanel && !els.bookingPanel.hidden) {
+        hideBookingPanel('Trip details changed — tap Get estimate again to see booking options.');
+      }
+    };
+    els.form.addEventListener('input', staleBooking);
+    els.form.addEventListener('change', staleBooking);
     els.estimateButton.addEventListener('click', async (event) => {
       event.preventDefault();
       const result = await onSubmit(event);

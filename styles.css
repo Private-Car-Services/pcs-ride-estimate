@@ -686,3 +686,105 @@ a {
 [hidden] {
   display: none !important;
 }
+
+/* —— Book it (25% deposit) —— */
+.booking-panel {
+  margin: 1rem 0;
+  padding: 0.95rem 1rem;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: #f8fafc;
+}
+
+.booking-panel .btn {
+  width: 100%;
+  margin-top: 0.6rem;
+  text-align: center;
+}
+
+.book-kicker {
+  margin: 0 0 0.4rem;
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ok);
+}
+
+.book-kicker.pending {
+  color: #8a5a00;
+}
+
+.book-copy,
+.book-note {
+  margin: 0;
+  font-size: 0.95rem;
+  line-height: 1.45;
+  color: var(--text);
+}
+
+.book-note {
+  color: var(--muted);
+}
+
+.book-fine {
+  margin: 0.5rem 0 0;
+  font-size: 0.82rem;
+  line-height: 1.4;
+  color: var(--muted);
+}
+
+.deposit-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 1rem;
+  font-size: 1rem;
+  color: var(--navy);
+}
+
+.deposit-row strong {
+  font-size: 1.35rem;
+}
+
+.book-warning {
+  margin-top: 0.75rem;
+  padding: 0.75rem 0.85rem;
+  border-radius: 10px;
+  background: var(--warn-bg);
+  border: 1px solid var(--warn-border);
+  color: #5c4a00;
+  font-size: 0.9rem;
+  line-height: 1.4;
+}
+
+.book-warning p {
+  margin: 0 0 0.35rem;
+}
+
+.book-warning ul {
+  margin: 0;
+  padding-left: 1.1rem;
+}
+
+.book-ack {
+  margin-top: 0.7rem;
+}
+
+.btn-book-step[aria-disabled="true"] {
+  opacity: 0.55;
+}
+
+.book-ack.shake {
+  animation: book-shake 0.5s;
+}
+
+@keyframes book-shake {
+  0%, 100% { transform: translateX(0); }
+  25% { transform: translateX(-5px); }
+  75% { transform: translateX(5px); }
+}
+
+.booking-panel [hidden] {
+  display: none !important;
+}
