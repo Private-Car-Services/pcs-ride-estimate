@@ -5,6 +5,9 @@
   var DATABASE_URL = "https://pts-maps-rides-default-rtdb.firebaseio.com";
   var PRESENCE_HUB = "AVLBLDRV";
   var OPEN_HUB = "REQUESTS";
+  /* Roster + commission hub: 8-char ride-code alphabet (no I/O/0/1). DRVRCOMM has O — use DRVRCMMS. */
+  var ROSTER_HUB = "DRVRCMMS";
+  var DEFAULT_COMMISSION_PCT = 70;
   var SESSION_KEY = "pcs-god-session";
   /* Allowed owner email only. A real private password comes next — do not store one in this file. */
   var OWNER_EMAIL = "mwragge78@gmail.com";
@@ -55,10 +58,20 @@
     sessionEmail: "",
     drivers: [],
     rides: [],
+    roster: {},
     driversError: "",
     ridesError: "",
+    rosterError: "",
     loading: false,
-    lastRefreshAt: 0
+    lastRefreshAt: 0,
+    commissionDrafts: {},
+    hireName: "",
+    hirePhone: "",
+    hireEmail: "",
+    hirePct: String(DEFAULT_COMMISSION_PCT),
+    hireError: "",
+    hireNotice: "",
+    actionNotice: ""
   };
 
   var map = null;
@@ -89,6 +102,50 @@
 
   function rideUrl(code) {
     return baseUrl() + "/rides/" + encodeURIComponent(code) + ".json";
+  }
+
+  function rosterUrl(id) {
+    var root = baseUrl() + "/rides/" + encodeURIComponent(ROSTER_HUB);
+    if (id) return root + "/" + encodeURIComponent(id) + ".json";
+    return root + ".json";
+  }
+
+  function presenceDriverUrl(id) {
+    return baseUrl() + "/rides/" + encodeURIComponent(PRESENCE_HUB) + "/drivers/" + encodeURIComponent(id) + ".json";
+  }
+
+  function sanitizeDriverId(email) {
+    return String(email || "")
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "_")
+      .replace(/^_+|_+$/g, "")
+      .slice(0, 48);
+  }
+
+  function clampPct(raw) {
+    var n = Number(raw);
+    if (!isFinite(n)) return null;
+    n = Math.round(n);
+    if (n < 0 || n > 100) return null;
+    return n;
+  }
+
+  function commissionPctFor(driverId) {
+    if (state.commissionDrafts && state.commissionDrafts[driverId] != null && state.commissionDrafts[driverId] !== "") {
+      var draft = clampPct(state.commissionDrafts[driverId]);
+      if (draft != null) return draft;
+    }
+    var row = state.roster && state.roster[driverId];
+    if (row && row.commissionPct != null && isFinite(+row.commissionPct)) {
+      return clampPct(row.commissionPct) != null ? clampPct(row.commissionPct) : DEFAULT_COMMISSION_PCT;
+    }
+    return DEFAULT_COMMISSION_PCT;
+  }
+
+  function isRosterActive(driverId) {
+    var row = state.roster && state.roster[driverId];
+    if (!row) return true; /* unknown online driver: treat as active until hired/fired */
+    return row.active !== false;
   }
 
   function isCoord(v) {
@@ -206,8 +263,18 @@
     state.screen = "login";
     state.drivers = [];
     state.rides = [];
+    state.roster = {};
     state.driversError = "";
     state.ridesError = "";
+    state.rosterError = "";
+    state.commissionDrafts = {};
+    state.hireName = "";
+    state.hirePhone = "";
+    state.hireEmail = "";
+    state.hirePct = String(DEFAULT_COMMISSION_PCT);
+    state.hireError = "";
+    state.hireNotice = "";
+    state.actionNotice = "";
     stopPoll();
     tearMap();
     render();
@@ -238,6 +305,200 @@
         });
         return out;
       });
+    });
+  }
+
+  function listRoster() {
+    return fetch(rosterUrl()).then(function (res) {
+      if (res.status === 401 || res.status === 403) {
+        var err = new Error("roster-denied");
+        err.denied = true;
+        throw err;
+      }
+      if (!res.ok) throw new Error("roster");
+      return res.text().then(function (text) {
+        if (!text || text === "null") return {};
+        var data;
+        try { data = JSON.parse(text); } catch (e) { return {}; }
+        if (!data || typeof data !== "object") return {};
+        var out = {};
+        Object.keys(data).forEach(function (id) {
+          var row = data[id];
+          if (!row || typeof row !== "object") return;
+          row.id = id;
+          out[id] = row;
+        });
+        return out;
+      });
+    });
+  }
+
+  function putRosterRow(id, row) {
+    return fetch(rosterUrl(id), {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(row)
+    }).then(function (res) {
+      if (res.status === 401 || res.status === 403) {
+        var err = new Error("roster-write-denied");
+        err.denied = true;
+        throw err;
+      }
+      if (!res.ok) throw new Error("roster-write");
+      return row;
+    });
+  }
+
+  function clearPresence(id) {
+    if (!id) return Promise.resolve();
+    return fetch(presenceDriverUrl(id), { method: "DELETE" }).catch(function () {});
+  }
+
+  function saveCommission(driverId, pctRaw) {
+    var pct = clampPct(pctRaw);
+    if (pct == null) {
+      state.actionNotice = "Commission must be a whole number from 0 to 100.";
+      return Promise.resolve(false);
+    }
+    var existing = (state.roster && state.roster[driverId]) || {};
+    var online = null;
+    (state.drivers || []).forEach(function (d) {
+      if (d && d.id === driverId) online = d;
+    });
+    var row = {
+      name: existing.name || (online && online.name) || driverId,
+      phone: existing.phone || (online && online.phone) || "",
+      email: existing.email || (online && online.email) || "",
+      commissionPct: pct,
+      active: existing.active !== false,
+      hiredAt: existing.hiredAt || Date.now(),
+      updatedAt: Date.now()
+    };
+    if (!row.email && driverId.indexOf("_") >= 0) {
+      /* id is sanitized email; keep blank email if unknown */
+    }
+    return putRosterRow(driverId, row).then(function () {
+      state.roster[driverId] = Object.assign({ id: driverId }, row);
+      delete state.commissionDrafts[driverId];
+      state.actionNotice = "Saved " + pct + "% commission for " + (row.name || driverId) + ".";
+      return true;
+    }).catch(function (err) {
+      state.actionNotice = err && err.denied
+        ? "Cannot save commission (Firebase permission denied on /rides/" + ROSTER_HUB + ")."
+        : "Could not save commission.";
+      return false;
+    });
+  }
+
+  function hireDriver() {
+    state.hireError = "";
+    state.hireNotice = "";
+    var name = String(state.hireName || "").trim();
+    var phone = String(state.hirePhone || "").trim();
+    var email = normalizeEmail(state.hireEmail);
+    var pct = clampPct(state.hirePct);
+    if (!name) {
+      state.hireError = "Enter the driver’s name.";
+      return Promise.resolve(false);
+    }
+    if (!email || email.indexOf("@") < 1) {
+      state.hireError = "Enter a valid driver email.";
+      return Promise.resolve(false);
+    }
+    if (pct == null) {
+      state.hireError = "Commission must be 0–100.";
+      return Promise.resolve(false);
+    }
+    var id = sanitizeDriverId(email);
+    if (!id) {
+      state.hireError = "Email could not be used as a driver id.";
+      return Promise.resolve(false);
+    }
+    var existing = state.roster[id];
+    var row = {
+      name: name,
+      phone: phone,
+      email: email,
+      commissionPct: pct,
+      active: true,
+      hiredAt: (existing && existing.hiredAt) || Date.now(),
+      updatedAt: Date.now(),
+      rehiredAt: existing && existing.active === false ? Date.now() : undefined
+    };
+    if (!row.rehiredAt) delete row.rehiredAt;
+    return putRosterRow(id, row).then(function () {
+      state.roster[id] = Object.assign({ id: id }, row);
+      state.hireName = "";
+      state.hirePhone = "";
+      state.hireEmail = "";
+      state.hirePct = String(DEFAULT_COMMISSION_PCT);
+      state.hireNotice = "Hired " + name + " at " + pct + "%.";
+      state.actionNotice = state.hireNotice;
+      return true;
+    }).catch(function (err) {
+      state.hireError = err && err.denied
+        ? "Cannot hire (Firebase permission denied on /rides/" + ROSTER_HUB + ")."
+        : "Could not save hire.";
+      return false;
+    });
+  }
+
+  function fireDriver(driverId) {
+    var existing = (state.roster && state.roster[driverId]) || {};
+    var online = null;
+    (state.drivers || []).forEach(function (d) {
+      if (d && d.id === driverId) online = d;
+    });
+    var row = {
+      name: existing.name || (online && online.name) || driverId,
+      phone: existing.phone || (online && online.phone) || "",
+      email: existing.email || (online && online.email) || "",
+      commissionPct: existing.commissionPct != null ? clampPct(existing.commissionPct) : DEFAULT_COMMISSION_PCT,
+      active: false,
+      hiredAt: existing.hiredAt || Date.now(),
+      firedAt: Date.now(),
+      updatedAt: Date.now()
+    };
+    if (row.commissionPct == null) row.commissionPct = DEFAULT_COMMISSION_PCT;
+    return putRosterRow(driverId, row).then(function () {
+      state.roster[driverId] = Object.assign({ id: driverId }, row);
+      return clearPresence(driverId).then(function () {
+        state.actionNotice = "Fired " + (row.name || driverId) + ". Marked inactive and cleared live presence.";
+        /* Drop from online list locally until next poll. */
+        state.drivers = (state.drivers || []).filter(function (d) { return !d || d.id !== driverId; });
+        return true;
+      });
+    }).catch(function (err) {
+      state.actionNotice = err && err.denied
+        ? "Cannot fire (Firebase permission denied on /rides/" + ROSTER_HUB + ")."
+        : "Could not fire driver.";
+      return false;
+    });
+  }
+
+  function rehireDriver(driverId) {
+    var existing = (state.roster && state.roster[driverId]) || {};
+    var pct = existing.commissionPct != null ? clampPct(existing.commissionPct) : DEFAULT_COMMISSION_PCT;
+    if (pct == null) pct = DEFAULT_COMMISSION_PCT;
+    var row = {
+      name: existing.name || driverId,
+      phone: existing.phone || "",
+      email: existing.email || "",
+      commissionPct: pct,
+      active: true,
+      hiredAt: existing.hiredAt || Date.now(),
+      rehiredAt: Date.now(),
+      updatedAt: Date.now()
+    };
+    return putRosterRow(driverId, row).then(function () {
+      state.roster[driverId] = Object.assign({ id: driverId }, row);
+      state.actionNotice = "Rehired " + (row.name || driverId) + " at " + pct + "%.";
+      return true;
+    }).catch(function (err) {
+      state.actionNotice = err && err.denied
+        ? "Cannot rehire (Firebase permission denied on /rides/" + ROSTER_HUB + ")."
+        : "Could not rehire driver.";
+      return false;
     });
   }
 
@@ -345,24 +606,39 @@
   }
 
   function revenueForDriver(driver, rides) {
-    /* No durable per-driver revenue ledger exists yet. Only show a figure when a live
-       ride we can read already carries estimatedTotal / fareBeforeTax — never invent $. */
+    /* Commission of fare before tax when known. Never invent a fare. */
     var ride = matchDriverToRide(driver, rides);
     if (!ride) return { label: "No trip revenue recorded yet", amount: null };
-    var money = fmtMoney(ride.estimatedTotal != null ? ride.estimatedTotal : ride.fareBeforeTax);
+    var fare = ride.fareBeforeTax;
+    if (fare === null || fare === undefined || fare === "" || !isFinite(+fare)) {
+      /* Fall back to estimatedTotal only for display note — commission still needs before-tax. */
+      var totalOnly = fmtMoney(ride.estimatedTotal);
+      if (totalOnly) {
+        return { label: totalOnly + " trip total (no before-tax fare yet)", amount: null };
+      }
+      return { label: "No trip revenue recorded yet", amount: null };
+    }
+    var pct = commissionPctFor(driver.id);
+    var share = Number(fare) * (pct / 100);
+    var money = fmtMoney(share);
     if (!money) return { label: "No trip revenue recorded yet", amount: null };
-    return { label: money + " (estimate on current trip)", amount: money };
+    return {
+      label: money + " · " + pct + "% of " + fmtMoney(fare) + " before tax",
+      amount: money,
+      pct: pct
+    };
   }
 
   function refresh() {
     if (state.screen !== "board") return;
     state.loading = true;
-    var driversP = listOnlineDrivers().then(function (rows) {
-      state.driversError = "";
-      state.drivers = rows;
+
+    var rosterP = listRoster().then(function (rows) {
+      state.rosterError = "";
+      state.roster = rows || {};
     }).catch(function (err) {
-      state.drivers = [];
-      state.driversError = err && err.denied ? "denied" : "error";
+      /* Keep prior roster in memory if a poll fails; mark error for UI. */
+      state.rosterError = err && err.denied ? "denied" : "error";
     });
 
     var ridesP = listOpenRides().then(function (rows) {
@@ -375,13 +651,28 @@
       state.ridesError = err && err.denied ? "denied" : "error";
     });
 
-    Promise.all([driversP, ridesP]).then(function () {
+    /* Presence after roster so fired drivers are filtered with current active flags. */
+    var driversP = rosterP.then(function () {
+      return listOnlineDrivers().then(function (rows) {
+        state.driversError = "";
+        state.drivers = (rows || []).filter(function (d) {
+          return d && isRosterActive(d.id);
+        });
+      }).catch(function (err) {
+        state.drivers = [];
+        state.driversError = err && err.denied ? "denied" : "error";
+      });
+    });
+
+    Promise.all([rosterP, driversP, ridesP]).then(function () {
       state.loading = false;
       state.lastRefreshAt = Date.now();
       renderBoardLists();
       syncMap();
       var pill = document.getElementById("refresh-pill");
       if (pill) pill.textContent = statusPillText();
+      var notice = document.getElementById("drivers-action-notice");
+      if (notice && state.actionNotice) notice.textContent = state.actionNotice;
     });
   }
 
@@ -563,36 +854,146 @@
     setTimeout(function () { if (map) map.invalidateSize(); }, 60);
   }
 
+  function knownDriverRows() {
+    /* Merge roster (hired / fired) with currently online presence. */
+    var byId = {};
+    var roster = state.roster || {};
+    Object.keys(roster).forEach(function (id) {
+      var row = roster[id];
+      if (!row) return;
+      byId[id] = {
+        id: id,
+        name: row.name || id,
+        phone: row.phone || "",
+        email: row.email || "",
+        online: false,
+        at: row.updatedAt || row.hiredAt || null,
+        lat: null,
+        lng: null,
+        fromRoster: true,
+        active: row.active !== false,
+        commissionPct: row.commissionPct
+      };
+    });
+    (state.drivers || []).forEach(function (d) {
+      if (!d || !d.id) return;
+      if (!isRosterActive(d.id) && byId[d.id] && byId[d.id].active === false) return;
+      var prev = byId[d.id] || {
+        id: d.id,
+        name: d.name || d.id,
+        phone: d.phone || "",
+        email: d.email || "",
+        fromRoster: false,
+        active: true,
+        commissionPct: null
+      };
+      prev.online = true;
+      prev.at = d.at || prev.at;
+      prev.lat = d.lat;
+      prev.lng = d.lng;
+      if (d.name) prev.name = d.name;
+      if (d.phone) prev.phone = d.phone;
+      if (!prev.active && prev.fromRoster) {
+        /* Fired: do not treat as online in the panel. */
+        prev.online = false;
+      }
+      byId[d.id] = prev;
+    });
+    return Object.keys(byId).map(function (id) { return byId[id]; }).sort(function (a, b) {
+      if (a.active !== b.active) return a.active ? -1 : 1;
+      if (a.online !== b.online) return a.online ? -1 : 1;
+      return String(a.name || "").localeCompare(String(b.name || ""));
+    });
+  }
+
+  function hireFormHtml() {
+    return (
+      '<form class="hire-form" id="hire-form" autocomplete="off">' +
+        "<h3>Hire a driver</h3>" +
+        '<div class="hire-grid">' +
+          '<div class="field">' +
+            '<label for="hire-name">Name</label>' +
+            '<input id="hire-name" name="name" type="text" required value="' + esc(state.hireName) + '">' +
+          "</div>" +
+          '<div class="field">' +
+            '<label for="hire-phone">Phone</label>' +
+            '<input id="hire-phone" name="phone" type="tel" value="' + esc(state.hirePhone) + '">' +
+          "</div>" +
+          '<div class="field">' +
+            '<label for="hire-email">Email</label>' +
+            '<input id="hire-email" name="email" type="email" required value="' + esc(state.hireEmail) + '">' +
+          "</div>" +
+          '<div class="field">' +
+            '<label for="hire-pct">Commission %</label>' +
+            '<input id="hire-pct" name="pct" type="number" min="0" max="100" step="1" required value="' + esc(state.hirePct) + '">' +
+          "</div>" +
+        "</div>" +
+        '<p class="hire-error" id="hire-error">' + esc(state.hireError) + "</p>" +
+        '<p class="hire-notice" id="hire-notice">' + esc(state.hireNotice) + "</p>" +
+        '<button class="btn btn-gold hire-btn" type="submit">Hire driver</button>' +
+      "</form>"
+    );
+  }
+
   function driversPanelHtml() {
+    var parts = [];
+    if (state.rosterError === "denied") {
+      parts.push('<p class="empty">Driver roster cannot be read (permission denied on /rides/' + esc(ROSTER_HUB) + '). Hire/Fire/commission saves need that path writable.</p>');
+    } else if (state.rosterError) {
+      parts.push('<p class="empty">Could not refresh the driver roster. Showing last known list.</p>');
+    }
     if (state.driversError === "denied") {
-      return '<p class="empty">Driver presence cannot be read (permission denied). No drivers invented.</p>';
+      parts.push('<p class="empty">Driver presence cannot be read (permission denied). Online status may be incomplete.</p>');
+    } else if (state.driversError) {
+      parts.push('<p class="empty">Could not load online drivers. Presence may be incomplete.</p>');
     }
-    if (state.driversError) {
-      return '<p class="empty">Could not load online drivers. Showing none.</p>';
+
+    var rows = knownDriverRows();
+    if (!rows.length) {
+      parts.push('<p class="empty">No drivers hired or online yet. Use Hire below.</p>');
+    } else {
+      parts.push(rows.map(function (d) {
+        var trip = d.online ? matchDriverToRide(d, state.rides) : null;
+        var rev = d.online ? revenueForDriver(d, state.rides) : { label: "—" };
+        var pct = commissionPctFor(d.id);
+        var badge;
+        if (!d.active) badge = '<span class="badge fired">Fired</span>';
+        else if (trip) badge = '<span class="badge on-trip">On trip</span>';
+        else if (d.online) badge = '<span class="badge">Online · free</span>';
+        else badge = '<span class="badge off">Hired · offline</span>';
+        var where = isCoord(d.lat) && isCoord(d.lng)
+          ? (+d.lat).toFixed(4) + ", " + (+d.lng).toFixed(4)
+          : (d.online ? "Location not shared" : "Not on the map");
+        var contact = [];
+        if (d.phone) contact.push(esc(d.phone));
+        if (d.email) contact.push(esc(d.email));
+        var cardClass = "card";
+        if (trip) cardClass += " paired";
+        if (!d.active) cardClass += " fired";
+        return (
+          '<article class="' + cardClass + '" data-driver-id="' + esc(d.id) + '">' +
+            "<h3>" + esc(displayName(d.name, "Driver")) + badge + "</h3>" +
+            '<p class="meta">' +
+            (contact.length ? contact.join(" · ") + "<br>" : "") +
+            "<strong>Last seen</strong> " + esc(fmtClock(d.at)) + "<br>" +
+            "<strong>Map</strong> " + esc(where) + "<br>" +
+            "<strong>Revenue</strong> " + esc(rev.label) +
+            (trip ? "<br><strong>With</strong> " + esc(displayName(trip.name, "Rider")) : "") +
+            "</p>" +
+            '<div class="commission-row">' +
+              '<label class="commission-label" for="comm-' + esc(d.id) + '">Commission %</label>' +
+              '<input class="commission-input" id="comm-' + esc(d.id) + '" data-driver-id="' + esc(d.id) + '" type="number" min="0" max="100" step="1" value="' + esc(String(pct)) + '"' + (d.active ? "" : " disabled") + ">" +
+              '<button type="button" class="btn btn-ghost btn-save-comm" data-driver-id="' + esc(d.id) + '"' + (d.active ? "" : " disabled") + ">Save</button>" +
+              (d.active
+                ? '<button type="button" class="btn btn-fire" data-driver-id="' + esc(d.id) + '">Fire</button>'
+                : '<button type="button" class="btn btn-ghost btn-rehire" data-driver-id="' + esc(d.id) + '">Rehire</button>') +
+            "</div>" +
+          "</article>"
+        );
+      }).join(""));
     }
-    if (!state.drivers.length) {
-      return '<p class="empty">No drivers online right now.</p>';
-    }
-    return state.drivers.map(function (d) {
-      var trip = matchDriverToRide(d, state.rides);
-      var rev = revenueForDriver(d, state.rides);
-      var badge = trip
-        ? '<span class="badge on-trip">On trip</span>'
-        : '<span class="badge">Online · free</span>';
-      var where = isCoord(d.lat) && isCoord(d.lng)
-        ? (+d.lat).toFixed(4) + ", " + (+d.lng).toFixed(4)
-        : "Location not shared";
-      return (
-        '<article class="card' + (trip ? " paired" : "") + '">' +
-          "<h3>" + esc(displayName(d.name, "Driver")) + badge + "</h3>" +
-          '<p class="meta"><strong>Last seen</strong> ' + esc(fmtClock(d.at)) + "<br>" +
-          "<strong>Map</strong> " + esc(where) + "<br>" +
-          "<strong>Revenue</strong> " + esc(rev.label) +
-          (trip ? "<br><strong>With</strong> " + esc(displayName(trip.name, "Rider")) : "") +
-          "</p>" +
-        "</article>"
-      );
-    }).join("");
+    parts.push('<p class="action-notice" id="drivers-action-notice">' + esc(state.actionNotice) + "</p>");
+    return parts.join("");
   }
 
   function ridesPanelHtml() {
@@ -636,6 +1037,7 @@
     var r = document.getElementById("rides-list");
     if (d) d.innerHTML = driversPanelHtml();
     if (r) r.innerHTML = ridesPanelHtml();
+    bindDriverActions();
   }
 
   function renderLogin() {
@@ -679,7 +1081,8 @@
         '<div class="workspace">' +
           '<aside class="side">' +
             '<section class="side-section">' +
-              "<h2>Drivers online</h2>" +
+              "<h2>Drivers</h2>" +
+              hireFormHtml() +
               '<div id="drivers-list">' + driversPanelHtml() + "</div>" +
             "</section>" +
             '<section class="side-section">' +
@@ -694,6 +1097,98 @@
         "</div>" +
       "</div>"
     );
+  }
+
+  function bindDriverActions() {
+    var list = document.getElementById("drivers-list");
+    if (!list || list.dataset.bound === "1") {
+      /* Always rebind fresh nodes after innerHTML replace. */
+    }
+    if (!list) return;
+
+    Array.prototype.forEach.call(list.querySelectorAll(".commission-input"), function (input) {
+      input.addEventListener("input", function () {
+        var id = input.getAttribute("data-driver-id");
+        if (!id) return;
+        state.commissionDrafts[id] = input.value;
+      });
+    });
+
+    Array.prototype.forEach.call(list.querySelectorAll(".btn-save-comm"), function (btn) {
+      btn.addEventListener("click", function () {
+        var id = btn.getAttribute("data-driver-id");
+        if (!id) return;
+        var input = document.getElementById("comm-" + id);
+        var raw = input ? input.value : state.commissionDrafts[id];
+        btn.disabled = true;
+        saveCommission(id, raw).then(function () {
+          btn.disabled = false;
+          renderBoardLists();
+          syncMap();
+        });
+      });
+    });
+
+    Array.prototype.forEach.call(list.querySelectorAll(".btn-fire"), function (btn) {
+      btn.addEventListener("click", function () {
+        var id = btn.getAttribute("data-driver-id");
+        if (!id) return;
+        var name = (state.roster[id] && state.roster[id].name) || id;
+        if (!window.confirm("Fire " + name + "? They will be marked inactive and removed from live presence.")) return;
+        btn.disabled = true;
+        fireDriver(id).then(function () {
+          btn.disabled = false;
+          renderBoardLists();
+          syncMap();
+        });
+      });
+    });
+
+    Array.prototype.forEach.call(list.querySelectorAll(".btn-rehire"), function (btn) {
+      btn.addEventListener("click", function () {
+        var id = btn.getAttribute("data-driver-id");
+        if (!id) return;
+        btn.disabled = true;
+        rehireDriver(id).then(function () {
+          btn.disabled = false;
+          renderBoardLists();
+          syncMap();
+        });
+      });
+    });
+  }
+
+  function bindHireForm() {
+    var form = document.getElementById("hire-form");
+    if (!form) return;
+    form.addEventListener("submit", function (ev) {
+      ev.preventDefault();
+      var nameEl = document.getElementById("hire-name");
+      var phoneEl = document.getElementById("hire-phone");
+      var emailEl = document.getElementById("hire-email");
+      var pctEl = document.getElementById("hire-pct");
+      state.hireName = nameEl ? nameEl.value : "";
+      state.hirePhone = phoneEl ? phoneEl.value : "";
+      state.hireEmail = emailEl ? emailEl.value : "";
+      state.hirePct = pctEl ? pctEl.value : String(DEFAULT_COMMISSION_PCT);
+      hireDriver().then(function (ok) {
+        if (ok) {
+          /* Re-render hire form cleared + list */
+          var side = form.parentNode;
+          if (side) {
+            var fresh = document.createElement("div");
+            fresh.innerHTML = hireFormHtml();
+            var newForm = fresh.firstChild;
+            side.replaceChild(newForm, form);
+            bindHireForm();
+          }
+          renderBoardLists();
+        } else {
+          var err = document.getElementById("hire-error");
+          if (err) err.textContent = state.hireError;
+        }
+      });
+    });
   }
 
   function bind() {
@@ -718,6 +1213,8 @@
     if (out) {
       out.addEventListener("click", function () { logout(); });
     }
+    bindHireForm();
+    bindDriverActions();
   }
 
   function render() {

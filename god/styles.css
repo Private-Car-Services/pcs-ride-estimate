@@ -365,3 +365,130 @@ button, input {
   background: #122412;
   font: inherit;
 }
+
+
+/* —— Hire / commission / fire —— */
+.hire-form {
+  margin: 0 0 14px;
+  padding: 12px;
+  border-radius: 14px;
+  border: 1px solid var(--line);
+  background: rgba(6, 20, 8, 0.35);
+}
+
+.hire-form h3 {
+  margin: 0 0 10px;
+  font-size: 13px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--gold-2);
+}
+
+.hire-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px 10px;
+}
+
+.hire-grid .field {
+  margin-bottom: 0;
+}
+
+.hire-grid .field:nth-child(3),
+.hire-grid .field:nth-child(4) {
+  grid-column: span 1;
+}
+
+.hire-form .field input {
+  padding: 9px 10px;
+  font-size: 13px;
+}
+
+.hire-btn {
+  margin-top: 8px;
+  width: 100%;
+  padding: 10px 12px;
+  font-size: 13px;
+}
+
+.hire-error {
+  min-height: 1.1em;
+  margin: 8px 0 0;
+  color: var(--danger);
+  font-size: 12px;
+}
+
+.hire-notice,
+.action-notice {
+  min-height: 1.1em;
+  margin: 6px 0 0;
+  color: var(--gold-2);
+  font-size: 12px;
+}
+
+.commission-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.commission-label {
+  width: 100%;
+  color: var(--gold-2);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.commission-input {
+  width: 72px;
+  padding: 7px 8px;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  background: rgba(6, 20, 8, 0.55);
+  outline: none;
+}
+
+.commission-input:focus {
+  border-color: var(--gold);
+}
+
+.commission-input:disabled {
+  opacity: 0.55;
+}
+
+.btn-save-comm {
+  padding: 7px 10px;
+  font-size: 12px;
+}
+
+.btn-fire {
+  padding: 7px 10px;
+  font-size: 12px;
+  font-weight: 700;
+  border-radius: 12px;
+  border: 1px solid rgba(201, 120, 120, 0.55);
+  background: rgba(201, 120, 120, 0.16);
+  color: #f0c2c2;
+  cursor: pointer;
+}
+
+.btn-fire:hover {
+  background: rgba(201, 120, 120, 0.28);
+}
+
+.card.fired {
+  opacity: 0.72;
+  border-style: dashed;
+}
+
+.badge.fired {
+  border-color: rgba(201, 120, 120, 0.55);
+  color: #f0c2c2;
+}
+
+.badge.off {
+  opacity: 0.85;
+}
