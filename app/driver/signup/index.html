@@ -11,7 +11,7 @@
   <link rel="icon" href="../../icon-driver.png">
   <link rel="manifest" href="manifest.webmanifest">
   <title>PCS Driver</title>
-  <link rel="stylesheet" href="../../styles.css?v=17">
+  <link rel="stylesheet" href="../../styles.css?v=19">
 </head>
 <body>
   <div class="phone">
@@ -25,12 +25,19 @@
       <h2>Create a driver account</h2>
       <p class="lede">Invitation sign-up. This phone keeps the account. Nothing is charged.</p>
       <form id="signup-form" autocomplete="off">
-        <label for="photo">Profile picture</label>
+        <label>Profile picture</label>
         <div class="photo-pick">
-          <img id="photo-preview" class="avatar" alt="" hidden>
-          <input id="photo" name="photo" type="file" accept="image/*">
+          <img id="photo-preview" class="avatar" alt="Your photo" hidden>
+          <div class="photo-actions">
+            <label class="photo-btn">Take photo
+              <input id="photo-camera" name="photoCamera" type="file" accept="image/*" capture="environment">
+            </label>
+            <label class="photo-btn">Choose from library
+              <input id="photo-library" name="photoLibrary" type="file" accept="image/*">
+            </label>
+          </div>
         </div>
-        <p class="fine">Optional. The rider sees this picture when you accept.</p>
+        <p class="fine">Optional. Riders see this when you accept a ride. Take a photo or choose one from your library.</p>
         <label for="full-name">Full name</label>
         <input id="full-name" name="name" type="text" autocomplete="name" required>
         <label for="mobile">Mobile phone</label>
@@ -43,7 +50,7 @@
         <input id="confirm" name="confirm" type="password" autocomplete="new-password" required>
 
         <p class="group-title">Your car</p>
-        <p class="fine">Riders see this when you accept a ride.</p>
+        <p class="fine">Year, make, model, plate, seats, and a front-right photo.</p>
         <label for="car-year">Year</label>
         <select id="car-year" name="carYear" required>
           <option value="">Select</option>
@@ -65,12 +72,19 @@
           <option value="6">6</option>
           <option value="7">7</option>
         </select>
-        <label for="car-photo">Photo of your car from the front right angle</label>
+        <label>Photo of your car from the front right angle</label>
         <div class="photo-pick">
-          <img id="car-photo-preview" class="car-thumb" alt="" hidden>
-          <input id="car-photo" name="carPhoto" type="file" accept="image/*" capture="environment" required>
+          <img id="car-photo-preview" class="car-thumb" alt="Your car" hidden>
+          <div class="photo-actions">
+            <label class="photo-btn">Take photo
+              <input id="car-photo-camera" name="carPhotoCamera" type="file" accept="image/*" capture="environment">
+            </label>
+            <label class="photo-btn">Choose from library
+              <input id="car-photo-library" name="carPhotoLibrary" type="file" accept="image/*">
+            </label>
+          </div>
         </div>
-        <p class="fine">Required. Take or choose a photo from the front right of the car.</p>
+        <p class="fine">Required. Take a photo or choose one from your library.</p>
 
         <p class="error" id="form-error" role="alert"></p>
         <button class="btn" type="submit">Save account</button>
@@ -194,21 +208,81 @@
         return value;
       }
 
-      function previewPhoto(input, preview, readerFn, onError) {
-        input.addEventListener("change", function () {
-          var file = input.files && input.files[0];
-          preview.hidden = true;
-          preview.removeAttribute("src");
-          if (!file) return;
-          readerFn(file).then(function (url) {
-            preview.src = url;
-            preview.hidden = false;
-            if (onError) onError("");
-          }).catch(function () {
-            input.value = "";
-            if (onError) onError("Choose a photo from this phone. A picture that is too large will not save.");
-          });
-        });
+      function fileFromInput(input) {
+        return input && input.files && input.files[0] ? input.files[0] : null;
+      }
+
+      function bindDualPhoto(cameraInput, libraryInput, preview, readerFn, onError) {
+        function handle(active, other) {
+          return function () {
+            var file = fileFromInput(active);
+            if (other) other.value = "";
+            preview.hidden = true;
+            preview.removeAttribute("src");
+            if (!file) return;
+            readerFn(file).then(function (url) {
+              preview.src = url;
+              preview.hidden = false;
+              if (onError) onError("");
+            }).catch(function () {
+              active.value = "";
+              if (onError) onError("Choose a photo from this phone. A picture that is too large will not save.");
+            });
+          };
+        }
+        if (cameraInput) cameraInput.addEventListener("change", handle(cameraInput, libraryInput));
+        if (libraryInput) libraryInput.addEventListener("change", handle(libraryInput, cameraInput));
+        return {
+          getFile: function () {
+            return fileFromInput(cameraInput) || fileFromInput(libraryInput);
+          }
+        };
+      }
+
+      function makeDualPhotoPick(opts) {
+        var pick = document.createElement("div");
+        pick.className = "photo-pick";
+        var preview = document.createElement("img");
+        preview.className = opts.previewClass || "avatar";
+        preview.alt = opts.alt || "";
+        var saved = opts.savedUrl || "";
+        preview.hidden = !saved;
+        if (saved) preview.src = saved;
+        var actions = document.createElement("div");
+        actions.className = "photo-actions";
+
+        function makeBtn(labelText, id, useCapture) {
+          var lab = document.createElement("label");
+          lab.className = "photo-btn";
+          lab.appendChild(document.createTextNode(labelText));
+          var input = document.createElement("input");
+          input.id = id;
+          input.type = "file";
+          input.accept = "image/*";
+          if (useCapture) input.setAttribute("capture", "environment");
+          lab.appendChild(input);
+          actions.appendChild(lab);
+          return input;
+        }
+
+        var cameraInput = makeBtn("Take photo", opts.cameraId, true);
+        var libraryInput = makeBtn("Choose from library", opts.libraryId, false);
+        pick.appendChild(preview);
+        pick.appendChild(actions);
+        return {
+          pick: pick,
+          preview: preview,
+          cameraInput: cameraInput,
+          libraryInput: libraryInput,
+          binder: null,
+          bind: function (readerFn, onError) {
+            this.binder = bindDualPhoto(cameraInput, libraryInput, preview, readerFn, onError);
+            return this.binder;
+          },
+          getFile: function () {
+            return this.binder ? this.binder.getFile() : (fileFromInput(cameraInput) || fileFromInput(libraryInput));
+          }
+        };
       }
 
       function showError(message) {
@@ -326,7 +400,7 @@
         form.appendChild(title);
         var hint = document.createElement("p");
         hint.className = "fine";
-        hint.textContent = "Riders see this when you accept a ride.";
+        hint.textContent = "Year, make, model, plate, seats, and a front-right photo.";
         form.appendChild(hint);
 
         var yearLab = document.createElement("label");
@@ -379,32 +453,23 @@
 
         var savedCar = safePhoto(account && account.carPhoto);
         var carLab = document.createElement("label");
-        carLab.htmlFor = "profile-car-photo";
         carLab.textContent = "Photo of your car from the front right angle";
-        var carPick = document.createElement("div");
-        carPick.className = "photo-pick";
-        var carPreview = document.createElement("img");
-        carPreview.className = "car-thumb";
-        carPreview.alt = "";
-        carPreview.hidden = !savedCar;
-        if (savedCar) carPreview.src = savedCar;
-        var carInput = document.createElement("input");
-        carInput.id = "profile-car-photo";
-        carInput.type = "file";
-        carInput.accept = "image/*";
-        carInput.setAttribute("capture", "environment");
-        if (requireNewCarPhoto && !savedCar) carInput.required = true;
-        carPick.appendChild(carPreview);
-        carPick.appendChild(carInput);
         form.appendChild(carLab);
-        form.appendChild(carPick);
+        var carDual = makeDualPhotoPick({
+          previewClass: "car-thumb",
+          alt: "Your car",
+          savedUrl: savedCar,
+          cameraId: "profile-car-photo-camera",
+          libraryId: "profile-car-photo-library"
+        });
+        form.appendChild(carDual.pick);
         var carFine = document.createElement("p");
         carFine.className = "fine";
         carFine.textContent = savedCar
-          ? "Required. Leave blank to keep the current photo, or choose a new one."
-          : "Required. Take or choose a photo from the front right of the car.";
+          ? "Required. Leave blank to keep the current photo, or take a new one / choose from your library."
+          : "Required. Take a photo or choose one from your library.";
         form.appendChild(carFine);
-        return { carInput: carInput, carPreview: carPreview, savedCar: savedCar };
+        return { carDual: carDual, savedCar: savedCar, requireNewCarPhoto: !!requireNewCarPhoto };
       }
 
       function showProfile(account, note) {
@@ -483,27 +548,24 @@
           updateForm.appendChild(input);
         }
 
+        var photoLab = document.createElement("label");
+        photoLab.textContent = "Profile picture";
+        updateForm.appendChild(photoLab);
+        var photoDual = makeDualPhotoPick({
+          previewClass: "avatar",
+          alt: "Your photo",
+          savedUrl: savedPhoto,
+          cameraId: "profile-photo-camera",
+          libraryId: "profile-photo-library"
+        });
+        updateForm.appendChild(photoDual.pick);
+        var photoFine = document.createElement("p");
+        photoFine.className = "fine";
+        photoFine.textContent = "Riders see this when you accept a ride. Take a photo or choose one from your library.";
+        updateForm.appendChild(photoFine);
+
         labeled("profile-name", "Full name", account.name || "", "text");
         labeled("profile-phone", "Mobile phone", prettyPhone(account.phone), "tel");
-
-        var photoLab = document.createElement("label");
-        photoLab.htmlFor = "profile-photo";
-        photoLab.textContent = "Profile picture";
-        var photoPick = document.createElement("div");
-        photoPick.className = "photo-pick";
-        var photoPreview = document.createElement("img");
-        photoPreview.className = "avatar";
-        photoPreview.alt = "";
-        photoPreview.hidden = !savedPhoto;
-        if (savedPhoto) photoPreview.src = savedPhoto;
-        var photoInput = document.createElement("input");
-        photoInput.id = "profile-photo";
-        photoInput.type = "file";
-        photoInput.accept = "image/*";
-        photoPick.appendChild(photoPreview);
-        photoPick.appendChild(photoInput);
-        updateForm.appendChild(photoLab);
-        updateForm.appendChild(photoPick);
 
         var vehicle = appendVehicleFields(updateForm, account, true);
 
@@ -528,8 +590,8 @@
         linkP.appendChild(link);
         main.appendChild(linkP);
 
-        previewPhoto(photoInput, photoPreview, readPhotoFile, function (message) { err.textContent = message; });
-        previewPhoto(vehicle.carInput, vehicle.carPreview, readCarPhotoFile, function (message) { err.textContent = message; });
+        photoDual.bind(readPhotoFile, function (message) { err.textContent = message; });
+        vehicle.carDual.bind(readCarPhotoFile, function (message) { err.textContent = message; });
 
         updateForm.addEventListener("submit", function (event) {
           event.preventDefault();
@@ -569,8 +631,8 @@
             err.textContent = "Select passenger seats from 1 to 7.";
             return;
           }
-          var photoFile = photoInput.files && photoInput.files[0];
-          var carFile = vehicle.carInput.files && vehicle.carInput.files[0];
+          var photoFile = photoDual.getFile();
+          var carFile = vehicle.carDual.getFile();
           if (!carFile && !safePhoto(account.carPhoto)) {
             err.textContent = "Add a photo of your car from the front right angle.";
             return;
@@ -612,12 +674,14 @@
       }
 
       fillYearSelect(document.getElementById("car-year"), "");
-      var signupPhoto = document.getElementById("photo");
       var signupPreview = document.getElementById("photo-preview");
-      var carPhoto = document.getElementById("car-photo");
+      var signupPhotoCamera = document.getElementById("photo-camera");
+      var signupPhotoLibrary = document.getElementById("photo-library");
       var carPreview = document.getElementById("car-photo-preview");
-      if (signupPhoto && signupPreview) previewPhoto(signupPhoto, signupPreview, readPhotoFile, showError);
-      if (carPhoto && carPreview) previewPhoto(carPhoto, carPreview, readCarPhotoFile, showError);
+      var carPhotoCamera = document.getElementById("car-photo-camera");
+      var carPhotoLibrary = document.getElementById("car-photo-library");
+      var signupPhotoCtl = bindDualPhoto(signupPhotoCamera, signupPhotoLibrary, signupPreview, readPhotoFile, showError);
+      var carPhotoCtl = bindDualPhoto(carPhotoCamera, carPhotoLibrary, carPreview, readCarPhotoFile, showError);
 
       form.addEventListener("submit", function (event) {
         event.preventDefault();
@@ -673,7 +737,7 @@
           showError("Select passenger seats from 1 to 7.");
           return;
         }
-        var carFile = carPhoto && carPhoto.files && carPhoto.files[0];
+        var carFile = carPhotoCtl.getFile();
         if (!carFile) {
           showError("Add a photo of your car from the front right angle.");
           return;
@@ -683,7 +747,7 @@
           return;
         }
 
-        var photoFile = signupPhoto && signupPhoto.files && signupPhoto.files[0];
+        var photoFile = signupPhotoCtl.getFile();
         var photoReady = photoFile ? readPhotoFile(photoFile) : Promise.resolve("");
         var carReady = readCarPhotoFile(carFile);
         Promise.all([photoReady, carReady]).then(function (parts) {
