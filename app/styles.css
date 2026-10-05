@@ -128,7 +128,7 @@ main {
 }
 
 .group-title {
-  margin: 0 0 6px;
+  margin: 18px 0 6px;
   color: var(--gold-2);
   font-size: 13px;
   font-weight: 700;
@@ -586,10 +586,49 @@ img.avatar[hidden] { display: none !important; }
   gap: 12px;
 }
 
-.photo-pick input[type="file"] {
+.photo-pick > input[type="file"] {
   flex: 1;
   padding: 10px;
   font-size: 14px;
+}
+
+.photo-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+}
+
+.photo-btn {
+  position: relative;
+  display: block;
+  margin: 0;
+  padding: 12px 14px;
+  text-align: center;
+  text-transform: none;
+  letter-spacing: 0;
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--navy);
+  background: var(--gold);
+  border: 1px solid var(--gold);
+  border-radius: 12px;
+  cursor: pointer;
+  overflow: hidden;
+}
+
+.photo-btn input[type="file"] {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  opacity: 0;
+  cursor: pointer;
+  font-size: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
 }
 
 .who {
