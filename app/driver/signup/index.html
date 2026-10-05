@@ -11,7 +11,7 @@
   <link rel="icon" href="../../icon-driver.png">
   <link rel="manifest" href="manifest.webmanifest">
   <title>PCS Driver</title>
-  <link rel="stylesheet" href="../../styles.css?v=7">
+  <link rel="stylesheet" href="../../styles.css?v=17">
 </head>
 <body>
   <div class="phone">
@@ -41,6 +41,37 @@
         <input id="password" name="password" type="password" autocomplete="new-password" required>
         <label for="confirm">Confirm password</label>
         <input id="confirm" name="confirm" type="password" autocomplete="new-password" required>
+
+        <p class="group-title">Your car</p>
+        <p class="fine">Riders see this when you accept a ride.</p>
+        <label for="car-year">Year</label>
+        <select id="car-year" name="carYear" required>
+          <option value="">Select</option>
+        </select>
+        <label for="car-make">Make</label>
+        <input id="car-make" name="carMake" type="text" autocomplete="off" required placeholder="e.g. Toyota">
+        <label for="car-model">Model</label>
+        <input id="car-model" name="carModel" type="text" autocomplete="off" required placeholder="e.g. Camry">
+        <label for="car-plate">License plate</label>
+        <input id="car-plate" name="carPlate" type="text" autocomplete="off" required placeholder="Plate number" style="text-transform:uppercase">
+        <label for="car-seats">Passenger seats</label>
+        <select id="car-seats" name="carSeats" required>
+          <option value="">Select</option>
+          <option value="1">1</option>
+          <option value="2">2</option>
+          <option value="3">3</option>
+          <option value="4">4</option>
+          <option value="5">5</option>
+          <option value="6">6</option>
+          <option value="7">7</option>
+        </select>
+        <label for="car-photo">Photo of your car from the front right angle</label>
+        <div class="photo-pick">
+          <img id="car-photo-preview" class="car-thumb" alt="" hidden>
+          <input id="car-photo" name="carPhoto" type="file" accept="image/*" capture="environment" required>
+        </div>
+        <p class="fine">Required. Take or choose a photo from the front right of the car.</p>
+
         <p class="error" id="form-error" role="alert"></p>
         <button class="btn" type="submit">Save account</button>
       </form>
@@ -62,6 +93,26 @@
             return b.toString(16).padStart(2, "0");
           }).join("");
         });
+      }
+
+      function carYearOptions(selected) {
+        var y = new Date().getFullYear() + 1;
+        var html = '<option value="">Select</option>';
+        var i;
+        for (i = 0; i < 26; i += 1) {
+          var year = String(y - i);
+          html += '<option value="' + year + '"' + (String(selected) === year ? " selected" : "") + ">" + year + "</option>";
+        }
+        return html;
+      }
+
+      function fillYearSelect(el, selected) {
+        if (!el) return;
+        el.innerHTML = carYearOptions(selected || "");
+      }
+
+      function normalizePlate(value) {
+        return String(value || "").trim().toUpperCase().replace(/\s+/g, " ");
       }
 
       function readPhotoFile(file) {
@@ -97,6 +148,45 @@
         });
       }
 
+      function readCarPhotoFile(file) {
+        return new Promise(function (resolve, reject) {
+          if (!file) { resolve(""); return; }
+          if (!/^image\//.test(file.type || "")) { reject(new Error("car")); return; }
+          var reader = new FileReader();
+          reader.onerror = function () { reject(new Error("car")); };
+          reader.onload = function () {
+            var img = new Image();
+            img.onload = function () {
+              if (!img.width || !img.height) { reject(new Error("car")); return; }
+              var maxW = 480;
+              var maxH = 320;
+              var scale = Math.min(1, maxW / img.width, maxH / img.height);
+              var w = Math.max(1, Math.round(img.width * scale));
+              var h = Math.max(1, Math.round(img.height * scale));
+              var canvas = document.createElement("canvas");
+              canvas.width = w;
+              canvas.height = h;
+              var ctx = canvas.getContext("2d");
+              ctx.drawImage(img, 0, 0, w, h);
+              var quality = 0.72;
+              var url = canvas.toDataURL("image/jpeg", quality);
+              while (url && url.length > 120000 && quality > 0.4) {
+                quality -= 0.08;
+                url = canvas.toDataURL("image/jpeg", quality);
+              }
+              if (!url || url.indexOf("data:image/jpeg;base64,") !== 0 || url.length > 120000) {
+                reject(new Error("car"));
+                return;
+              }
+              resolve(url);
+            };
+            img.onerror = function () { reject(new Error("car")); };
+            img.src = reader.result;
+          };
+          reader.readAsDataURL(file);
+        });
+      }
+
       function safePhoto(value) {
         if (typeof value !== "string") return "";
         if (!/^data:image\/jpeg;base64,[A-Za-z0-9+/=]+$/.test(value)) return "";
@@ -104,13 +194,13 @@
         return value;
       }
 
-      function previewPhoto(input, preview, onError) {
+      function previewPhoto(input, preview, readerFn, onError) {
         input.addEventListener("change", function () {
           var file = input.files && input.files[0];
           preview.hidden = true;
           preview.removeAttribute("src");
           if (!file) return;
-          readPhotoFile(file).then(function (url) {
+          readerFn(file).then(function (url) {
             preview.src = url;
             preview.hidden = false;
             if (onError) onError("");
@@ -141,6 +231,22 @@
         var d = digits(value);
         if (d.length === 10) return "(" + d.slice(0, 3) + ") " + d.slice(3, 6) + "-" + d.slice(6);
         return String(value || "");
+      }
+
+      function hasCompleteCar(account) {
+        if (!account) return false;
+        var year = Number(account.carYear);
+        var seats = Number(account.carSeats);
+        return year >= 1980 && year <= 2100 &&
+          String(account.carMake || "").trim() &&
+          String(account.carModel || "").trim() &&
+          normalizePlate(account.carPlate) &&
+          seats >= 1 && seats <= 7 &&
+          !!safePhoto(account.carPhoto);
+      }
+
+      function carLabel(account) {
+        return [account.carYear, account.carMake, account.carModel].filter(Boolean).join(" ");
       }
 
       function installBlock() {
@@ -213,6 +319,94 @@
         main.appendChild(installBlock());
       }
 
+      function appendVehicleFields(form, account, requireNewCarPhoto) {
+        var title = document.createElement("p");
+        title.className = "group-title";
+        title.textContent = "Your car";
+        form.appendChild(title);
+        var hint = document.createElement("p");
+        hint.className = "fine";
+        hint.textContent = "Riders see this when you accept a ride.";
+        form.appendChild(hint);
+
+        var yearLab = document.createElement("label");
+        yearLab.htmlFor = "profile-car-year";
+        yearLab.textContent = "Year";
+        var yearSel = document.createElement("select");
+        yearSel.id = "profile-car-year";
+        yearSel.name = "carYear";
+        yearSel.required = true;
+        yearSel.innerHTML = carYearOptions(account && account.carYear);
+        form.appendChild(yearLab);
+        form.appendChild(yearSel);
+
+        function textField(id, label, value, placeholder) {
+          var lab = document.createElement("label");
+          lab.htmlFor = id;
+          lab.textContent = label;
+          var input = document.createElement("input");
+          input.id = id;
+          input.name = id;
+          input.type = "text";
+          input.value = value || "";
+          input.required = true;
+          if (placeholder) input.placeholder = placeholder;
+          if (id.indexOf("plate") >= 0) input.style.textTransform = "uppercase";
+          form.appendChild(lab);
+          form.appendChild(input);
+          return input;
+        }
+
+        textField("profile-car-make", "Make", account && account.carMake, "e.g. Toyota");
+        textField("profile-car-model", "Model", account && account.carModel, "e.g. Camry");
+        textField("profile-car-plate", "License plate", account && account.carPlate, "Plate number");
+
+        var seatsLab = document.createElement("label");
+        seatsLab.htmlFor = "profile-car-seats";
+        seatsLab.textContent = "Passenger seats";
+        var seatsSel = document.createElement("select");
+        seatsSel.id = "profile-car-seats";
+        seatsSel.name = "carSeats";
+        seatsSel.required = true;
+        var seatsHtml = '<option value="">Select</option>';
+        var s;
+        for (s = 1; s <= 7; s += 1) {
+          seatsHtml += '<option value="' + s + '"' + (String(account && account.carSeats) === String(s) ? " selected" : "") + ">" + s + "</option>";
+        }
+        seatsSel.innerHTML = seatsHtml;
+        form.appendChild(seatsLab);
+        form.appendChild(seatsSel);
+
+        var savedCar = safePhoto(account && account.carPhoto);
+        var carLab = document.createElement("label");
+        carLab.htmlFor = "profile-car-photo";
+        carLab.textContent = "Photo of your car from the front right angle";
+        var carPick = document.createElement("div");
+        carPick.className = "photo-pick";
+        var carPreview = document.createElement("img");
+        carPreview.className = "car-thumb";
+        carPreview.alt = "";
+        carPreview.hidden = !savedCar;
+        if (savedCar) carPreview.src = savedCar;
+        var carInput = document.createElement("input");
+        carInput.id = "profile-car-photo";
+        carInput.type = "file";
+        carInput.accept = "image/*";
+        carInput.setAttribute("capture", "environment");
+        if (requireNewCarPhoto && !savedCar) carInput.required = true;
+        carPick.appendChild(carPreview);
+        carPick.appendChild(carInput);
+        form.appendChild(carLab);
+        form.appendChild(carPick);
+        var carFine = document.createElement("p");
+        carFine.className = "fine";
+        carFine.textContent = savedCar
+          ? "Required. Leave blank to keep the current photo, or choose a new one."
+          : "Required. Take or choose a photo from the front right of the car.";
+        form.appendChild(carFine);
+        return { carInput: carInput, carPreview: carPreview, savedCar: savedCar };
+      }
+
       function showProfile(account, note) {
         var main = document.getElementById("signup-main");
         main.textContent = "";
@@ -220,7 +414,7 @@
         h.textContent = "Driver profile";
         var lead = document.createElement("p");
         lead.className = "lede";
-        lead.textContent = "Saved on this phone. Riders see your name when you accept a ride.";
+        lead.textContent = "Saved on this phone. Riders see your name and car when you accept a ride.";
         main.appendChild(h);
         main.appendChild(lead);
         var savedPhoto = safePhoto(account.photo);
@@ -230,6 +424,12 @@
           face.alt = "";
           face.src = savedPhoto;
           main.appendChild(face);
+        }
+        if (!hasCompleteCar(account)) {
+          var need = document.createElement("p");
+          need.className = "note vehicle-needed";
+          need.textContent = "Add your car details below before going online. Year, make, model, plate, seats, and a front-right photo are required.";
+          main.appendChild(need);
         }
         if (note) {
           var noteP = document.createElement("p");
@@ -250,6 +450,19 @@
         row("Name", account.name || "");
         row("Phone", prettyPhone(account.phone));
         row("Email", account.email || "");
+        if (hasCompleteCar(account)) {
+          row("Car", carLabel(account));
+          row("Plate", normalizePlate(account.carPlate));
+          row("Seats", String(account.carSeats));
+          var carFace = safePhoto(account.carPhoto);
+          if (carFace) {
+            var carImg = document.createElement("img");
+            carImg.className = "car-thumb";
+            carImg.alt = "Your car";
+            carImg.src = carFace;
+            main.appendChild(carImg);
+          }
+        }
 
         var updateForm = document.createElement("form");
         updateForm.id = "profile-form";
@@ -292,6 +505,8 @@
         updateForm.appendChild(photoLab);
         updateForm.appendChild(photoPick);
 
+        var vehicle = appendVehicleFields(updateForm, account, true);
+
         var err = document.createElement("p");
         err.className = "error";
         err.id = "profile-error";
@@ -313,13 +528,19 @@
         linkP.appendChild(link);
         main.appendChild(linkP);
 
-        previewPhoto(photoInput, photoPreview, function (message) { err.textContent = message; });
+        previewPhoto(photoInput, photoPreview, readPhotoFile, function (message) { err.textContent = message; });
+        previewPhoto(vehicle.carInput, vehicle.carPreview, readCarPhotoFile, function (message) { err.textContent = message; });
 
         updateForm.addEventListener("submit", function (event) {
           event.preventDefault();
           err.textContent = "";
           var name = document.getElementById("profile-name").value.trim();
           var phone = digits(document.getElementById("profile-phone").value);
+          var carYear = document.getElementById("profile-car-year").value;
+          var carMake = document.getElementById("profile-car-make").value.trim();
+          var carModel = document.getElementById("profile-car-model").value.trim();
+          var carPlate = normalizePlate(document.getElementById("profile-car-plate").value);
+          var carSeats = document.getElementById("profile-car-seats").value;
           if (!name) {
             err.textContent = "Enter your full name.";
             return;
@@ -328,15 +549,47 @@
             err.textContent = "Enter a mobile phone with 10 digits.";
             return;
           }
+          if (!carYear) {
+            err.textContent = "Select the car year.";
+            return;
+          }
+          if (!carMake) {
+            err.textContent = "Enter the car make.";
+            return;
+          }
+          if (!carModel) {
+            err.textContent = "Enter the car model.";
+            return;
+          }
+          if (!carPlate) {
+            err.textContent = "Enter the license plate number.";
+            return;
+          }
+          if (!carSeats || Number(carSeats) < 1 || Number(carSeats) > 7) {
+            err.textContent = "Select passenger seats from 1 to 7.";
+            return;
+          }
           var photoFile = photoInput.files && photoInput.files[0];
+          var carFile = vehicle.carInput.files && vehicle.carInput.files[0];
+          if (!carFile && !safePhoto(account.carPhoto)) {
+            err.textContent = "Add a photo of your car from the front right angle.";
+            return;
+          }
           var photoReady = photoFile ? readPhotoFile(photoFile) : Promise.resolve(safePhoto(account.photo));
-          photoReady.then(function (photo) {
+          var carReady = carFile ? readCarPhotoFile(carFile) : Promise.resolve(safePhoto(account.carPhoto));
+          Promise.all([photoReady, carReady]).then(function (parts) {
             var next = {
               name: name,
               phone: phone,
               email: account.email || "",
               passwordHash: account.passwordHash || "",
-              photo: photo
+              photo: parts[0],
+              carYear: Number(carYear),
+              carMake: carMake,
+              carModel: carModel,
+              carPlate: carPlate,
+              carSeats: Number(carSeats),
+              carPhoto: parts[1]
             };
             if (account.username) next.username = account.username;
             try {
@@ -358,9 +611,13 @@
         return;
       }
 
+      fillYearSelect(document.getElementById("car-year"), "");
       var signupPhoto = document.getElementById("photo");
       var signupPreview = document.getElementById("photo-preview");
-      if (signupPhoto && signupPreview) previewPhoto(signupPhoto, signupPreview, showError);
+      var carPhoto = document.getElementById("car-photo");
+      var carPreview = document.getElementById("car-photo-preview");
+      if (signupPhoto && signupPreview) previewPhoto(signupPhoto, signupPreview, readPhotoFile, showError);
+      if (carPhoto && carPreview) previewPhoto(carPhoto, carPreview, readCarPhotoFile, showError);
 
       form.addEventListener("submit", function (event) {
         event.preventDefault();
@@ -370,6 +627,11 @@
         var email = document.getElementById("email").value.trim().toLowerCase();
         var password = document.getElementById("password").value;
         var confirm = document.getElementById("confirm").value;
+        var carYear = document.getElementById("car-year").value;
+        var carMake = document.getElementById("car-make").value.trim();
+        var carModel = document.getElementById("car-model").value.trim();
+        var carPlate = normalizePlate(document.getElementById("car-plate").value);
+        var carSeats = document.getElementById("car-seats").value;
 
         if (!name) {
           showError("Enter your full name.");
@@ -391,6 +653,31 @@
           showError("Password and confirm password must match.");
           return;
         }
+        if (!carYear) {
+          showError("Select the car year.");
+          return;
+        }
+        if (!carMake) {
+          showError("Enter the car make.");
+          return;
+        }
+        if (!carModel) {
+          showError("Enter the car model.");
+          return;
+        }
+        if (!carPlate) {
+          showError("Enter the license plate number.");
+          return;
+        }
+        if (!carSeats || Number(carSeats) < 1 || Number(carSeats) > 7) {
+          showError("Select passenger seats from 1 to 7.");
+          return;
+        }
+        var carFile = carPhoto && carPhoto.files && carPhoto.files[0];
+        if (!carFile) {
+          showError("Add a photo of your car from the front right angle.");
+          return;
+        }
         if (!window.crypto || !crypto.subtle || !crypto.subtle.digest) {
           showError("This browser cannot save a password safely. Try Safari or Chrome.");
           return;
@@ -398,14 +685,21 @@
 
         var photoFile = signupPhoto && signupPhoto.files && signupPhoto.files[0];
         var photoReady = photoFile ? readPhotoFile(photoFile) : Promise.resolve("");
-        photoReady.then(function (photo) {
+        var carReady = readCarPhotoFile(carFile);
+        Promise.all([photoReady, carReady]).then(function (parts) {
           return sha256Hex(password).then(function (hex) {
           var profile = {
             name: name,
             phone: phone,
             email: email,
             passwordHash: hex,
-            photo: photo
+            photo: parts[0],
+            carYear: Number(carYear),
+            carMake: carMake,
+            carModel: carModel,
+            carPlate: carPlate,
+            carSeats: Number(carSeats),
+            carPhoto: parts[1]
           };
           localStorage.setItem("pcs-driver-account", JSON.stringify(profile));
           localStorage.setItem("pcs-driver-session", email);
