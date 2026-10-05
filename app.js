@@ -17,7 +17,8 @@
   // {amount} (e.g. 12.34) or {cents} (e.g. 1234), the deposit is filled in automatically.
   const SQUARE_DEPOSIT_URL = 'https://squareup.com/appointments/book/L077DQHSNJAG6';
   const DEPOSIT_PCT = 0.25;
-  // Auto "Book it" only Mon–Fri 8:00 am–6:00 pm America/Chicago (same hours as the rider app).
+  // Auto "Book it" only for Greater Houston, Mon–Fri 8:00 am–6:00 pm America/Chicago (same hours as the rider app).
+  // Waco always stays pending — Anson's calendar is not connected.
   const BOOK_START_MIN = 8 * 60;
   const BOOK_END_MIN = 18 * 60;
   // Matthew's calendar must be clear this many minutes before pickup and after the estimated drop-off.
@@ -644,6 +645,8 @@
   }
 
   // Decide whether to offer instant "Book it" or keep the request pending for Matthew / a driver.
+  // Instant Book it + Matthew's calendar check apply to Greater Houston only.
+  // Waco (and unknown area) always stay pending — we do not have Anson's calendar.
   function bookingDecision(result) {
     if (!result || result.callForQuote || typeof result.total !== 'number') {
       return Promise.resolve({ show: false });
@@ -658,6 +661,17 @@
       return Promise.resolve({ show: true, ok: false, past: true, message: 'That pickup time has already passed. Pick a future date and time.' });
     }
     const pending = (message) => ({ show: true, ok: false, message });
+    const area = serviceArea();
+    if (area === 'Waco area') {
+      return Promise.resolve(pending(
+        'Waco-area rides always need confirmation from Matthew or Anson. Instant Book it and the online calendar check are for Greater Houston only.'
+      ));
+    }
+    if (area !== 'Greater Houston area') {
+      return Promise.resolve(pending(
+        'Choose Greater Houston area or Waco area above. Instant Book it is available for Greater Houston only; Waco stays pending confirmation.'
+      ));
+    }
     const wd = weekdayOf(dateStr);
     const [hh, mm] = timeStr.split(':').map(Number);
     const mins = hh * 60 + (mm || 0);
@@ -724,7 +738,7 @@
         '<p class="book-copy">' + escapeHtml(decision.message) +
         ' Your request stays <strong>pending until Matthew or a driver accepts it</strong>. Text it to us and we’ll confirm.</p>' +
         '<a class="btn btn-secondary" id="book-pending-text" href="sms:' + PHONE + '">Text my request</a>' +
-        '<p class="book-fine">Instant <strong>Book it</strong> is offered Mon–Fri 8:00 am–6:00 pm (Central) when the schedule is open.</p>';
+        '<p class="book-fine">Instant <strong>Book it</strong> is for <strong>Greater Houston</strong> only, Mon–Fri 8:00 am–6:00 pm (Central) when Matthew’s schedule is open. <strong>Waco</strong> requests always stay pending confirmation (we don’t have Anson’s calendar).</p>';
       const btn = document.getElementById('book-pending-text');
       if (btn) {
         btn.addEventListener('click', (event) => {
@@ -735,9 +749,9 @@
     }
     const deposit = depositFor(result.total);
     panel.innerHTML =
-      '<p class="book-kicker">Open on the schedule</p>' +
+      '<p class="book-kicker">Open on the Houston schedule</p>' +
       '<div class="deposit-row"><span>25% deposit to book</span><strong>' + money(deposit) + '</strong></div>' +
-      '<p class="book-fine">25% of the ' + money(result.total) + ' estimate. The rest of your final fare is due after the ride.</p>' +
+      '<p class="book-fine">Greater Houston only — calendar check is for Houston. 25% of the ' + money(result.total) + ' estimate. The rest of your final fare is due after the ride.</p>' +
       '<button type="button" class="btn btn-primary btn-book" id="book-it-btn">Book it</button>' +
       '<div class="book-confirm" id="book-confirm" hidden>' +
         '<div class="book-warning" role="alert">' +
@@ -1086,6 +1100,7 @@
         if (els.routeStatus.classList.contains('error') && /Greater Houston area or Waco area/.test(els.routeStatus.textContent)) {
           showRouteStatus('');
         }
+        if (lastEstimate && !lastEstimate.callForQuote) updateBooking(lastEstimate);
       });
     });
     if (els.addStopButton) els.addStopButton.addEventListener('click', () => addStop());
