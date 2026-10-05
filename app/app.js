@@ -678,28 +678,9 @@
     }).catch(function () {});
   }
 
-  function shiftClosed(row) {
-    if (!row || typeof row !== "object") return false;
-    if (row.shiftClosed) return true;
-    return row.endOdometer != null && isFinite(Number(row.endOdometer));
-  }
-
   function ensureMilesDayReady() {
     if (ROLE !== "driver" || !signedIn()) return;
     var row = todayMilesRow();
-    /* Ending odometer (or skip-marked close) ends the shift — ask for opening miles again. */
-    if (shiftClosed(row)) {
-      if (driverMidRide()) {
-        state.milesNeedStart = false;
-        state.milesToday = Number(row && row.gpsMiles) || 0;
-        state.milesStartOdo = row && row.startOdometer != null ? Number(row.startOdometer) : null;
-        return;
-      }
-      state.milesNeedStart = true;
-      state.milesToday = 0;
-      state.milesStartOdo = null;
-      return;
-    }
     if (row && row.startOdometer != null && isFinite(Number(row.startOdometer))) {
       state.milesNeedStart = false;
       state.milesToday = Number(row.gpsMiles) || 0;
@@ -750,13 +731,15 @@
 
   function trackDailyMiles(pos) {
     if (ROLE !== "driver" || !signedIn() || state.milesNeedStart) return;
-    if (!canGoOnline() && !driverMidRide()) return;
-    if (!pos || !pos.coords) return;
-    var acc = Number(pos.coords.accuracy);
-    /* iPhone city GPS often 50–120 m; only drop very bad fixes. */
-    if (isFinite(acc) && acc > 200) return;
-    var lat = Number(pos.coords.latitude);
-    var lng = Number(pos.coords.longitude);
+    var lat;
+    var lng;
+    if (pos && pos.coords) {
+      lat = Number(pos.coords.latitude);
+      lng = Number(pos.coords.longitude);
+    } else {
+      lat = Number(state.hereLat);
+      lng = Number(state.hereLng);
+    }
     if (!isFinite(lat) || !isFinite(lng)) return;
     var now = Date.now();
     var prevLat = state.milesTrackLat;
@@ -769,12 +752,12 @@
       return;
     }
     var dist = haversine({ lat: prevLat, lng: prevLng }, { lat: lat, lng: lng });
-    /* ~5 m — still filters jitter, credits slow crawl / stop-and-go. */
-    if (!(dist >= 0.003)) return;
+    /* ~3 m — same points that already moved the map icon. */
+    if (!(dist >= 0.002)) return;
     var hours = (now - prevAt) / 3600000;
     if (!(hours > 0)) return;
     var mph = dist / hours;
-    var MAX_MPH = 95;
+    var MAX_MPH = 100;
     if (mph > MAX_MPH) {
       if (hours < 1 / 3600) return;
       dist = MAX_MPH * hours;
@@ -788,8 +771,13 @@
       startedAt: now,
       lastUpdate: now
     };
-    if (row.startOdometer == null || !isFinite(Number(row.startOdometer))) return;
-    /* Ignore a leftover endOdometer from an earlier logout so beta miles still count. */
+    if (row.startOdometer == null || !isFinite(Number(row.startOdometer))) {
+      if (state.milesStartOdo != null && isFinite(Number(state.milesStartOdo))) {
+        row.startOdometer = Number(state.milesStartOdo);
+      } else {
+        return;
+      }
+    }
     if (row.endOdometer != null) delete row.endOdometer;
     if (row.shiftClosed) delete row.shiftClosed;
     row.gpsMiles = Math.round(((Number(row.gpsMiles) || 0) + dist) * 100) / 100;
@@ -799,7 +787,7 @@
     state.milesToday = Number(row.gpsMiles) || 0;
     var el = document.getElementById("miles-today");
     if (el) el.textContent = "Today: " + Number(row.gpsMiles).toFixed(1) + " mi";
-    if (syncOn() && canGoOnline()) publishDriverPresence();
+    if (syncOn()) publishDriverPresence();
   }
 
   function milesTodayLabel() {
