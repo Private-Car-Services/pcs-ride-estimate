@@ -11,6 +11,13 @@
   var LATE_MILE_CENTS = 143;
   var SHORT_NOTICE_PCT = 0.25;
   var TAX_RATE = 0.0825;
+  /* Airport bases = estimator app.js RATES (dollars→cents). Local base remains BASE_CENTS ($11). */
+  var AIRPORT = {
+    daytime: { drop: 1550, pick: 2500 },
+    weekendNight: { drop: 2000, pick: 3000 },
+    late: { drop: 3000, pick: 5000 }
+  };
+  var ASAP_EXPIRE_MS = 20 * 60 * 1000;
 
   var SAMPLE = {
     name: "",
@@ -46,13 +53,13 @@
   // /rides/{8-char} rules work without /open or /drivers paths.
   var PRESENCE_HUB = "AVLBLDRV";
   var OPEN_HUB = "REQUESTS";
-  var MILES_HUB = "DRVRMILZ"; /* 8-char hub (no I/O); not DRVMILES */
+  var MILES_HUB = "DRVRMLES"; /* 8-char hub (no I/O); DRVRMILZ wrongly had I */
   var ROSTER_HUB = "DRVRCMMS"; /* hire / approve / commission */
   var HISTORY_HUB = "DRVRHSTY"; /* completed ride history per driver */
-  var TEST_START_PIN = "0001"; /* always accepted as alternate start PIN */
   var lastDriverPatchAt = 0;
   var lastDriverPatchLat = null;
   var lastDriverPatchLng = null;
+  var accountSyncTried = false;
   var rideLookup = 0;
   var openListSeq = 0;
   var driving = { key: "", pending: "", done: false, miles: null, line: null };
@@ -71,6 +78,7 @@
     date: "",
     time: SAMPLE.time,
     asap: true,
+    tripType: "auto",
     error: "",
     passengers: 2,
     stops: 0,
@@ -208,6 +216,132 @@
     var s = String(v == null ? "" : v).trim().toLowerCase();
     return s === "asap" || s === "true" || s === "1";
   }
+
+  function pad2(n) {
+    return String(n).padStart(2, "0");
+  }
+
+  /** Interpret YYYY-MM-DD + HH:MM as America/Chicago wall time → UTC ms. */
+  function chicagoWallToMs(dateStr, timeStr) {
+    if (!dateStr || !timeStr) return NaN;
+    var wantDate = String(dateStr);
+    var hm = String(timeStr).split(":");
+    var wantTime = pad2(Number(hm[0]) || 0) + ":" + pad2(Number(hm[1]) || 0);
+    var offsets = ["-05:00", "-06:00"];
+    var i;
+    for (i = 0; i < offsets.length; i += 1) {
+      var iso = wantDate + "T" + wantTime + ":00" + offsets[i];
+      var ms = Date.parse(iso);
+      if (!isFinite(ms)) continue;
+      var parts = chicagoParts(new Date(ms));
+      if (parts.date === wantDate && parts.time === wantTime) return ms;
+    }
+    return Date.parse(wantDate + "T" + wantTime + ":00-05:00");
+  }
+
+  function chicagoWeekday(dateStr) {
+    var ms = chicagoWallToMs(dateStr, "12:00");
+    if (!isFinite(ms)) return -1;
+    var map = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
+    var wd = new Intl.DateTimeFormat("en-US", { timeZone: "America/Chicago", weekday: "short" }).format(new Date(ms));
+    return map[wd] != null ? map[wd] : -1;
+  }
+
+  function normalizePhoneDigits(raw) {
+    return String(raw || "").replace(/\D/g, "");
+  }
+
+  function phoneLooksValid(raw) {
+    var d = normalizePhoneDigits(raw);
+    if (d.length === 11 && d.charAt(0) === "1") d = d.slice(1);
+    return d.length === 10;
+  }
+
+  function addressLooksAirport(text) {
+    var s = String(text || "").toLowerCase();
+    /* Houston-area airports + common terminal street names (matches estimator intent). */
+    if (/\b(iah|hou|ews|ellington)\b/.test(s)) return true;
+    if (/\b(hobby|william\s*p\.?\s*hobby)\b/.test(s)) return true;
+    if (/\b(bush\s*intercontinental|george\s*bush|intercontinental)\b/.test(s)) return true;
+    if (/\bairport\b/.test(s)) return true;
+    if (/\b(n\s*terminal|terminal\s*rd|terminal\s*road|airport\s*blvd|airport\s*boulevard|airport\s*rd|airport\s*road)\b/.test(s)) return true;
+    if (/\b(jfk\s*blvd|world\s*way|terminal\s*[a-z0-9])\b/.test(s)) return true;
+    return false;
+  }
+
+  function detectAirportKind() {
+    /* Explicit trip type (estimator-style) wins; otherwise infer from addresses. */
+    var forced = String(state.tripType || "auto").toLowerCase();
+    if (forced === "airport-drop" || forced === "airport-pick" || forced === "local") return forced;
+    var pick = [state.pickupStreet, state.pickupCity, state.pickupState].join(" ");
+    var drop = [state.dropStreet, state.dropCity, state.dropState].join(" ");
+    var pickAir = addressLooksAirport(pick);
+    var dropAir = addressLooksAirport(drop);
+    if (pickAir && !dropAir) return "airport-pick";
+    if (dropAir && !pickAir) return "airport-drop";
+    if (pickAir && dropAir) return "airport-pick";
+    return "local";
+  }
+
+  function validateScheduleRules() {
+    if (state.asap || isAsapValue(state.time)) return "";
+    if (!state.date || !state.time) return "Add a date and time.";
+    var ms = chicagoWallToMs(state.date, state.time);
+    if (!isFinite(ms)) return "That date or time is not valid.";
+    var nowParts = chicagoParts(new Date());
+    var nowMs = chicagoWallToMs(nowParts.date, nowParts.time);
+    if (isFinite(nowMs) && ms < nowMs) return "Pick a date and time that have not passed yet.";
+    var dow = chicagoWeekday(state.date);
+    var hm = String(state.time).split(":");
+    var hour = Number(hm[0]);
+    var minute = Number(hm[1] || 0);
+    var mins = hour * 60 + minute;
+    if (dow === 0 || dow === 6) {
+      if (!isFinite(nowMs) || ms - nowMs < 48 * 60 * 60 * 1000) {
+        return "Weekend rides need at least 48 hours' notice (America/Chicago), or choose ASAP.";
+      }
+      return "";
+    }
+    if (dow < 1 || dow > 5) return "Could not check the weekday for that date.";
+    if (mins < 8 * 60 || mins > 18 * 60) {
+      return "Weekday scheduled rides are Mon–Fri 8:00 am–6:00 pm America/Chicago. Use ASAP for other hours, or call " + BUSINESS_PHONE + ".";
+    }
+    return "";
+  }
+
+  function bookingWebhookUrl() {
+    try {
+      if (window.PCS_SYNC && window.PCS_SYNC.bookingWebhook) return String(window.PCS_SYNC.bookingWebhook).trim();
+      if (window.PCS_BOOKING_WEBHOOK) return String(window.PCS_BOOKING_WEBHOOK).trim();
+    } catch (err) {}
+    return "";
+  }
+
+  function notifyOwnerNewBooking(ride) {
+    if (!ride || !ride.code) return;
+    var hook = bookingWebhookUrl();
+    if (!hook) return;
+    try {
+      fetch(hook, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          type: "pcs_booking_pending_owner",
+          code: ride.code,
+          name: ride.name || "",
+          phone: ride.phone || "",
+          when: ride.when || "",
+          date: ride.date || "",
+          time: ride.time || "",
+          asap: !!ride.asap,
+          pickup: [ride.pickupStreet, ride.pickupCity, ride.pickupState].filter(Boolean).join(", "),
+          dropoff: [ride.dropStreet, ride.dropCity, ride.dropState].filter(Boolean).join(", "),
+          status: ride.status || "pending_owner"
+        })
+      }).catch(function () {});
+    } catch (err) {}
+  }
+
 
   function rideIsAsap(ride) {
     if (!ride) return !!state.asap;
@@ -795,15 +929,18 @@
   }
 
   function resolveTier(dateStr, timeStr, isHoliday) {
-    var daytime = { cents: DAY_MILE_CENTS, label: "Weekday daytime" };
-    var weekendNight = { cents: NIGHT_MILE_CENTS, label: "Nights, weekends & holidays" };
-    var late = { cents: LATE_MILE_CENTS, label: "Late night" };
+    var daytime = { cents: DAY_MILE_CENTS, label: "Weekday daytime", airportDrop: AIRPORT.daytime.drop, airportPick: AIRPORT.daytime.pick };
+    var weekendNight = { cents: NIGHT_MILE_CENTS, label: "Nights, weekends & holidays", airportDrop: AIRPORT.weekendNight.drop, airportPick: AIRPORT.weekendNight.pick };
+    var late = { cents: LATE_MILE_CENTS, label: "Late night", airportDrop: AIRPORT.late.drop, airportPick: AIRPORT.late.pick };
     if (!dateStr || !timeStr) return daytime;
-    var ymd = dateStr.split("-");
     var hm = timeStr.split(":");
-    var date = new Date(Number(ymd[0]), Number(ymd[1]) - 1, Number(ymd[2]), Number(hm[0]), Number(hm[1] || 0), 0, 0);
-    var day = date.getDay();
     var hour = Number(hm[0]);
+    var day = chicagoWeekday(dateStr);
+    if (day < 0) {
+      var ymd = dateStr.split("-");
+      var date = new Date(Number(ymd[0]), Number(ymd[1]) - 1, Number(ymd[2]), Number(hm[0]), Number(hm[1] || 0), 0, 0);
+      day = date.getDay();
+    }
     if (hour >= 22 || hour < 6) return late;
     if (day === 0 || day === 6 || isHoliday || (hour >= 18 && hour <= 21)) return weekendNight;
     return daytime;
@@ -822,19 +959,18 @@
   function isShortNotice() {
     if (state.asap || isAsapValue(state.time)) return true;
     if (!state.date || !state.time) return false;
-    var ymd = state.date.split("-");
-    var hm = state.time.split(":");
-    var when = new Date(Number(ymd[0]), Number(ymd[1]) - 1, Number(ymd[2]), Number(hm[0]), Number(hm[1] || 0), 0, 0);
-    return when.getTime() - Date.now() < 24 * 60 * 60 * 1000;
+    var whenMs = chicagoWallToMs(state.date, state.time);
+    if (!isFinite(whenMs)) return false;
+    return whenMs - Date.now() < 24 * 60 * 60 * 1000;
   }
 
   var busyCache = null;
 
   function pickupInstant() {
     if (state.asap || isAsapValue(state.time)) return new Date();
-    var ymd = (state.date || "").split("-");
-    var hm = (state.time || "").split(":");
-    return new Date(Number(ymd[0]), Number(ymd[1]) - 1, Number(ymd[2]), Number(hm[0]), Number(hm[1] || 0), 0, 0);
+    var ms = chicagoWallToMs(state.date, state.time);
+    if (!isFinite(ms)) return new Date(NaN);
+    return new Date(ms);
   }
 
   function rideHitsBusy(windows) {
@@ -877,7 +1013,17 @@
     var mileage = miles.ready ? miles.billed * tier.cents : 0;
     var paxCents = extraPax * EXTRA_PAX_CENTS;
     var stopCents = extraStops * EXTRA_STOP_CENTS;
-    var beforeNotice = BASE_CENTS + mileage + paxCents + stopCents;
+    var kind = detectAirportKind();
+    var baseCents = BASE_CENTS;
+    var baseLabel = "Local base";
+    if (kind === "airport-drop") {
+      baseCents = tier.airportDrop || BASE_CENTS;
+      baseLabel = "Airport drop-off base";
+    } else if (kind === "airport-pick") {
+      baseCents = tier.airportPick || BASE_CENTS;
+      baseLabel = "Airport pick-up base";
+    }
+    var beforeNotice = baseCents + mileage + paxCents + stopCents;
     var notice = miles.ready && isShortNotice() ? Math.round(beforeNotice * SHORT_NOTICE_PCT) : 0;
     var sub = beforeNotice + notice;
     var tax = Math.round(sub * TAX_RATE);
@@ -888,7 +1034,9 @@
       perMileCents: tier.cents,
       tierLabel: tier.label,
       mileage: mileage,
-      base: BASE_CENTS,
+      base: baseCents,
+      baseLabel: baseLabel,
+      tripKind: kind,
       extraPax: extraPax,
       paxCents: paxCents,
       stopCents: stopCents,
@@ -921,11 +1069,9 @@
   function testSkipPayEnabled() {
     try {
       var v = localStorage.getItem("PCS_TEST_SKIP_PAY");
-      if (v === "false" || v === "0") return false;
-      /* Default on until live Square charges exist. */
-      return true;
+      return v === "true" || v === "1" || v === "yes";
     } catch (err) {
-      return true;
+      return false;
     }
   }
 
@@ -954,8 +1100,9 @@
   function cancelWarningCopy() {
     var fee = cancelFeeCents();
     return (
-      "If you cancel before pickup, you will be charged " + money(fee) +
-      " (25% of the estimate or $10, whichever is more)."
+      "If you cancel before pickup, a cancel fee of " + money(fee) +
+      " may apply (25% of the estimate or $10, whichever is more). " +
+      "Automatic card charges are not live yet — if you cancel, we will follow up about any fee."
     );
   }
 
@@ -1539,10 +1686,13 @@
     pin = normalizeStoredPin(local && local.pin);
     if (!pin) pin = makeRidePin();
     state.pin = pin;
-    if (state.rideStatus === "requested" || state.rideStatus === "accepted" || state.rideStatus === "started") {
-      saveRide(state.rideStatus || "requested");
+    if (state.rideStatus === "requested" || state.rideStatus === "pending_owner" || state.rideStatus === "accepted" || state.rideStatus === "started") {
+      saveRide(state.rideStatus || "pending_owner");
       if (syncOn() && state.code) {
-        patchRide(state.code, { pin: pin }).catch(function () {});
+        pinHashFor(pin, state.code).then(function (h) {
+          state.pinHash = h;
+          patchRide(state.code, { pinHash: h, pin: null }).catch(function () {});
+        }).catch(function () {});
       }
     }
     return pin;
@@ -1556,11 +1706,25 @@
     return String(raw || "").replace(/\D/g, "").slice(0, 4);
   }
 
-  function pinAccepted(entered) {
+  function pinHashFor(pin, code) {
+    var normalized = normalizeStoredPin(pin);
+    var c = normalizeCode(code || state.code || "");
+    return sha256Hex(normalized + "|" + c);
+  }
+
+  function pinAcceptedAsync(entered) {
     var e = normalizeStoredPin(entered);
-    if (!e || e.length !== 4) return false;
-    if (e === TEST_START_PIN) return true;
-    return e === normalizeStoredPin(state.pin);
+    if (!e || e.length !== 4) return Promise.resolve(false);
+    var local = normalizeStoredPin(state.pin);
+    if (local && e === local) return Promise.resolve(true);
+    var hash = state.pinHash || (currentRide() && currentRide().pinHash) || "";
+    if (!hash) {
+      /* Fallback: compare plain local only (rider device). Never accept a universal test PIN. */
+      return Promise.resolve(false);
+    }
+    return pinHashFor(e, state.code || state.driverCode || readDriverCode()).then(function (got) {
+      return got === String(hash).toLowerCase();
+    }).catch(function () { return false; });
   }
 
   function rideUrl(code) {
@@ -1587,11 +1751,34 @@
     });
   }
 
+  function getRideWithEtag(code) {
+    return fetch(rideUrl(code), {
+      headers: { "X-Firebase-ETag": "true" }
+    }).then(function (res) {
+      if (res.status === 404) return { ride: null, etag: "" };
+      if (!res.ok) throw new Error("ride");
+      var etag = res.headers.get("ETag") || res.headers.get("etag") || "";
+      return res.text().then(function (text) {
+        var ride = null;
+        if (text && text !== "null") {
+          try { ride = asRide(JSON.parse(text)); } catch (err) { ride = null; }
+        }
+        return { ride: ride, etag: etag };
+      });
+    });
+  }
+
   function putRide(code, ride) {
+    var payload = ride && typeof ride === "object" ? Object.assign({}, ride) : ride;
+    if (payload && typeof payload === "object") {
+      if (payload.pinHash) {
+        delete payload.pin; /* never store plaintext PIN remotely */
+      }
+    }
     return fetch(rideUrl(code), {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(ride)
+      body: JSON.stringify(payload)
     }).then(function (res) {
       if (!res.ok) throw new Error("ride");
       return res.text().then(function () {});
@@ -1599,11 +1786,33 @@
   }
 
   function patchRide(code, partial) {
+    var body = partial && typeof partial === "object" ? Object.assign({}, partial) : partial;
+    if (body && Object.prototype.hasOwnProperty.call(body, "pin") && body.pinHash) {
+      body.pin = null;
+    }
     return fetch(rideUrl(code), {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body)
+    }).then(function (res) {
+      if (!res.ok) throw new Error("ride");
+      return res.text().then(function () {});
+    });
+  }
+
+  function patchRideIfMatch(code, partial, etag) {
+    var headers = { "Content-Type": "application/json" };
+    if (etag) headers["if-match"] = etag;
+    return fetch(rideUrl(code), {
+      method: "PATCH",
+      headers: headers,
       body: JSON.stringify(partial)
     }).then(function (res) {
+      if (res.status === 412) {
+        var err = new Error("precondition");
+        err.conflict = true;
+        throw err;
+      }
       if (!res.ok) throw new Error("ride");
       return res.text().then(function () {});
     });
@@ -1692,6 +1901,9 @@
         }
         if (existing && existing.active === true) return existing;
         if (existing && String(existing.approvalStatus || "").toLowerCase() === "approved") return existing;
+        if (existing && String(existing.approvalStatus || "").toLowerCase() === "fired") return existing;
+        if (existing && String(existing.approvalStatus || "").toLowerCase() === "rejected") return existing;
+        /* Drivers may only create/update a pending signup row — never self-approve. */
         var row = {
           name: account.name || "",
           phone: account.phone || "",
@@ -1707,12 +1919,54 @@
           carPlate: normalizePlate(account.carPlate),
           carSeats: account.carSeats || ""
         };
+        var method = existing ? "PATCH" : "PUT";
+        var body = existing
+          ? {
+              name: row.name,
+              phone: row.phone,
+              email: row.email,
+              carYear: row.carYear,
+              carMake: row.carMake,
+              carModel: row.carModel,
+              carPlate: row.carPlate,
+              carSeats: row.carSeats,
+              updatedAt: row.updatedAt
+            }
+          : row;
         return fetch(rosterUrl(id), {
-          method: "PUT",
+          method: method,
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(row)
+          body: JSON.stringify(body)
         }).then(function () { return row; });
       });
+    }).catch(function () {});
+  }
+
+  function accountsHubUrl(id) {
+    var base = databaseURL() + "/rides/" + encodeURIComponent("USRACCTS");
+    if (id) return base + "/" + encodeURIComponent(id) + ".json";
+    return base + ".json";
+  }
+
+  function syncAccountProfile(role, account) {
+    /* Best-effort multi-device profile mirror (no password). Full Auth still required for real accounts. */
+    if (!syncOn() || !account || !account.email) return Promise.resolve();
+    var id = String(account.email).toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 48);
+    if (!id) return Promise.resolve();
+    var row = {
+      role: role || "",
+      name: account.name || "",
+      phone: account.phone || "",
+      email: String(account.email || "").toLowerCase(),
+      updatedAt: Date.now()
+    };
+    return fetch(accountsHubUrl(id), {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(row)
+    }).then(function (res) {
+      if (!res.ok) throw new Error("account");
+      return res.text().then(function () {});
     }).catch(function () {});
   }
 
@@ -1888,6 +2142,29 @@
     });
   }
 
+  function listOpenSummariesRaw() {
+    if (!syncOn()) return Promise.resolve([]);
+    return fetch(openIndexUrl()).then(function (res) {
+      if (!res.ok) return [];
+      return res.text().then(function (text) {
+        if (!text || text === "null") return [];
+        var data;
+        try { data = JSON.parse(text); } catch (e) { return []; }
+        if (!data || typeof data !== "object") return [];
+        var out = [];
+        Object.keys(data).forEach(function (code) {
+          var row = data[code];
+          if (!row || typeof row !== "object") return;
+          if (row.kind === "driver" || row.kind === "driverPresence") return;
+          if (code === "drivers") return;
+          if (!row.code) row.code = code;
+          out.push(row);
+        });
+        return out;
+      });
+    }).catch(function () { return []; });
+  }
+
   function listOpenRides() {
     if (!syncOn()) return Promise.resolve([]);
     return fetch(openIndexUrl()).then(function (res) {
@@ -1910,6 +2187,15 @@
           if (code === "drivers") return;
           if ((row.status || "requested") !== "requested") return;
           if (!isCoord(row.pickupLat) || !isCoord(row.pickupLng)) return;
+          var asapRow = !!(row.asap === true || String(row.asap || "").toLowerCase() === "true" ||
+            String(row.when || "").toLowerCase() === "asap" || String(row.time || "").toLowerCase() === "asap");
+          if (asapRow) {
+            var age = Date.now() - Number(row.updatedAt || row.requestedAt || row.createdAt || 0);
+            if (Number(row.updatedAt || row.requestedAt || row.createdAt || 0) > 0 && age > ASAP_EXPIRE_MS) {
+              deleteOpenRide(code).catch(function () {});
+              return;
+            }
+          }
           if (!row.code) row.code = code;
           out.push(row);
         });
@@ -2064,32 +2350,27 @@
   }
 
   function publishRide(code, created) {
-    return putRide(code, created).then(function () {
-      var latest = currentRide();
-      var patch = {};
-      if (latest && latest.code === code) {
-        if (latest.status && latest.status !== created.status) patch.status = latest.status;
-        if (isCoord(latest.driverLat) && coordNum(latest.driverLat) !== coordNum(created.driverLat)) {
-          patch.driverLat = +latest.driverLat;
-        }
-        if (isCoord(latest.driverLng) && coordNum(latest.driverLng) !== coordNum(created.driverLng)) {
-          patch.driverLng = +latest.driverLng;
-        }
-        if (isCoord(latest.pickupLat) && coordNum(latest.pickupLat) !== coordNum(created.pickupLat)) {
-          patch.pickupLat = +latest.pickupLat;
-          patch.pickupLng = +latest.pickupLng;
-        }
-        if (isCoord(latest.dropLat) && coordNum(latest.dropLat) !== coordNum(created.dropLat)) {
-          patch.dropLat = +latest.dropLat;
-          patch.dropLng = +latest.dropLng;
-        }
-      }
-      var openSource = latest && latest.code === code ? latest : created;
-      putOpenRide(code, openSource).catch(function () {});
-      if (!patch.status && !isCoord(patch.driverLat) && !isCoord(patch.driverLng) && !isCoord(patch.pickupLat) && !isCoord(patch.dropLat)) {
-        return;
-      }
-      return patchRide(code, patch);
+    var remote = Object.assign({}, created || {});
+    remote.status = "pending_owner";
+    remote.requestedAt = Date.now();
+    remote.createdAt = remote.requestedAt;
+    remote.updatedAt = remote.requestedAt;
+    delete remote.pin; /* plaintext PIN stays on the rider device only */
+    var pinPromise = pinHashFor(state.pin || remote.pin || makeRidePin(), code).then(function (h) {
+      remote.pinHash = h;
+      state.pinHash = h;
+      return remote;
+    });
+    return pinPromise.then(function (payload) {
+      return putRide(code, payload).then(function () {
+        var openSource = Object.assign({}, payload, { status: "pending_owner" });
+        return putOpenRide(code, openSource).then(function () {
+          notifyOwnerNewBooking(payload);
+          state.rideStatus = "pending_owner";
+          saveRide("pending_owner");
+          return payload;
+        });
+      });
     });
   }
 
@@ -2192,8 +2473,11 @@
     if (state.openListError === "open-denied") {
       return "Open rides could not load. The map still shows your area.";
     }
+    if (state.openListError === "pending-approval") {
+      return "Your account is pending owner approval before you can accept rides.";
+    }
     if (state.openListError) {
-      return "Could not load open rides right now. Trying again…";
+      return String(state.openListError);
     }
     if (!state.openRides.length) {
       return "No open rides right now. New rider requests show up on this map.";
@@ -2257,10 +2541,10 @@
       if ((state.screen === "waiting" || state.screen === "trip") && state.code && ride.code && ride.code !== state.code) return;
       var local = currentRide() || {};
       var localPin = normalizeStoredPin(local.pin) || normalizeStoredPin(state.pin);
-      if (localPin && !normalizeStoredPin(ride.pin)) ride.pin = localPin;
-      if (!normalizeStoredPin(ride.pin)) {
-        ride.pin = makeRidePin();
-        if (syncOn() && code) patchRide(code, { pin: ride.pin }).catch(function () {});
+      if (localPin) ride.pin = localPin; /* keep local-only; do not push plaintext pin */
+      if (ride.pinHash) state.pinHash = ride.pinHash;
+      if (String(ride.status || "").toLowerCase() === "denied") {
+        state.rideStatus = "denied";
       }
       try { localStorage.setItem(STORE, JSON.stringify(ride)); } catch (err) {}
       ingestCustomerRide(ride);
@@ -2368,7 +2652,8 @@
       return false;
     }
     if (savedRide.pickupStreet && savedRide.dropStreet &&
-        (savedRide.status === "requested" || savedRide.status === "accepted" ||
+        (savedRide.status === "requested" || savedRide.status === "pending_owner" ||
+         savedRide.status === "denied" || savedRide.status === "accepted" ||
          savedRide.status === "started" || savedRide.status === "completed")) {
       if (savedRide.status !== "completed" && !rideIsAsap(savedRide) && isPickupInPast(savedRide.date, savedRide.time)) {
         discardStoredRide();
@@ -2450,7 +2735,7 @@
     return (
       '<div class="app-nav">' + logoutLine() + "</div>" +
       "<h2>Request a ride</h2>" +
-      "<p class=\"lede\">Nothing is sent, and nothing is charged.</p>" +
+      "<p class=\"lede\">Request goes to Private Car Services for confirmation. Card charges are not taken on this screen.</p>" +
       "<form id=\"ride-form\" autocomplete=\"off\">" +
       '<div class="group"><p class="group-title">Pickup</p>' +
       locateField("pickup-street", "Street", state.pickupStreet, "pickup-results", "use-location") +
@@ -2474,17 +2759,27 @@
       (state.asap ? '<p class="fine when-asap-hint">Pickup as soon as a driver accepts.</p>' : "") +
       scheduleFields +
       "</div>" +
+      '<div class="group"><p class="group-title">Trip type</p>' +
+      '<label for="trip-type">Base fare</label>' +
+      '<select id="trip-type" name="trip-type">' +
+      '<option value="auto"' + (state.tripType === "auto" || !state.tripType ? " selected" : "") + ">Auto (detect airport from addresses)</option>" +
+      '<option value="local"' + (state.tripType === "local" ? " selected" : "") + ">Local</option>" +
+      '<option value="airport-drop"' + (state.tripType === "airport-drop" ? " selected" : "") + ">Airport drop-off</option>" +
+      '<option value="airport-pick"' + (state.tripType === "airport-pick" ? " selected" : "") + ">Airport pick-up</option>" +
+      "</select>" +
+      '<p class="fine">Airport bases match the estimator: pick-up and drop-off differ by time of day.</p>' +
+      "</div>" +
       '<div class="group"><p class="group-title">Rider</p>' +
       field("rider-name", "Name", state.name, "required") +
       field("rider-phone", "Phone", state.phone, 'type="tel" inputmode="tel" required') +
       "</div>" +
       '<p class="note">Miles round up to the next whole mile. Texas tax is 8.25% and is estimate-only, not a charge.</p>' +
       paymentHoldCopy() +
-      '<p class="fine">Cancel before pickup: you will be charged 25% of the estimate or $10, whichever is more.</p>' +
+      '<p class="fine">Cancel before pickup: a fee of 25% of the estimate or $10 (whichever is more) may apply. Automatic charging is not live yet.</p>' +
       '<p class="error" id="form-error" role="alert">' + esc(state.error) + "</p>" +
       '<button class="btn" type="submit">Request this ride</button>' +
       "</form>" +
-      '<p class="fine">The driver uses a separate app. On this phone, that app sees this request. Nothing is texted.</p>'
+      '<p class="fine">After you request, the owner confirms the booking before drivers see it. Call 936-261-7878 if you need help.</p>'
     );
   }
 
@@ -2501,15 +2796,19 @@
     var noticeNote = est.notice
       ? " Includes 25% for under 24 hours' notice."
       : "";
+    var baseName = est.baseLabel || "Local base";
     return (
       '<div class="card">' +
       '<p class="tag">' + (state.rideStatus === "completed" ? "Final fare · not a charge" : "Estimate only · not a charge") + "</p>" +
+      '<div class="money-row"><span>' + esc(baseName) + "</span><span>" + money(est.base) + "</span></div>" +
+      '<div class="money-row"><span>Mileage (' + est.billed + " mi × " + money(est.perMileCents) + ")</span><span>" + money(est.mileage) + "</span></div>" +
+      (est.notice ? '<div class="money-row"><span>Under 24 hours notice (+25%)</span><span>' + money(est.notice) + "</span></div>" : "") +
       '<div class="money-row"><span>Miles</span><span>' + est.raw.toFixed(2) + " mi, billed as " + est.billed + " (rounded up)</span></div>" +
       '<div class="money-row"><span>Fare before tax</span><span>' + money(est.sub) + "</span></div>" +
       '<div class="money-row"><span>Texas tax 8.25%</span><span>' + money(est.tax) + "</span></div>" +
       '<div class="total-row"><span>' + (state.rideStatus === "completed" ? "Final total" : "Estimated total") + "</span><span>" + money(est.total) + "</span></div>" +
-      '<p class="fine">Not a charge. ' + esc(est.tierLabel) + " " + money(est.perMileCents) +
-      "/mi, local base " + money(est.base) + " for 2 passengers." + noticeNote + "</p>" +
+      '<p class="fine">Not a charge. ' + esc(est.tierLabel) + " · " + esc(baseName) + " " + money(est.base) +
+      " (includes 2 passengers)." + noticeNote + "</p>" +
       "</div>"
     );
   }
@@ -2692,15 +2991,27 @@
     var both = !!(placeCoords("pickup") && placeCoords("drop"));
     var driver = savedDriverPoint();
     var caption = !both ? "Sample map · Willis" : (driver ? "Your driver" : "Your route");
-    var note = syncOn()
-      ? "This screen changes when a driver accepts. Nothing is texted."
-      : "Open the driver app and accept this ride. This screen changes when a driver accepts.";
+    var st = String(state.rideStatus || "").toLowerCase();
+    var note = st === "pending_owner"
+      ? "Your request was saved. Private Car Services must confirm it before drivers can accept."
+      : (st === "denied"
+        ? "This booking was declined. Call " + BUSINESS_PHONE + " or request a different time."
+        : (syncOn()
+          ? "This screen changes when a driver accepts."
+          : "Open the driver app and accept this ride. This screen changes when a driver accepts."));
     var near = driverNearPickup();
-    var waitLabel = near ? "Waiting for a driver" : (driversOnlineNow().length ? "Drivers are available" : "Waiting for a driver");
-    var canCancel = state.rideStatus === "requested" || state.rideStatus === "accepted";
+    var waitLabel = st === "denied"
+      ? "Booking declined"
+      : (st === "pending_owner"
+        ? "Waiting for confirmation"
+        : (near ? "Waiting for a driver" : (driversOnlineNow().length ? "Drivers are available" : "Waiting for a driver")));
+    var canCancel = st === "requested" || st === "accepted" || st === "pending_owner";
+    var statusHtml = st === "denied"
+      ? '<div class="status"><i></i><span>Booking declined</span></div>'
+      : waitingStatusBlock(waitLabel);
     return (
       '<button class="btn ghost" type="button" id="back-home">← Request</button>' +
-      waitingStatusBlock(waitLabel) +
+      statusHtml +
       driverIdentityLine() +
       driverEtaLine() +
       "<p class=\"lede\">" + esc(pickupLine()) + " → " + esc(dropLine()) + "<br>" + esc(prettyWhen()) + "</p>" +
@@ -2766,6 +3077,7 @@
     if (ride.code) state.code = ride.code;
     var incomingPin = normalizeStoredPin(ride.pin);
     if (incomingPin) state.pin = incomingPin;
+    if (ride.pinHash) state.pinHash = ride.pinHash;
   }
 
   function currentRide() {
@@ -2874,6 +3186,7 @@
       state.pin = pinOut;
       rideOut.pin = pinOut;
     }
+    if (state.pinHash) rideOut.pinHash = state.pinHash;
     localStorage.setItem(STORE, JSON.stringify(rideOut));
     if (ROLE === "customer") writeRideOwner(readSession());
   }
@@ -2888,6 +3201,7 @@
     state.date = "";
     state.time = "";
     state.asap = true;
+    state.tripType = "auto";
     state.rideStatus = "";
     state.pickupLat = null;
     state.pickupLng = null;
@@ -2910,6 +3224,7 @@
     state.holiday = false;
     state.code = "";
     state.pin = "";
+    state.pinHash = "";
     state.pinDraft = "";
     state.pinError = "";
     state.dropFix = null;
@@ -3104,7 +3419,6 @@
         esc(state.pinDraft || "") + '">' +
         '<p class="error" id="pin-error" role="alert">' + esc(state.pinError || "") + "</p>" +
         '<button class="btn" type="submit">Start ride</button>' +
-        '<p class="fine">Testing: PIN 0001 also starts any ride.</p>' +
         "</form></div>"
       );
     }
@@ -3272,6 +3586,8 @@
     }
     state.name = val("rider-name");
     state.phone = val("rider-phone");
+    var tripEl = document.getElementById("trip-type");
+    if (tripEl) state.tripType = tripEl.value || "auto";
   }
 
   function formComplete() {
@@ -3336,6 +3652,8 @@
           state.loginError = "";
           state.gateStep = "";
           state.screen = "home";
+          accountSyncTried = true;
+          syncAccountProfile(ROLE === "driver" ? "driver" : "rider", account);
           if (ROLE === "driver") {
             ensureMilesDayReady();
             followGps();
@@ -3506,8 +3824,19 @@
           render();
           return;
         }
+        if (!phoneLooksValid(state.phone)) {
+          state.error = "Enter a valid 10-digit US phone number.";
+          render();
+          return;
+        }
         if (!state.asap && isPickupInPast(state.date, state.time)) {
           state.error = "Pick a date and time that have not passed yet.";
+          render();
+          return;
+        }
+        var scheduleErr = validateScheduleRules();
+        if (scheduleErr) {
+          state.error = scheduleErr;
           render();
           return;
         }
@@ -3519,30 +3848,81 @@
           state.driverLng = null;
           state.code = syncOn() ? makeRideCode() : "";
           state.pin = makeRidePin();
+          state.pinHash = "";
           state.pinDraft = "";
           state.pinError = "";
           state.paymentSkipped = false;
           geocodeMissing().then(function () {
-            saveRide("requested", { clearDriver: true });
+            saveRide("pending_owner", { clearDriver: true });
             var created = currentRide();
             state.customerGeocodeTried = true;
+            if (!syncOn()) {
+              state.screen = "waiting";
+              state.rideStatus = "pending_owner";
+              render();
+              return;
+            }
+            if (!state.code || !created) {
+              state.error = "Could not create a ride code. Try again.";
+              state.screen = "home";
+              render();
+              return;
+            }
             state.screen = "waiting";
+            state.remoteLoading = true;
             render();
-            if (syncOn() && state.code && created) publishRide(state.code, created).catch(function () {});
+            publishRide(state.code, created).then(function () {
+              state.remoteLoading = false;
+              state.error = "";
+              render();
+            }).catch(function () {
+              state.remoteLoading = false;
+              state.screen = "home";
+              state.rideStatus = "";
+              state.error = "Your request did not save. Check your connection and try again — you are not waiting for a driver yet.";
+              try { localStorage.removeItem(STORE); } catch (e) {}
+              render();
+            });
           });
         }
         loadBusyWindows().then(function (windows) {
           if (rideHitsBusy(windows)) {
-            state.error = "That time is already taken. Pick another time, or call 936-261-7878.";
+            state.error = "That time is already taken. Pick another time, or call " + BUSINESS_PHONE + ".";
             render();
             return;
           }
-          requestRide();
+          if (!syncOn()) {
+            requestRide();
+            return;
+          }
+          listOpenSummariesRaw().then(function (open) {
+            var startMs = pickupInstant().getTime();
+            var endMs = startMs + 60 * 60 * 1000;
+            var clash = (open || []).some(function (row) {
+              if (!row || rideIsAsap(row)) return false;
+              var st = String(row.status || "requested").toLowerCase();
+              if (st === "denied" || st === "cancelled" || st === "completed") return false;
+              if (!row.date || !row.time) return false;
+              var other = chicagoWallToMs(row.date, row.time);
+              if (!isFinite(other) || !isFinite(startMs)) return false;
+              return other < endMs && startMs < other + 60 * 60 * 1000;
+            });
+            if (clash) {
+              state.error = "That time overlaps another booking. Pick another time, or call " + BUSINESS_PHONE + ".";
+              render();
+              return;
+            }
+            requestRide();
+          }).catch(function () {
+            requestRide();
+          });
         }).catch(function () {
-          requestRide();
+          state.error = "Could not check the busy schedule (busy.json). Try again, or call " + BUSINESS_PHONE + ".";
+          render();
         });
       });
     }
+
     var backHome = document.getElementById("back-home");
     if (backHome) {
       backHome.addEventListener("click", function () {
@@ -3588,27 +3968,29 @@
           render();
           return;
         }
-        if (!pinAccepted(entered)) {
-          state.pinError = "That PIN does not match. Ask the rider again.";
+        pinAcceptedAsync(entered).then(function (ok) {
+          if (!ok) {
+            state.pinError = "That PIN does not match. Ask the rider again.";
+            render();
+            return;
+          }
+          state.tripPath = [];
+          state.useDrivenMiles = false;
+          state.endedEarly = false;
+          if (isCoord(state.hereLat) && isCoord(state.hereLng)) {
+            recordTripPoint(state.hereLat, state.hereLng);
+          }
+          saveRide("started");
+          var code = state.driverCode || state.code || readDriverCode();
+          if (syncOn() && code) {
+            syncActiveTripFare({ status: "started" });
+          }
+          state.pinDraft = "";
+          state.pinError = "";
+          state.screen = "trip";
           render();
-          return;
-        }
-        state.tripPath = [];
-        state.useDrivenMiles = false;
-        state.endedEarly = false;
-        if (isCoord(state.hereLat) && isCoord(state.hereLng)) {
-          recordTripPoint(state.hereLat, state.hereLng);
-        }
-        saveRide("started");
-        var code = state.driverCode || state.code || readDriverCode();
-        if (syncOn() && code) {
-          syncActiveTripFare({ status: "started" });
-        }
-        state.pinDraft = "";
-        state.pinError = "";
-        state.screen = "trip";
-        render();
-        openTurnByTurnToDrop();
+          openTurnByTurnToDrop();
+        });
       });
     }
     var completeRide = document.getElementById("complete-ride");
@@ -3953,10 +4335,53 @@
       state.driverCode = code;
       writeDriverCode(code);
     }
-    saveRide("accepted");
-    try { bumpDayRequested(); } catch (e) {}
-    if (syncOn() && code) {
-      var patch = { status: "accepted" };
+    function finishLocalAccept() {
+      saveRide("accepted");
+      try { bumpDayRequested(); } catch (e) {}
+      state.selectedOpenCode = "";
+      state.mode = "driver";
+      state.screen = "trip";
+      state.openListError = "";
+      render();
+    }
+    if (!syncOn() || !code) {
+      finishLocalAccept();
+      return;
+    }
+    state.openListError = "";
+    state.remoteLoading = true;
+    render();
+    getRideWithEtag(code).then(function (pack) {
+      var ride = pack && pack.ride;
+      var etag = pack && pack.etag;
+      var st = String((ride && ride.status) || "").toLowerCase();
+      if (!ride) {
+        var err = new Error("missing");
+        err.taken = true;
+        throw err;
+      }
+      if (st === "accepted" || st === "started" || st === "completed" || st === "cancelled" || st === "denied") {
+        var taken = new Error("taken");
+        taken.taken = true;
+        throw taken;
+      }
+      if (st === "pending_owner" || st === "pending-owner") {
+        var wait = new Error("pending-owner");
+        wait.pendingOwner = true;
+        throw wait;
+      }
+      if (st && st !== "requested") {
+        var bad = new Error("bad-status");
+        bad.taken = true;
+        throw bad;
+      }
+      if (ride.pinHash) state.pinHash = ride.pinHash;
+      var patch = {
+        status: "accepted",
+        acceptedAt: Date.now(),
+        driverId: driverPresenceId(),
+        updatedAt: Date.now()
+      };
       if (state.driverName) patch.driverName = state.driverName;
       if (state.driverPhone) patch.driverPhone = state.driverPhone;
       if (safePhoto(state.driverPhoto)) patch.driverPhoto = safePhoto(state.driverPhoto);
@@ -3966,13 +4391,30 @@
       if (state.driverCarPlate) patch.driverCarPlate = state.driverCarPlate;
       if (state.driverCarSeats) patch.driverCarSeats = state.driverCarSeats;
       if (safePhoto(state.driverCarPhoto)) patch.driverCarPhoto = safePhoto(state.driverCarPhoto);
-      patchRide(code, patch).catch(function () {});
-      deleteOpenRide(code).catch(function () {});
-    }
-    state.selectedOpenCode = "";
-    state.mode = "driver";
-    state.screen = "trip";
-    render();
+      if (account && account.email) patch.driverEmail = String(account.email).toLowerCase();
+      return patchRideIfMatch(code, patch, etag).then(function () {
+        return deleteOpenRide(code).catch(function () {});
+      });
+    }).then(function () {
+      state.remoteLoading = false;
+      finishLocalAccept();
+    }).catch(function (err) {
+      state.remoteLoading = false;
+      if (err && err.pendingOwner) {
+        state.openListError = "This booking is still waiting for owner approval.";
+      } else if (err && (err.conflict || err.taken)) {
+        state.openListError = "That ride was already taken by another driver.";
+        state.selectedOpenCode = "";
+        clearRideFields();
+        writeDriverCode("");
+        state.driverCode = "";
+        try { localStorage.removeItem(STORE); } catch (e2) {}
+        refreshOpenRides(true);
+      } else {
+        state.openListError = "Could not accept this ride. Try again.";
+      }
+      render();
+    });
   }
 
   function denySelectedOpenRide() {
@@ -4341,8 +4783,8 @@
     sheetHost.innerHTML =
       '<div class="sheet" role="dialog" aria-modal="true" aria-labelledby="sheet-title">' +
       '<p class="tag">Preview only</p>' +
-      '<h3 id="sheet-title">Nothing was sent</h3>' +
-      "<p class=\"lede\">This does not open Messages. On a live app, this request would text " + BUSINESS_PHONE + ".</p>" +
+      '<h3 id="sheet-title">Preview message</h3>' +
+      "<p class=\"lede\">This preview does not send a text. For real help call " + BUSINESS_PHONE + ".</p>" +
       '<pre class="draft" id="draft"></pre>' +
       '<button class="btn" type="button" id="close-sheet">Close</button>' +
       "</div>";
@@ -4395,6 +4837,10 @@
     });
     if (ROLE !== "driver" && signedIn()) {
       maybeRestoreCustomerRide();
+    }
+    if (signedIn() && !accountSyncTried) {
+      accountSyncTried = true;
+      syncAccountProfile(ROLE === "driver" ? "driver" : "rider", accountForRole());
     }
     render();
   });
