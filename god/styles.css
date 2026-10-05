@@ -513,3 +513,23 @@ button, input {
 .miles-history li {
   margin: 4px 0;
 }
+
+
+.badge.pending {
+  background: rgba(240, 212, 138, 0.2);
+  color: #f0d48a;
+  border: 1px solid rgba(240, 212, 138, 0.55);
+}
+.cal-week {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 10px 0;
+  align-items: center;
+}
+.cal-day.selected {
+  border-color: #f0d48a;
+  color: #f0d48a;
+  font-weight: 700;
+}
+.btn-approve { margin-left: 4px; }

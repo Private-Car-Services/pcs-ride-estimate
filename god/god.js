@@ -9,6 +9,7 @@
   var ROSTER_HUB = "DRVRCMMS";
   /* Miles hub: 8-char alphabet (no I/O). DRVMILES contains I — use DRVRMILZ. */
   var MILES_HUB = "DRVRMILZ";
+  var HISTORY_HUB = "DRVRHSTY"; /* completed ride logs; 8-char no I/O */
   var DEFAULT_COMMISSION_PCT = 70;
   var SESSION_KEY = "pcs-god-session";
   /* Allowed owner email only. A real private password comes next — do not store one in this file. */
@@ -75,7 +76,11 @@
     hireNotice: "",
     actionNotice: "",
     miles: {},
-    milesError: ""
+    milesError: "",
+    history: {},
+    historyError: "",
+    selectedDriverId: "",
+    driverDetailDay: ""
   };
 
   var map = null;
@@ -217,6 +222,78 @@
     return row.active !== false;
   }
 
+  function approvalOf(row) {
+    if (!row) return "unknown";
+    var a = String(row.approvalStatus || "").toLowerCase();
+    if (a === "pending") return "pending";
+    if (a === "rejected") return "rejected";
+    if (row.active === false) return "fired";
+    return "approved";
+  }
+
+  function historyUrl(driverId, rideCode) {
+    var base = baseUrl() + "/rides/" + encodeURIComponent(HISTORY_HUB) + "/" + encodeURIComponent(driverId);
+    if (rideCode) return base + "/" + encodeURIComponent(rideCode) + ".json";
+    return base + ".json";
+  }
+
+  function listDriverHistory(driverId) {
+    return fetch(historyUrl(driverId)).then(function (res) {
+      if (res.status === 401 || res.status === 403) {
+        var err = new Error("history-denied");
+        err.denied = true;
+        throw err;
+      }
+      if (res.status === 404) return {};
+      if (!res.ok) throw new Error("history");
+      return res.text().then(function (text) {
+        if (!text || text === "null") return {};
+        try {
+          var data = JSON.parse(text);
+          return data && typeof data === "object" ? data : {};
+        } catch (e) { return {}; }
+      });
+    });
+  }
+
+  function historyEntries(driverId) {
+    var raw = (state.history && state.history[driverId]) || {};
+    return Object.keys(raw).map(function (code) {
+      var row = raw[code] || {};
+      row.code = row.code || code;
+      return row;
+    }).sort(function (a, b) {
+      return Number(b.completedAt || 0) - Number(a.completedAt || 0);
+    });
+  }
+
+  function totalsForDriver(driverId) {
+    var entries = historyEntries(driverId);
+    var rideTotal = 0;
+    var commissionTotal = 0;
+    entries.forEach(function (e) {
+      rideTotal += Number(e.fareTotal) || 0;
+      commissionTotal += Number(e.commissionCents) || 0;
+    });
+    return { rideTotal: rideTotal, commissionTotal: commissionTotal, count: entries.length };
+  }
+
+  function mondayOfWeek(ymd) {
+    var parts = String(ymd || chicagoToday()).split("-");
+    var dt = new Date(Number(parts[0]), Number(parts[1]) - 1, Number(parts[2]));
+    var dow = dt.getDay();
+    var offset = dow === 0 ? -6 : 1 - dow;
+    dt.setDate(dt.getDate() + offset);
+    return dt.getFullYear() + "-" + String(dt.getMonth() + 1).padStart(2, "0") + "-" + String(dt.getDate()).padStart(2, "0");
+  }
+
+  function addDaysYmd(ymd, n) {
+    var parts = String(ymd).split("-");
+    var dt = new Date(Number(parts[0]), Number(parts[1]) - 1, Number(parts[2]));
+    dt.setDate(dt.getDate() + n);
+    return dt.getFullYear() + "-" + String(dt.getMonth() + 1).padStart(2, "0") + "-" + String(dt.getDate()).padStart(2, "0");
+  }
+
   function isCoord(v) {
     return v !== null && v !== undefined && v !== "" && isFinite(+v);
   }
@@ -253,6 +330,11 @@
   function fmtMoney(n) {
     if (n === null || n === undefined || n === "" || !isFinite(+n)) return null;
     return "$" + Number(n).toFixed(2);
+  }
+
+  function fmtCents(cents) {
+    if (cents === null || cents === undefined || cents === "" || !isFinite(+cents)) return "$0.00";
+    return "$" + (Number(cents) / 100).toFixed(2);
   }
 
   function fmtClock(ms) {
@@ -448,6 +530,7 @@
       email: existing.email || (online && online.email) || "",
       commissionPct: pct,
       active: existing.active !== false,
+      approvalStatus: existing.approvalStatus || (existing.active === false ? "fired" : "approved"),
       hiredAt: existing.hiredAt || Date.now(),
       updatedAt: Date.now()
     };
@@ -498,6 +581,7 @@
       email: email,
       commissionPct: pct,
       active: true,
+      approvalStatus: "approved",
       hiredAt: (existing && existing.hiredAt) || Date.now(),
       updatedAt: Date.now(),
       rehiredAt: existing && existing.active === false ? Date.now() : undefined
@@ -532,6 +616,7 @@
       email: existing.email || (online && online.email) || "",
       commissionPct: existing.commissionPct != null ? clampPct(existing.commissionPct) : DEFAULT_COMMISSION_PCT,
       active: false,
+      approvalStatus: "fired",
       hiredAt: existing.hiredAt || Date.now(),
       firedAt: Date.now(),
       updatedAt: Date.now()
@@ -563,6 +648,7 @@
       email: existing.email || "",
       commissionPct: pct,
       active: true,
+      approvalStatus: "approved",
       hiredAt: existing.hiredAt || Date.now(),
       rehiredAt: Date.now(),
       updatedAt: Date.now()
@@ -575,6 +661,68 @@
       state.actionNotice = err && err.denied
         ? "Cannot rehire (Firebase permission denied on /rides/" + ROSTER_HUB + ")."
         : "Could not rehire driver.";
+      return false;
+    });
+  }
+
+  function approveDriver(driverId) {
+    var existing = (state.roster && state.roster[driverId]) || {};
+    var pct = existing.commissionPct != null ? clampPct(existing.commissionPct) : DEFAULT_COMMISSION_PCT;
+    if (pct == null) pct = DEFAULT_COMMISSION_PCT;
+    var row = {
+      name: existing.name || driverId,
+      phone: existing.phone || "",
+      email: existing.email || "",
+      commissionPct: pct,
+      active: true,
+      approvalStatus: "approved",
+      hiredAt: existing.hiredAt || existing.signedUpAt || Date.now(),
+      approvedAt: Date.now(),
+      updatedAt: Date.now(),
+      carYear: existing.carYear || "",
+      carMake: existing.carMake || "",
+      carModel: existing.carModel || "",
+      carPlate: existing.carPlate || "",
+      carSeats: existing.carSeats || ""
+    };
+    return putRosterRow(driverId, row).then(function () {
+      state.roster[driverId] = Object.assign({ id: driverId }, row);
+      state.actionNotice = "Approved " + (row.name || driverId) + ". They can go online.";
+      return true;
+    }).catch(function (err) {
+      state.actionNotice = err && err.denied
+        ? "Cannot approve (Firebase permission denied on /rides/" + ROSTER_HUB + ")."
+        : "Could not approve driver.";
+      return false;
+    });
+  }
+
+  function rejectDriver(driverId) {
+    var existing = (state.roster && state.roster[driverId]) || {};
+    var pct = existing.commissionPct != null ? clampPct(existing.commissionPct) : DEFAULT_COMMISSION_PCT;
+    if (pct == null) pct = DEFAULT_COMMISSION_PCT;
+    var row = {
+      name: existing.name || driverId,
+      phone: existing.phone || "",
+      email: existing.email || "",
+      commissionPct: pct,
+      active: false,
+      approvalStatus: "rejected",
+      hiredAt: existing.hiredAt || existing.signedUpAt || Date.now(),
+      rejectedAt: Date.now(),
+      updatedAt: Date.now()
+    };
+    return putRosterRow(driverId, row).then(function () {
+      state.roster[driverId] = Object.assign({ id: driverId }, row);
+      return clearPresence(driverId).then(function () {
+        state.actionNotice = "Rejected " + (row.name || driverId) + ".";
+        state.drivers = (state.drivers || []).filter(function (d) { return !d || d.id !== driverId; });
+        return true;
+      });
+    }).catch(function (err) {
+      state.actionNotice = err && err.denied
+        ? "Cannot reject (Firebase permission denied on /rides/" + ROSTER_HUB + ")."
+        : "Could not reject driver.";
       return false;
     });
   }
@@ -764,7 +912,30 @@
       });
     });
 
-    Promise.all([rosterP, driversP, ridesP, milesP]).then(function () {
+    var historyP = driversP.then(function () {
+      var ids = {};
+      Object.keys(state.roster || {}).forEach(function (id) { ids[id] = true; });
+      (state.drivers || []).forEach(function (d) { if (d && d.id) ids[d.id] = true; });
+      var list = Object.keys(ids);
+      return Promise.all(list.map(function (id) {
+        return listDriverHistory(id).then(function (rows) {
+          return { id: id, rows: rows };
+        }).catch(function () {
+          return { id: id, rows: state.history[id] || {} };
+        });
+      })).then(function (rows) {
+        var next = {};
+        rows.forEach(function (row) {
+          if (row && row.id) next[row.id] = row.rows || {};
+        });
+        state.history = next;
+        state.historyError = "";
+      }).catch(function (err) {
+        state.historyError = err && err.denied ? "denied" : "error";
+      });
+    });
+
+    Promise.all([rosterP, driversP, ridesP, milesP, historyP]).then(function () {
       state.loading = false;
       state.lastRefreshAt = Date.now();
       renderBoardLists();
@@ -977,6 +1148,7 @@
         lng: null,
         fromRoster: true,
         active: row.active !== false,
+        approvalStatus: row.approvalStatus || (row.active === false ? "fired" : "approved"),
         commissionPct: row.commissionPct,
         carYear: row.carYear || "",
         carMake: row.carMake || "",
@@ -1022,6 +1194,10 @@
       byId[d.id] = prev;
     });
     return Object.keys(byId).map(function (id) { return byId[id]; }).sort(function (a, b) {
+      var aa = approvalOf(a);
+      var ba = approvalOf(b);
+      if (aa === "pending" && ba !== "pending") return -1;
+      if (ba === "pending" && aa !== "pending") return 1;
       if (a.active !== b.active) return a.active ? -1 : 1;
       if (a.online !== b.online) return a.online ? -1 : 1;
       return String(a.name || "").localeCompare(String(b.name || ""));
@@ -1057,7 +1233,74 @@
     );
   }
 
+  function driverDetailHtml(driverId) {
+    var rows = knownDriverRows();
+    var d = null;
+    rows.forEach(function (row) { if (row.id === driverId) d = row; });
+    if (!d) {
+      return '<p class="empty">Driver not found.</p><button type="button" class="btn btn-ghost" id="close-driver-detail">← Drivers</button>';
+    }
+    var totals = totalsForDriver(driverId);
+    var day = state.driverDetailDay || chicagoToday();
+    var monday = mondayOfWeek(day);
+    var weekDays = [];
+    var i;
+    for (i = 0; i < 7; i += 1) weekDays.push(addDaysYmd(monday, i));
+    var entries = historyEntries(driverId).filter(function (e) { return e.day === day; });
+    var dayRide = 0;
+    var dayComm = 0;
+    entries.forEach(function (e) {
+      dayRide += Number(e.fareTotal) || 0;
+      dayComm += Number(e.commissionCents) || 0;
+    });
+    var cal = weekDays.map(function (ymd) {
+      var count = historyEntries(driverId).filter(function (e) { return e.day === ymd; }).length;
+      var selected = ymd === day ? " selected" : "";
+      return '<button type="button" class="btn btn-ghost cal-day' + selected + '" data-detail-day="' + esc(ymd) + '">' +
+        esc(ymd.slice(5)) + (count ? " · " + count : "") + "</button>";
+    }).join("");
+    var list;
+    if (!entries.length) {
+      list = '<p class="fine">No completed rides on ' + esc(day) + ".</p>";
+    } else {
+      list = entries.map(function (e) {
+        return (
+          '<article class="card">' +
+          "<h3>" + esc(e.code || "Ride") + "</h3>" +
+          '<p class="meta">' +
+          "<strong>Rider</strong> " + esc(e.riderName || "—") + "<br>" +
+          "<strong>Route</strong> " + esc(e.pickup || "") + " → " + esc(e.drop || "") + "<br>" +
+          "<strong>Ride total</strong> " + esc(fmtCents(e.fareTotal)) + "<br>" +
+          "<strong>Commission</strong> " + esc(fmtCents(e.commissionCents)) +
+          " (" + esc(String(e.commissionPct || "")) + "%)" +
+          (e.billedMiles != null ? "<br><strong>Miles</strong> " + esc(String(e.billedMiles)) : "") +
+          "</p></article>"
+        );
+      }).join("");
+    }
+    return (
+      '<button type="button" class="btn btn-ghost" id="close-driver-detail">← Drivers</button>' +
+      "<h3>" + esc(displayName(d.name, "Driver")) + " · history</h3>" +
+      '<p class="meta">' +
+      "<strong>All-time ride total</strong> " + esc(fmtCents(totals.rideTotal)) + "<br>" +
+      "<strong>All-time commission total</strong> " + esc(fmtCents(totals.commissionTotal)) + "<br>" +
+      "<strong>Pay week</strong> Mon–Sun · " + esc(monday) + " → " + esc(addDaysYmd(monday, 6)) +
+      "</p>" +
+      '<div class="cal-week">' +
+      '<button type="button" class="btn btn-ghost" id="detail-week-prev">←</button>' +
+      cal +
+      '<button type="button" class="btn btn-ghost" id="detail-week-next">→</button>' +
+      "</div>" +
+      '<p class="meta"><strong>' + esc(day) + "</strong> · ride " + esc(fmtCents(dayRide)) +
+      " · commission " + esc(fmtCents(dayComm)) + "</p>" +
+      list
+    );
+  }
+
   function driversPanelHtml() {
+    if (state.selectedDriverId) {
+      return driverDetailHtml(state.selectedDriverId);
+    }
     var parts = [];
     if (state.rosterError === "denied") {
       parts.push('<p class="empty">Driver roster cannot be read (permission denied on /rides/' + esc(ROSTER_HUB) + '). Hire/Fire/commission saves need that path writable.</p>');
@@ -1078,11 +1321,15 @@
         var trip = d.online ? matchDriverToRide(d, state.rides) : null;
         var rev = d.online ? revenueForDriver(d, state.rides) : { label: "—" };
         var pct = commissionPctFor(d.id);
+        var approval = approvalOf(d);
+        var totals = totalsForDriver(d.id);
         var badge;
-        if (!d.active) badge = '<span class="badge fired">Fired</span>';
+        if (approval === "pending") badge = '<span class="badge pending">Pending</span>';
+        else if (approval === "rejected") badge = '<span class="badge fired">Rejected</span>';
+        else if (approval === "fired" || !d.active) badge = '<span class="badge fired">Fired</span>';
         else if (trip) badge = '<span class="badge on-trip">On trip</span>';
         else if (d.online) badge = '<span class="badge">Online · free</span>';
-        else badge = '<span class="badge off">Hired · offline</span>';
+        else badge = '<span class="badge off">Approved · offline</span>';
         var where = isCoord(d.lat) && isCoord(d.lng)
           ? (+d.lat).toFixed(4) + ", " + (+d.lng).toFixed(4)
           : (d.online ? "Location not shared" : "Not on the map");
@@ -1122,19 +1369,26 @@
             "<strong>Map</strong> " + esc(where) + "<br>" +
             "<strong>Today start odo</strong> " + esc(startOdo != null ? String(startOdo) : "—") + "<br>" +
             "<strong>GPS miles today</strong> " + esc(gpsToday != null ? Number(gpsToday).toFixed(1) + " mi" : "—") + "<br>" +
-            "<strong>Revenue</strong> " + esc(rev.label) +
-            (trip ? "<br><strong>With</strong> " + esc(displayName(trip.name, "Rider")) : "") +
+            "<strong>Live trip revenue</strong> " + esc(rev.label) +
+            (trip ? "<br><strong>With</strong> " + esc(displayName(trip.name, "Rider")) : "") + "<br>" +
+            "<strong>Ride total</strong> " + esc(fmtCents(totals.rideTotal)) + "<br>" +
+            "<strong>Commission total</strong> " + esc(fmtCents(totals.commissionTotal)) +
+            " · " + esc(String(totals.count)) + " logged rides" +
             "</p>" +
             (hist.length
-              ? '<details class="miles-history"><summary>Last 14 days</summary><ul>' + hist.join("") + "</ul></details>"
+              ? '<details class="miles-history"><summary>Last 14 days miles</summary><ul>' + hist.join("") + "</ul></details>"
               : '<p class="fine">No mileage days saved yet.</p>') +
+            '<button type="button" class="btn btn-ghost btn-open-driver" data-driver-id="' + esc(d.id) + '">Calendar & history</button>' +
             '<div class="commission-row">' +
               '<label class="commission-label" for="comm-' + esc(d.id) + '">Commission %</label>' +
-              '<input class="commission-input" id="comm-' + esc(d.id) + '" data-driver-id="' + esc(d.id) + '" type="number" min="0" max="100" step="1" value="' + esc(String(pct)) + '"' + (d.active ? "" : " disabled") + ">" +
-              '<button type="button" class="btn btn-ghost btn-save-comm" data-driver-id="' + esc(d.id) + '"' + (d.active ? "" : " disabled") + ">Save</button>" +
-              (d.active
-                ? '<button type="button" class="btn btn-fire" data-driver-id="' + esc(d.id) + '">Fire</button>'
-                : '<button type="button" class="btn btn-ghost btn-rehire" data-driver-id="' + esc(d.id) + '">Rehire</button>') +
+              '<input class="commission-input" id="comm-' + esc(d.id) + '" data-driver-id="' + esc(d.id) + '" type="number" min="0" max="100" step="1" value="' + esc(String(pct)) + '"' + (approval === "approved" ? "" : " disabled") + ">" +
+              '<button type="button" class="btn btn-ghost btn-save-comm" data-driver-id="' + esc(d.id) + '"' + (approval === "approved" ? "" : " disabled") + ">Save</button>" +
+              (approval === "pending"
+                ? '<button type="button" class="btn btn-gold btn-approve" data-driver-id="' + esc(d.id) + '">Approve</button>' +
+                  '<button type="button" class="btn btn-fire btn-reject" data-driver-id="' + esc(d.id) + '">Reject</button>'
+                : (d.active
+                  ? '<button type="button" class="btn btn-fire" data-driver-id="' + esc(d.id) + '">Fire</button>'
+                  : '<button type="button" class="btn btn-ghost btn-rehire" data-driver-id="' + esc(d.id) + '">Rehire</button>')) +
             "</div>" +
           "</article>"
         );
@@ -1302,6 +1556,75 @@
           renderBoardLists();
           syncMap();
         });
+      });
+    });
+
+    Array.prototype.forEach.call(list.querySelectorAll(".btn-approve"), function (btn) {
+      btn.addEventListener("click", function () {
+        var id = btn.getAttribute("data-driver-id");
+        if (!id) return;
+        btn.disabled = true;
+        approveDriver(id).then(function () {
+          btn.disabled = false;
+          renderBoardLists();
+          syncMap();
+        });
+      });
+    });
+
+    Array.prototype.forEach.call(list.querySelectorAll(".btn-reject"), function (btn) {
+      btn.addEventListener("click", function () {
+        var id = btn.getAttribute("data-driver-id");
+        if (!id) return;
+        var name = (state.roster[id] && state.roster[id].name) || id;
+        if (!window.confirm("Reject " + name + "? They will stay locked out until approved.")) return;
+        btn.disabled = true;
+        rejectDriver(id).then(function () {
+          btn.disabled = false;
+          renderBoardLists();
+          syncMap();
+        });
+      });
+    });
+
+    Array.prototype.forEach.call(list.querySelectorAll(".btn-open-driver"), function (btn) {
+      btn.addEventListener("click", function () {
+        var id = btn.getAttribute("data-driver-id");
+        if (!id) return;
+        state.selectedDriverId = id;
+        state.driverDetailDay = chicagoToday();
+        renderBoardLists();
+      });
+    });
+
+    var closeDetail = document.getElementById("close-driver-detail");
+    if (closeDetail) {
+      closeDetail.addEventListener("click", function () {
+        state.selectedDriverId = "";
+        state.driverDetailDay = "";
+        renderBoardLists();
+      });
+    }
+    var weekPrev = document.getElementById("detail-week-prev");
+    if (weekPrev) {
+      weekPrev.addEventListener("click", function () {
+        var mon = mondayOfWeek(state.driverDetailDay || chicagoToday());
+        state.driverDetailDay = addDaysYmd(mon, -7);
+        renderBoardLists();
+      });
+    }
+    var weekNext = document.getElementById("detail-week-next");
+    if (weekNext) {
+      weekNext.addEventListener("click", function () {
+        var mon = mondayOfWeek(state.driverDetailDay || chicagoToday());
+        state.driverDetailDay = addDaysYmd(mon, 7);
+        renderBoardLists();
+      });
+    }
+    Array.prototype.forEach.call(list.querySelectorAll("[data-detail-day]"), function (btn) {
+      btn.addEventListener("click", function () {
+        state.driverDetailDay = btn.getAttribute("data-detail-day") || chicagoToday();
+        renderBoardLists();
       });
     });
   }
