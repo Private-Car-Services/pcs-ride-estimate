@@ -19,6 +19,158 @@
   };
   var ASAP_EXPIRE_MS = 20 * 60 * 1000;
 
+  var TEST_PIN = "0001";
+
+  function pcsAuth() {
+    return window.PCS_AUTH || null;
+  }
+
+  function authFetch(url, opts) {
+    var a = pcsAuth();
+    if (!a || !a.authFetch) {
+      return Promise.reject(Object.assign(new Error("auth-required"), { authRequired: true }));
+    }
+    return a.authFetch(url, opts || {});
+  }
+
+  function firebaseUid() {
+    var a = pcsAuth();
+    var u = a && a.currentUser ? a.currentUser() : null;
+    return u && u.uid ? u.uid : "";
+  }
+
+  function firebaseEmail() {
+    var a = pcsAuth();
+    var u = a && a.currentUser ? a.currentUser() : null;
+    return u && u.email ? String(u.email).trim().toLowerCase() : "";
+  }
+
+  function isOwnerSession() {
+    var a = pcsAuth();
+    return !!(a && a.isOwnerSignedIn && a.isOwnerSignedIn());
+  }
+
+  function testModeAvailable() {
+    return isOwnerSession();
+  }
+
+  function isTestRide(ride) {
+    if (ride && (ride.isTest === true || ride.isTest === 1 || String(ride.isTest).toLowerCase() === "true")) return true;
+    return !!state.isTest;
+  }
+
+  function testBannerHtml() {
+    if (!isTestRide(state) && !(state.rideStatus && state.isTest)) return "";
+    if (!state.isTest && !isTestRide(currentRide())) return "";
+    return '<p class="tag" style="background:#7a1f1f;color:#fff;">TEST RIDE — practice only · no charge · PIN 0001</p>';
+  }
+
+  var openRideAlertTimer = null;
+  var openRideAudioUnlocked = false;
+  var openRideAudioCtx = null;
+
+  function openRideAlertMuted() {
+    try { return localStorage.getItem("pcs-driver-alert-mute") === "1"; } catch (err) { return false; }
+  }
+
+  function setOpenRideAlertMuted(on) {
+    try { localStorage.setItem("pcs-driver-alert-mute", on ? "1" : "0"); } catch (err) {}
+  }
+
+  function unlockOpenRideAudio() {
+    openRideAudioUnlocked = true;
+    try {
+      var AC = window.AudioContext || window.webkitAudioContext;
+      if (AC && !openRideAudioCtx) openRideAudioCtx = new AC();
+      if (openRideAudioCtx && openRideAudioCtx.state === "suspended") openRideAudioCtx.resume();
+    } catch (err) {}
+    try {
+      if (navigator.vibrate) navigator.vibrate(30);
+    } catch (err2) {}
+  }
+
+  function beepOpenRideOnce() {
+    /* Default: short doorbell-style chime (ding–dong). Mute toggle still available. */
+    if (openRideAlertMuted() || !openRideAudioUnlocked) return;
+    try {
+      var AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC) return;
+      if (!openRideAudioCtx) openRideAudioCtx = new AC();
+      var ctx = openRideAudioCtx;
+      if (ctx.state === "suspended") ctx.resume();
+      function tone(freq, start, dur, peak) {
+        var o = ctx.createOscillator();
+        var g = ctx.createGain();
+        o.type = "sine";
+        o.frequency.value = freq;
+        g.gain.value = 0.0001;
+        o.connect(g);
+        g.connect(ctx.destination);
+        g.gain.exponentialRampToValueAtTime(peak || 0.2, start + 0.015);
+        g.gain.exponentialRampToValueAtTime(0.0001, start + dur);
+        o.start(start);
+        o.stop(start + dur + 0.02);
+      }
+      var now = ctx.currentTime;
+      tone(880, now, 0.22, 0.55); /* louder ding */          /* ding */
+      tone(659.25, now + 0.28, 0.5, 0.5); /* louder dong */ /* dong */
+    } catch (err) {}
+    try {
+      if (navigator.vibrate) navigator.vibrate([80, 40, 120]);
+    } catch (err2) {}
+  }
+
+  function countAlertableOpenRides() {
+    var list = state.openRides || [];
+    var n = 0;
+    list.forEach(function (r) {
+      if (!r) return;
+      if (r.isTest) return; /* never alert other drivers for TEST */
+      if (String(r.status || "requested") !== "requested") return;
+      n += 1;
+    });
+    return n;
+  }
+
+  function stopOpenRideAlert() {
+    if (openRideAlertTimer) {
+      clearInterval(openRideAlertTimer);
+      openRideAlertTimer = null;
+    }
+  }
+
+  function syncOpenRideAlert() {
+    if (ROLE !== "driver" || !signedIn() || !canGoOnline()) {
+      stopOpenRideAlert();
+      return;
+    }
+    if (state.screen === "trip") {
+      stopOpenRideAlert();
+      return;
+    }
+    var n = countAlertableOpenRides();
+    if (!n || openRideAlertMuted()) {
+      stopOpenRideAlert();
+      return;
+    }
+    if (openRideAlertTimer) return;
+    beepOpenRideOnce();
+    openRideAlertTimer = setInterval(function () {
+      if (!countAlertableOpenRides() || openRideAlertMuted() || state.screen === "trip") {
+        stopOpenRideAlert();
+        return;
+      }
+      beepOpenRideOnce();
+    }, 4000);
+  }
+
+  function openRideAlertToggleHtml() {
+    if (ROLE !== "driver" || !signedIn()) return "";
+    var muted = openRideAlertMuted();
+    return '<button class="btn ghost" type="button" id="toggle-ride-alert">' +
+      (muted ? "Unmute ride alert" : "Mute ride alert") + "</button>";
+  }
+
   var SAMPLE = {
     name: "",
     phone: "",
@@ -59,6 +211,8 @@
   var lastDriverPatchAt = 0;
   var lastDriverPatchLat = null;
   var lastDriverPatchLng = null;
+  var lastTripMilesUiAt = 0;
+  var lastGpsPollAt = 0;
   var accountSyncTried = false;
   var rideLookup = 0;
   var openListSeq = 0;
@@ -121,6 +275,7 @@
     pickupFromHere: false,
     loginError: "",
     gateStep: "",
+    isTest: false,
     openRides: [],
     selectedOpenCode: "",
     openListError: "",
@@ -317,10 +472,24 @@
     return "";
   }
 
+  function webhookSecret() {
+    try {
+      if (window.PCS_SYNC && window.PCS_SYNC.webhookSecret) return String(window.PCS_SYNC.webhookSecret).trim();
+    } catch (err) {}
+    return "";
+  }
+
   function notifyOwnerNewBooking(ride) {
     if (!ride || !ride.code) return;
+    if (ride.isTest) return; /* never spam Matthew / Zapier for TEST rides */
     var hook = bookingWebhookUrl();
     if (!hook) return;
+    /* Only after an authenticated Firebase save succeeded (caller must invoke post-save). */
+    var secret = webhookSecret();
+    if (!secret) {
+      /* Require shared secret so unauthenticated POSTs cannot be faked usefully once Zapier checks it. */
+      return;
+    }
     try {
       fetch(hook, {
         method: "POST",
@@ -336,7 +505,9 @@
           asap: !!ride.asap,
           pickup: [ride.pickupStreet, ride.pickupCity, ride.pickupState].filter(Boolean).join(", "),
           dropoff: [ride.dropStreet, ride.dropCity, ride.dropState].filter(Boolean).join(", "),
-          status: ride.status || "pending_owner"
+          status: ride.status || "pending_owner",
+          secret: secret,
+          webhookSecret: secret
         })
       }).catch(function () {});
     } catch (err) {}
@@ -493,7 +664,7 @@
     state.milesToday = Number(row.gpsMiles) || 0;
     state.milesStartOdo = row.startOdometer != null ? Number(row.startOdometer) : null;
     if (!syncOn()) return Promise.resolve();
-    return fetch(milesUrl(driverPresenceId(), day), {
+    return authFetch(milesUrl(driverPresenceId(), day), {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(row)
@@ -558,7 +729,8 @@
     if (ROLE !== "driver" || !signedIn() || state.milesNeedStart) return;
     if (!pos || !pos.coords) return;
     var acc = Number(pos.coords.accuracy);
-    if (isFinite(acc) && acc > 50) return;
+    /* City / pocket GPS often reports 40–70 m; 50 was dropping real fixes. */
+    if (isFinite(acc) && acc > 85) return;
     var lat = Number(pos.coords.latitude);
     var lng = Number(pos.coords.longitude);
     if (!isFinite(lat) || !isFinite(lng)) return;
@@ -566,16 +738,33 @@
     var prevLat = state.milesTrackLat;
     var prevLng = state.milesTrackLng;
     var prevAt = state.milesTrackAt || 0;
+    if (!isFinite(prevLat) || !isFinite(prevLng) || !prevAt) {
+      state.milesTrackLat = lat;
+      state.milesTrackLng = lng;
+      state.milesTrackAt = now;
+      return;
+    }
+    var dist = haversine({ lat: prevLat, lng: prevLng }, { lat: lat, lng: lng });
+    /* Keep the previous anchor until we see real movement (~8 m). */
+    if (!(dist >= 0.005)) return;
+    var hours = (now - prevAt) / 3600000;
+    if (!(hours > 0)) return;
+    var mph = dist / hours;
+    var MAX_MPH = 90;
+    /*
+      Old bug: we advanced the GPS anchor, then discarded the segment when
+      mph > 100. After iOS throttled watchPosition (Maps / locked screen),
+      the next jump looked "too fast" and those miles were permanently lost —
+      counter frozen while the car kept driving.
+      Cap credit at MAX_MPH instead of dropping the segment.
+    */
+    if (mph > MAX_MPH) {
+      if (hours < 1 / 3600) return; /* sub-second spike — ignore, keep anchor */
+      dist = MAX_MPH * hours;
+    }
     state.milesTrackLat = lat;
     state.milesTrackLng = lng;
     state.milesTrackAt = now;
-    if (!isFinite(prevLat) || !isFinite(prevLng) || !prevAt) return;
-    var dist = haversine({ lat: prevLat, lng: prevLng }, { lat: lat, lng: lng });
-    if (!(dist >= 0.009)) return; /* ~15m in miles */
-    var hours = (now - prevAt) / 3600000;
-    if (hours <= 0) return;
-    var mph = dist / hours;
-    if (mph > 100) return; /* implausible for this app */
     var row = todayMilesRow() || {
       startOdometer: state.milesStartOdo,
       gpsMiles: 0,
@@ -897,7 +1086,7 @@
     var point = { lat: +lat, lng: +lng };
     var path = state.tripPath || [];
     var last = path.length ? path[path.length - 1] : null;
-    if (last && haversine(last, point) < 0.03) return;
+    if (last && haversine(last, point) < 0.008) return; /* ~13 m */
     path.push(point);
     if (path.length > 400) path = path.slice(path.length - 400);
     state.tripPath = path;
@@ -918,7 +1107,7 @@
         hundredths = Math.round(haversine(pickup, dropoff) * 100) / 100;
         if (!(driving.key === key && driving.done)) ensureDrivingRoute(pickup, dropoff);
       }
-      // If the car drove farther than the planned route (extension / detour), bill the driven path.
+      /* Live trip: once we have a GPS path, bill the greater of planned vs driven. */
       if ((state.rideStatus === "started" || state.rideStatus === "completed") && driven != null && driven > hundredths) {
         hundredths = driven;
       }
@@ -1067,6 +1256,7 @@
   }
 
   function testSkipPayEnabled() {
+    if (state.isTest || isTestRide(currentRide())) return true; /* TEST rides never charge */
     try {
       var v = localStorage.getItem("PCS_TEST_SKIP_PAY");
       return v === "true" || v === "1" || v === "yes";
@@ -1684,14 +1874,16 @@
     }
     var local = currentRide();
     pin = normalizeStoredPin(local && local.pin);
-    if (!pin) pin = makeRidePin();
+    if (!pin) {
+      pin = (state.isTest || isTestRide(local)) ? TEST_PIN : makeRidePin();
+    }
     state.pin = pin;
     if (state.rideStatus === "requested" || state.rideStatus === "pending_owner" || state.rideStatus === "accepted" || state.rideStatus === "started") {
       saveRide(state.rideStatus || "pending_owner");
-      if (syncOn() && state.code) {
+      if (syncOn() && state.code && !(state.isTest || isTestRide(local))) {
         pinHashFor(pin, state.code).then(function (h) {
           state.pinHash = h;
-          patchRide(state.code, { pinHash: h, pin: null }).catch(function () {});
+          putRideSecrets(state.code, { pinHash: h }).catch(function () {});
         }).catch(function () {});
       }
     }
@@ -1715,20 +1907,62 @@
   function pinAcceptedAsync(entered) {
     var e = normalizeStoredPin(entered);
     if (!e || e.length !== 4) return Promise.resolve(false);
+    var ride = currentRide() || {};
+    var testRide = isTestRide(ride) || !!state.isTest;
+    /* TEST PIN 0001 works ONLY on rides flagged isTest. Never on real rides. */
+    if (testRide && e === TEST_PIN) return Promise.resolve(true);
+    if (!testRide && e === TEST_PIN) {
+      /* explicitly reject universal test pin on real rides */
+    }
     var local = normalizeStoredPin(state.pin);
     if (local && e === local) return Promise.resolve(true);
-    var hash = state.pinHash || (currentRide() && currentRide().pinHash) || "";
-    if (!hash) {
-      /* Fallback: compare plain local only (rider device). Never accept a universal test PIN. */
-      return Promise.resolve(false);
+    var code = state.code || state.driverCode || readDriverCode();
+    function checkHash(hash) {
+      if (!hash) return Promise.resolve(false);
+      return pinHashFor(e, code).then(function (got) {
+        return got === String(hash).toLowerCase();
+      }).catch(function () { return false; });
     }
-    return pinHashFor(e, state.code || state.driverCode || readDriverCode()).then(function (got) {
-      return got === String(hash).toLowerCase();
-    }).catch(function () { return false; });
+    var mem = state.pinHash || ride.pinHash || "";
+    if (mem) return checkHash(mem);
+    if (!syncOn() || !code) return Promise.resolve(false);
+    return getRideSecrets(code).then(function (secrets) {
+      var h = secrets && secrets.pinHash ? secrets.pinHash : "";
+      if (h) state.pinHash = h;
+      return checkHash(h);
+    });
   }
 
   function rideUrl(code) {
     return databaseURL() + "/rides/" + encodeURIComponent(code) + ".json";
+  }
+
+  function rideSecretsUrl(code) {
+    return databaseURL() + "/rides/" + encodeURIComponent(code) + "/secrets.json";
+  }
+
+  function putRideSecrets(code, secrets) {
+    if (!syncOn() || !code) return Promise.resolve();
+    return authFetch(rideSecretsUrl(code), {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(secrets || {})
+    }).then(function (res) {
+      if (!res.ok) throw new Error("secrets");
+      return res.text().then(function () {});
+    });
+  }
+
+  function getRideSecrets(code) {
+    if (!syncOn() || !code) return Promise.resolve(null);
+    return authFetch(rideSecretsUrl(code)).then(function (res) {
+      if (res.status === 404) return null;
+      if (!res.ok) throw new Error("secrets");
+      return res.text().then(function (text) {
+        if (!text || text === "null") return null;
+        try { return JSON.parse(text); } catch (e) { return null; }
+      });
+    }).catch(function () { return null; });
   }
 
   function coordNum(v) {
@@ -1741,7 +1975,7 @@
   }
 
   function getRide(code) {
-    return fetch(rideUrl(code)).then(function (res) {
+    return authFetch(rideUrl(code)).then(function (res) {
       if (res.status === 404) return null;
       if (!res.ok) throw new Error("ride");
       return res.text().then(function (text) {
@@ -1752,7 +1986,7 @@
   }
 
   function getRideWithEtag(code) {
-    return fetch(rideUrl(code), {
+    return authFetch(rideUrl(code), {
       headers: { "X-Firebase-ETag": "true" }
     }).then(function (res) {
       if (res.status === 404) return { ride: null, etag: "" };
@@ -1770,40 +2004,56 @@
 
   function putRide(code, ride) {
     var payload = ride && typeof ride === "object" ? Object.assign({}, ride) : ride;
+    var secretHash = "";
     if (payload && typeof payload === "object") {
+      delete payload.pin; /* never store plaintext PIN remotely */
       if (payload.pinHash) {
-        delete payload.pin; /* never store plaintext PIN remotely */
+        secretHash = payload.pinHash;
+        delete payload.pinHash; /* pinHash lives only under /secrets */
       }
+      if (payload.secrets) delete payload.secrets;
     }
-    return fetch(rideUrl(code), {
+    return authFetch(rideUrl(code), {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload)
     }).then(function (res) {
       if (!res.ok) throw new Error("ride");
       return res.text().then(function () {});
+    }).then(function () {
+      if (!secretHash) return;
+      return putRideSecrets(code, { pinHash: secretHash });
     });
   }
 
   function patchRide(code, partial) {
     var body = partial && typeof partial === "object" ? Object.assign({}, partial) : partial;
-    if (body && Object.prototype.hasOwnProperty.call(body, "pin") && body.pinHash) {
-      body.pin = null;
+    var secretHash = "";
+    if (body && typeof body === "object") {
+      if (Object.prototype.hasOwnProperty.call(body, "pin")) body.pin = null;
+      if (body.pinHash) {
+        secretHash = body.pinHash;
+        delete body.pinHash;
+      }
+      if (body.secrets) delete body.secrets;
     }
-    return fetch(rideUrl(code), {
+    return authFetch(rideUrl(code), {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body)
     }).then(function (res) {
       if (!res.ok) throw new Error("ride");
       return res.text().then(function () {});
+    }).then(function () {
+      if (!secretHash) return;
+      return putRideSecrets(code, { pinHash: secretHash });
     });
   }
 
   function patchRideIfMatch(code, partial, etag) {
     var headers = { "Content-Type": "application/json" };
     if (etag) headers["if-match"] = etag;
-    return fetch(rideUrl(code), {
+    return authFetch(rideUrl(code), {
       method: "PATCH",
       headers: headers,
       body: JSON.stringify(partial)
@@ -1871,7 +2121,7 @@
       if (!syncOn()) state.rosterStatus = "approved";
       return Promise.resolve();
     }
-    return fetch(rosterUrl(driverPresenceId())).then(function (res) {
+    return authFetch(rosterUrl(driverPresenceId())).then(function (res) {
       if (res.status === 404) {
         applyRosterRow(null);
         return null;
@@ -1893,7 +2143,7 @@
     if (!syncOn() || !account || !account.email) return Promise.resolve();
     var id = String(account.email).toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 48);
     if (!id) return Promise.resolve();
-    return fetch(rosterUrl(id)).then(function (res) {
+    return authFetch(rosterUrl(id)).then(function (res) {
       return res.text().then(function (text) {
         var existing = null;
         if (text && text !== "null") {
@@ -1908,6 +2158,7 @@
           name: account.name || "",
           phone: account.phone || "",
           email: String(account.email || "").toLowerCase(),
+          uid: firebaseUid() || account.uid || "",
           commissionPct: (existing && existing.commissionPct != null) ? existing.commissionPct : Math.round(DRIVER_COMMISSION_RATE * 100),
           active: false,
           approvalStatus: "pending",
@@ -1933,7 +2184,7 @@
               updatedAt: row.updatedAt
             }
           : row;
-        return fetch(rosterUrl(id), {
+        return authFetch(rosterUrl(id), {
           method: method,
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(body)
@@ -1949,18 +2200,19 @@
   }
 
   function syncAccountProfile(role, account) {
-    /* Best-effort multi-device profile mirror (no password). Full Auth still required for real accounts. */
-    if (!syncOn() || !account || !account.email) return Promise.resolve();
-    var id = String(account.email).toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 48);
-    if (!id) return Promise.resolve();
+    /* Profile under /rides/USRACCTS/{uid}. Password lives only in Firebase Auth. */
+    if (!syncOn() || !account) return Promise.resolve();
+    var uid = firebaseUid() || account.uid || "";
+    if (!uid) return Promise.resolve();
     var row = {
+      uid: uid,
       role: role || "",
       name: account.name || "",
       phone: account.phone || "",
-      email: String(account.email || "").toLowerCase(),
+      email: String(account.email || firebaseEmail() || "").toLowerCase(),
       updatedAt: Date.now()
     };
-    return fetch(accountsHubUrl(id), {
+    return authFetch(accountsHubUrl(uid), {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(row)
@@ -2084,7 +2336,7 @@
     stats.rideTotalCents += fareTotal;
     writeDayStats(day, stats);
     if (syncOn()) {
-      fetch(historyUrl(driverPresenceId(), code), {
+      authFetch(historyUrl(driverPresenceId(), code), {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(entry)
@@ -2118,13 +2370,14 @@
       pickupLng: ride ? ride.pickupLng : null,
       dropLat: ride ? ride.dropLat : null,
       dropLng: ride ? ride.dropLng : null,
+      isTest: !!(ride && ride.isTest),
       updatedAt: Date.now()
     };
   }
 
   function putOpenRide(code, ride) {
     if (!syncOn() || !code) return Promise.resolve();
-    return fetch(openIndexUrl(code), {
+    return authFetch(openIndexUrl(code), {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(openSummaryFromRide(code, ride))
@@ -2136,7 +2389,7 @@
 
   function deleteOpenRide(code) {
     if (!syncOn() || !code) return Promise.resolve();
-    return fetch(openIndexUrl(code), { method: "DELETE" }).then(function (res) {
+    return authFetch(openIndexUrl(code), { method: "DELETE" }).then(function (res) {
       if (!res.ok && res.status !== 404) throw new Error("open");
       return res.text().then(function () {});
     });
@@ -2144,7 +2397,7 @@
 
   function listOpenSummariesRaw() {
     if (!syncOn()) return Promise.resolve([]);
-    return fetch(openIndexUrl()).then(function (res) {
+    return authFetch(openIndexUrl()).then(function (res) {
       if (!res.ok) return [];
       return res.text().then(function (text) {
         if (!text || text === "null") return [];
@@ -2167,7 +2420,7 @@
 
   function listOpenRides() {
     if (!syncOn()) return Promise.resolve([]);
-    return fetch(openIndexUrl()).then(function (res) {
+    return authFetch(openIndexUrl()).then(function (res) {
       if (res.status === 401 || res.status === 403) {
         var err = new Error("open-denied");
         err.denied = true;
@@ -2186,6 +2439,7 @@
           if (row.kind === "driver" || row.kind === "driverPresence") return;
           if (code === "drivers") return;
           if ((row.status || "requested") !== "requested") return;
+          if (row.isTest && !isOwnerSession()) return; /* TEST rides never on other drivers\' boards */
           if (!isCoord(row.pickupLat) || !isCoord(row.pickupLng)) return;
           var asapRow = !!(row.asap === true || String(row.asap || "").toLowerCase() === "true" ||
             String(row.when || "").toLowerCase() === "asap" || String(row.time || "").toLowerCase() === "asap");
@@ -2244,7 +2498,7 @@
   function postRefusal(record) {
     if (!syncOn() || !record) return Promise.resolve({ ok: false, reason: "no-sync" });
     var id = makeRefusalId();
-    return fetch(refusalUrl(id), {
+    return authFetch(refusalUrl(id), {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(record)
@@ -2274,7 +2528,7 @@
       gpsMilesToday: Number(state.milesToday) || 0,
       startOdometer: state.milesStartOdo
     };
-    return fetch(driversUrl(driverPresenceId()), {
+    return authFetch(driversUrl(driverPresenceId()), {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body)
@@ -2286,12 +2540,12 @@
 
   function clearDriverPresence() {
     if (!syncOn() || ROLE !== "driver") return Promise.resolve();
-    return fetch(driversUrl(driverPresenceId()), { method: "DELETE" }).catch(function () {});
+    return authFetch(driversUrl(driverPresenceId()), { method: "DELETE" }).catch(function () {});
   }
 
   function listOnlineDrivers() {
     if (!syncOn()) return Promise.resolve([]);
-    return fetch(driversUrl()).then(function (res) {
+    return authFetch(driversUrl()).then(function (res) {
       if (res.status === 401 || res.status === 403) {
         var err = new Error("drivers-denied");
         err.denied = true;
@@ -2355,18 +2609,35 @@
     remote.requestedAt = Date.now();
     remote.createdAt = remote.requestedAt;
     remote.updatedAt = remote.requestedAt;
+    remote.isTest = !!state.isTest && testModeAvailable();
+    var uid = firebaseUid();
+    if (uid) remote.riderUid = uid;
+    if (firebaseEmail()) remote.riderEmail = firebaseEmail();
     delete remote.pin; /* plaintext PIN stays on the rider device only */
-    var pinPromise = pinHashFor(state.pin || remote.pin || makeRidePin(), code).then(function (h) {
-      remote.pinHash = h;
-      state.pinHash = h;
-      return remote;
-    });
+    delete remote.pinHash;
+    var pin = state.pin || makeRidePin();
+    if (remote.isTest) {
+      pin = TEST_PIN;
+      state.pin = TEST_PIN;
+    } else {
+      state.pin = normalizeStoredPin(pin) || makeRidePin();
+      pin = state.pin;
+    }
+    var pinPromise = remote.isTest
+      ? Promise.resolve(remote)
+      : pinHashFor(pin, code).then(function (h) {
+          remote.pinHash = h; /* putRide moves this under /secrets */
+          state.pinHash = h;
+          return remote;
+        });
     return pinPromise.then(function (payload) {
       return putRide(code, payload).then(function () {
-        var openSource = Object.assign({}, payload, { status: "pending_owner" });
-        return putOpenRide(code, openSource).then(function () {
+        /* TEST rides go on REQUESTS with isTest so owner driver session can see them; listOpenRides hides them from everyone else. */
+        var openPromise = putOpenRide(code, Object.assign({}, payload, { status: "pending_owner", isTest: !!payload.isTest }));
+        return openPromise.then(function () {
           notifyOwnerNewBooking(payload);
           state.rideStatus = "pending_owner";
+          state.isTest = !!payload.isTest;
           saveRide("pending_owner");
           return payload;
         });
@@ -2447,7 +2718,8 @@
     var est = estimate();
     return (
       '<article class="card open-ride-card" id="open-ride-card">' +
-      '<p class="tag">Open request</p>' +
+      '<p class="tag">' + (state.isTest ? "TEST request" : "Open request") + "</p>" +
+      (state.isTest ? '<p class="tag" style="background:#7a1f1f;color:#fff;">TEST — owner practice only</p>' : "") +
       '<div class="who">' + photoImg(state.riderPhoto) +
       "<div>" +
       '<h2 style="font-size:18px">' + esc(state.name || "Rider") + "</h2>" +
@@ -2613,6 +2885,10 @@
   }
 
   function signedIn() {
+    var a = pcsAuth();
+    if (a && a.hasConfig && a.hasConfig()) {
+      return !!(a.currentUser && a.currentUser());
+    }
     return !!readSession();
   }
 
@@ -2698,6 +2974,7 @@
       '<label for="login-pass">Password</label>' +
       '<input id="login-pass" name="password" type="password" autocomplete="current-password" required>' +
       '<p class="error" id="login-error" role="alert">' + esc(state.loginError || "") + "</p>" +
+      '<p class="fine">Accounts use Firebase Auth (email + password). Old phone-only passwords no longer work — create an account again if needed.</p>' +
       '<button class="btn" type="submit">Log in</button>' +
       "</form>" +
       '<a class="btn secondary" href="signup/?v=21">Create an account</a>'
@@ -2736,6 +3013,11 @@
       '<div class="app-nav">' + logoutLine() + "</div>" +
       "<h2>Request a ride</h2>" +
       "<p class=\"lede\">Request goes to Private Car Services for confirmation. Card charges are not taken on this screen.</p>" +
+      (testModeAvailable()
+        ? ('<div class="card" style="border:1px solid #7a1f1f;">' +
+           '<label><input type="checkbox" id="test-ride-toggle"' + (state.isTest ? " checked" : "") + '> <strong>TEST MODE</strong> — practice only, PIN 0001, no charge, not shown to other drivers</label></div>')
+        : "") +
+      (state.isTest ? testBannerHtml() : "") +
       "<form id=\"ride-form\" autocomplete=\"off\">" +
       '<div class="group"><p class="group-title">Pickup</p>' +
       locateField("pickup-street", "Street", state.pickupStreet, "pickup-results", "use-location") +
@@ -2942,6 +3224,7 @@
   }
 
   function customerTrip() {
+    var testTop = testBannerHtml();
     var both = !!(placeCoords("pickup") && placeCoords("drop"));
     var driver = savedDriverPoint();
     var caption = !both
@@ -2951,6 +3234,7 @@
     var started = state.rideStatus === "started";
     var completed = state.rideStatus === "completed";
     return (
+      testTop +
       '<button class="btn ghost" type="button" id="back-home">← Request</button>' +
       (completed
         ? '<div class="status"><i></i><span>Ride complete</span></div>'
@@ -2988,6 +3272,7 @@
   }
 
   function customerWaiting() {
+    var testTop = testBannerHtml();
     var both = !!(placeCoords("pickup") && placeCoords("drop"));
     var driver = savedDriverPoint();
     var caption = !both ? "Sample map · Willis" : (driver ? "Your driver" : "Your route");
@@ -3015,7 +3300,7 @@
       driverIdentityLine() +
       driverEtaLine() +
       "<p class=\"lede\">" + esc(pickupLine()) + " → " + esc(dropLine()) + "<br>" + esc(prettyWhen()) + "</p>" +
-      riderPinBanner() +
+      testTop + riderPinBanner() +
       customerMapBlock(caption, driver) +
       moneyCard() +
       paymentHoldCopy() +
@@ -3078,6 +3363,11 @@
     var incomingPin = normalizeStoredPin(ride.pin);
     if (incomingPin) state.pin = incomingPin;
     if (ride.pinHash) state.pinHash = ride.pinHash;
+    state.isTest = !!ride.isTest;
+    if (state.isTest) {
+      state.pin = TEST_PIN;
+      state.paymentSkipped = true;
+    }
   }
 
   function currentRide() {
@@ -3187,6 +3477,11 @@
       rideOut.pin = pinOut;
     }
     if (state.pinHash) rideOut.pinHash = state.pinHash;
+    rideOut.isTest = !!state.isTest;
+    if (rideOut.isTest) {
+      rideOut.pin = TEST_PIN;
+      delete rideOut.pinHash;
+    }
     localStorage.setItem(STORE, JSON.stringify(rideOut));
     if (ROLE === "customer") writeRideOwner(readSession());
   }
@@ -3227,6 +3522,7 @@
     state.pinHash = "";
     state.pinDraft = "";
     state.pinError = "";
+    state.isTest = false;
     state.dropFix = null;
     state.pickupFromHere = false;
     state.tripPath = [];
@@ -3368,6 +3664,7 @@
         : (
           "<h2>Open requests</h2>" +
           driverBoardStatus() +
+          openRideAlertToggleHtml() +
           '<div class="map-stage board-map">' +
           '<div id="live-map" role="img" aria-label="Open ride requests map"></div>' +
           '<p class="map-caption">You and open rider pickups</p>' +
@@ -3392,10 +3689,10 @@
     return (
       '<div class="card" id="driver-fare-card">' +
       '<p class="tag">' + (finalLabel || "Live fare · updates with the trip") + "</p>" +
-      '<div class="money-row"><span>Miles</span><span>' + est.raw.toFixed(2) + " mi, billed as " + est.billed + "</span></div>" +
-      '<div class="money-row"><span>Fare before tax</span><span>' + money(est.sub) + "</span></div>" +
-      '<div class="money-row"><span>Texas tax 8.25%</span><span>' + money(est.tax) + "</span></div>" +
-      '<div class="total-row"><span>' + (finalLabel ? "Final total" : "Estimated total") + "</span><span>" + money(est.total) + "</span></div>" +
+      '<div class="money-row"><span>Miles</span><span data-live-miles>' + est.raw.toFixed(2) + " mi, billed as " + est.billed + "</span></div>" +
+      '<div class="money-row"><span>Fare before tax</span><span data-live-sub>' + money(est.sub) + "</span></div>" +
+      '<div class="money-row"><span>Texas tax 8.25%</span><span data-live-tax>' + money(est.tax) + "</span></div>" +
+      '<div class="total-row"><span>' + (finalLabel ? "Final total" : "Estimated total") + "</span><span data-live-total>" + money(est.total) + "</span></div>" +
       commissionLine() +
       '<p class="fine">Miles round up. Tax is estimate-only, not a charge.</p></div>'
     );
@@ -3404,6 +3701,7 @@
   function driverTrip() {
     var started = state.rideStatus === "started";
     var completed = state.rideStatus === "completed";
+    var testTop = testBannerHtml();
     var pinGate = "";
     var dropEditor = "";
     var completeBtn = "";
@@ -3412,7 +3710,9 @@
       pinGate = (
         '<div class="card pin-gate">' +
         '<p class="tag">Start the ride</p>' +
-        '<p class="lede">Ask the rider for their 4-digit PIN, then enter it here.</p>' +
+        '<p class="lede">' + (state.isTest
+          ? "TEST ride — use PIN 0001 to start."
+          : "Ask the rider for their 4-digit PIN, then enter it here.") + "</p>" +
         '<form id="start-pin-form" autocomplete="off">' +
         '<label for="start-pin">PIN</label>' +
         '<input id="start-pin" name="pin" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="4" autocomplete="one-time-code" value="' +
@@ -3455,6 +3755,7 @@
     }
     var statusLabel = completed ? "Ride complete" : (started ? "Ride started" : "Heading to pickup");
     return (
+      testTop +
       (completed ? "" : '<button class="btn ghost" type="button" id="back-driver">← Requests</button>') +
       '<p class="fine" id="miles-today">' + esc(milesTodayLabel()) + "</p>" +
       '<div class="status"><i></i><span>' + statusLabel + "</span></div>" +
@@ -3621,34 +3922,34 @@
         state.loginError = "";
         var emailEl = document.getElementById("login-email");
         var passEl = document.getElementById("login-pass");
-        var loginValue = emailEl ? emailEl.value.trim() : "";
-        var loginEmail = loginValue.toLowerCase();
+        var loginEmail = emailEl ? emailEl.value.trim().toLowerCase() : "";
         var password = passEl ? passEl.value : "";
-        var account = accountForRole();
-        if (!account || (!account.email && !account.username) || !account.passwordHash) {
-          state.loginError = "No account on this phone yet. Create one first.";
+        var a = pcsAuth();
+        if (!a || !a.hasConfig || !a.hasConfig()) {
+          state.loginError = (a && a.initError && a.initError()) || "Firebase Auth is not configured yet. Create a Firebase account after Matthew finishes Auth setup — local-only passwords no longer sign you in.";
           render();
           return;
         }
-        var emailMatches = account.email && loginEmail === String(account.email).trim().toLowerCase();
-        var legacyUsernameMatches = account.username && loginEmail === String(account.username).trim().toLowerCase();
-        if (!emailMatches && !legacyUsernameMatches) {
-          state.loginError = "That email or password does not match the account on this phone.";
+        if (!loginEmail || !password) {
+          state.loginError = "Enter email and password.";
           render();
           return;
         }
-        if (!window.crypto || !crypto.subtle) {
-          state.loginError = "This browser cannot check the password. Try Safari or Chrome.";
-          render();
-          return;
-        }
-        sha256Hex(password).then(function (hex) {
-          if (hex !== account.passwordHash) {
-            state.loginError = "That email or password does not match the account on this phone.";
-            render();
-            return;
-          }
-          writeSession(account.email || account.username);
+        a.signInEmailPassword(loginEmail, password).then(function () {
+          var account = accountForRole() || {};
+          account.email = loginEmail;
+          account.uid = firebaseUid();
+          if (!account.name) account.name = loginEmail.split("@")[0];
+          /* Keep profile cache on device (no passwordHash authority). */
+          try {
+            var key = ROLE === "driver" ? "pcs-driver-account" : "pcs-rider-account";
+            var prev = accountForRole() || {};
+            var next = Object.assign({}, prev, { email: loginEmail, uid: firebaseUid() });
+            delete next.passwordHash;
+            localStorage.setItem(key, JSON.stringify(next));
+            account = next;
+          } catch (err) {}
+          writeSession(loginEmail);
           state.loginError = "";
           state.gateStep = "";
           state.screen = "home";
@@ -3665,14 +3966,51 @@
               render();
             });
             return;
-          } else {
-            maybeRestoreCustomerRide();
           }
+          maybeRestoreCustomerRide();
           render();
-        }).catch(function () {
-          state.loginError = "Could not check the password on this phone.";
+        }).catch(function (err) {
+          var msg = a.authErrorMessage ? a.authErrorMessage(err) : "Sign-in failed.";
+          var local = accountForRole();
+          if (local && local.passwordHash && !local.uid) {
+            msg = "This phone has an old on-device account. Create a Firebase account (same email) under Create an account, then log in.";
+          }
+          state.loginError = msg;
           render();
         });
+      });
+    }
+    var alertToggle = document.getElementById("toggle-ride-alert");
+    if (alertToggle) {
+      alertToggle.addEventListener("click", function () {
+        unlockOpenRideAudio();
+        setOpenRideAlertMuted(!openRideAlertMuted());
+        syncOpenRideAlert();
+        render();
+      });
+    }
+    /* First tap unlocks Web Audio for ride alerts (browser autoplay policy). */
+    if (ROLE === "driver") {
+      ["accept-ride", "deny-ride", "open-hub", "miles-start-form", "log-out"].forEach(function (id) {
+        var el = document.getElementById(id);
+        if (el) el.addEventListener("click", unlockOpenRideAudio, { once: false });
+      });
+      document.addEventListener("pointerdown", unlockOpenRideAudio, { once: true });
+    }
+    var testToggle = document.getElementById("test-ride-toggle");
+    if (testToggle) {
+      testToggle.addEventListener("change", function () {
+        if (!testModeAvailable()) {
+          state.isTest = false;
+          render();
+          return;
+        }
+        state.isTest = !!testToggle.checked;
+        if (state.isTest) {
+          state.paymentSkipped = true;
+          state.pin = TEST_PIN;
+        }
+        render();
       });
     }
     var logout = document.getElementById("log-out");
@@ -3690,6 +4028,7 @@
       });
     }
     function finishDriverLogout() {
+      stopOpenRideAlert();
       if (ROLE === "driver") {
         clearDriverPresence();
         state.milesEndPrompt = false;
@@ -3698,9 +4037,12 @@
         state.milesTrackAt = 0;
       }
       writeSession("");
+      var a = pcsAuth();
+      if (a && a.signOut) a.signOut();
       state.loginError = "";
       state.gateStep = "";
       state.screen = "home";
+      state.isTest = false;
       state.onlineDrivers = [];
       state.onlineStamp = "";
       render();
@@ -3847,11 +4189,12 @@
           state.driverLat = null;
           state.driverLng = null;
           state.code = syncOn() ? makeRideCode() : "";
-          state.pin = makeRidePin();
+          if (state.isTest && !testModeAvailable()) state.isTest = false;
+          state.pin = (state.isTest ? TEST_PIN : makeRidePin());
           state.pinHash = "";
           state.pinDraft = "";
           state.pinError = "";
-          state.paymentSkipped = false;
+          state.paymentSkipped = !!state.isTest; /* TEST rides never charge / never open Square */
           geocodeMissing().then(function () {
             saveRide("pending_owner", { clearDriver: true });
             var created = currentRide();
@@ -4227,6 +4570,7 @@
       state.openRides = [];
       state.openListError = "";
       state.openListLoading = false;
+      stopOpenRideAlert();
       var statusOff = document.getElementById("board-status");
       if (statusOff) statusOff.textContent = driverBoardStatusInner();
       syncDriverBoardMarkers();
@@ -4245,6 +4589,7 @@
       var changed = stamp !== state.openListStamp || !!prevError;
       state.openListStamp = stamp;
       state.openRides = rides;
+      syncOpenRideAlert();
       var selectionCleared = false;
       if (state.selectedOpenCode) {
         var still = rides.some(function (r) { return r.code === state.selectedOpenCode; });
@@ -4272,6 +4617,7 @@
       var next = err && err.denied ? "open-denied" : "open-error";
       var changed = state.openListError !== next;
       state.openListError = next;
+      stopOpenRideAlert();
       if (force) {
         render();
         return;
@@ -4311,6 +4657,7 @@
   }
 
   function acceptSelectedOpenRide() {
+    stopOpenRideAlert();
     if (!state.selectedOpenCode && !state.code) return;
     if (!isDriverApproved()) {
       state.openListError = "pending-approval";
@@ -4375,13 +4722,21 @@
         bad.taken = true;
         throw bad;
       }
+      if (ride.isTest && !isOwnerSession()) {
+        var notest = new Error("test-ride");
+        notest.taken = true;
+        throw notest;
+      }
+      if (ride.isTest) state.isTest = true;
       if (ride.pinHash) state.pinHash = ride.pinHash;
       var patch = {
         status: "accepted",
         acceptedAt: Date.now(),
         driverId: driverPresenceId(),
+        driverUid: firebaseUid() || "",
         updatedAt: Date.now()
       };
+      if (ride.isTest) patch.isTest = true;
       if (state.driverName) patch.driverName = state.driverName;
       if (state.driverPhone) patch.driverPhone = state.driverPhone;
       if (safePhoto(state.driverPhoto)) patch.driverPhoto = safePhoto(state.driverPhoto);
@@ -4418,6 +4773,7 @@
   }
 
   function denySelectedOpenRide() {
+    stopOpenRideAlert();
     var code = state.selectedOpenCode || state.code || "";
     var account = readDriverAccount();
     var record = buildRefusalRecord(currentRide() || selectedOpenRide(), account);
@@ -4729,51 +5085,96 @@
     if (illus) illus.classList.remove("is-hidden");
   }
 
+  function refreshLiveTripMilesUi(force) {
+    if (ROLE !== "driver" || state.rideStatus !== "started") return;
+    var now = Date.now();
+    if (!force && now - lastTripMilesUiAt < 1500) return;
+    lastTripMilesUiAt = now;
+    var card = document.getElementById("driver-fare-card");
+    if (!card) return;
+    var est = estimate();
+    if (!est.ready) return;
+    var milesEl = card.querySelector("[data-live-miles]");
+    var subEl = card.querySelector("[data-live-sub]");
+    var taxEl = card.querySelector("[data-live-tax]");
+    var totalEl = card.querySelector("[data-live-total]");
+    if (milesEl) milesEl.textContent = est.raw.toFixed(2) + " mi, billed as " + est.billed;
+    if (subEl) subEl.textContent = money(est.sub);
+    if (taxEl) taxEl.textContent = money(est.tax);
+    if (totalEl) totalEl.textContent = money(est.total);
+  }
+
+  function onGpsFix(pos) {
+    if (!pos || !pos.coords) return;
+    var first = !isFinite(state.hereLat);
+    state.hereLat = pos.coords.latitude;
+    state.hereLng = pos.coords.longitude;
+    state.driverLat = state.hereLat;
+    state.driverLng = state.hereLng;
+    if (ROLE === "driver") trackDailyMiles(pos);
+    var ride = currentRide();
+    if (syncOn()) {
+      var driverCode = state.driverCode || readDriverCode();
+      if (!ride || !driverCode || ride.code !== driverCode) ride = null;
+    }
+    if (ride && (ride.driverLat !== state.hereLat || ride.driverLng !== state.hereLng)) {
+      ride.driverLat = state.hereLat;
+      ride.driverLng = state.hereLng;
+      localStorage.setItem(STORE, JSON.stringify(ride));
+    }
+    var pathBefore = (state.tripPath || []).length;
+    recordTripPoint(state.hereLat, state.hereLng);
+    var pathGrew = (state.tripPath || []).length > pathBefore;
+    maybePatchDriverLocation();
+    if (pathGrew || state.rideStatus === "started") refreshLiveTripMilesUi(pathGrew);
+    if (ROLE === "driver" && state.screen === "home" && boardMapStillMounted()) {
+      syncDriverBoardMarkers();
+      publishDriverPresence();
+    } else if (carMarker) {
+      var dest;
+      if (state.screen === "home") {
+        dest = { lat: state.hereLat, lng: state.hereLng };
+      } else if (state.rideStatus === "started" && placeCoords("drop")) {
+        dest = placeCoords("drop");
+      } else {
+        dest = routePoints().pickup;
+      }
+      placeCar(state.hereLat, state.hereLng, bearing(
+        { lat: state.hereLat, lng: state.hereLng },
+        dest
+      ));
+      if (ROLE === "driver") publishDriverPresence();
+    } else if (first) {
+      render();
+      if (ROLE === "driver") publishDriverPresence();
+    } else if (ROLE === "driver") {
+      publishDriverPresence();
+    }
+  }
+
+  function nudgeGps() {
+    if (!navigator.geolocation || ROLE !== "driver" || !signedIn()) return;
+    if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
+    var now = Date.now();
+    if (now - lastGpsPollAt < 3500) return;
+    lastGpsPollAt = now;
+    navigator.geolocation.getCurrentPosition(onGpsFix, function () {}, {
+      enableHighAccuracy: true,
+      maximumAge: 0,
+      timeout: 8000
+    });
+  }
+
   function followGps() {
-    if (!navigator.geolocation || state.gpsWatch) return;
-    state.gpsWatch = navigator.geolocation.watchPosition(function (pos) {
-      var first = !isFinite(state.hereLat);
-      state.hereLat = pos.coords.latitude;
-      state.hereLng = pos.coords.longitude;
-      state.driverLat = state.hereLat;
-      state.driverLng = state.hereLng;
-      if (ROLE === "driver") trackDailyMiles(pos);
-      var ride = currentRide();
-      if (syncOn()) {
-        var driverCode = state.driverCode || readDriverCode();
-        if (!ride || !driverCode || ride.code !== driverCode) ride = null;
-      }
-      if (ride && (ride.driverLat !== state.hereLat || ride.driverLng !== state.hereLng)) {
-        ride.driverLat = state.hereLat;
-        ride.driverLng = state.hereLng;
-        localStorage.setItem(STORE, JSON.stringify(ride));
-      }
-      recordTripPoint(state.hereLat, state.hereLng);
-      maybePatchDriverLocation();
-      if (ROLE === "driver" && state.screen === "home" && boardMapStillMounted()) {
-        syncDriverBoardMarkers();
-        publishDriverPresence();
-      } else if (carMarker) {
-        var dest;
-        if (state.screen === "home") {
-          dest = { lat: state.hereLat, lng: state.hereLng };
-        } else if (state.rideStatus === "started" && placeCoords("drop")) {
-          dest = placeCoords("drop");
-        } else {
-          dest = routePoints().pickup;
-        }
-        placeCar(state.hereLat, state.hereLng, bearing(
-          { lat: state.hereLat, lng: state.hereLng },
-          dest
-        ));
-        if (ROLE === "driver") publishDriverPresence();
-      } else if (first) {
-        render();
-        if (ROLE === "driver") publishDriverPresence();
-      } else if (ROLE === "driver") {
-        publishDriverPresence();
-      }
-    }, function () {}, { enableHighAccuracy: true, maximumAge: 2000, timeout: 10000 });
+    if (!navigator.geolocation) return;
+    if (!state.gpsWatch) {
+      state.gpsWatch = navigator.geolocation.watchPosition(onGpsFix, function () {}, {
+        enableHighAccuracy: true,
+        maximumAge: 1000,
+        timeout: 15000
+      });
+    }
+    nudgeGps();
   }
 
   document.addEventListener("DOMContentLoaded", function () {
@@ -4835,6 +5236,16 @@
     window.addEventListener("pagehide", function () {
       if (ROLE === "driver" && signedIn()) clearDriverPresence();
     });
+    document.addEventListener("visibilitychange", function () {
+      if (document.visibilityState !== "visible") return;
+      if (ROLE === "driver" && signedIn()) nudgeGps();
+    });
+    setInterval(function () {
+      if (ROLE !== "driver" || !signedIn()) return;
+      if (document.visibilityState === "hidden") return;
+      /* Backup when watchPosition goes quiet in foreground (Safari quirk). */
+      if (state.screen === "home" || driverMidRide()) nudgeGps();
+    }, 4000);
     if (ROLE !== "driver" && signedIn()) {
       maybeRestoreCustomerRide();
     }
