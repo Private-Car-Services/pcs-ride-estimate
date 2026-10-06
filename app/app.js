@@ -95,6 +95,7 @@
   }
 
   function unlockOpenRideAudio() {
+    keepRideAudioAwake();
     openRideAudioUnlocked = true;
     try {
       var AC = window.AudioContext || window.webkitAudioContext;
@@ -138,15 +139,8 @@
   }
 
   function countAlertableOpenRides() {
-    var list = state.openRides || [];
-    var n = 0;
-    list.forEach(function (r) {
-      if (!r) return;
-      if (r.isTest) return; /* never alert other drivers for TEST */
-      if (String(r.status || "requested") !== "requested") return;
-      n += 1;
-    });
-    return n;
+    /* v51: skips rides this driver denied; TEST rides only reach the owner's login (listOpenRides filters them). */
+    return alertableOpenRides().length;
   }
 
   function stopOpenRideAlert() {
@@ -157,14 +151,13 @@
   }
 
   function syncOpenRideAlert() {
-    if (ROLE !== "driver" || !signedIn() || !canGoOnline()) {
+    if (ROLE !== "driver" || !signedIn() || !canGoOnline() || !driverCanTakeNew()) {
       stopOpenRideAlert();
+      closeRidePopup();
       return;
     }
-    if (state.screen === "trip") {
-      stopOpenRideAlert();
-      return;
-    }
+    /* v51: pop-up + chime on every driver page (map, Home menu, Today, Earnings, finished trip). */
+    syncRidePopup();
     var n = countAlertableOpenRides();
     if (!n || openRideAlertMuted()) {
       stopOpenRideAlert();
@@ -173,7 +166,7 @@
     if (openRideAlertTimer) return;
     beepOpenRideOnce();
     openRideAlertTimer = setInterval(function () {
-      if (!countAlertableOpenRides() || openRideAlertMuted() || state.screen === "trip") {
+      if (!countAlertableOpenRides() || openRideAlertMuted() || !driverCanTakeNew()) {
         stopOpenRideAlert();
         return;
       }
@@ -186,6 +179,599 @@
     var muted = openRideAlertMuted();
     return '<button class="btn ghost" type="button" id="toggle-ride-alert">' +
       (muted ? "Unmute ride alert" : "Mute ride alert") + "</button>";
+  }
+
+  /* ================= v51 (Oct 6 test-ride fixes) ================= */
+
+  /* ---- 3. Ride alert on every driver page + full-screen "Ride requested" pop-up ---- */
+  var DISMISS_KEY = "pcs-driver-dismissed-rides"; /* shared with driver/ride-alert.js (Profile page) */
+  var DISMISS_MS = 12 * 3600000;
+  var openRideAudioPrimed = false;
+
+  function readDismissed() {
+    try {
+      var m = JSON.parse(localStorage.getItem(DISMISS_KEY) || "{}");
+      return m && typeof m === "object" ? m : {};
+    } catch (e) { return {}; }
+  }
+
+  function rideDismissed(code) {
+    var t = Number(readDismissed()[code]) || 0;
+    return t > 0 && Date.now() - t < DISMISS_MS;
+  }
+
+  function dismissRideCode(code) {
+    if (!code) return;
+    var m = readDismissed();
+    var now = Date.now();
+    Object.keys(m).forEach(function (k) { if (!(now - Number(m[k]) < DISMISS_MS)) delete m[k]; });
+    m[code] = now;
+    try { localStorage.setItem(DISMISS_KEY, JSON.stringify(m)); } catch (e) {}
+  }
+
+  /* Free for a new ride: map board, Home menu pages, or a finished trip. Never mid-ride (one ride at a time). */
+  function driverCanTakeNew() {
+    if (ROLE !== "driver" || !signedIn()) return false;
+    if (state.screen === "home") return true;
+    return state.screen === "trip" && state.rideStatus === "completed";
+  }
+
+  function alertableOpenRides() {
+    return (state.openRides || []).filter(function (r) {
+      if (!r || !r.code) return false;
+      if (r.isTest && !isOwnerSession()) return false;
+      if (String(r.status || "requested") !== "requested") return false;
+      return !rideDismissed(r.code);
+    });
+  }
+
+  /* iOS: keep Web Audio alive. Any tap resumes it (iOS suspends it after the app is hidden). */
+  function keepRideAudioAwake() {
+    if (ROLE !== "driver") return;
+    openRideAudioUnlocked = true;
+    try {
+      var AC = window.AudioContext || window.webkitAudioContext;
+      if (AC && !openRideAudioCtx) openRideAudioCtx = new AC();
+      var ctx = openRideAudioCtx;
+      if (!ctx) return;
+      if (ctx.state !== "running" && ctx.resume) ctx.resume();
+      if (!openRideAudioPrimed) {
+        var src = ctx.createBufferSource();
+        src.buffer = ctx.createBuffer(1, 1, 22050);
+        src.connect(ctx.destination);
+        src.start(0);
+        openRideAudioPrimed = true;
+      }
+    } catch (err) {}
+  }
+
+  var ridePopupCode = "";
+  var ridePopupInfo = {}; /* code -> { photo, fareCents, road } */
+  var ridePopupBusy = {};
+  var ridePopupHtmlKey = "";
+
+  function closeRidePopup() {
+    ridePopupCode = "";
+    ridePopupHtmlKey = "";
+    var el = document.getElementById("ride-popup");
+    if (el && el.parentNode) el.parentNode.removeChild(el);
+  }
+
+  function rowAddress(row, prefix) {
+    if (!row) return "";
+    return row[prefix + "Address"] ||
+      addressLine(row[prefix + "Street"], row[prefix + "City"], row[prefix + "State"], row[prefix + "Line2"], row[prefix + "Zip"]);
+  }
+
+  /* Fare for a ride that is not on screen: run the normal estimate() on a copy of the state, then put everything back. */
+  function estimateForRide(ride, roadMiles) {
+    var keep = Object.assign({}, state);
+    var keepDriving = driving;
+    var out = null;
+    try {
+      applyRide(ride);
+      state.rideStatus = "requested";
+      state.tripPath = [];
+      state.useDrivenMiles = false;
+      state.tripType = "auto";
+      var a = placeCoords("pickup");
+      var b = placeCoords("drop");
+      if (a && b) {
+        var miles = roadMiles != null && !viaPoints().length ? roadMiles : Math.round(straightChainMiles(a, b) * 1.3 * 100) / 100;
+        driving = { key: routeKey(a, b), pending: "", done: true, miles: miles, line: null };
+        var est = estimate();
+        if (est.ready) out = est;
+      }
+    } catch (e) {
+      out = null;
+    }
+    driving = keepDriving;
+    Object.keys(state).forEach(function (k) { if (!Object.prototype.hasOwnProperty.call(keep, k)) delete state[k]; });
+    Object.assign(state, keep);
+    return out;
+  }
+
+  function loadRidePopupInfo(code) {
+    if (ridePopupBusy[code] || ridePopupInfo[code]) return;
+    ridePopupBusy[code] = true;
+    getRide(code).then(function (ride) {
+      if (!ride) return;
+      if (!ride.code) ride.code = code;
+      var info = { photo: safePhoto(ride.riderPhoto), fareCents: null, passengers: ride.passengers };
+      var est = estimateForRide(ride, null);
+      if (est) info.fareCents = est.total;
+      ridePopupInfo[code] = info;
+      syncRidePopup();
+      var a = pointFrom(ride.pickupLat, ride.pickupLng);
+      var b = pointFrom(ride.dropLat, ride.dropLng);
+      if (!a || !b) return;
+      return osrmLeg(a, b).then(function (leg) {
+        if (!leg) return;
+        var est2 = estimateForRide(ride, Math.round(leg.miles * 100) / 100);
+        if (est2) info.fareCents = est2.total;
+        syncRidePopup();
+      });
+    }).catch(function () {}).then(function () { ridePopupBusy[code] = false; });
+  }
+
+  function syncRidePopup() {
+    if (ROLE !== "driver") return;
+    if (!driverCanTakeNew() || !canGoOnline() || state.acceptBusy) {
+      closeRidePopup();
+      return;
+    }
+    var list = alertableOpenRides();
+    var row = null;
+    list.forEach(function (r) { if (r.code === ridePopupCode) row = r; });
+    if (!row) row = list[0] || null;
+    if (!row) {
+      closeRidePopup();
+      return;
+    }
+    showRidePopup(row);
+  }
+
+  function showRidePopup(row) {
+    var code = row.code;
+    var info = ridePopupInfo[code];
+    if (!info) loadRidePopupInfo(code);
+    var me = pointFrom(state.hereLat, state.hereLng);
+    var away = me && isCoord(row.pickupLat) ? haversine(me, { lat: +row.pickupLat, lng: +row.pickupLng }) : null;
+    var when = rideIsAsap(row) ? "ASAP" : (row.when || [row.date, row.time].filter(Boolean).join(" "));
+    var fare = info && info.fareCents != null ? "Est. fare " + money(info.fareCents) : (info ? "Fare figured at drop-off" : "Est. fare: figuring\u2026");
+    var photo = info && info.photo ? '<img class="rp-photo" alt="Rider" src="' + info.photo + '">' : '<div class="rp-photo rp-nophoto">&#128100;</div>';
+    var key = code + "|" + fare + "|" + (info && info.photo ? 1 : 0) + "|" + (away != null ? away.toFixed(1) : "");
+    var el = document.getElementById("ride-popup");
+    if (el && ridePopupCode === code && ridePopupHtmlKey === key) return;
+    ridePopupCode = code;
+    ridePopupHtmlKey = key;
+    if (!el) {
+      el = document.createElement("div");
+      el.id = "ride-popup";
+      document.body.appendChild(el);
+      el.addEventListener("click", function (event) {
+        var t = event.target;
+        if (!t || !t.id) return;
+        if (t.id === "rp-accept") popupAccept(ridePopupCode);
+        else if (t.id === "rp-deny") popupDeny(ridePopupCode);
+      });
+    }
+    el.innerHTML =
+      '<div class="rp-card" role="dialog" aria-modal="true" aria-labelledby="rp-title">' +
+      '<p class="rp-title" id="rp-title">Ride requested</p>' +
+      (row.isTest ? '<p class="tag" style="background:#7a1f1f;color:#fff;">TEST — owner practice only</p>' : "") +
+      '<div class="rp-who">' + photo + "<div>" +
+      '<div class="rp-name">' + esc(row.name || "Rider") + "</div>" +
+      '<div class="rp-sub">' + esc(when || "") + (info && info.passengers ? " · " + esc(String(info.passengers)) + " passengers" : "") + "</div>" +
+      "</div></div>" +
+      '<div class="rp-row"><b>Pickup</b>' + esc(rowAddress(row, "pickup") || "On the map") +
+      (away != null ? '<span class="rp-sub"> · ' + esc(fmtMiles(away)) + " from you</span>" : "") + "</div>" +
+      '<div class="rp-row"><b>Drop-off</b>' + esc(rowAddress(row, "drop") || "Ask the rider") + "</div>" +
+      '<div class="rp-fare">' + esc(fare) + "</div>" +
+      '<div class="rp-actions">' +
+      '<button type="button" class="rp-accept" id="rp-accept">Accept</button>' +
+      '<button type="button" class="rp-deny" id="rp-deny">Deny</button>' +
+      "</div></div>";
+  }
+
+  /* Accept from the pop-up: same path as the map card (v49 conditional write in acceptRideOnce). */
+  function popupAccept(code) {
+    if (!code) return;
+    keepRideAudioAwake();
+    closeRidePopup();
+    stopOpenRideAlert();
+    if (state.screen === "trip" && state.rideStatus === "completed") {
+      clearRideFields();
+      writeDriverCode("");
+      state.driverCode = "";
+    }
+    state.hubOpen = false;
+    state.hubView = "menu";
+    state.mode = "driver";
+    state.screen = "home";
+    state.selectedOpenCode = code;
+    state.openListError = "";
+    setAcceptNotice("Accepting\u2026", "busy");
+    state.acceptBusy = true; /* keeps the pop-up closed while the ride loads */
+    render();
+    getRide(code).then(function (ride) {
+      state.acceptBusy = false;
+      if (!ride) {
+        state.selectedOpenCode = "";
+        setAcceptNotice("This ride is no longer in the system.");
+        state.openListError = state.acceptNotice;
+        render();
+        refreshOpenRides(true);
+        return;
+      }
+      if (!ride.code) ride.code = code;
+      rememberRemote(ride);
+      state.code = code;
+      state.driverCode = code;
+      writeDriverCode(code);
+      state.selectedOpenCode = code;
+      acceptSelectedOpenRide();
+    }).catch(function () {
+      state.acceptBusy = false;
+      state.selectedOpenCode = "";
+      setAcceptNotice("");
+      state.openListError = "Could not reach the server to accept this ride. Check your signal and try again.";
+      render();
+    });
+  }
+
+  function popupDeny(code) {
+    if (!code) return;
+    keepRideAudioAwake();
+    dismissRideCode(code);
+    closeRidePopup();
+    if (state.selectedOpenCode === code && state.screen === "home") {
+      denySelectedOpenRide();
+    } else {
+      var row = null;
+      (state.openRides || []).forEach(function (r) { if (r.code === code) row = r; });
+      try {
+        var rec = buildRefusalRecord(row || { code: code }, readDriverAccount());
+        rec.rideCode = code;
+        if (row) {
+          rec.customerName = row.name || "";
+          rec.customerPhone = row.phone || "";
+          rec.pickup = rowAddress(row, "pickup");
+          rec.dropoff = rowAddress(row, "drop");
+        }
+        postRefusal(rec).catch(function () {});
+      } catch (e) {}
+    }
+    syncOpenRideAlert();
+  }
+
+  /* ---- 2. Navigate button (Apple Maps on iPhone/iPad = CarPlay; Google Maps elsewhere) ---- */
+  function isAppleTouchDevice() {
+    var ua = navigator.userAgent || "";
+    if (/iPhone|iPad|iPod/i.test(ua)) return true;
+    /* iPadOS Safari says "Macintosh" (desktop mode). v50 missed this, so the iPad got the Google Maps web page. */
+    return /Macintosh/i.test(ua) && (navigator.maxTouchPoints || 0) > 1;
+  }
+
+  function navAddressText(prefix) {
+    var st = String(state[prefix + "State"] || "").trim();
+    var zip = String(state[prefix + "Zip"] || "").trim();
+    return [state[prefix + "Street"], state[prefix + "City"], [st, zip].filter(Boolean).join(" ")]
+      .map(function (p) { return String(p || "").trim(); })
+      .filter(Boolean).join(", ");
+  }
+
+  function navTarget() {
+    if (ROLE !== "driver") return null;
+    var started = state.rideStatus === "started";
+    if (state.rideStatus !== "accepted" && !started) return null;
+    var prefix = started ? "drop" : "pickup";
+    var pt = placeCoords(prefix);
+    var approx = started ? state.dropApprox : state.pickupApprox;
+    /* Real pin = rider's GPS / picked from list / found to the house. City- or street-level guesses use the address text. */
+    var exact = !!pt && (!approx || (!started && state.pickupFromHere));
+    var text = navAddressText(prefix);
+    var dest = exact ? pt.lat.toFixed(6) + "," + pt.lng.toFixed(6) : text;
+    if (!dest && pt) dest = pt.lat.toFixed(6) + "," + pt.lng.toFixed(6);
+    if (!dest) return null;
+    var url = isAppleTouchDevice()
+      ? "https://maps.apple.com/?daddr=" + encodeURIComponent(dest) + "&dirflg=d"
+      : "https://www.google.com/maps/dir/?api=1&destination=" + encodeURIComponent(dest) + "&travelmode=driving";
+    return { url: url, label: started ? "drop-off" : "pickup", dest: dest, exact: exact };
+  }
+
+  function navButtonHtml() {
+    if (state.rideStatus !== "accepted" && state.rideStatus !== "started") return "";
+    var t = navTarget();
+    if (!t) {
+      return '<p class="note">Directions are not ready yet: the ' +
+        (state.rideStatus === "started" ? "drop-off" : "pickup") + " address is missing.</p>";
+    }
+    return '<a class="nav-btn-big" id="open-nav" href="' + esc(t.url) + '" target="_blank" rel="noopener">' +
+      "&#10148; Navigate to " + esc(t.label) + "</a>" +
+      '<p class="trip-eta" id="trip-eta">' + esc(tripEtaText()) + "</p>";
+  }
+
+  /* ---- 6. Live distance + ETA (OSRM every 30 s at most; straight line x1.3 at 30 mph fallback) ---- */
+  var etaRoad = { key: "", at: 0, pending: false, miles: null, minutes: null, straight: null };
+
+  function osrmLeg(a, b) {
+    var url = "https://router.project-osrm.org/route/v1/driving/" +
+      a.lng + "," + a.lat + ";" + b.lng + "," + b.lat + "?overview=false";
+    return fetch(url).then(function (res) { return res.json(); }).then(function (d) {
+      var r = d && d.routes && d.routes[0];
+      if (!r || !isFinite(+r.distance) || !isFinite(+r.duration)) return null;
+      return { miles: +r.distance / 1609.344, minutes: +r.duration / 60 };
+    }).catch(function () { return null; });
+  }
+
+  function etaPoints() {
+    var started = state.rideStatus === "started";
+    if (state.rideStatus !== "accepted" && !started) return null;
+    var from = ROLE === "driver" ? pointFrom(state.hereLat, state.hereLng) : savedDriverPoint();
+    var to = started ? placeCoords("drop") : placeCoords("pickup");
+    if (!from || !to) return null;
+    return { from: from, to: to, kind: started ? "drop-off" : "pickup" };
+  }
+
+  function liveEta() {
+    var p = etaPoints();
+    if (!p) return null;
+    var straight = haversine(p.from, p.to);
+    var key = p.kind + "|" + p.to.lat.toFixed(3) + "," + p.to.lng.toFixed(3);
+    var miles;
+    var minutes;
+    if (etaRoad.key === key && etaRoad.miles != null && etaRoad.straight > 0.05 && straight > 0.05) {
+      var f = straight / etaRoad.straight;
+      miles = etaRoad.miles * f;
+      minutes = etaRoad.minutes * f;
+    } else {
+      miles = straight * 1.3;
+      minutes = (miles / 30) * 60;
+    }
+    var now = Date.now();
+    if (!etaRoad.pending && now - etaRoad.at > 10000 && (etaRoad.key !== key || now - etaRoad.at > 30000)) {
+      etaRoad.pending = true;
+      etaRoad.at = now;
+      if (etaRoad.key !== key) { etaRoad.key = key; etaRoad.miles = null; }
+      osrmLeg(p.from, p.to).then(function (leg) {
+        etaRoad.pending = false;
+        if (!leg || etaRoad.key !== key) return;
+        etaRoad.miles = leg.miles;
+        etaRoad.minutes = leg.minutes;
+        etaRoad.straight = straight;
+        refreshEtaDoms();
+      });
+    }
+    return { miles: miles, minutes: Math.max(1, Math.round(minutes)), kind: p.kind, arriving: straight <= 0.06 };
+  }
+
+  function arriveClock(minutes) {
+    try {
+      return new Date(Date.now() + minutes * 60000).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", timeZone: "America/Chicago" });
+    } catch (e) { return ""; }
+  }
+
+  function tripEtaText() {
+    var e = liveEta();
+    if (!e) return state.rideStatus === "started" ? "" : "Distance shows once your location is on.";
+    if (e.arriving) return "Arriving at " + e.kind;
+    return "To " + e.kind + ": " + e.miles.toFixed(1) + " mi · ~" + e.minutes + " min · arrive " + arriveClock(e.minutes);
+  }
+
+  function refreshEtaDoms() {
+    if (ROLE === "customer") {
+      refreshDriverEtaDom();
+      return;
+    }
+    var el = document.getElementById("trip-eta");
+    if (el) {
+      var t = tripEtaText();
+      if (el.textContent !== t) el.textContent = t;
+    }
+  }
+
+  /* ---- 5. Rider live location (only while the driver is on the way) + photo pin on the driver map ---- */
+  var riderShare = { watch: null, code: "", lastAt: 0, lastLat: null, lastLng: null, sent: false };
+
+  function stopRiderShare() {
+    if (riderShare.watch != null && navigator.geolocation) {
+      try { navigator.geolocation.clearWatch(riderShare.watch); } catch (e) {}
+    }
+    if (riderShare.sent && riderShare.code && syncOn()) {
+      /* After pickup / cancel: take the rider's position back off the ride record. */
+      patchRide(riderShare.code, { riderLat: null, riderLng: null, riderLocAt: null }).catch(function () {});
+    }
+    riderShare = { watch: null, code: "", lastAt: 0, lastLat: null, lastLng: null, sent: false };
+  }
+
+  function riderSharing() {
+    return ROLE === "customer" && signedIn() && syncOn() && !!state.code &&
+      state.screen === "trip" && state.rideStatus === "accepted" && !!navigator.geolocation;
+  }
+
+  function syncRiderLocationShare() {
+    if (ROLE !== "customer") return;
+    if (!riderSharing()) {
+      if (riderShare.watch != null || riderShare.sent) stopRiderShare();
+      return;
+    }
+    if (riderShare.watch != null && riderShare.code === state.code) return;
+    stopRiderShare();
+    riderShare.code = state.code;
+    try {
+      riderShare.watch = navigator.geolocation.watchPosition(onRiderFix, function () {}, {
+        enableHighAccuracy: true,
+        maximumAge: 5000,
+        timeout: 20000
+      });
+    } catch (e) {}
+  }
+
+  function onRiderFix(pos) {
+    if (!pos || !pos.coords || !riderSharing() || riderShare.code !== state.code) return;
+    var lat = +pos.coords.latitude;
+    var lng = +pos.coords.longitude;
+    if (!isFinite(lat) || !isFinite(lng)) return;
+    var now = Date.now();
+    if (now - riderShare.lastAt < 10000) return;
+    var moved = riderShare.lastLat == null ? 1 : haversine({ lat: riderShare.lastLat, lng: riderShare.lastLng }, { lat: lat, lng: lng });
+    if (moved < 0.006 && now - riderShare.lastAt < 30000) return;
+    riderShare.lastAt = now;
+    riderShare.lastLat = lat;
+    riderShare.lastLng = lng;
+    riderShare.sent = true;
+    patchRide(riderShare.code, {
+      riderLat: Math.round(lat * 1e6) / 1e6,
+      riderLng: Math.round(lng * 1e6) / 1e6,
+      riderLocAt: now,
+      riderLocAcc: Math.round(Number(pos.coords.accuracy) || 0)
+    }).catch(function () {});
+  }
+
+  var riderMarker = null;
+  var nearZoomDone = "";
+
+  function noteRiderLive(ride) {
+    if (!ride || ROLE !== "driver") return;
+    if (!isCoord(ride.riderLat) || !isCoord(ride.riderLng)) {
+      state.riderLiveLat = null;
+      state.riderLiveLng = null;
+      return;
+    }
+    state.riderLiveLat = +ride.riderLat;
+    state.riderLiveLng = +ride.riderLng;
+    state.riderLiveAt = Number(ride.riderLocAt) || 0;
+    var p = riderLivePoint();
+    if (riderMarker && p) riderMarker.setLatLng([p.lat, p.lng]);
+    nearPickupZoom(false);
+  }
+
+  /* Rider's phone GPS if fresh (3 min) and near the pickup (0.5 mi); otherwise null (use the pickup pin). */
+  function riderLivePoint() {
+    var p = pointFrom(state.riderLiveLat, state.riderLiveLng);
+    if (!p) return null;
+    if (!(Date.now() - (Number(state.riderLiveAt) || 0) < 3 * 60000)) return null;
+    var pick = placeCoords("pickup");
+    if (pick && haversine(p, pick) > 0.5) return null;
+    return p;
+  }
+
+  function riderPhotoIcon() {
+    var photo = safePhoto(state.riderPhoto);
+    if (!photo) return pinIcon(state.name ? String(state.name).split(" ")[0] : "Rider", "pin-you");
+    return window.L.divIcon({
+      className: "pin-icon",
+      html: '<img class="rider-photo-pin" alt="Rider" src="' + photo + '">',
+      iconSize: [56, 56],
+      iconAnchor: [28, 28]
+    });
+  }
+
+  /* One simple zoom: when the driver is within ~0.2 mi of the rider, zoom in tight on them. */
+  function nearPickupZoom(force) {
+    if (ROLE !== "driver" || state.screen !== "trip" || state.rideStatus !== "accepted" || !liveMap) return;
+    var here = pointFrom(state.hereLat, state.hereLng);
+    var target = riderLivePoint() || placeCoords("pickup");
+    if (!here || !target) return;
+    if (haversine(here, target) > 0.2) return;
+    var code = state.driverCode || state.code || "ride";
+    if (!force && nearZoomDone === code) return;
+    nearZoomDone = code;
+    try {
+      liveMap.fitBounds(window.L.latLngBounds([[here.lat, here.lng], [target.lat, target.lng]]), { padding: [40, 40], maxZoom: 18 });
+    } catch (e) {}
+  }
+
+  /* ---- 7. Speed (mph) + ride counts ---- */
+  var speedTrack = { lat: null, lng: null, at: 0 };
+
+  function noteSpeed(pos) {
+    if (!pos || !pos.coords) return;
+    var now = Date.now();
+    var lat = +pos.coords.latitude;
+    var lng = +pos.coords.longitude;
+    var mph = null;
+    var s = pos.coords.speed;
+    if (s != null && isFinite(s) && s >= 0) {
+      mph = s * 2.23694;
+    } else if (speedTrack.at && now - speedTrack.at >= 1500) {
+      var d = haversine({ lat: speedTrack.lat, lng: speedTrack.lng }, { lat: lat, lng: lng });
+      mph = d < 0.005 ? 0 : d / ((now - speedTrack.at) / 3600000);
+    }
+    if (!speedTrack.at || now - speedTrack.at >= 1500) speedTrack = { lat: lat, lng: lng, at: now };
+    if (mph != null && isFinite(mph) && mph < 130) {
+      state.speedMph = mph < 1 ? 0 : mph;
+      state.speedAt = now;
+    }
+  }
+
+  function speedLabel() {
+    if (!state.speedAt) return "";
+    if (Date.now() - state.speedAt > 20000) return "0 mph";
+    return Math.round(state.speedMph || 0) + " mph";
+  }
+
+  var rideHistoryServer = null;
+
+  function loadRideHistory() {
+    if (ROLE !== "driver" || !signedIn() || !syncOn()) return Promise.resolve();
+    return authFetch(historyUrl(driverPresenceId())).then(function (res) {
+      return res.ok ? res.json() : null;
+    }).then(function (data) {
+      rideHistoryServer = data && typeof data === "object" ? data : {};
+      refreshMilesTodayDom();
+    }).catch(function () {});
+  }
+
+  function rideCounts() {
+    var byCode = {};
+    if (rideHistoryServer) {
+      Object.keys(rideHistoryServer).forEach(function (c) {
+        var e = rideHistoryServer[c];
+        if (e && e.day) byCode[c] = String(e.day);
+      });
+    }
+    readRideLog().forEach(function (e) { if (e && e.code && e.day) byCode[e.code] = String(e.day); });
+    var today = chicagoToday();
+    var monday = mondayOfWeek(today);
+    var out = { today: 0, week: 0, all: 0 };
+    Object.keys(byCode).forEach(function (c) {
+      var d = byCode[c];
+      out.all += 1;
+      if (d === today) out.today += 1;
+      if (d >= monday && d <= today) out.week += 1;
+    });
+    return out;
+  }
+
+  function ridesCountLabel() {
+    var c = rideCounts();
+    return "Rides: " + c.today + " today · " + c.week + " this week · " + c.all + " all-time";
+  }
+
+  function v51Styles() {
+    if (document.getElementById("v51-style")) return;
+    var s = document.createElement("style");
+    s.id = "v51-style";
+    s.textContent =
+      "#ride-popup{position:fixed;inset:0;z-index:9999;background:rgba(5,14,28,.93);display:flex;align-items:center;justify-content:center;padding:16px}" +
+      "#ride-popup .rp-card{background:#0b1c33;color:#fff;border:2px solid #f0d48a;border-radius:20px;max-width:460px;width:100%;padding:20px;box-shadow:0 10px 40px rgba(0,0,0,.5);max-height:92vh;overflow:auto}" +
+      "#ride-popup .rp-title{font-size:30px;font-weight:800;color:#f0d48a;margin:0 0 14px;text-align:center}" +
+      "#ride-popup .rp-who{display:flex;gap:14px;align-items:center;margin-bottom:12px}" +
+      "#ride-popup .rp-photo{width:72px;height:72px;border-radius:50%;object-fit:cover;border:3px solid #f0d48a;flex:0 0 auto;display:flex;align-items:center;justify-content:center;font-size:36px;background:#14304f}" +
+      "#ride-popup .rp-name{font-size:22px;font-weight:700}" +
+      "#ride-popup .rp-sub{color:#c9d3e0;font-size:14px}" +
+      "#ride-popup .rp-row{margin:10px 0;font-size:17px;line-height:1.35}" +
+      "#ride-popup .rp-row b{display:block;color:#f0d48a;font-size:12px;letter-spacing:.08em;text-transform:uppercase}" +
+      "#ride-popup .rp-fare{font-size:24px;font-weight:800;margin:14px 0 4px}" +
+      "#ride-popup .rp-actions{display:flex;gap:12px;margin-top:16px}" +
+      "#ride-popup .rp-actions button{flex:1;font-size:24px;font-weight:800;padding:20px 10px;border-radius:14px;border:0;color:#fff;cursor:pointer}" +
+      "#ride-popup .rp-accept{background:#2e9d4f}#ride-popup .rp-deny{background:#8a2323}" +
+      ".nav-btn-big{display:block;text-align:center;font-size:24px;font-weight:800;padding:18px 12px;margin:10px 0 6px;background:#1f6fd1;color:#fff !important;border-radius:14px;text-decoration:none;box-shadow:0 4px 14px rgba(0,0,0,.25)}" +
+      ".trip-eta{font-size:18px;font-weight:700;margin:4px 0 10px}" +
+      ".rider-photo-pin{width:52px;height:52px;border-radius:50%;object-fit:cover;border:3px solid #f0d48a;box-shadow:0 0 0 3px rgba(11,28,51,.65),0 4px 10px rgba(0,0,0,.45);background:#0b1c33;display:block}";
+    document.head.appendChild(s);
   }
 
   var SAMPLE = {
@@ -897,7 +1483,8 @@
 
   function milesTodayLabel() {
     var n = Number(state.milesToday) || 0;
-    return "Today: " + n.toFixed(1) + " mi · " + fmtOnline(onlineMsToday());
+    var spd = speedLabel();
+    return "Today: " + n.toFixed(1) + " mi · " + fmtOnline(onlineMsToday()) + (spd ? " · " + spd : "");
   }
 
   function refreshMilesTodayDom() {
@@ -905,6 +1492,10 @@
     var label = milesTodayLabel();
     Array.prototype.forEach.call(document.querySelectorAll("#miles-today"), function (el) {
       if (el.textContent !== label) el.textContent = label;
+    });
+    var rides = ridesCountLabel();
+    Array.prototype.forEach.call(document.querySelectorAll("#rides-count"), function (el) {
+      if (el.textContent !== rides) el.textContent = rides;
     });
   }
 
@@ -958,7 +1549,7 @@
       '<div class="card vehicle-needed">' +
       '<p class="tag">Car details required</p>' +
       '<p class="lede">Add your car year, make, model, plate, seats, and a front-right photo before going online.</p>' +
-      '<a class="btn" href="signup/?v=23">Complete vehicle profile</a>' +
+      '<a class="btn" href="signup/?v=24">Complete vehicle profile</a>' +
       "</div>"
     );
   }
@@ -1040,11 +1631,7 @@
     var img = photoImg(state.driverPhoto);
     var carImg = carPhotoImg(state.driverCarPhoto);
     if (!state.driverName && !img && !carImg && !state.driverCarPlate) return "";
-    var phone = "";
-    if (state.driverPhone) {
-      var tel = String(state.driverPhone).replace(/[^\d+]/g, "");
-      phone = ' <a href="tel:' + esc(tel) + '">' + esc(state.driverPhone) + "</a>";
-    }
+    var phone = ""; /* v51: riders never see the driver's phone number */
     var who = state.driverName ? esc(state.driverName) : "your driver";
     var carBits = [];
     var carName = carLineFrom({
@@ -1117,11 +1704,15 @@
   }
 
   function driverEtaText() {
-    if (state.rideStatus !== "accepted") return "";
-    var eta = driverPickupEta();
+    if (state.rideStatus !== "accepted" && state.rideStatus !== "started") return "";
+    var eta = liveEta();
     if (!eta) return "";
-    if (eta.miles <= 0.08) return "Driver is arriving";
-    return "Driver is " + eta.miles.toFixed(1) + " mi away · ~" + eta.minutes + " min";
+    if (state.rideStatus === "started") {
+      if (eta.arriving) return "Arriving at your drop-off";
+      return "To drop-off: " + eta.miles.toFixed(1) + " mi · ~" + eta.minutes + " min · arrive " + arriveClock(eta.minutes);
+    }
+    if (eta.arriving) return "Driver is arriving";
+    return "Driver is " + eta.miles.toFixed(1) + " mi away · ~" + eta.minutes + " min · arrives " + arriveClock(eta.minutes);
   }
 
   function driverEtaLine() {
@@ -1525,7 +2116,7 @@
       '<p class="tag">' + (squareChargeOn() ? "Pay to confirm your ride" : "Add your card to confirm your ride") + '</p>' +
       (squareChargeOn() && squareCfg().testMode ? '<p class="fine" style="background:#c9a227;color:#0b1f3a;font-weight:700;padding:4px 8px;border-radius:8px">TEST MODE · Square sandbox · no real charge</p>' : "") +
       '<p class="lede">' + (squareChargeOn() ? "Pay the 25% deposit or the full estimate on a secure Square form. Your pickup PIN shows as soon as payment goes through." : (requested
-        ? "We will text a secure Square card link to " + esc(state.phone || "your phone") + ". Your pickup PIN shows here as soon as your card is confirmed."
+        ? "Got it \u2014 we'll send your secure card link shortly. The Private Car Services office was notified about this ride. Your pickup PIN shows here as soon as your card is confirmed."
         : "Your pickup PIN shows here after your card is on file. You are not charged until after drop-off, so you can add a tip.")) + "</p>" +
       '<button class="btn" type="button" id="square-hold-btn">' + (squareChargeOn() ? "Pay for this ride" : (requested ? "Card link requested &#10003;" : "Add card for this ride")) + "</button>" +
       (testing
@@ -1662,14 +2253,13 @@
       el.innerHTML =
         '<div class="sheet" role="dialog" aria-modal="true" aria-labelledby="card-title">' + head +
         '<h3 id="card-title">Card setup</h3>' +
-        '<p class="lede">Card setup inside the app is being finalized. Private Car Services will text a secure Square payment link to ' +
-        esc(state.phone || "your phone") + " for this ride.</p>" +
+        '<p class="lede">Card setup inside the app is being finalized. Tap below and the Private Car Services office will send you a secure Square card link for this ride.</p>' +
         '<p class="fine">Your pickup PIN appears on the ride screen as soon as your card is confirmed. Questions? Call <a href="tel:' +
         BUSINESS_PHONE + '">' + esc(BUSINESS_PHONE) + "</a>.</p>" +
         '<p class="error" id="sq-card-error" role="alert"></p>' +
         (requested
-          ? '<p class="fine"><strong>Link requested.</strong> Watch for a text from Private Car Services.</p>'
-          : '<button class="btn" type="button" id="card-link-request">Text me the secure link</button>') +
+          ? '<p class="fine"><strong>Got it \u2014 we\u2019ll send your secure card link shortly.</strong> The office was notified. Questions? Call ' + esc(BUSINESS_PHONE) + ".</p>"
+          : '<button class="btn" type="button" id="card-link-request">Send me the secure card link</button>') +
         '<button class="btn secondary" type="button" id="card-sheet-close">Close</button>' +
         "</div>";
     }
@@ -1873,7 +2463,7 @@
     }
     if (btn) {
       btn.disabled = true;
-      btn.textContent = "Sending request…";
+      btn.textContent = "Notifying the office…";
     }
     if (!syncOn() || !code) {
       done();
@@ -1882,7 +2472,7 @@
     patchRide(code, patch).then(done).catch(function () {
       if (btn) {
         btn.disabled = false;
-        btn.textContent = "Text me the secure link";
+        btn.textContent = "Send me the secure card link";
       }
       cardSheetError("That did not go through. Check your signal and try again, or call " + BUSINESS_PHONE + ".");
     });
@@ -1895,19 +2485,6 @@
       " may apply (25% of the estimate or $10, whichever is more). " +
       "Automatic card charges are not live yet — if you cancel, we will follow up about any fee."
     );
-  }
-
-  function openTurnByTurnToDrop() {
-    var drop = placeCoords("drop");
-    if (!drop) return false;
-    var dest = (+drop.lat) + "," + (+drop.lng);
-    var ua = navigator.userAgent || "";
-    var ios = /iPhone|iPad|iPod/i.test(ua);
-    var url = ios
-      ? "https://maps.apple.com/?daddr=" + encodeURIComponent(dest) + "&dirflg=d"
-      : "https://www.google.com/maps/dir/?api=1&destination=" + encodeURIComponent(dest) + "&travelmode=driving";
-    window.open(url, "_blank", "noopener,noreferrer");
-    return true;
   }
 
   function completeActiveRide(opts) {
@@ -2049,6 +2626,7 @@
     driverCancelPollBusy = true;
     getRide(code).then(function (ride) {
       driverCancelPollBusy = false;
+      if (ride) noteRiderLive(ride);
       if (!ride || String(ride.status || "").toLowerCase() !== "cancelled") return;
       var now = state.driverCode || state.code || readDriverCode();
       if (state.screen !== "trip" || now !== code) return;
@@ -2193,6 +2771,7 @@
       liveMap = null;
     }
     carMarker = null;
+    riderMarker = null;
   }
 
   function modeSwitch(active) {
@@ -4234,7 +4813,7 @@
   }
 
   function driverProfileLink() {
-    return '<a class="nav-link" href="signup/?v=23">Profile</a>';
+    return '<a class="nav-link" href="signup/?v=24">Profile</a>';
   }
 
   function selectedOpenRide() {
@@ -4326,7 +4905,6 @@
       coordNum(ride.driverLng) !== coordNum(state.driverLng);
     var codeChanged = !!(ride.code && ride.code !== state.code);
     var identityChanged = (ride.driverName || "") !== (state.driverName || "") ||
-      (ride.driverPhone || "") !== (state.driverPhone || "") ||
       safePhoto(ride.driverPhoto) !== safePhoto(state.driverPhoto) ||
       (ride.driverCarPlate || "") !== (state.driverCarPlate || "") ||
       safePhoto(ride.driverCarPhoto) !== safePhoto(state.driverCarPhoto) ||
@@ -4645,7 +5223,7 @@
       })() + "</p>" +
       '<button class="btn" type="submit">Log in</button>' +
       "</form>" +
-      '<a class="btn secondary" href="signup/?v=23">Create an account</a>'
+      '<a class="btn secondary" href="signup/?v=24">Create an account</a>'
     );
   }
 
@@ -4900,6 +5478,9 @@
           : waitingStatusBlock(near || state.driverName ? "Driver on the way" : "Drivers are available"))) +
       driverIdentityLine() +
       driverEtaLine() +
+      (state.rideStatus === "accepted" && syncOn() && navigator.geolocation
+        ? '<p class="fine" id="rider-share-note">&#128205; Sharing your location with your driver until pickup so they can find you.</p>'
+        : "") +
       routeLedeHtml() +
       (started || completed ? "" : riderPinBanner()) +
       customerMapBlock(caption, driver) +
@@ -5013,7 +5594,7 @@
     state.driverLat = isCoord(ride.driverLat) ? +ride.driverLat : null;
     state.driverLng = isCoord(ride.driverLng) ? +ride.driverLng : null;
     state.driverName = ride.driverName || "";
-    state.driverPhone = ride.driverPhone || "";
+    state.driverPhone = ROLE === "driver" ? (ride.driverPhone || "") : ""; /* v51: never kept on the rider app */
     state.riderPhoto = safePhoto(ride.riderPhoto);
     state.driverPhoto = safePhoto(ride.driverPhoto);
     state.driverCarYear = ride.driverCarYear || "";
@@ -5073,6 +5654,7 @@
     } else {
       if (!driverName && prev.driverName) driverName = prev.driverName;
       if (!driverPhone && prev.driverPhone) driverPhone = prev.driverPhone;
+      if (ROLE === "customer") driverPhone = "";
       if (!driverPhoto) driverPhoto = safePhoto(prev.driverPhoto);
       if (!driverCarYear && prev.driverCarYear) driverCarYear = prev.driverCarYear;
       if (!driverCarMake && prev.driverCarMake) driverCarMake = prev.driverCarMake;
@@ -5215,6 +5797,9 @@
     state.driverCarSeats = "";
     state.driverCarPhoto = "";
     state.riderPhoto = "";
+    state.riderLiveLat = null;
+    state.riderLiveLng = null;
+    state.riderLiveAt = 0;
     state.passengers = 2;
     state.stops = 0;
     state.holiday = false;
@@ -5244,7 +5829,7 @@
       '<p class="lede">Keep the map clean. Open today\'s numbers, history, or profile here.</p>' +
       '<button class="btn" type="button" id="hub-today">Today</button>' +
       '<button class="btn secondary" type="button" id="hub-history">Earnings & history</button>' +
-      '<a class="btn secondary" href="signup/?v=23">Profile</a>' +
+      '<a class="btn secondary" href="signup/?v=24">Profile</a>' +
       logoutLine()
     );
   }
@@ -5357,6 +5942,7 @@
     return (
       accountNav() +
       '<p class="fine" id="miles-today">' + esc(milesTodayLabel()) + "</p>" +
+      '<p class="fine" id="rides-count">' + esc(ridesCountLabel()) + "</p>" +
       (state.driverNotice
         ? '<div class="card notice-card" role="status"><p class="lede">' + esc(state.driverNotice) + "</p>" +
           '<button class="btn ghost" type="button" id="dismiss-driver-notice">OK</button></div>'
@@ -5443,7 +6029,6 @@
         "</div>"
       );
       completeBtn = (
-        '<button class="btn secondary" type="button" id="open-nav">Open turn-by-turn to drop-off</button>' +
         '<button class="btn" type="button" id="complete-ride">Ride complete</button>'
       );
     }
@@ -5463,7 +6048,9 @@
       testTop +
       (completed ? "" : '<button class="btn ghost" type="button" id="back-driver">← Requests</button>') +
       '<p class="fine" id="miles-today">' + esc(milesTodayLabel()) + "</p>" +
+      '<p class="fine" id="rides-count">' + esc(ridesCountLabel()) + "</p>" +
       '<div class="status"><i></i><span>' + statusLabel + "</span></div>" +
+      (completed ? "" : navButtonHtml()) +
       '<div class="who">' + photoImg(state.riderPhoto) +
       "<p class=\"lede\">" + esc(state.name || "Rider") +
       (completed ? " · trip finished." : (started ? " · en route." : " is at " + esc(pickupLine()) + ".")) +
@@ -5552,6 +6139,8 @@
     } else if (ROLE === "driver" && state.screen === "trip") {
       startMap();
     }
+    if (ROLE === "driver" && !driverCanTakeNew()) closeRidePopup();
+    if (ROLE === "customer") syncRiderLocationShare();
     if (ROLE === "driver" && state.screen === "trip" && state.pickupStreet) {
       var repairKey = (state.driverCode || state.code || "") + "|" + state.dropStreet;
       if (state.geocodeKey !== repairKey) {
@@ -5646,6 +6235,7 @@
             syncDriverProfile().then(function () { render(); });
             ensureMilesDayReady();
             followGps();
+            loadRideHistory();
             acquireWakeLock();
             refreshRosterStatus().then(function () {
               if (canGoOnline()) {
@@ -5781,6 +6371,7 @@
             syncDriverProfile().then(function () { render(); });
             ensureMilesDayReady();
             followGps();
+            loadRideHistory();
             acquireWakeLock();
             refreshRosterStatus().then(function () {
               if (canGoOnline()) {
@@ -6277,8 +6868,7 @@
           state.pinDraft = "";
           state.pinError = "";
           state.screen = "trip";
-          render();
-          openTurnByTurnToDrop();
+          render(); /* v51: the big Navigate button at the top now points at the drop-off (iPad blocks auto-open) */
         });
       });
     }
@@ -6302,10 +6892,9 @@
     var openNav = document.getElementById("open-nav");
     if (openNav) {
       openNav.addEventListener("click", function () {
-        if (!openTurnByTurnToDrop()) {
-          state.error = "Drop-off location is not ready yet.";
-          render();
-        }
+        /* Real link (works in the iPad/iPhone home-screen app); refresh it in case the pin moved. */
+        var t = navTarget();
+        if (t) openNav.setAttribute("href", t.url);
       });
     }
     var cancelRide = document.getElementById("cancel-ride");
@@ -6806,7 +7395,7 @@
   }
 
   function refreshOpenRides(force) {
-    if (ROLE !== "driver" || !signedIn() || state.screen !== "home") return;
+    if (ROLE !== "driver" || !signedIn() || !driverCanTakeNew()) return;
     if (!syncOn()) {
       state.openRides = [];
       state.openListError = "";
@@ -6962,7 +7551,7 @@
       };
       if (ride.isTest) patch.isTest = true;
       if (state.driverName) patch.driverName = state.driverName;
-      if (state.driverPhone) patch.driverPhone = state.driverPhone;
+      /* v51: driverPhone is no longer written on the ride record (riders can read it). */
       if (safePhoto(state.driverPhoto)) patch.driverPhoto = safePhoto(state.driverPhoto);
       if (state.driverCarYear) patch.driverCarYear = state.driverCarYear;
       if (state.driverCarMake) patch.driverCarMake = state.driverCarMake;
@@ -7355,7 +7944,17 @@
         : [[route.driver.lat, route.driver.lng], [route.pickup.lat, route.pickup.lng], [route.dropoff.lat, route.dropoff.lng]];
       window.L.polyline(road, { color: "#d4b15a", weight: 4, opacity: 0.9 }).addTo(liveMap);
       var youLabel = state.mode === "driver" ? "Customer" : "You";
-      window.L.marker([route.pickup.lat, route.pickup.lng], { icon: pinIcon(youLabel, "pin-you") }).addTo(liveMap);
+      riderMarker = null;
+      var beforePickup = ROLE === "driver" && state.rideStatus !== "started" && state.rideStatus !== "completed";
+      if (beforePickup && placeCoords("pickup")) {
+        /* v51: rider's photo as a round pin at their live phone location (or the pickup point). */
+        var riderAt = riderLivePoint();
+        if (riderAt) window.L.marker([route.pickup.lat, route.pickup.lng], { icon: pinIcon("Pickup", "pin-you") }).addTo(liveMap);
+        var riderPt = riderAt || route.pickup;
+        riderMarker = window.L.marker([riderPt.lat, riderPt.lng], { icon: riderPhotoIcon(), zIndexOffset: 700 }).addTo(liveMap);
+      } else {
+        window.L.marker([route.pickup.lat, route.pickup.lng], { icon: pinIcon(youLabel, "pin-you") }).addTo(liveMap);
+      }
       window.L.marker([route.dropoff.lat, route.dropoff.lng], { icon: pinIcon("Drop-off", "pin-drop") }).addTo(liveMap);
       carMarker = window.L.marker([route.driver.lat, route.driver.lng], {
         icon: window.L.divIcon({
@@ -7369,6 +7968,7 @@
       var boundPts = road.slice();
       boundPts.push([route.driver.lat, route.driver.lng]);
       liveMap.fitBounds(window.L.latLngBounds(boundPts), { padding: [28, 28], maxZoom: 14 });
+      nearPickupZoom(true);
       layer.on("tileload", function () {
         if (tilesOk) return;
         tilesOk = true;
@@ -7398,6 +7998,7 @@
       liveMap = null;
     }
     carMarker = null;
+    riderMarker = null;
     var illus = document.getElementById("illus");
     if (illus) illus.classList.remove("is-hidden");
   }
@@ -7428,7 +8029,11 @@
     state.hereLng = pos.coords.longitude;
     state.driverLat = state.hereLat;
     state.driverLng = state.hereLng;
-    if (ROLE === "driver") trackDailyMiles(pos);
+    if (ROLE === "driver") {
+      noteSpeed(pos);
+      trackDailyMiles(pos);
+      refreshMilesTodayDom();
+    }
     var ride = currentRide();
     if (syncOn()) {
       var driverCode = state.driverCode || readDriverCode();
@@ -7444,6 +8049,10 @@
     var pathGrew = (state.tripPath || []).length > pathBefore;
     maybePatchDriverLocation();
     if (pathGrew || state.rideStatus === "started") refreshLiveTripMilesUi(pathGrew);
+    if (ROLE === "driver" && state.screen === "trip") {
+      refreshEtaDoms();
+      nearPickupZoom(false);
+    }
     if (ROLE === "driver" && state.screen === "home" && boardMapStillMounted()) {
       syncDriverBoardMarkers();
       publishDriverPresence();
@@ -7514,7 +8123,15 @@
     document.addEventListener("keydown", function (event) {
       if (event.key === "Escape") closePreview();
     });
+    v51Styles();
+    if (ROLE === "driver") {
+      /* iOS only lets sound play after a tap; every tap re-arms it (it is suspended after the app was hidden). */
+      document.addEventListener("touchend", keepRideAudioAwake, true);
+      document.addEventListener("click", keepRideAudioAwake, true);
+    }
+    setInterval(refreshEtaDoms, 5000);
     if (ROLE === "driver" && signedIn()) {
+      loadRideHistory();
       ensureMilesDayReady();
       followGps();
       acquireWakeLock();
@@ -7537,7 +8154,7 @@
     setInterval(pullRemoteRide, 3000);
     setInterval(pollDriverRideCancel, 5000);
     setInterval(function () {
-      if (ROLE === "driver" && signedIn() && state.screen === "home" && canGoOnline() && !state.hubOpen) refreshOpenRides();
+      if (ROLE === "driver" && signedIn() && canGoOnline() && driverCanTakeNew()) refreshOpenRides();
     }, 3000);
     setInterval(function () {
       if (ROLE === "driver" && signedIn() && !state.hubOpen) refreshScheduledRides(false);
