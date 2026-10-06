@@ -269,5 +269,23 @@
       });
     })();
   </script>
+  <script>
+    /* v52: if this phone has a ride in progress, offer a clear way back to it. */
+    (function () {
+      try {
+        var m = JSON.parse(localStorage.getItem("pcs-rider-active-ride") || "null");
+        var who = localStorage.getItem("pcs-rider-session") || "";
+        if (!m || !m.code || !who || (m.session && m.session !== who)) return;
+        var main = document.getElementById("signup-main");
+        if (!main) return;
+        var box = document.createElement("div");
+        box.className = "card";
+        box.id = "back-to-ride-banner";
+        box.innerHTML = '<p class="note"><strong>You have a ride in progress.</strong></p>' +
+          '<a class="btn" id="back-to-ride-link" href="../">Back to my ride</a>';
+        main.insertBefore(box, main.firstChild);
+      } catch (e) {}
+    })();
+  </script>
 </body>
 </html>
