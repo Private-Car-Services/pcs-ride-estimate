@@ -94,6 +94,42 @@
     try { localStorage.setItem("pcs-driver-alert-mute", on ? "1" : "0"); } catch (err) {}
   }
 
+  /* v53: iOS 17+ - "playback" audio session so the ride chime plays even with the silent switch on. */
+  function setPlaybackAudioSession() {
+    try {
+      if (navigator.audioSession && navigator.audioSession.type !== "playback") navigator.audioSession.type = "playback";
+    } catch (err) {}
+  }
+
+  /* v53: big gold "Tap to turn on ride alert sound" bar on each fresh open until tapped (iOS needs a tap first). */
+  function rideSoundRunning() {
+    return !!openRideAudioCtx && openRideAudioCtx.state === "running";
+  }
+
+  function hideRideSoundBar() {
+    var bar = document.getElementById("ride-sound-bar");
+    if (bar && bar.parentNode) bar.parentNode.removeChild(bar);
+  }
+
+  function showRideSoundBar() {
+    if (ROLE !== "driver" || rideSoundRunning() || document.getElementById("ride-sound-bar") || !document.body) return;
+    var bar = document.createElement("button");
+    bar.type = "button";
+    bar.id = "ride-sound-bar";
+    bar.textContent = "\uD83D\uDD14 Tap to turn on ride alert sound";
+    bar.setAttribute("style", "position:fixed;top:0;left:0;right:0;z-index:10050;width:100%;margin:0;border:0;border-radius:0;" +
+      "padding:calc(16px + env(safe-area-inset-top)) 14px 16px;background:#e3b341;color:#0b1c33;font-size:20px;font-weight:800;" +
+      "text-align:center;box-shadow:0 3px 12px rgba(0,0,0,.45);cursor:pointer");
+    bar.addEventListener("click", function (ev) {
+      ev.preventDefault();
+      ev.stopPropagation();
+      keepRideAudioAwake();
+      playRideChime(true); /* short test chime so the driver hears it works */
+      hideRideSoundBar();
+    });
+    document.body.appendChild(bar);
+  }
+
   function unlockOpenRideAudio() {
     keepRideAudioAwake();
     openRideAudioUnlocked = true;
@@ -110,6 +146,11 @@
   function beepOpenRideOnce() {
     /* Default: short doorbell-style chime (ding–dong). Mute toggle still available. */
     if (openRideAlertMuted() || !openRideAudioUnlocked) return;
+    playRideChime(false);
+  }
+
+  function playRideChime(isTest) {
+    setPlaybackAudioSession();
     try {
       var AC = window.AudioContext || window.webkitAudioContext;
       if (!AC) return;
@@ -134,7 +175,7 @@
       tone(659.25, now + 0.28, 0.5, 0.5); /* louder dong */ /* dong */
     } catch (err) {}
     try {
-      if (navigator.vibrate) navigator.vibrate([80, 40, 120]);
+      if (navigator.vibrate) navigator.vibrate(isTest ? 40 : [80, 40, 120]);
     } catch (err2) {}
   }
 
@@ -151,6 +192,7 @@
   }
 
   function syncOpenRideAlert() {
+    if (ROLE === "driver" && signedIn()) showRideSoundBar(); /* v53: until sound is on */
     if (ROLE !== "driver" || !signedIn() || !canGoOnline() || !driverCanTakeNew()) {
       stopOpenRideAlert();
       closeRidePopup();
@@ -229,12 +271,16 @@
   function keepRideAudioAwake() {
     if (ROLE !== "driver") return;
     openRideAudioUnlocked = true;
+    setPlaybackAudioSession();
     try {
       var AC = window.AudioContext || window.webkitAudioContext;
       if (AC && !openRideAudioCtx) openRideAudioCtx = new AC();
       var ctx = openRideAudioCtx;
       if (!ctx) return;
-      if (ctx.state !== "running" && ctx.resume) ctx.resume();
+      if (ctx.state !== "running" && ctx.resume) {
+        var r = ctx.resume();
+        if (r && r.then) r.then(function () { if (rideSoundRunning()) hideRideSoundBar(); }).catch(function () {});
+      } else if (ctx.state === "running") hideRideSoundBar();
       if (!openRideAudioPrimed) {
         var src = ctx.createBufferSource();
         src.buffer = ctx.createBuffer(1, 1, 22050);
@@ -297,9 +343,9 @@
     getRide(code).then(function (ride) {
       if (!ride) return;
       if (!ride.code) ride.code = code;
-      var info = { photo: safePhoto(ride.riderPhoto), fareCents: null, passengers: ride.passengers };
+      var info = { photo: safePhoto(ride.riderPhoto), fareCents: null, commCents: null, passengers: ride.passengers };
       var est = estimateForRide(ride, null);
-      if (est) info.fareCents = est.total;
+      if (est) { info.fareCents = est.total; info.commCents = commissionCentsFor(est); }
       ridePopupInfo[code] = info;
       syncRidePopup();
       var a = pointFrom(ride.pickupLat, ride.pickupLng);
@@ -308,7 +354,7 @@
       return osrmLeg(a, b).then(function (leg) {
         if (!leg) return;
         var est2 = estimateForRide(ride, Math.round(leg.miles * 100) / 100);
-        if (est2) info.fareCents = est2.total;
+        if (est2) { info.fareCents = est2.total; info.commCents = commissionCentsFor(est2); }
         syncRidePopup();
       });
     }).catch(function () {}).then(function () { ridePopupBusy[code] = false; });
@@ -338,7 +384,7 @@
     var me = pointFrom(state.hereLat, state.hereLng);
     var away = me && isCoord(row.pickupLat) ? haversine(me, { lat: +row.pickupLat, lng: +row.pickupLng }) : null;
     var when = rideIsAsap(row) ? "ASAP" : (row.when || [row.date, row.time].filter(Boolean).join(" "));
-    var fare = info && info.fareCents != null ? "Est. fare " + money(info.fareCents) : (info ? "Fare figured at drop-off" : "Est. fare: figuring\u2026");
+    var fare = info && info.commCents != null ? "Est. commission " + money(info.commCents) : (info ? "Commission figured at drop-off" : "Est. commission: figuring\u2026");
     var photo = info && info.photo ? '<img class="rp-photo" alt="Rider" src="' + info.photo + '">' : '<div class="rp-photo rp-nophoto">&#128100;</div>';
     var key = code + "|" + fare + "|" + (info && info.photo ? 1 : 0) + "|" + (away != null ? away.toFixed(1) : "");
     var el = document.getElementById("ride-popup");
@@ -950,21 +996,21 @@
     return '<button class="btn ghost" type="button" id="back-home">← Book a new ride</button>';
   }
 
-  /* One plain line that says where things stand and when the PIN appears. */
+  /* One plain line that says where things stand and when the PIN appears.
+     v53 rule: the PIN shows as soon as a driver accepts, card or no card (earlier if the card is already OK). */
   function riderStageNote() {
     var st = String(state.rideStatus || "").toLowerCase();
     if (!isActiveStatus(st) || st === "started") return "";
-    var cardOk = rideCardReady();
+    var pinNow = riderPinReady();
     var msg;
     if (st === "pending_owner" || st === "pending-owner") {
       msg = "Step 1: waiting for Private Car Services to approve your ride. " +
-        (cardOk ? "Your pickup PIN is below." : "Your pickup PIN appears once your card is confirmed.");
+        (pinNow ? "Your pickup PIN is below." : "Your pickup PIN shows as soon as a driver accepts.");
     } else if (st === "requested") {
-      msg = cardOk ? "Approved. Waiting for a driver to accept. Your pickup PIN is below."
-        : "Approved. Your pickup PIN appears once your card is confirmed.";
+      msg = pinNow ? "Approved. Waiting for a driver to accept. Your pickup PIN is below."
+        : "Approved. Waiting for a driver to accept. Your pickup PIN shows as soon as a driver accepts.";
     } else {
-      msg = cardOk ? "Your driver is on the way. Give them the PIN below when they arrive."
-        : "Your driver is on the way. Your pickup PIN appears once your card is confirmed. Add your card below, or call " + BUSINESS_PHONE + " and we'll confirm it.";
+      msg = "Your driver is on the way. Give them the PIN below when they arrive.";
     }
     return '<p class="note" id="rider-stage" role="status">' + esc(msg) + "</p>";
   }
@@ -1804,6 +1850,22 @@
   }
 
 
+  /* v53: drivers see their own commission, not the rider fare. Same formula as the earnings log
+     (appendCompletedRideLog): fare before tax (minus EXTRA_FEE) x this driver's % from /rides/DRVRCMMS/{driverId};
+     70% (God mode DEFAULT_COMMISSION_PCT) when no rate is set. */
+  function driverCommissionPct() {
+    var pct = state.rosterPct != null ? Number(state.rosterPct) : Math.round(DRIVER_COMMISSION_RATE * 100);
+    if (!isFinite(pct) || pct < 0 || pct > 100) pct = 70;
+    return pct;
+  }
+
+  function commissionCentsFor(est) {
+    if (!est || est.sub == null || !isFinite(Number(est.sub))) return null;
+    var base = Number(est.sub) - EXTRA_FEE;
+    if (base < 0) base = 0;
+    return Math.round(base * (driverCommissionPct() / 100));
+  }
+
   function commissionLine() {
     var pct = state.rosterPct != null ? Number(state.rosterPct) : Math.round(DRIVER_COMMISSION_RATE * 100);
     if (!isFinite(pct)) pct = Math.round(DRIVER_COMMISSION_RATE * 100);
@@ -1818,7 +1880,7 @@
     var base = est.sub - EXTRA_FEE;
     if (base < 0) base = 0;
     var cents = Math.round(base * rate);
-    return '<p><strong>Your commission</strong> ' + money(cents) + '</p>' +
+    return '<p><strong>Est. commission</strong> ' + money(cents) + '</p>' +
       '<p class="fine">' + pct + '% of the fare before tax and fees. Estimate only · not a payout.</p>';
   }
 
@@ -2286,11 +2348,17 @@
     return st === "on_file" || st === "owner_ok" || st === "test_skip";
   }
 
-  /* PIN only after the card step is done (or TEST ride / testing skip). */
+  /* Card step done (or TEST ride / testing skip). v53: no longer gates the PIN once a driver accepts. */
   function rideCardReady() {
     if (state.isTest || isTestRide(currentRide())) return true;
     if (state.paymentSkipped && testSkipPayEnabled()) return true;
     return cardStatusOk(String(state.cardStatus || ""));
+  }
+
+  /* v53: PIN shows when a driver accepts (accepted/started), or earlier if the card is already OK. */
+  function riderPinReady() {
+    var st = String(state.rideStatus || "").toLowerCase();
+    return st === "accepted" || st === "started" || rideCardReady();
   }
 
   function paymentInfoCopy() {
@@ -2298,7 +2366,7 @@
       '<div class="card payment-card">' +
       '<p class="tag">Payment</p>' +
       '<p class="lede">After you request, you add your card for this ride on a secure Square form. You are not charged until after drop-off, so you can add a tip.</p>' +
-      '<p class="fine">Your pickup PIN shows once your card is on file. This app never sees or stores your card number.</p>' +
+      '<p class="fine">Your pickup PIN shows as soon as a driver accepts your ride. This app never sees or stores your card number.</p>' +
       "</div>"
     );
   }
@@ -2308,11 +2376,11 @@
     var testing = testSkipPayEnabled();
     return (
       '<div class="card card-needed" id="card-needed">' +
-      '<p class="tag">' + (squareChargeOn() ? "Pay to confirm your ride" : "Add your card to confirm your ride") + '</p>' +
+      '<p class="tag">' + (squareChargeOn() ? "Pay for your ride" : "Add card for this ride") + '</p>' +
       (squareChargeOn() && squareCfg().testMode ? '<p class="fine" style="background:#c9a227;color:#0b1f3a;font-weight:700;padding:4px 8px;border-radius:8px">TEST MODE · Square sandbox · no real charge</p>' : "") +
-      '<p class="lede">' + (squareChargeOn() ? "Pay the 25% deposit or the full estimate on a secure Square form. Your pickup PIN shows as soon as payment goes through." : (requested
-        ? "Got it \u2014 we'll send your secure card link shortly. The Private Car Services office was notified about this ride. Your pickup PIN shows here as soon as your card is confirmed."
-        : "Your pickup PIN shows here after your card is on file. You are not charged until after drop-off, so you can add a tip.")) + "</p>" +
+      '<p class="lede">' + (squareChargeOn() ? "Pay the 25% deposit or the full estimate on a secure Square form." : (requested
+        ? "Got it \u2014 we'll send your secure card link shortly. The Private Car Services office was notified about this ride."
+        : "Add your card so you can pay and tip after drop-off. You are not charged until the ride is done.")) + "</p>" +
       '<button class="btn" type="button" id="square-hold-btn">' + (squareChargeOn() ? "Pay for this ride" : (requested ? "Card link requested &#10003;" : "Add card for this ride")) + "</button>" +
       (testing
         ? '<button class="btn ghost" type="button" id="skip-pay-btn">Skip for testing</button>' +
@@ -2449,7 +2517,7 @@
         '<div class="sheet" role="dialog" aria-modal="true" aria-labelledby="card-title">' + head +
         '<h3 id="card-title">Card setup</h3>' +
         '<p class="lede">Card setup inside the app is being finalized. Tap below and the Private Car Services office will send you a secure Square card link for this ride.</p>' +
-        '<p class="fine">Your pickup PIN appears on the ride screen as soon as your card is confirmed. Questions? Call <a href="tel:' +
+        '<p class="fine">Add your card so you can pay and tip after drop-off. Questions? Call <a href="tel:' +
         BUSINESS_PHONE + '">' + esc(BUSINESS_PHONE) + "</a>.</p>" +
         '<p class="error" id="sq-card-error" role="alert"></p>' +
         (requested
@@ -3532,6 +3600,119 @@
     );
   }
 
+  /*
+    v53: dropdown suggestions (From, To, stops; rider and driver). Before v53 the list was ranked by
+    "name matches what you typed" first and distance second, so a far "QuickTrip" (exact spelling) beat a
+    near "QuikTrip" (real brand spelling). Now: search about 60 mi around you first, merge with a wider
+    search, drop duplicates, then sort ONLY by distance. Matches over 100 mi stay behind "Show farther results".
+  */
+  var HOUSTON_CENTER = { lat: 29.7604, lng: -95.3698 };
+  var SUGGEST_LOCAL_MI = 60;
+  var SUGGEST_HIDE_MI = 100;
+  var SUGGEST_MIN_LOCAL = 3;
+  var SUGGEST_SHOW = 6;
+  var SUGGEST_MAX = 15;
+  var SUGGEST_DUP_MI = 0.031; /* about 50 m */
+
+  /* Distance is measured from: your location -> From/pickup point -> Houston (last resort, sorting only). */
+  function suggestOrigin(prefix) {
+    var origin = searchOrigin(prefix);
+    if (origin && origin.from) return origin;
+    return { point: HOUSTON_CENTER, from: "houston" };
+  }
+
+  function bboxAround(o, miles) {
+    var dLat = miles / 69;
+    var dLon = miles / (69 * Math.cos((o.lat * Math.PI) / 180));
+    return [o.lng - dLon, o.lat - dLat, o.lng + dLon, o.lat + dLat].map(function (n) { return n.toFixed(4); }).join(",");
+  }
+
+  function suggestProps(it) { return (it && it.feature && it.feature.properties) || {}; }
+
+  function suggestAddrKey(it) {
+    var p = suggestProps(it);
+    if (!p.housenumber || !p.street) return "";
+    return normText(p.housenumber + " " + p.street);
+  }
+
+  function suggestPt(it) { return { lat: it.place.lat, lng: it.place.lng }; }
+
+  /* Same place listed twice (store + its fuel pumps, or a bare "1224 Wilson Road" under the store at 1224 Wilson Road). */
+  function dedupeSuggestions(items) {
+    var ordered = items.map(function (it, i) {
+      var p = suggestProps(it);
+      var poi = photonIsPoi(p);
+      var pref = (poi ? 0 : 4) + (suggestAddrKey(it) ? 0 : 2) + (String(p.osm_key || "") === "highway" || it.fuel ? 1 : 0);
+      return { it: it, i: i, poi: poi, pref: pref, addr: suggestAddrKey(it), line: normText(it.place.line1) + "|" + normText(it.place.city) };
+    }).sort(function (a, b) { return (a.pref - b.pref) || (a.it.dist - b.it.dist) || (a.i - b.i); });
+    var kept = [];
+    ordered.forEach(function (c) {
+      var dup = kept.some(function (k) {
+        if (c.line === k.line) return true;
+        var d = haversine(suggestPt(c.it), suggestPt(k.it));
+        if (c.poi && k.poi) {
+          var sameName = c.it.nameKey && c.it.nameKey === k.it.nameKey;
+          return !!sameName && (d < 0.15 || (!!c.addr && c.addr === k.addr));
+        }
+        if (!c.poi && c.addr && c.addr === k.addr && d < 0.25) return true;
+        return !c.poi && k.poi && !!c.addr && d < SUGGEST_DUP_MI && (!k.addr || k.addr === c.addr);
+      });
+      if (!dup) kept.push(c);
+    });
+    return kept.sort(function (a, b) { return (a.it.dist - b.it.dist) || (a.i - b.i); }).map(function (c) { return c.it; });
+  }
+
+  /* items must already be sorted nearest first. */
+  function splitSuggestions(items) {
+    var local = items.filter(function (it) { return it.dist <= SUGGEST_LOCAL_MI; });
+    var shown = local.length >= SUGGEST_MIN_LOCAL ? local : items.filter(function (it) { return it.dist <= SUGGEST_HIDE_MI; });
+    if (!shown.length) shown = items.slice(); /* nothing closer exists: show what we have */
+    var more = items.filter(function (it) { return shown.indexOf(it) === -1; });
+    more = shown.slice(SUGGEST_SHOW).concat(more).sort(function (a, b) { return a.dist - b.dist; });
+    return { shown: shown.slice(0, SUGGEST_SHOW), more: more.slice(0, SUGGEST_MAX - Math.min(shown.length, SUGGEST_SHOW)) };
+  }
+
+  function suggestPlaces(q, origin) {
+    var o = (origin && origin.point) || HOUSTON_CENTER;
+    var bbox = bboxAround(o, SUGGEST_LOCAL_MI);
+    /* location_bias_scale low = distance matters more than how "famous" a place is. */
+    var common = "lang=en&lat=" + o.lat.toFixed(5) + "&lon=" + o.lng.toFixed(5) + "&location_bias_scale=0.1&zoom=12&q=";
+    var calls = [
+      photonFetch("limit=30&bbox=" + bbox + "&" + common + encodeURIComponent(q)), /* local: about 60 mi around you */
+      photonFetch("limit=10&" + common + encodeURIComponent(q)) /* wider: used only if few local, or behind "Show farther results" */
+    ];
+    var streetOnly = looksLikeAddress(q) ? String(q).replace(/^\s*\d+[A-Za-z]?\s+/, "") : "";
+    if (streetOnly.length >= 3) {
+      /* Map data often has the street but not each house number: also look up the street by itself. */
+      calls.push(photonFetch("limit=8&bbox=" + bbox + "&" + common + encodeURIComponent(streetOnly)));
+    }
+    return Promise.all(calls).then(function (lists) {
+      var merged = rankPlaces([].concat.apply([], lists), q, o);
+      merged = dedupeSuggestions(merged); /* final sort: nearest first, whatever source or query it came from */
+      return splitSuggestions(merged);
+    });
+  }
+
+  function suggestHeadHtml(origin) {
+    if (origin && origin.from === "houston") return '<p class="suggest-note">Closest to Houston first. Tap Use current location for places near you.</p>';
+    return suggestNoteHtml(origin);
+  }
+
+  function renderSuggestions(box, origin, shown, more, expanded) {
+    var list = expanded ? shown.concat(more) : shown;
+    box._places = list;
+    box._shown = shown;
+    box._more = more;
+    box._origin = origin;
+    var moreBtn = !expanded && more.length
+      ? '<button type="button" class="suggest-more" style="display:block;width:100%;text-align:center;background:transparent;border:0;padding:10px 12px;color:var(--gold-2,#e3c77d);font-weight:700;font-size:14px;cursor:pointer">Show farther results (' + more.length + ")</button>"
+      : "";
+    box.innerHTML = list.length
+      ? suggestHeadHtml(origin) + list.map(suggestItemHtml).join("") + moreBtn
+      : '<p class="suggest-note">No matches yet. Keep typing, or fill in line 1, city and ZIP yourself.</p>';
+    box.hidden = false;
+  }
+
   function wireSearch(prefix) {
     var input = document.getElementById(prefix + "-street");
     var box = document.getElementById(prefix + "-results");
@@ -3541,11 +3722,22 @@
     input.addEventListener("focus", primeSearchOrigin);
     input.addEventListener("blur", function () {
       setTimeout(function () {
-        box.hidden = true;
-        /* No suggestion picked: find what was typed (street + city, ZIP optional). */
-        if (!isCoord(addrGet(prefix, "Lat")) && String(addrGet(prefix, "City") || "").trim()) autoResolveField(prefix);
+        if (box._keepUntil && box._keepUntil > Date.now()) return; /* tapped "Show farther results" */
+        closeBox();
       }, 450);
     });
+    function closeBox() {
+      box.hidden = true;
+      /* No suggestion picked: find what was typed (street + city, ZIP optional). */
+      if (!isCoord(addrGet(prefix, "Lat")) && String(addrGet(prefix, "City") || "").trim()) autoResolveField(prefix);
+    }
+    /* List left open after "Show farther results": close it on a tap anywhere else. */
+    function outsideTap(event) {
+      if (!document.body.contains(box)) { document.removeEventListener("pointerdown", outsideTap, true); return; }
+      if (box.hidden || box.contains(event.target) || event.target === input || document.activeElement === input) return;
+      closeBox();
+    }
+    document.addEventListener("pointerdown", outsideTap, true);
     input.addEventListener("input", function () {
       var q = input.value.trim();
       addrSet(prefix, "Street", input.value);
@@ -3567,25 +3759,31 @@
       }
       var mine = ++seq;
       timer = setTimeout(function () {
-        var origin = searchOrigin(prefix);
-        findPlaces(q, origin).then(function (items) {
+        var origin = suggestOrigin(prefix);
+        suggestPlaces(q, origin).then(function (res) {
           if (mine !== seq || input.value.trim() !== q) return;
           var num = (q.match(/^(\d+[A-Za-z]?)\s+/) || [])[1];
-          items = items.slice(0, 6).map(function (it) {
+          function keepNum(it) {
             var pl = it.place;
             if (!num || pl.category || /^\d/.test(String(pl.line1 || ""))) return it;
             /* Typed "1099 McCaleb" but the map only knows the street: keep the house number. */
             return Object.assign({}, it, { place: Object.assign({}, pl, { line1: num + " " + pl.line1, approx: true }) });
-          });
-          box._places = items;
-          box.innerHTML = items.length
-            ? suggestNoteHtml(origin) + items.map(suggestItemHtml).join("")
-            : '<p class="suggest-note">No matches yet. Keep typing, or fill in line 1, city and ZIP yourself.</p>';
-          box.hidden = false;
+          }
+          renderSuggestions(box, origin, res.shown.map(keepNum), res.more.map(keepNum), false);
         }).catch(function () { box.hidden = true; });
       }, 300);
     });
+    box.addEventListener("mousedown", function (event) {
+      /* Keep the keyboard/focus on line 1 when tapping "Show farther results". */
+      if (event.target.closest && event.target.closest(".suggest-more")) event.preventDefault();
+    });
     box.addEventListener("click", function (event) {
+      var moreBtn = event.target.closest ? event.target.closest(".suggest-more") : null;
+      if (moreBtn) {
+        box._keepUntil = Date.now() + 1500;
+        renderSuggestions(box, box._origin, box._shown || [], box._more || [], true);
+        return;
+      }
       var btn = event.target.closest ? event.target.closest(".suggest-item") : null;
       if (!btn || !box._places) return;
       var item = box._places[Number(btn.getAttribute("data-i"))];
@@ -4998,14 +5196,14 @@
 
   function riderPinBanner() {
     var pin = ensureRidePin();
-    if (!rideCardReady()) return cardNeededHtml();
-    if (!pin) return "";
+    var cardBox = rideCardReady() ? "" : cardNeededHtml(); /* "Add card for this ride" box stays until the card is OK */
+    if (!riderPinReady() || !pin) return cardBox;
     return (
       '<div class="pin-box">' +
       '<p class="ride-pin-label">Give your driver this PIN when they arrive</p>' +
       '<p class="ride-pin">' + esc(pin) + "</p>" +
       '<p class="fine">They find your ride on the map. This PIN only starts the trip.</p>' +
-      "</div>"
+      "</div>" + cardBox
     );
   }
 
@@ -5045,11 +5243,11 @@
       '<div class="route-line"><p>' + esc(pickupLine()) + "</p>" + stopsSummaryHtml() + "<p>" + esc(dropLine()) + "</p></div>" +
       driverPickupDistanceLine() +
       '<p class="fine">' + (est.ready
-        ? est.raw.toFixed(2) + " mi, billed as " + est.billed + " · about " + money(est.total) +
+        ? est.raw.toFixed(2) + " mi, billed as " + est.billed +
           (state.dropApprox ? " (drop-off is approximate)" : "")
         : (state.dropLookup === "looking"
           ? "Finding the drop-off on the map…"
-          : "Drop-off isn't on the map yet. You can still accept and use the address above; the fare is figured at drop-off.")) + "</p>" +
+          : "Drop-off isn't on the map yet. You can still accept and use the address above; your commission is figured at drop-off.")) + "</p>" +
       commissionLine() +
       seatsWarningForRide(state, readDriverAccount()) +
       (state.acceptNotice
@@ -6178,19 +6376,17 @@
     if (!est.ready) {
       return (
         '<div class="card" id="driver-fare-card">' +
-        '<p class="tag">' + (finalLabel || "Live fare") + "</p>" +
-        '<p class="fine">Miles and fare update when the route is ready.</p></div>'
+        '<p class="tag">' + (finalLabel || "Live commission") + "</p>" +
+        '<p class="fine">Miles and commission update when the route is ready.</p></div>'
       );
     }
+    /* v53: drivers see miles + their commission (not the rider fare/tax/total). */
     return (
       '<div class="card" id="driver-fare-card">' +
-      '<p class="tag">' + (finalLabel || "Live fare · updates with the trip") + "</p>" +
+      '<p class="tag">' + (finalLabel || "Live commission · updates with the trip") + "</p>" +
       '<div class="money-row"><span>Miles</span><span data-live-miles>' + est.raw.toFixed(2) + " mi, billed as " + est.billed + "</span></div>" +
-      '<div class="money-row"><span>Fare before tax</span><span data-live-sub>' + money(est.sub) + "</span></div>" +
-      '<div class="money-row"><span>Texas tax 8.25%</span><span data-live-tax>' + money(est.tax) + "</span></div>" +
-      '<div class="total-row"><span>' + (finalLabel ? "Final total" : "Estimated total") + "</span><span data-live-total>" + money(est.total) + "</span></div>" +
-      commissionLine() +
-      '<p class="fine">Miles round up. Tax is estimate-only, not a charge.</p></div>'
+      '<div class="total-row"><span>' + (finalLabel ? "Commission" : "Est. commission") + "</span><span data-live-comm>" + money(commissionCentsFor(est) || 0) + "</span></div>" +
+      '<p class="fine">' + driverCommissionPct() + "% of the fare before tax and fees. Miles round up. Estimate only · not a payout.</p></div>"
     );
   }
 
@@ -6244,7 +6440,7 @@
         '<p class="lede">This trip is finished. Location updates have stopped.</p>' +
         "<p><strong>Final drop-off</strong><br>" + esc(dropLine()) + "</p>" +
         "</div>" +
-        driverFareCard("Final fare") +
+        driverFareCard("Final commission") +
         '<button class="btn secondary" type="button" id="back-driver">Back to requests</button>'
       );
     }
@@ -8247,6 +8443,8 @@
     if (subEl) subEl.textContent = money(est.sub);
     if (taxEl) taxEl.textContent = money(est.tax);
     if (totalEl) totalEl.textContent = money(est.total);
+    var commEl = card.querySelector("[data-live-comm]");
+    if (commEl) commEl.textContent = money(commissionCentsFor(est) || 0);
   }
 
   function onGpsFix(pos) {
@@ -8353,8 +8551,17 @@
     v51Styles();
     if (ROLE === "driver") {
       /* iOS only lets sound play after a tap; every tap re-arms it (it is suspended after the app was hidden). */
+      setPlaybackAudioSession();
+      document.addEventListener("touchstart", keepRideAudioAwake, true);
+      document.addEventListener("pointerdown", keepRideAudioAwake, true);
       document.addEventListener("touchend", keepRideAudioAwake, true);
       document.addEventListener("click", keepRideAudioAwake, true);
+      if (signedIn()) showRideSoundBar();
+      document.addEventListener("visibilitychange", function () {
+        /* iOS suspends sound while the app is hidden: ask for a tap again if it did not come back on its own. */
+        if (document.visibilityState !== "visible") return;
+        setTimeout(function () { if (!rideSoundRunning() && signedIn()) showRideSoundBar(); }, 800);
+      });
     }
     setInterval(refreshEtaDoms, 5000);
     if (ROLE === "driver" && signedIn()) {
