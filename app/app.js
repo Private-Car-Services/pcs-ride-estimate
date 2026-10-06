@@ -5392,6 +5392,7 @@
     if (state.milesEndPrompt) return Promise.resolve();
     if (!canGoOnline()) return Promise.resolve();
     var account = readDriverAccount() || {};
+    var speedFresh = !!(state.speedAt && (Date.now() - state.speedAt <= 20000));
     var body = {
       online: true,
       at: Date.now(),
@@ -5406,7 +5407,9 @@
       carSeats: account.carSeats || "",
       gpsMilesToday: Number(state.milesToday) || 0,
       onlineMinutesToday: Math.floor(onlineMsToday() / 60000),
-      startOdometer: state.milesStartOdo
+      startOdometer: state.milesStartOdo,
+      speedMph: speedFresh ? Math.round(state.speedMph || 0) : 0,
+      speedAt: state.speedAt || null
     };
     return authFetch(driversUrl(driverPresenceId()), {
       method: "PUT",
