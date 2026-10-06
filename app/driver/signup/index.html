@@ -17,8 +17,8 @@
   <link rel="stylesheet" href="../../styles.css?v=23">
   <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-auth-compat.js"></script>
-  <script src="../sync-config.js?v=3"></script>
-  <script src="../pcs-auth.js?v=1"></script>
+  <script src="../../sync-config.js?v=3"></script>
+  <script src="../../pcs-auth.js?v=1"></script>
 </head>
 <body>
   <div class="phone">
@@ -93,7 +93,7 @@
         </div>
         <p class="fine">Required. Take a photo or choose one from your library.</p>
 
-        <p class="fine" id="form-version">Form v21</p>
+        <p class="fine" id="form-version">Form v23</p>
         <p class="error" id="form-error" role="alert"></p>
         <button class="btn" type="submit">Save account</button>
       </form>
@@ -297,6 +297,96 @@
         errorEl.textContent = message;
       }
 
+      /* ---- v50: the driver profile (car details + photos) is saved on the server too ----
+         /rides/DRVRPRFL/{driverId}, driverId = email-based roster id. The driver app loads it at every login,
+         so logging out, closing the app, or using another phone/iPad never asks for it again. */
+      var PROFILE_FIELDS = ["name", "phone", "photo", "carYear", "carMake", "carModel", "carPlate", "carSeats", "carColor", "carPhoto"];
+      function dbBase() {
+        var sync = window.PCS_SYNC || {};
+        return String(sync.databaseURL || "").replace(/\/+$/, "");
+      }
+      function authedFetch(url, opts) {
+        var a = window.PCS_AUTH;
+        if (a && a.authFetch && a.hasConfig && a.hasConfig()) {
+          return a.authFetch(url, opts || {}).catch(function (err) {
+            if (err && err.authRequired) return fetch(url, opts || {});
+            throw err;
+          });
+        }
+        return fetch(url, opts || {});
+      }
+      function driverIdFor(email) {
+        return String(email || "").trim().toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 48);
+      }
+      function profileVal(k, v) {
+        if (k === "photo" || k === "carPhoto") return safePhoto(v);
+        if (v == null) return "";
+        if (k === "carPlate") return normalizePlate(v);
+        return v;
+      }
+      function hasVal(k, v) {
+        var x = profileVal(k, v);
+        return x !== "" && x != null;
+      }
+      function mergeProfile(local, remote) {
+        var acc = Object.assign({}, local || {});
+        var localAt = Number(acc.profileUpdatedAt) || 0;
+        var remoteAt = remote ? (Number(remote.updatedAt) || 0) : 0;
+        var remoteNewer = !!remote && remoteAt > localAt;
+        var changed = false, needPush = false;
+        PROFILE_FIELDS.forEach(function (k) {
+          var lv = hasVal(k, acc[k]);
+          var rv = remote ? hasVal(k, remote[k]) : false;
+          if (rv && (!lv || (remoteNewer && profileVal(k, remote[k]) !== profileVal(k, acc[k])))) {
+            acc[k] = profileVal(k, remote[k]);
+            changed = true;
+          } else if (lv && (!rv || (!remoteNewer && localAt > remoteAt && profileVal(k, remote[k]) !== profileVal(k, acc[k])))) {
+            needPush = true;
+          }
+        });
+        if (remoteNewer) { acc.profileUpdatedAt = remoteAt; changed = true; }
+        return { account: acc, changed: changed, needPush: needPush };
+      }
+      function fetchServerProfile(email) {
+        var db = dbBase(), id = driverIdFor(email);
+        if (!db || !id) return Promise.resolve(null);
+        return authedFetch(db + "/rides/DRVRPRFL/" + encodeURIComponent(id) + ".json").then(function (res) {
+          if (!res.ok) throw new Error("profile " + res.status);
+          return res.text();
+        }).then(function (text) {
+          if (!text || text === "null") return null;
+          var row = null;
+          try { row = JSON.parse(text); } catch (e) { row = null; }
+          if (!row || typeof row !== "object") return null;
+          if (row.email && String(row.email).trim().toLowerCase() !== String(email).trim().toLowerCase()) return null;
+          return row;
+        });
+      }
+      function pushServerProfile(account) {
+        /* Resolves true when the server has the profile. Never sends passwords. */
+        var db = dbBase(), email = String((account && account.email) || "").trim().toLowerCase(), id = driverIdFor(email);
+        if (!db || !id) return Promise.resolve(false);
+        var at = Number(account.profileUpdatedAt) || Date.now();
+        var row = { email: email, driverId: id, updatedAt: at };
+        if (account.uid) row.uid = account.uid;
+        PROFILE_FIELDS.forEach(function (k) { if (hasVal(k, account[k])) row[k] = profileVal(k, account[k]); });
+        return authedFetch(db + "/rides/DRVRPRFL/" + encodeURIComponent(id) + ".json", {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(row)
+        }).then(function (res) {
+          if (!res.ok) throw new Error("profile " + res.status);
+          /* Copy the car text onto an existing roster row (never approval fields) so God mode sees it. */
+          var rurl = db + "/rides/DRVRCMMS/" + encodeURIComponent(id) + ".json";
+          return authedFetch(rurl).then(function (r2) { return r2.ok ? r2.text() : ""; }).then(function (text) {
+            if (!text || text === "null") return;
+            var car = { profileUpdatedAt: at };
+            ["carYear", "carMake", "carModel", "carPlate", "carSeats"].forEach(function (k) { if (hasVal(k, row[k])) car[k] = row[k]; });
+            return authedFetch(rurl, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(car) });
+          }).catch(function () {}).then(function () { return true; });
+        }).catch(function () { return false; });
+      }
+
       function readAccount() {
         try {
           var raw = localStorage.getItem("pcs-driver-account");
@@ -487,7 +577,7 @@
         h.textContent = "Driver profile";
         var lead = document.createElement("p");
         lead.className = "lede";
-        lead.textContent = "Saved on this phone. Riders see your name and car when you accept a ride.";
+        lead.textContent = "Saved to your driver account, so it stays when you log out or use another phone or iPad. Riders see your name and car when you accept a ride.";
         main.appendChild(h);
         main.appendChild(lead);
         var savedPhoto = safePhoto(account.photo);
@@ -591,7 +681,7 @@
         var formVer = document.createElement("p");
         formVer.className = "fine";
         formVer.id = "form-version";
-        formVer.textContent = "Form v21";
+        formVer.textContent = "Form v23";
         updateForm.appendChild(formVer);
         main.appendChild(updateForm);
 
@@ -653,7 +743,9 @@
           var photoReady = photoFile ? readPhotoFile(photoFile) : Promise.resolve(safePhoto(account.photo));
           var carReady = carFile ? readCarPhotoFile(carFile) : Promise.resolve(safePhoto(account.carPhoto));
           Promise.all([photoReady, carReady]).then(function (parts) {
-            var next = {
+            /* v50: start from the saved account so the login password hash (and anything else) is kept.
+               Before v50 this dropped passwordHash, and the next login replaced the whole profile. */
+            var next = Object.assign({}, account, {
               name: name,
               phone: phone,
               email: account.email || "",
@@ -664,16 +756,21 @@
               carModel: carModel,
               carPlate: carPlate,
               carSeats: Number(carSeats),
-              carPhoto: parts[1]
-            };
-            if (account.username) next.username = account.username;
+              carPhoto: parts[1],
+              profileUpdatedAt: Date.now()
+            });
             try {
               localStorage.setItem("pcs-driver-account", JSON.stringify(next));
             } catch (saveErr) {
               err.textContent = "Could not update the profile on this phone.";
               return;
             }
-            showProfile(next, "Profile updated on this phone.");
+            err.textContent = "Saving…";
+            pushServerProfile(next).then(function (ok) {
+              showProfile(next, ok
+                ? "Profile updated and saved to your driver account."
+                : "Profile updated on this phone. No signal to the server right now; the driver app will finish saving it next time it opens.");
+            });
           }).catch(function () {
             err.textContent = "Choose a photo from this phone. A picture that is too large will not save.";
           });
@@ -683,6 +780,17 @@
       var existing = readAccount();
       if (existing && (existing.email || existing.username)) {
         showProfile(existing, "");
+        if (existing.email) {
+          fetchServerProfile(existing.email).then(function (remote) {
+            var cur = readAccount() || existing;
+            var merged = mergeProfile(cur, remote);
+            if (merged.changed) {
+              try { localStorage.setItem("pcs-driver-account", JSON.stringify(merged.account)); } catch (e) {}
+              if (!document.querySelector("#profile-form input:focus, #profile-form select:focus")) showProfile(merged.account, "");
+            }
+            if (merged.needPush) pushServerProfile(merged.account);
+          }).catch(function () {});
+        }
         return;
       }
 
@@ -775,10 +883,12 @@
                 carModel: carModel,
                 carPlate: carPlate,
                 carSeats: Number(carSeats),
-                carPhoto: parts[1]
+                carPhoto: parts[1],
+                profileUpdatedAt: Date.now()
               };
               localStorage.setItem("pcs-driver-account", JSON.stringify(profile));
               localStorage.setItem("pcs-driver-session", email);
+              pushServerProfile(profile);
               document.getElementById("password").value = "";
               document.getElementById("confirm").value = "";
               try {
@@ -828,10 +938,12 @@
               carModel: carModel,
               carPlate: carPlate,
               carSeats: Number(carSeats),
-              carPhoto: parts[1]
+              carPhoto: parts[1],
+              profileUpdatedAt: Date.now()
             };
             localStorage.setItem("pcs-driver-account", JSON.stringify(profile));
             localStorage.setItem("pcs-driver-session", email);
+            pushServerProfile(profile);
             document.getElementById("password").value = "";
             document.getElementById("confirm").value = "";
             try {
