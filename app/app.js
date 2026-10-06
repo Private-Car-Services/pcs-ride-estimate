@@ -774,6 +774,201 @@
     document.head.appendChild(s);
   }
 
+  /* ================= v52: active-ride recovery, no duplicate requests, clear PIN status ================= */
+  var ACTIVE_KEY = "pcs-rider-active-ride"; /* survives a new request overwriting the ride store */
+  var PINS_KEY = "pcs-rider-pins"; /* PIN per ride code, so a PIN is never lost on this phone */
+  var activeRefreshAt = 0;
+
+  function isActiveStatus(st) {
+    st = String(st || "").toLowerCase();
+    return st === "requested" || st === "pending_owner" || st === "pending-owner" || st === "accepted" || st === "started";
+  }
+
+  function activeRiderRide() {
+    if (ROLE !== "customer" || !signedIn()) return null;
+    var r = currentRide();
+    if (!r || !r.pickupStreet || !rideBelongsToSession(r) || !isActiveStatus(r.status)) return null;
+    return r;
+  }
+
+  function readActiveMark() {
+    try {
+      var m = JSON.parse(localStorage.getItem(ACTIVE_KEY) || "null");
+      return m && m.code ? m : null;
+    } catch (e) { return null; }
+  }
+
+  function rememberActiveRide(code) {
+    if (!code) return;
+    try { localStorage.setItem(ACTIVE_KEY, JSON.stringify({ code: code, session: readSession(), at: Date.now() })); } catch (e) {}
+  }
+
+  function clearActiveMark(code) {
+    var m = readActiveMark();
+    if (m && (!code || m.code === code)) {
+      try { localStorage.removeItem(ACTIVE_KEY); } catch (e) {}
+    }
+  }
+
+  function rememberPin(code, pin) {
+    pin = normalizeStoredPin(pin);
+    if (!code || !pin) return;
+    try {
+      var m = JSON.parse(localStorage.getItem(PINS_KEY) || "{}") || {};
+      m[code] = { pin: pin, at: Date.now() };
+      var keys = Object.keys(m).sort(function (a, b) { return (m[b].at || 0) - (m[a].at || 0); });
+      keys.slice(20).forEach(function (k) { delete m[k]; });
+      localStorage.setItem(PINS_KEY, JSON.stringify(m));
+    } catch (e) {}
+  }
+
+  function recalledPin(code) {
+    if (!code) return "";
+    try {
+      var m = JSON.parse(localStorage.getItem(PINS_KEY) || "{}") || {};
+      return normalizeStoredPin(m[code] && m[code].pin);
+    } catch (e) { return ""; }
+  }
+
+  /* Open the rider's in-progress ride screen (used by Back to my ride / Cancel that ride / reload). */
+  function goToActiveRide(ride) {
+    if (!ride) return false;
+    applyRide(ride);
+    if (!normalizeStoredPin(state.pin)) {
+      var p = recalledPin(ride.code);
+      if (p) state.pin = p;
+    }
+    state.error = "";
+    state.cancelError = "";
+    state.cancelConfirm = false;
+    state.customerGeocodeTried = false;
+    var st = String(ride.status || "").toLowerCase();
+    state.screen = (st === "accepted" || st === "started") ? "trip" : "waiting";
+    return true;
+  }
+
+  /* Reload with the ride store gone/overwritten but a remembered active code: pull it back from the server. */
+  function restoreFromActiveMark() {
+    if (ROLE !== "customer" || !signedIn() || !syncOn()) return;
+    if (activeRiderRide()) return;
+    var mark = readActiveMark();
+    if (!mark || (mark.session && mark.session !== readSession())) return;
+    getRide(mark.code).then(function (ride) {
+      if (!ride || !isActiveStatus(ride.status)) {
+        clearActiveMark(mark.code);
+        return;
+      }
+      if (activeRiderRide()) return;
+      if (!ride.code) ride.code = mark.code;
+      ride.pin = recalledPin(mark.code) || null;
+      try { localStorage.setItem(STORE, JSON.stringify(ride)); } catch (e) {}
+      writeRideOwner(readSession());
+      goToActiveRide(ride);
+      render();
+    }).catch(function () {});
+  }
+
+  /* While the "already have a ride" card is up, check the server so a cancelled/denied ride unblocks booking. */
+  function refreshActiveRideStatus(code) {
+    if (!syncOn() || !code || Date.now() - activeRefreshAt < 5000) return;
+    activeRefreshAt = Date.now();
+    getRide(code).then(function (ride) {
+      if (!ride) return;
+      var local = currentRide();
+      if (!local || local.code !== code) return;
+      if (String(ride.status || "") === String(local.status || "")) return;
+      ride.pin = normalizeStoredPin(local.pin) || recalledPin(code) || null;
+      if (!ride.code) ride.code = code;
+      try { localStorage.setItem(STORE, JSON.stringify(ride)); } catch (e) {}
+      if (!isActiveStatus(ride.status)) clearActiveMark(code);
+      if (state.screen === "home") render();
+    }).catch(function () {});
+  }
+
+  /* Before a new request: if this phone remembers an open ride but the local copy is gone, ask the server first. */
+  function checkMarkBeforeRequest(form) {
+    if (ROLE !== "customer" || !syncOn()) return false;
+    var mark = readActiveMark();
+    if (!mark || (mark.session && mark.session !== readSession())) return false;
+    var errEl = document.getElementById("form-error");
+    if (errEl) errEl.textContent = "Checking your current ride\u2026";
+    function proceed() {
+      state.error = "";
+      form.dataset.markChecked = "1";
+      if (form.requestSubmit) form.requestSubmit();
+      else form.dispatchEvent(new Event("submit", { cancelable: true }));
+    }
+    getRide(mark.code).then(function (ride) {
+      if (ride && isActiveStatus(ride.status)) {
+        if (!ride.code) ride.code = mark.code;
+        ride.pin = recalledPin(mark.code) || null;
+        try { localStorage.setItem(STORE, JSON.stringify(ride)); } catch (e) {}
+        writeRideOwner(readSession());
+        state.error = "";
+        state.screen = "home";
+        render(); /* shows "You already have a ride requested" */
+        return;
+      }
+      clearActiveMark(mark.code);
+      proceed();
+    }).catch(function () {
+      /* Offline: don't risk a duplicate. Keep what they typed; just say why. */
+      var el = document.getElementById("form-error");
+      if (el) el.textContent = "Couldn't check your current ride. Check your signal and try again.";
+    });
+    return true;
+  }
+
+  function rideStatusWords(st) {
+    st = String(st || "").toLowerCase();
+    if (st === "pending_owner" || st === "pending-owner") return "waiting for Private Car Services to approve it";
+    if (st === "requested") return "approved, waiting for a driver";
+    if (st === "accepted") return "your driver is on the way";
+    if (st === "started") return "your ride is in progress";
+    return st;
+  }
+
+  function activeRideHomeCard(r) {
+    refreshActiveRideStatus(r.code);
+    return (
+      '<div class="app-nav">' + logoutLine() + "</div>" +
+      '<div class="card active-ride-card" id="active-ride-card">' +
+      '<p class="tag">Ride in progress</p>' +
+      "<h2>You already have a ride requested</h2>" +
+      '<p class="lede">Ride ' + esc(r.code || "") + " · " + esc(rideStatusWords(r.status)) + ".<br>" +
+      esc(r.pickupAddress || r.pickupStreet || "") + " → " + esc(r.dropAddress || r.dropStreet || "") + "</p>" +
+      '<p class="fine">So drivers never get two requests, a new ride can be booked once this one is finished or cancelled.</p>' +
+      '<button class="btn" type="button" id="back-to-ride">Back to my ride</button>' +
+      (riderCanCancel(r.status) ? '<button class="btn secondary" type="button" id="cancel-that-ride">Cancel that ride</button>' : "") +
+      "</div>"
+    );
+  }
+
+  /* Ride screens: "← Request" only once the ride is over (otherwise it led to a fresh form = duplicate requests). */
+  function riderBackButton() {
+    if (isActiveStatus(state.rideStatus)) return "";
+    return '<button class="btn ghost" type="button" id="back-home">← Book a new ride</button>';
+  }
+
+  /* One plain line that says where things stand and when the PIN appears. */
+  function riderStageNote() {
+    var st = String(state.rideStatus || "").toLowerCase();
+    if (!isActiveStatus(st) || st === "started") return "";
+    var cardOk = rideCardReady();
+    var msg;
+    if (st === "pending_owner" || st === "pending-owner") {
+      msg = "Step 1: waiting for Private Car Services to approve your ride. " +
+        (cardOk ? "Your pickup PIN is below." : "Your pickup PIN appears once your card is confirmed.");
+    } else if (st === "requested") {
+      msg = cardOk ? "Approved. Waiting for a driver to accept. Your pickup PIN is below."
+        : "Approved. Your pickup PIN appears once your card is confirmed.";
+    } else {
+      msg = cardOk ? "Your driver is on the way. Give them the PIN below when they arrive."
+        : "Your driver is on the way. Your pickup PIN appears once your card is confirmed. Add your card below, or call " + BUSINESS_PHONE + " and we'll confirm it.";
+    }
+    return '<p class="note" id="rider-stage" role="status">' + esc(msg) + "</p>";
+  }
+
   var SAMPLE = {
     name: "",
     phone: "",
@@ -2454,6 +2649,7 @@
   function requestCardLink() {
     var btn = document.getElementById("card-link-request");
     var code = state.code || "";
+    if (cardStatusOk(String(state.cardStatus || ""))) { closeCardSheet(); render(); return; } /* v52: never undo a card OK */
     var patch = { cardStatus: "link_requested", cardRequestedAt: Date.now() };
     function done() {
       state.cardStatus = "link_requested";
@@ -2567,6 +2763,7 @@
     function finish() {
       try { localStorage.removeItem(STORE); } catch (err) {}
       writeRideOwner("");
+      clearActiveMark(code); /* v52: a cancelled ride frees the rider to book again */
       clearRideFields();
       state.cancelBusy = false;
       state.cancelConfirm = false;
@@ -3557,7 +3754,7 @@
       return pin;
     }
     var local = currentRide();
-    pin = normalizeStoredPin(local && local.pin);
+    pin = normalizeStoredPin(local && local.pin) || (ROLE === "customer" ? recalledPin(state.code) : "");
     if (!pin) {
       pin = (state.isTest || isTestRide(local)) ? TEST_PIN : makeRidePin();
     }
@@ -4942,13 +5139,13 @@
       if (state.screen !== "waiting" && state.screen !== "trip") return;
       if ((state.screen === "waiting" || state.screen === "trip") && state.code && ride.code && ride.code !== state.code) return;
       var local = currentRide() || {};
-      var localPin = normalizeStoredPin(local.pin) || normalizeStoredPin(state.pin);
+      var localPin = normalizeStoredPin(local.pin) || normalizeStoredPin(state.pin) || recalledPin(ride.code || code);
       if (localPin) ride.pin = localPin; /* keep local-only; do not push plaintext pin */
       if (ride.pinHash) state.pinHash = ride.pinHash;
-      if (String(ride.status || "").toLowerCase() === "denied") {
-        state.rideStatus = "denied";
-      }
+      /* v52: no longer pre-set state.rideStatus = "denied" here; that hid the change from ingestCustomerRide,
+         so the rider screen never refreshed to "denied" (stuck on the old Cancel ride card until a reload). */
       try { localStorage.setItem(STORE, JSON.stringify(ride)); } catch (err) {}
+      if (!isActiveStatus(ride.status)) clearActiveMark(ride.code || code);
       ingestCustomerRide(ride);
     }).catch(function () {});
   }
@@ -5061,7 +5258,8 @@
         (savedRide.status === "requested" || savedRide.status === "pending_owner" ||
          savedRide.status === "denied" || savedRide.status === "accepted" ||
          savedRide.status === "started" || savedRide.status === "completed")) {
-      if (savedRide.status !== "completed" && !rideIsAsap(savedRide) && isPickupInPast(savedRide.date, savedRide.time)) {
+      if ((savedRide.status === "requested" || savedRide.status === "pending_owner" || savedRide.status === "denied") &&
+          !rideIsAsap(savedRide) && isPickupInPast(savedRide.date, savedRide.time) && !readActiveMark()) {
         discardStoredRide();
         state.screen = "home";
         return false;
@@ -5243,6 +5441,8 @@
   }
 
   function customerHome() {
+    var openRide = activeRiderRide();
+    if (openRide) return activeRideHomeCard(openRide);
     if (!state.asap && isPickupInPast(state.date, state.time)) {
       state.date = "";
       state.time = "";
@@ -5470,7 +5670,7 @@
     var completed = state.rideStatus === "completed";
     return (
       testTop +
-      '<button class="btn ghost" type="button" id="back-home">← Request</button>' +
+      riderBackButton() +
       (completed
         ? '<div class="status"><i></i><span>Ride complete</span></div>'
         : (started
@@ -5482,7 +5682,7 @@
         ? '<p class="fine" id="rider-share-note">&#128205; Sharing your location with your driver until pickup so they can find you.</p>'
         : "") +
       routeLedeHtml() +
-      (started || completed ? "" : riderPinBanner()) +
+      (started || completed ? "" : riderStageNote() + riderPinBanner()) +
       customerMapBlock(caption, driver) +
       moneyCard() +
       (completed
@@ -5511,7 +5711,7 @@
     var caption = !both ? "Your route" : (driver ? "Your driver" : "Your route");
     var st = String(state.rideStatus || "").toLowerCase();
     var note = st === "cancelled"
-      ? "This ride was cancelled. Tap ← Request to book a new ride, or call " + BUSINESS_PHONE + "."
+      ? "This ride was cancelled. Tap ← Book a new ride to request again, or call " + BUSINESS_PHONE + "."
       : st === "pending_owner"
       ? "Your request was saved. Private Car Services must confirm it before drivers can accept."
       : (st === "denied"
@@ -5532,12 +5732,12 @@
         : waitingStatusBlock(waitLabel));
     var live = st !== "denied" && st !== "cancelled";
     return (
-      '<button class="btn ghost" type="button" id="back-home">← Request</button>' +
+      riderBackButton() +
       statusHtml +
       driverIdentityLine() +
       driverEtaLine() +
       routeLedeHtml() +
-      testTop + (live ? riderPinBanner() : "") +
+      testTop + (live ? riderStageNote() + riderPinBanner() : "") +
       customerMapBlock(caption, driver) +
       moneyCard() +
       (live ? paymentStatusCard() : "") +
@@ -5749,6 +5949,11 @@
     }
     localStorage.setItem(STORE, JSON.stringify(rideOut));
     if (ROLE === "customer") writeRideOwner(readSession());
+    if (ROLE === "customer" && rideOut.code) {
+      if (rideOut.pin) rememberPin(rideOut.code, rideOut.pin);
+      if (isActiveStatus(status)) rememberActiveRide(rideOut.code);
+      else clearActiveMark(rideOut.code);
+    }
   }
 
   function clearRideFields() {
@@ -6248,6 +6453,7 @@
             return;
           }
           maybeRestoreCustomerRide();
+          restoreFromActiveMark();
           render();
         }
         function loginFail(msg) {
@@ -6384,6 +6590,7 @@
             return;
           }
           maybeRestoreCustomerRide();
+          restoreFromActiveMark();
           render();
         }).catch(function (err) {
           var msg = a.authErrorMessage ? a.authErrorMessage(err) : "Sign-in failed.";
@@ -6648,6 +6855,9 @@
     if (form) {
       form.addEventListener("submit", function (event) {
         event.preventDefault();
+        if (activeRiderRide()) { render(); return; } /* v52: never a second request while one is open */
+        if (!form.dataset.markChecked && checkMarkBeforeRequest(form)) return;
+        delete form.dataset.markChecked;
         readForm();
         state.notice = "";
         state.stopList = (state.stopList || []).filter(function (s) { return s && String(s.street || "").trim(); });
@@ -6802,10 +7012,27 @@
       });
     }
 
+    var backToRide = document.getElementById("back-to-ride");
+    if (backToRide) {
+      backToRide.addEventListener("click", function () {
+        if (goToActiveRide(activeRiderRide())) render();
+      });
+    }
+    var cancelThat = document.getElementById("cancel-that-ride");
+    if (cancelThat) {
+      cancelThat.addEventListener("click", function () {
+        if (!goToActiveRide(activeRiderRide())) return;
+        state.cancelConfirm = true;
+        render();
+        var card = document.getElementById("cancel-card");
+        if (card && card.scrollIntoView) card.scrollIntoView({ block: "center" });
+      });
+    }
     var backHome = document.getElementById("back-home");
     if (backHome) {
       backHome.addEventListener("click", function () {
-        if (String(state.rideStatus || "").toLowerCase() === "cancelled") discardStoredRide();
+        var endedSt = String(state.rideStatus || "").toLowerCase();
+        if (endedSt === "cancelled" || endedSt === "denied") { clearActiveMark(state.code); discardStoredRide(); }
         state.mode = "customer";
         state.screen = "home";
         render();
@@ -8197,6 +8424,7 @@
     }, 4000);
     if (ROLE !== "driver" && signedIn()) {
       maybeRestoreCustomerRide();
+      restoreFromActiveMark();
     }
     if (signedIn() && !accountSyncTried) {
       accountSyncTried = true;
@@ -8227,6 +8455,14 @@
       if (state.screen === "trip" && ride && (ride.status === "accepted" || ride.status === "started" || ride.status === "completed")) return;
       if (state.screen !== "home" && (!ride || (ride.status !== "accepted" && ride.status !== "started" && ride.status !== "completed"))) state.screen = "home";
       render();
+      return;
+    }
+    if (state.screen === "home") {
+      /* v52: if a ride is open (another tab, reopened app), swap the request form for "Back to my ride", and back again once it ends. */
+      var open = activeRiderRide();
+      var showing = !!document.getElementById("active-ride-card");
+      if (!!open !== showing) render();
+      else if (open) refreshActiveRideStatus(open.code);
       return;
     }
     if (state.screen !== "waiting" && state.screen !== "trip") return;
