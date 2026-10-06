@@ -781,3 +781,78 @@ button, input {
     grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
   }
 }
+
+/* v55: collapsible driver cards + tucked Hire / How this works */
+details.driver-card > summary.driver-card-summary {
+  cursor: pointer;
+  list-style: none;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--ink);
+}
+details.driver-card > summary.driver-card-summary::-webkit-details-marker {
+  display: none;
+}
+details.driver-card > summary.driver-card-summary::before {
+  content: "▸";
+  color: var(--gold-2);
+  font-size: 12px;
+  margin-right: 2px;
+}
+details.driver-card[open] > summary.driver-card-summary::before {
+  content: "▾";
+}
+.driver-card-name {
+  font-weight: 700;
+}
+.driver-card-body {
+  margin-top: 8px;
+}
+.driver-card-status {
+  margin: 4px 0 6px;
+  font-size: 13px;
+  font-weight: 600;
+}
+.driver-speed {
+  margin: 6px 0;
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--gold-2);
+}
+.tuck-link {
+  background: none;
+  border: none;
+  color: var(--gold-2);
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 700;
+  padding: 4px 0 8px;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.hire-tuck {
+  margin-bottom: 8px;
+}
+details.board-how {
+  margin: 0 0 10px;
+}
+details.board-how > summary {
+  cursor: pointer;
+  color: var(--gold-2);
+  font-weight: 700;
+  font-size: 13px;
+  list-style: none;
+}
+details.board-how > summary::-webkit-details-marker {
+  display: none;
+}
+details.board-how > summary::before {
+  content: "▸ ";
+}
+details.board-how[open] > summary::before {
+  content: "▾ ";
+}

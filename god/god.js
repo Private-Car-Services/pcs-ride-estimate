@@ -97,7 +97,10 @@
     calendarUpdated: "",
     assignDrafts: {},
     fareDrafts: {},
-    boardNotice: ""
+    boardNotice: "",
+    expandedDrivers: {},
+    showHireForm: false,
+    showBoardHow: false
   };
 
   var map = null;
@@ -2118,6 +2121,8 @@
       if (d.carSeats) prev.carSeats = d.carSeats;
       if (d.gpsMilesToday != null) prev.gpsMilesToday = d.gpsMilesToday;
       if (d.startOdometer != null) prev.startOdometer = d.startOdometer;
+      if (d.speedMph != null) prev.speedMph = d.speedMph;
+      if (d.speedAt != null) prev.speedAt = d.speedAt;
       if (!prev.active && prev.fromRoster) {
         /* Fired: do not treat as online in the panel. */
         prev.online = false;
@@ -2133,6 +2138,24 @@
       if (a.online !== b.online) return a.online ? -1 : 1;
       return String(a.name || "").localeCompare(String(b.name || ""));
     });
+  }
+
+  function driverSpeedLabel(d) {
+    if (!d || !d.online) return "—";
+    if (d.speedMph == null) return "—";
+    if (d.speedAt && (Date.now() - Number(d.speedAt) > 20000)) return "—";
+    return Math.round(Number(d.speedMph) || 0) + " mph";
+  }
+
+  function hireBlockHtml() {
+    return (
+      '<div class="hire-tuck" id="hire-tuck">' +
+        '<button type="button" class="tuck-link" id="toggle-hire">' +
+          (state.showHireForm ? "− Hide hire form" : "+ Hire a driver") +
+        "</button>" +
+        (state.showHireForm ? hireFormHtml() : "") +
+      "</div>"
+    );
   }
 
   function hireFormHtml() {
@@ -2261,6 +2284,13 @@
         else if (trip) badge = '<span class="badge on-trip">On trip</span>';
         else if (d.online) badge = '<span class="badge">Online · free</span>';
         else badge = '<span class="badge off">Approved · offline</span>';
+        var statusShort;
+        if (approval === "pending") statusShort = '<span class="badge pending">Pending</span>';
+        else if (approval === "rejected") statusShort = '<span class="badge fired">Rejected</span>';
+        else if (approval === "fired" || !d.active) statusShort = '<span class="badge fired">Fired</span>';
+        else if (d.online) statusShort = '<span class="badge">Online</span>';
+        else statusShort = '<span class="badge off">Offline</span>';
+        var speedTxt = driverSpeedLabel(d);
         var where = isCoord(d.lat) && isCoord(d.lng)
           ? (+d.lat).toFixed(4) + ", " + (+d.lng).toFixed(4)
           : (d.online ? "Location not shared" : "Not on the map");
@@ -2288,52 +2318,56 @@
         if (!d.active) cardClass += " fired";
         if (state.focusDriverId && state.focusDriverId === d.id) cardClass += " focused";
         var canLocate = d.online && !!focusTarget(d.id);
-        var nameHtml =
-          '<button type="button" class="driver-name-btn btn-locate-driver' + (canLocate ? "" : " no-loc") + '" data-driver-id="' + esc(d.id) + '"' +
-          ' title="' + (canLocate ? "Show on map" : "No live location") + '">' +
-          esc(displayName(d.name, "Driver")) + "</button>";
         var locateBtn = d.online
           ? '<button type="button" class="btn btn-ghost btn-locate btn-locate-driver" data-driver-id="' + esc(d.id) + '"' +
             (canLocate ? "" : ' aria-disabled="true"') + ">" +
             (canLocate ? "&#128205; Locate on map" : "No live location") + "</button>"
           : "";
+        var openAttr = state.expandedDrivers[d.id] ? " open" : "";
         return (
-          '<article class="' + cardClass + '" data-driver-id="' + esc(d.id) + '">' +
-            "<h3>" + nameHtml + badge + "</h3>" +
-            locateBtn +
-            '<p class="meta">' +
-            (contact.length ? contact.join(" · ") + "<br>" : "") +
-            (car || plate
-              ? "<strong>Car</strong> " + esc(car || "—") +
-                (plate ? " · Plate " + esc(plate) : "") +
-                (d.carSeats ? " · " + esc(String(d.carSeats)) + " seats" : "") + "<br>"
-              : "") +
-            "<strong>Last seen</strong> " + esc(fmtClock(d.at)) + "<br>" +
-            "<strong>Map</strong> " + esc(where) + "<br>" +
-            "<strong>Today start odo</strong> " + esc(startOdo != null ? String(startOdo) : "—") + "<br>" +
-            "<strong>GPS miles today</strong> " + esc(gpsToday != null ? Number(gpsToday).toFixed(1) + " mi" : "—") + "<br>" +
-            "<strong>Live trip revenue</strong> " + esc(rev.label) +
-            (trip ? "<br><strong>With</strong> " + esc(displayName(trip.name, "Rider")) : "") + "<br>" +
-            "<strong>Ride total</strong> " + esc(fmtCents(totals.rideTotal)) + "<br>" +
-            "<strong>Commission total</strong> " + esc(fmtCents(totals.commissionTotal)) +
-            " · " + esc(String(totals.count)) + " logged rides" +
-            "</p>" +
-            (hist.length
-              ? '<details class="miles-history"><summary>Last 14 days miles</summary><ul>' + hist.join("") + "</ul></details>"
-              : '<p class="fine">No mileage days saved yet.</p>') +
-            '<button type="button" class="btn btn-ghost btn-open-driver" data-driver-id="' + esc(d.id) + '">Calendar & history</button>' +
-            '<div class="commission-row">' +
-              '<label class="commission-label" for="comm-' + esc(d.id) + '">Commission %</label>' +
-              '<input class="commission-input" id="comm-' + esc(d.id) + '" data-driver-id="' + esc(d.id) + '" type="number" min="0" max="100" step="1" value="' + esc(String(pct)) + '"' + (approval === "approved" ? "" : " disabled") + ">" +
-              '<button type="button" class="btn btn-ghost btn-save-comm" data-driver-id="' + esc(d.id) + '"' + (approval === "approved" ? "" : " disabled") + ">Save</button>" +
-              (approval === "pending"
-                ? '<button type="button" class="btn btn-gold btn-approve" data-driver-id="' + esc(d.id) + '">Approve</button>' +
-                  '<button type="button" class="btn btn-fire btn-reject" data-driver-id="' + esc(d.id) + '">Reject</button>'
-                : (d.active
-                  ? '<button type="button" class="btn btn-fire" data-driver-id="' + esc(d.id) + '">Fire</button>'
-                  : '<button type="button" class="btn btn-ghost btn-rehire" data-driver-id="' + esc(d.id) + '">Rehire</button>')) +
+          '<details class="' + cardClass + ' driver-card"' + openAttr + ' data-driver-id="' + esc(d.id) + '">' +
+            '<summary class="driver-card-summary">' +
+              '<span class="driver-card-name">' + esc(displayName(d.name, "Driver")) + "</span>" +
+              statusShort +
+            "</summary>" +
+            '<div class="driver-card-body">' +
+              locateBtn +
+              '<p class="driver-speed"><strong>Speed</strong> ' + esc(speedTxt) + "</p>" +
+              '<h3 class="driver-card-status">' + badge + "</h3>" +
+              '<p class="meta">' +
+              (contact.length ? contact.join(" · ") + "<br>" : "") +
+              (car || plate
+                ? "<strong>Car</strong> " + esc(car || "—") +
+                  (plate ? " · Plate " + esc(plate) : "") +
+                  (d.carSeats ? " · " + esc(String(d.carSeats)) + " seats" : "") + "<br>"
+                : "") +
+              "<strong>Last seen</strong> " + esc(fmtClock(d.at)) + "<br>" +
+              "<strong>Map</strong> " + esc(where) + "<br>" +
+              "<strong>Today start odo</strong> " + esc(startOdo != null ? String(startOdo) : "—") + "<br>" +
+              "<strong>GPS miles today</strong> " + esc(gpsToday != null ? Number(gpsToday).toFixed(1) + " mi" : "—") + "<br>" +
+              "<strong>Live trip revenue</strong> " + esc(rev.label) +
+              (trip ? "<br><strong>With</strong> " + esc(displayName(trip.name, "Rider")) : "") + "<br>" +
+              "<strong>Ride total</strong> " + esc(fmtCents(totals.rideTotal)) + "<br>" +
+              "<strong>Commission total</strong> " + esc(fmtCents(totals.commissionTotal)) +
+              " · " + esc(String(totals.count)) + " logged rides" +
+              "</p>" +
+              (hist.length
+                ? '<details class="miles-history"><summary>Last 14 days miles</summary><ul>' + hist.join("") + "</ul></details>"
+                : '<p class="fine">No mileage days saved yet.</p>') +
+              '<button type="button" class="btn btn-ghost btn-open-driver" data-driver-id="' + esc(d.id) + '">Calendar & history</button>' +
+              '<div class="commission-row">' +
+                '<label class="commission-label" for="comm-' + esc(d.id) + '">Commission %</label>' +
+                '<input class="commission-input" id="comm-' + esc(d.id) + '" data-driver-id="' + esc(d.id) + '" type="number" min="0" max="100" step="1" value="' + esc(String(pct)) + '"' + (approval === "approved" ? "" : " disabled") + ">" +
+                '<button type="button" class="btn btn-ghost btn-save-comm" data-driver-id="' + esc(d.id) + '"' + (approval === "approved" ? "" : " disabled") + ">Save</button>" +
+                (approval === "pending"
+                  ? '<button type="button" class="btn btn-gold btn-approve" data-driver-id="' + esc(d.id) + '">Approve</button>' +
+                    '<button type="button" class="btn btn-fire btn-reject" data-driver-id="' + esc(d.id) + '">Reject</button>'
+                  : (d.active
+                    ? '<button type="button" class="btn btn-fire" data-driver-id="' + esc(d.id) + '">Fire</button>'
+                    : '<button type="button" class="btn btn-ghost btn-rehire" data-driver-id="' + esc(d.id) + '">Rehire</button>')) +
+              "</div>" +
             "</div>" +
-          "</article>"
+          "</details>"
         );
       }).join(""));
     }
@@ -2488,6 +2522,12 @@
   function bindDayBoardActions() {
     var board = document.getElementById("day-board");
     if (!board) return;
+    var how = document.getElementById("board-how");
+    if (how) {
+      how.addEventListener("toggle", function () {
+        state.showBoardHow = !!how.open;
+      });
+    }
     Array.prototype.forEach.call(board.querySelectorAll(".day-fare"), function (input) {
       input.addEventListener("input", function () {
         var id = input.getAttribute("data-event-id");
@@ -2649,17 +2689,26 @@
     } else if (state.calendarError) {
       err = '<p class="empty">Could not load scheduled rides.</p>';
     }
-    var hint = (
+    var hintBody = (
       '<p class="day-board-hint">Shows Google Calendar events whose <strong>title starts with PCS</strong> (example: <em>PCS – John Smith</em>). ' +
       "Pickup = event Location. Drop-off = a <code>Drop-off:</code> or <code>To:</code> line in the notes, else the whole notes. " +
       "Wall-TV friendly. Assign an approved driver; they see it on their app. Completing credits Mon–Sun commission.</p>"
+    );
+    var emptyNote = (!rows.length && !err)
+      ? '<p class="empty">No upcoming PCS-titled rides in the hub yet. Title calendar events with <strong>PCS</strong> and run the calendar sync routine.</p>'
+      : "";
+    var howBlock = (
+      '<details class="board-how"' + (state.showBoardHow ? " open" : "") + ' id="board-how">' +
+        "<summary>How this works</summary>" +
+        hintBody +
+        emptyNote +
+      "</details>"
     );
     if (!rows.length && !err) {
       return (
         '<section class="day-board" id="day-board">' +
         "<h2>Scheduled rides</h2>" +
-        hint + notice +
-        '<p class="empty">No upcoming PCS-titled rides in the hub yet. Title calendar events with <strong>PCS</strong> and run the calendar sync routine.</p>' +
+        howBlock + notice +
         "</section>"
       );
     }
@@ -2711,7 +2760,7 @@
     return (
       '<section class="day-board" id="day-board">' +
         "<h2>Scheduled rides</h2>" +
-        hint + notice + err +
+        howBlock + notice + err +
         '<div class="day-grid">' + cards + "</div>" +
       "</section>"
     );
@@ -2736,7 +2785,7 @@
           '<aside class="side">' +
             '<section class="side-section">' +
               "<h2>Drivers</h2>" +
-              hireFormHtml() +
+              hireBlockHtml() +
               '<div id="drivers-list">' + driversPanelHtml() + "</div>" +
             "</section>" +
             '<section class="side-section">' +
@@ -2763,6 +2812,15 @@
       /* Always rebind fresh nodes after innerHTML replace. */
     }
     if (!list) return;
+
+    Array.prototype.forEach.call(list.querySelectorAll("details.driver-card"), function (el) {
+      el.addEventListener("toggle", function () {
+        var id = el.getAttribute("data-driver-id");
+        if (!id) return;
+        if (el.open) state.expandedDrivers[id] = true;
+        else delete state.expandedDrivers[id];
+      });
+    });
 
     Array.prototype.forEach.call(list.querySelectorAll(".commission-input"), function (input) {
       input.addEventListener("input", function () {
@@ -2885,7 +2943,26 @@
     });
   }
 
+  function refreshHireBlock() {
+    var tuck = document.getElementById("hire-tuck");
+    if (!tuck) return;
+    var fresh = document.createElement("div");
+    fresh.innerHTML = hireBlockHtml();
+    var next = fresh.firstChild;
+    if (next) {
+      tuck.replaceWith(next);
+      bindHireForm();
+    }
+  }
+
   function bindHireForm() {
+    var toggle = document.getElementById("toggle-hire");
+    if (toggle) {
+      toggle.addEventListener("click", function () {
+        state.showHireForm = !state.showHireForm;
+        refreshHireBlock();
+      });
+    }
     var form = document.getElementById("hire-form");
     if (!form) return;
     form.addEventListener("submit", function (ev) {
@@ -2900,15 +2977,8 @@
       state.hirePct = pctEl ? pctEl.value : String(DEFAULT_COMMISSION_PCT);
       hireDriver().then(function (ok) {
         if (ok) {
-          /* Re-render hire form cleared + list */
-          var side = form.parentNode;
-          if (side) {
-            var fresh = document.createElement("div");
-            fresh.innerHTML = hireFormHtml();
-            var newForm = fresh.firstChild;
-            side.replaceChild(newForm, form);
-            bindHireForm();
-          }
+          state.showHireForm = false;
+          refreshHireBlock();
           renderBoardLists();
         } else {
           var err = document.getElementById("hire-error");
