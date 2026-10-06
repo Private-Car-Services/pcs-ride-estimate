@@ -3,12 +3,12 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <meta name="description" content="Get a ride fare estimate from Private Car Services — Houston & Willis, TX. Estimate only; book to confirm." />
+  <meta name="description" content="Get a ride fare estimate from Private Car Services — Houston &amp; Waco, TX. Estimate only; book to confirm." />
   <title>Ride Estimate | Private Car Services</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="styles.css?v=14" />
+  <link rel="stylesheet" href="styles.css?v=15" />
   <script src="config.js"></script>
 </head>
 <body>
@@ -18,7 +18,7 @@
         <span class="brand-mark" aria-hidden="true"></span>
         <div>
           <p class="brand-name">Private Car Services</p>
-          <p class="brand-tag">Houston &amp; Willis, TX</p>
+          <p class="brand-tag">Houston &amp; Waco, TX</p>
         </div>
       </div>
       <a class="header-phone" href="tel:9362617878">936-261-7878</a>
@@ -35,7 +35,7 @@
     </section>
 
     <div id="api-banner" class="banner banner-warn" hidden>
-      Driving miles are looked up from the addresses. Enter miles below if that fails.
+      Driving miles are looked up from your addresses. If the lookup fails, enter miles below.
     </div>
 
     <div class="layout">
@@ -57,49 +57,79 @@
             </div>
           </fieldset>
 
-          <fieldset class="address-group">
-            <legend>Pickup address</legend>
-            <div class="field">
-              <label for="pickup-street">Street address</label>
-              <input type="text" id="pickup-street" name="pcs-pickup-line" autocomplete="off" autocorrect="off" readonly required maxlength="120" placeholder="Street address" />
+          <fieldset class="addr-block" data-addr="pickup">
+            <legend>From</legend>
+            <div class="field addr-line1">
+              <div class="label-row">
+                <label for="pickup-line1">Address line 1</label>
+                <button type="button" class="btn-locate" id="use-location">📍 Use current location</button>
+              </div>
+              <input type="text" id="pickup-line1" data-part="line1" name="pcs-pickup-l1" autocomplete="off" autocorrect="off" spellcheck="false" readonly required maxlength="140" placeholder="Search a place or street address" aria-autocomplete="list" aria-controls="pickup-suggest" />
+              <div class="suggest" id="pickup-suggest" role="listbox" hidden></div>
             </div>
-            <div class="row two">
+            <div class="field">
+              <label for="pickup-line2">Address line 2 <span class="optional-tag">optional</span></label>
+              <input type="text" id="pickup-line2" data-part="line2" name="pcs-pickup-l2" autocomplete="off" readonly maxlength="80" placeholder="Apt, suite, gate, terminal" />
+            </div>
+            <div class="row three">
               <div class="field">
                 <label for="pickup-city">City</label>
-                <input type="text" id="pickup-city" name="pcs-pickup-town" autocomplete="off" readonly required maxlength="80" placeholder="Willis" />
+                <input type="text" id="pickup-city" data-part="city" name="pcs-pickup-town" autocomplete="off" readonly required maxlength="80" placeholder="City" />
               </div>
               <div class="field">
                 <label for="pickup-state">State</label>
-                <input type="text" id="pickup-state" name="pcs-pickup-region" autocomplete="off" readonly required maxlength="30" placeholder="TX" />
+                <input type="text" id="pickup-state" data-part="state" name="pcs-pickup-region" autocomplete="off" readonly required maxlength="30" value="TX" placeholder="TX" />
+              </div>
+              <div class="field">
+                <label for="pickup-zip">ZIP</label>
+                <input type="text" id="pickup-zip" data-part="zip" name="pcs-pickup-pc" autocomplete="off" readonly inputmode="numeric" maxlength="10" pattern="\d{5}(-\d{4})?" placeholder="ZIP" />
+              </div>
+            </div>
+          </fieldset>
+
+          <fieldset class="addr-block" data-addr="dropoff">
+            <legend>To</legend>
+            <p class="addr-note">Where the ride ends.</p>
+            <div class="field addr-line1">
+              <div class="label-row">
+                <label for="dropoff-line1">Address line 1</label>
+              </div>
+              <input type="text" id="dropoff-line1" data-part="line1" name="pcs-dropoff-l1" autocomplete="off" autocorrect="off" spellcheck="false" readonly required maxlength="140" placeholder="Search a place or street address" aria-autocomplete="list" aria-controls="dropoff-suggest" />
+              <div class="suggest" id="dropoff-suggest" role="listbox" hidden></div>
+            </div>
+            <div class="field">
+              <label for="dropoff-line2">Address line 2 <span class="optional-tag">optional</span></label>
+              <input type="text" id="dropoff-line2" data-part="line2" name="pcs-dropoff-l2" autocomplete="off" readonly maxlength="80" placeholder="Apt, suite, gate, terminal" />
+            </div>
+            <div class="row three">
+              <div class="field">
+                <label for="dropoff-city">City</label>
+                <input type="text" id="dropoff-city" data-part="city" name="pcs-dropoff-town" autocomplete="off" readonly required maxlength="80" placeholder="City" />
+              </div>
+              <div class="field">
+                <label for="dropoff-state">State</label>
+                <input type="text" id="dropoff-state" data-part="state" name="pcs-dropoff-region" autocomplete="off" readonly required maxlength="30" value="TX" placeholder="TX" />
+              </div>
+              <div class="field">
+                <label for="dropoff-zip">ZIP</label>
+                <input type="text" id="dropoff-zip" data-part="zip" name="pcs-dropoff-pc" autocomplete="off" readonly inputmode="numeric" maxlength="10" pattern="\d{5}(-\d{4})?" placeholder="ZIP" />
               </div>
             </div>
           </fieldset>
 
           <div class="stops-block">
-            <p class="stops-title">Stops <span class="optional-tag">optional</span></p>
-            <p class="stops-price">Each stop adds $11. Add one only if you need to go somewhere before the final destination.</p>
             <div id="stops-list"></div>
-            <button type="button" class="btn btn-add-stop" id="add-stop-btn">Add a stop</button>
+            <button type="button" class="link-add-stop" id="add-stop-btn">+ Add a stop</button>
+            <p class="stops-price" id="stops-price">Only if you need to stop somewhere on the way. Each stop adds $11. Stops happen in order between From and To.</p>
           </div>
 
-          <fieldset class="address-group destination-group">
-            <legend>Final destination</legend>
-            <p class="destination-note">Where the ride ends. This is not a stop.</p>
-            <div class="field">
-              <label for="dropoff-street">Street address</label>
-              <input type="text" id="dropoff-street" name="pcs-dropoff-line" autocomplete="off" autocorrect="off" readonly required maxlength="120" placeholder="Street address" />
-            </div>
-            <div class="row two">
-              <div class="field">
-                <label for="dropoff-city">City</label>
-                <input type="text" id="dropoff-city" name="pcs-dropoff-town" autocomplete="off" readonly required maxlength="80" placeholder="Willis" />
-              </div>
-              <div class="field">
-                <label for="dropoff-state">State</label>
-                <input type="text" id="dropoff-state" name="pcs-dropoff-region" autocomplete="off" readonly required maxlength="30" placeholder="TX" />
-              </div>
-            </div>
-          </fieldset>
+          <div class="field" id="manual-miles-field" hidden>
+            <label for="manual-miles">Driving miles (one way, only if the lookup fails)</label>
+            <input type="number" id="manual-miles" name="manual-miles" min="0.1" step="0.1" inputmode="decimal" placeholder="e.g. 22.5" />
+          </div>
+
+          <div id="map" class="map" hidden aria-label="Route map"></div>
+          <p id="route-status" class="route-status" hidden></p>
 
           <div class="row two">
             <div class="field">
@@ -129,23 +159,14 @@
             </select>
           </div>
 
-          <div class="field" id="manual-miles-field" hidden>
-            <label for="manual-miles">Driving miles (one way)</label>
-            <input type="number" id="manual-miles" name="manual-miles" min="0.1" step="0.1" placeholder="e.g. 22.5" />
-          </div>
-
-          <div id="map" class="map" hidden aria-label="Route map"></div>
-          <p id="route-status" class="route-status" hidden></p>
-
           <div class="field">
-            <label for="trip-type">Trip type</label>
-            <select id="trip-type" name="trip-type">
-              <option value="local">Local trip</option>
-              <option value="airport-drop">Airport drop-off</option>
-              <option value="airport-pick">Airport pick-up</option>
+            <label for="service-type">Service</label>
+            <select id="service-type" name="service-type">
+              <option value="standard">Standard ride</option>
               <option value="hourly">Hourly service — call for quote</option>
               <option value="van">11-passenger van — call for quote</option>
             </select>
+            <p class="hint">Day, night, weekend, holiday and airport rates are set automatically from your pickup time and addresses.</p>
           </div>
 
           <div class="field">
@@ -156,25 +177,16 @@
 
           <div class="row two">
             <div class="field">
-              <label for="ride-date">Desired date</label>
+              <label for="ride-date">Pickup date</label>
               <input type="date" id="ride-date" name="ride-date" required />
             </div>
             <div class="field">
-              <label for="ride-time">Desired time</label>
+              <label for="ride-time">Pickup time</label>
               <input type="time" id="ride-time" name="ride-time" required />
             </div>
           </div>
 
-          <div class="checks">
-            <label class="check">
-              <input type="checkbox" id="holiday" name="holiday" />
-              <span>Holiday (uses weekend / night rates)</span>
-            </label>
-            <label class="check">
-              <input type="checkbox" id="short-notice" name="short-notice" />
-              <span>Less than 24 hours’ notice (+25%)</span>
-            </label>
-          </div>
+          <p class="rate-preview" id="rate-preview" aria-live="polite"></p>
         </fieldset>
 
         <button type="button" class="btn btn-primary btn-estimate" id="estimate-btn">
@@ -197,6 +209,7 @@
             <p class="area-line" id="area-line" hidden></p>
             <p class="miles-line" id="miles-line"></p>
             <p class="tier-line" id="tier-line"></p>
+            <p class="tier-line" id="airport-line" hidden></p>
             <ul class="line-items" id="line-items"></ul>
             <div class="total-row">
               <span>Estimated total</span>
@@ -250,11 +263,11 @@
 
   <footer class="site-footer">
     <div class="wrap">
-      <p>© <span id="year"></span> Private Car Services · Houston &amp; Willis, TX</p>
+      <p>© <span id="year"></span> Private Car Services · Houston &amp; Waco, TX</p>
       <p><a href="https://www.ptstaxiservices.com/">ptstaxiservices.com</a></p>
     </div>
   </footer>
 
-  <script src="app.js?v=14"></script>
+  <script src="app.js?v=15"></script>
 </body>
 </html>

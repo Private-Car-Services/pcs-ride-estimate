@@ -1,6 +1,6 @@
 # Private Car Services — Ride Fare Estimator
 
-Static webpage that estimates private car fares for Houston & Willis, TX.
+Static webpage that estimates private car fares for Houston & Waco, TX.
 **Estimate only** — not a booking. Customers still call or use the site request form to confirm.
 
 After an estimate, the page shows the current website-booking promotion: book on the website by Nov 30 for 10% off (pay in full, no cancellation within 24 hours, and at least 48 hours’ notice; rides through Dec 31). The promotion is a separate booking CTA and does not change the regular rate calculations.
@@ -32,7 +32,7 @@ python3 -m http.server 8080
 # then visit http://localhost:8080
 ```
 
-Without an API key, enter **driving miles** manually. The estimate still works.
+Without an API key, **Get estimate** looks up driving miles from the street, city, and state (Photon geocoding and OSRM). If that lookup fails, enter **driving miles** manually. The estimate still works.
 
 ## Add a Google Maps API key
 

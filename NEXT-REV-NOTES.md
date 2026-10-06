@@ -187,3 +187,34 @@ Update / create routine **"PCS busy slots from calendar"** (or a sibling **"PCS 
 
 ### Upload package
 Prepared at `/workspace/pcs-next-rev-v45/` — publish only when Matthew says go. Never upload `config.js`.
+
+## Driver app: keep screen awake while logged in
+- Requested 2026-10-05 by Matthew: screen dims/locks when untouched. Keep the screen on while the driver is logged in/online (Screen Wake Lock API; re-acquire on visibilitychange; fallback for iOS PWA if needed). Release on logout.
+- Clarified by Matthew: screen stays on from login until logout, or until he manually presses the side button to lock / closes the app. No auto-dim while logged in.
+
+## Quote page v15 — built locally Oct 5, 2026 (NOT published yet)
+Cache: root `index.html` → `styles.css?v=15`, `app.js?v=15` (live was v14). Package: `/workspace/pcs-quote-rev/`.
+
+- **Header/footer/meta:** "Houston & Willis, TX" → **"Houston & Waco, TX"**. City placeholders no longer say Willis.
+- **Why Willis kept coming back:** it was in the root `index.html` since the first upload (Oct 2, `f0cee71`) and was
+  never removed there. The Oct 3 "Remove Houston and Willis from the app header" commits only changed
+  `app/index.html` and `app/driver/index.html` (rider/driver apps). Every quote-page publish since then (v14 Book it,
+  Pages Actions recovery) re-uploaded a root `index.html` copied from that original file. Stale copies that still
+  have it: `/workspace/pcs-ride-estimate/`, `/workspace/pcs-app-starter/`, `/workspace/pcs-publish-v24/`,
+  `/workspace/pcs-publish-actions-fix/`. **Never build the root page from those folders.** Build from this repo's root.
+- **Addresses:** From, To, and stops each have Address line 1 (suggestions), Line 2, City, State, ZIP.
+  Suggestions: built-in airports first (IAH, HOU, EFD, CXO, DWH, ACT, CLL, GRK, AUS, SAT, DFW, DAL), then Google Places
+  if the live Maps key allows it (new Places API, then legacy), else free OSM search (Photon) biased to the nearest
+  results (current location → From pin → service area). **📍 Use current location** on From.
+- **Layout:** From, To, then **+ Add a stop** (0–5 stops; no empty stop rows until tapped; Remove on each).
+- **Rates are automatic:** trip-type airport picker, Holiday checkbox, and Short-notice checkbox are gone.
+  Tier from pickup date/time (late 10 pm–5:59 am, nights/weekends/holidays, weekday day), holidays from the built-in list,
+  +25% when pickup is under 24 h away. Airport base auto-detected: From is an airport → pick-up base; To or a stop is an
+  airport → drop-off base. Hotels/"Airport Blvd" streets and "Hobby Lobby" don't count. Hourly / van stay call-for-quote
+  in a "Service" menu.
+- **Miles:** billed miles always round **up** to the next whole mile (10.01 → 11). Route via Google Directions when
+  allowed, else OSRM (map shows the OSRM line on the Google map when Maps JS loads). Computed miles fill the miles box;
+  the manual box shows only if the lookup fails.
+- Book it (Houston calendar `app/busy.json`, Waco pending, Square 25% deposit) unchanged except holiday is now automatic.
+- No FlightAware. Airline / flight number fields still appear when an airport is detected.
+- Follow-up (not in this package): rider app `app/app.js` still has a "Sample map · Willis" map caption.

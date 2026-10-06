@@ -788,3 +788,186 @@ a {
 .booking-panel [hidden] {
   display: none !important;
 }
+
+/* —— v15: From / To / + Add a stop address blocks —— */
+.addr-block,
+.form-card fieldset.addr-block {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 0.85rem 0.95rem 0.1rem;
+  margin: 0 0 0.85rem;
+  background: #fff;
+}
+
+.form-card .addr-block > legend {
+  float: left;
+  width: 100%;
+  margin: 0 0 0.55rem;
+  padding: 0;
+  font-size: 1rem;
+  font-weight: 700;
+  color: var(--navy);
+}
+
+.form-card .addr-block > legend + * {
+  clear: both;
+}
+
+.addr-note {
+  clear: both;
+  margin: -0.2rem 0 0.6rem;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+.addr-line1 {
+  position: relative;
+}
+
+.label-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.35rem;
+}
+
+.label-row label {
+  margin-bottom: 0 !important;
+}
+
+.btn-locate {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.4rem 0.75rem;
+  border-radius: 999px;
+  border: 1px solid var(--navy-soft);
+  background: #eef3fb;
+  color: var(--navy);
+  font: inherit;
+  font-size: 0.82rem;
+  font-weight: 700;
+  cursor: pointer;
+  min-height: 34px;
+}
+
+.btn-locate:hover {
+  background: #e2eaf7;
+}
+
+.btn-locate:disabled {
+  opacity: 0.65;
+  cursor: progress;
+}
+
+.suggest {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: calc(100% + 4px);
+  z-index: 15;
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  box-shadow: 0 14px 30px rgba(11, 31, 58, 0.16);
+  overflow: hidden;
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+.suggest-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 0.7rem 0.85rem;
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  background: #fff;
+  font: inherit;
+  color: var(--text);
+  cursor: pointer;
+  min-height: 48px;
+}
+
+.suggest-item:last-child {
+  border-bottom: 0;
+}
+
+.suggest-item:hover,
+.suggest-item:focus {
+  background: #f2f6fc;
+  outline: none;
+}
+
+.suggest-item strong {
+  display: block;
+  font-size: 0.94rem;
+  color: var(--navy);
+}
+
+.suggest-item span {
+  display: block;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+.row.three {
+  display: grid;
+  grid-template-columns: 1.6fr 0.7fr 0.9fr;
+  gap: 0.65rem;
+}
+
+@media (max-width: 520px) {
+  .row.three {
+    grid-template-columns: 1fr 1fr;
+  }
+  .row.three > .field:first-child {
+    grid-column: 1 / -1;
+  }
+}
+
+.stops-block {
+  margin: 0 0 1.1rem;
+}
+
+.stop-block {
+  background: #f7f9fc;
+}
+
+.link-add-stop {
+  display: inline-block;
+  margin: 0.1rem 0 0.25rem;
+  padding: 0.35rem 0;
+  border: 0;
+  background: none;
+  color: var(--navy-soft);
+  font: inherit;
+  font-weight: 700;
+  font-size: 0.98rem;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  cursor: pointer;
+}
+
+.link-add-stop:hover {
+  color: var(--navy);
+}
+
+.stops-price {
+  margin: 0;
+  font-size: 0.84rem;
+  color: var(--muted);
+}
+
+.rate-preview {
+  margin: -0.35rem 0 1rem;
+  font-size: 0.86rem;
+  color: var(--ok);
+  font-weight: 600;
+}
+
+.rate-preview:empty {
+  display: none;
+}
