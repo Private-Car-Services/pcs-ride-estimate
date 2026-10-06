@@ -1,5 +1,6 @@
-/* PCS driver: new-ride alert for the Profile page (v51; v53: iOS silent-mode + tap-to-enable sound bar).
-   The main driver app (app.js) has its own pop-up; this small script makes the Profile page chime too.
+/* PCS driver: new-ride alert for the Profile page (v51; v53: iOS silent-mode + tap-to-enable sound bar;
+   v54: loud looping siren that ducks other audio until Accept/Deny).
+   The main driver app (app.js) has its own pop-up; this small script makes the Profile page alert too.
    Accept happens in the driver app (same Accept code); Deny here is remembered there too. */
 (function () {
   "use strict";
@@ -16,6 +17,8 @@
   var primed = false;
   var shownCode = "";
   var lastBeep = 0;
+  var sirenTimer = null;
+  var sirenNodes = [];
 
   function ls(k) { try { return localStorage.getItem(k) || ""; } catch (e) { return ""; } }
   function db() { var c = window.PCS_SYNC || {}; return String(c.databaseURL || "").trim().replace(/\/+$/, ""); }
@@ -52,9 +55,16 @@
     return [r[p + "Street"], r[p + "City"], r[p + "State"]].filter(Boolean).join(", ");
   }
 
-  /* v53: iOS 17+ plays the chime even with the silent switch on. */
+  /* v53/v54: iOS 17+ silent-switch ignore; prefer playback so the siren ducks/interrupts other audio. */
   function playbackSession() {
-    try { if (navigator.audioSession && navigator.audioSession.type !== "playback") navigator.audioSession.type = "playback"; } catch (e) {}
+    try {
+      if (!navigator.audioSession) return;
+      var t = navigator.audioSession.type;
+      if (t !== "playback" && t !== "playAndRecord") {
+        try { navigator.audioSession.type = "playback"; } catch (e1) {}
+        try { if (navigator.audioSession.type !== "playback") navigator.audioSession.type = "playAndRecord"; } catch (e2) {}
+      }
+    } catch (e) {}
   }
   function running() { return !!ctx && ctx.state === "running"; }
   function hideBar() {
@@ -100,34 +110,78 @@
       }
     } catch (e) {}
   }
+  function stopSiren() {
+    if (sirenTimer) { clearInterval(sirenTimer); sirenTimer = null; }
+    sirenNodes.forEach(function (n) {
+      try { if (n.stop) n.stop(); } catch (e) {}
+      try { if (n.disconnect) n.disconnect(); } catch (e2) {}
+    });
+    sirenNodes = [];
+    try { if (navigator.vibrate) navigator.vibrate(0); } catch (e3) {}
+  }
   function beep() {
     if (ls(MUTE) === "1" || !ctx) return;
-    chime(false);
+    playSirenBurst(false);
   }
+  /* Short test tone for the unlock bar; full alert uses the looping siren. */
   function chime(isTest) {
     if (!ctx) return;
     playbackSession();
     try {
       if (ctx.state === "suspended") ctx.resume();
       var now = ctx.currentTime;
-      [[880, 0, 0.22, 0.55], [659.25, 0.28, 0.5, 0.5]].forEach(function (t) {
+      var o = ctx.createOscillator();
+      var g = ctx.createGain();
+      o.type = "square";
+      o.frequency.value = 980;
+      g.gain.value = 0.0001;
+      o.connect(g);
+      g.connect(ctx.destination);
+      g.gain.exponentialRampToValueAtTime(isTest ? 0.45 : 0.7, now + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.0001, now + 0.28);
+      o.start(now);
+      o.stop(now + 0.32);
+    } catch (e) {}
+    try { if (navigator.vibrate) navigator.vibrate(isTest ? 60 : [200, 80, 200, 80, 200]); } catch (e2) {}
+  }
+  /* v54: loud alternating high/low sweeps (siren-style). One burst ~1.1s; loops via startSirenLoop. */
+  function playSirenBurst(isTest) {
+    if (!ctx || ls(MUTE) === "1") return;
+    playbackSession();
+    try {
+      if (ctx.state === "suspended") ctx.resume();
+      var now = ctx.currentTime;
+      var peak = isTest ? 0.55 : 0.95;
+      [[880, 0, 0.18], [1400, 0.18, 0.18], [880, 0.36, 0.18], [1400, 0.54, 0.18], [980, 0.72, 0.22]].forEach(function (t) {
         var o = ctx.createOscillator();
         var g = ctx.createGain();
-        o.type = "sine";
-        o.frequency.value = t[0];
+        o.type = "sawtooth";
+        o.frequency.setValueAtTime(t[0], now + t[1]);
+        o.frequency.linearRampToValueAtTime(t[0] * (t[0] < 1000 ? 1.35 : 0.72), now + t[1] + t[2]);
         g.gain.value = 0.0001;
         o.connect(g);
         g.connect(ctx.destination);
-        g.gain.exponentialRampToValueAtTime(t[3], now + t[1] + 0.015);
+        g.gain.exponentialRampToValueAtTime(peak, now + t[1] + 0.02);
         g.gain.exponentialRampToValueAtTime(0.0001, now + t[1] + t[2]);
         o.start(now + t[1]);
-        o.stop(now + t[1] + t[2] + 0.02);
+        o.stop(now + t[1] + t[2] + 0.03);
+        sirenNodes.push(o); sirenNodes.push(g);
       });
     } catch (e) {}
-    try { if (navigator.vibrate) navigator.vibrate(isTest ? 40 : [80, 40, 120]); } catch (e2) {}
+    try { if (navigator.vibrate) navigator.vibrate(isTest ? 80 : [220, 60, 220, 60, 220, 60, 320]); } catch (e2) {}
+  }
+  function startSirenLoop() {
+    if (ls(MUTE) === "1") { stopSiren(); return; }
+    if (sirenTimer) return;
+    playSirenBurst(false);
+    sirenTimer = setInterval(function () {
+      if (!shownCode || ls(MUTE) === "1" || !document.getElementById("ride-popup")) { stopSiren(); return; }
+      playSirenBurst(false);
+    }, 1400);
   }
 
   function hide() {
+    stopSiren();
     shownCode = "";
     var el = document.getElementById("ride-popup");
     if (el && el.parentNode) el.parentNode.removeChild(el);
@@ -209,7 +263,7 @@
         if (!list.length) { hide(); return; }
         var pick = list.filter(function (r) { return r.code === shownCode; })[0] || list[0];
         show(pick);
-        if (Date.now() - lastBeep > 3500) { lastBeep = Date.now(); beep(); }
+        startSirenLoop();
       });
     }).catch(function () {});
   }
@@ -226,4 +280,13 @@
   });
   setInterval(tick, 4000);
   setTimeout(tick, 800);
+  /* Test hooks (no UI). */
+  window.__pcsRideAlert = {
+    playSirenBurst: playSirenBurst,
+    startSirenLoop: startSirenLoop,
+    stopSiren: stopSiren,
+    showBar: showBar,
+    hide: hide,
+    chime: chime
+  };
 })();
