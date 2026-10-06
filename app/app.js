@@ -256,6 +256,9 @@
     cardStatus: "",
     cardLast4: "",
     cardBrand: "",
+    paymentStatus: "",
+    paidCents: 0,
+    receiptUrl: "",
     cancelConfirm: false,
     cancelBusy: false,
     cancelError: "",
@@ -1462,8 +1465,22 @@
       appId: String(c.applicationId || "").trim(),
       locationId: String(c.locationId || "").trim(),
       endpoint: String(c.cardOnFileUrl || "").trim(),
-      sandbox: String(c.environment || "").toLowerCase() === "sandbox"
+      chargeUrl: String(c.paymentUrl || "").trim(),
+      sandbox: String(c.environment || "").toLowerCase() === "sandbox",
+      testMode: c.testMode === true
     };
+  }
+
+  /* Square TEST MODE (app/square-config.js, ?squaretest=1 only): the card step charges the 25% deposit or the
+     full estimate through the pcs-pay Worker (POST /charge). Off for real customers. */
+  function squareChargeOn() {
+    var c = squareCfg();
+    return squareConfigured() && /^https:\/\//i.test(c.chargeUrl);
+  }
+
+  function ridePaid() {
+    var p = String(state.paymentStatus || "");
+    return p === "deposit_paid" || p === "paid_in_full";
   }
 
   function squareConfigured() {
@@ -1497,11 +1514,12 @@
     var testing = testSkipPayEnabled();
     return (
       '<div class="card card-needed" id="card-needed">' +
-      '<p class="tag">Add your card to confirm your ride</p>' +
-      '<p class="lede">' + (requested
+      '<p class="tag">' + (squareChargeOn() ? "Pay to confirm your ride" : "Add your card to confirm your ride") + '</p>' +
+      (squareChargeOn() && squareCfg().testMode ? '<p class="fine" style="background:#c9a227;color:#0b1f3a;font-weight:700;padding:4px 8px;border-radius:8px">TEST MODE · Square sandbox · no real charge</p>' : "") +
+      '<p class="lede">' + (squareChargeOn() ? "Pay the 25% deposit or the full estimate on a secure Square form. Your pickup PIN shows as soon as payment goes through." : (requested
         ? "We will text a secure Square card link to " + esc(state.phone || "your phone") + ". Your pickup PIN shows here as soon as your card is confirmed."
-        : "Your pickup PIN shows here after your card is on file. You are not charged until after drop-off, so you can add a tip.") + "</p>" +
-      '<button class="btn" type="button" id="square-hold-btn">' + (requested ? "Card link requested &#10003;" : "Add card for this ride") + "</button>" +
+        : "Your pickup PIN shows here after your card is on file. You are not charged until after drop-off, so you can add a tip.")) + "</p>" +
+      '<button class="btn" type="button" id="square-hold-btn">' + (squareChargeOn() ? "Pay for this ride" : (requested ? "Card link requested &#10003;" : "Add card for this ride")) + "</button>" +
       (testing
         ? '<button class="btn ghost" type="button" id="skip-pay-btn">Skip for testing</button>' +
           '<p class="fine">Testing only · no real Square charge.</p>'
@@ -1515,6 +1533,15 @@
     if (!rideCardReady()) return "";
     var st = String(state.cardStatus || "");
     var line;
+    if (ridePaid()) {
+      return '<div class="card payment-card" id="payment-received"><p class="tag">Payment</p>' +
+        (squareCfg().testMode ? '<p class="fine" style="font-weight:700">TEST MODE · Square sandbox</p>' : "") +
+        '<p class="lede"><strong>You\u2019re booked, payment received.</strong> ' + esc(money(state.paidCents || 0)) +
+        (state.paymentStatus === "paid_in_full" ? " (paid in full)" : " (25% deposit)") +
+        (state.cardLast4 ? " · " + esc(state.cardBrand || "card") + " ending " + esc(state.cardLast4) : "") + ".</p>" +
+        (/^https:\/\//i.test(state.receiptUrl || "") ? '<p class="fine"><a id="rider-receipt-link" href="' + esc(state.receiptUrl) + '" target="_blank" rel="noopener">View your receipt</a></p>' : "") +
+        "</div>";
+    }
     if (state.isTest || st === "test_skip" || state.paymentSkipped) line = "Test ride: no card needed, no charge.";
     else if (st === "owner_ok") line = "Payment confirmed by Private Car Services.";
     else {
@@ -1579,6 +1606,39 @@
     var el = cardSheetEl();
     var head = '<p class="tag">' + (code ? "Ride " + esc(code) : "This ride") +
       (est.ready ? " · est. " + money(est.total) : "") + "</p>";
+    if (squareChargeOn() && est.ready && code) {
+      var depCents = Math.round(est.total * 0.25);
+      el.innerHTML =
+        '<div class="sheet" role="dialog" aria-modal="true" aria-labelledby="card-title">' + head +
+        (squareCfg().testMode ? '<p class="fine" style="background:#c9a227;color:#0b1f3a;font-weight:700;padding:4px 8px;border-radius:8px">TEST MODE · card 4111 1111 1111 1111 · CVV 111 · ZIP 77042</p>' : "") +
+        '<h3 id="card-title">Pay for this ride</h3>' +
+        '<label class="check" style="display:flex;align-items:center;gap:10px;margin:10px 0;padding:10px 12px;border:1px solid var(--line);border-radius:12px;color:var(--ink);font-size:15px;letter-spacing:0;text-transform:none;cursor:pointer"><input type="radio" name="sq-pay-choice" value="deposit" checked style="width:20px;height:20px;margin:0;padding:0;flex:0 0 auto;accent-color:#c9a227"> 25% deposit now \u2014 <strong>' + money(depCents) + "</strong></label>" +
+        '<label class="check" style="display:flex;align-items:center;gap:10px;margin:10px 0;padding:10px 12px;border:1px solid var(--line);border-radius:12px;color:var(--ink);font-size:15px;letter-spacing:0;text-transform:none;cursor:pointer"><input type="radio" name="sq-pay-choice" value="full" style="width:20px;height:20px;margin:0;padding:0;flex:0 0 auto;accent-color:#c9a227"> Pay in full \u2014 <strong>' + money(est.total) + "</strong></label>" +
+        '<p class="fine">Square keeps your card; this app never sees the number.</p>' +
+        '<div id="sq-card-container" class="sq-card"><p class="fine">Loading the secure card form\u2026</p></div>' +
+        '<p class="error" id="sq-card-error" role="alert"></p>' +
+        '<button class="btn" type="button" id="sq-pay-btn" disabled>Pay ' + money(depCents) + "</button>" +
+        '<button class="btn secondary" type="button" id="card-sheet-close">Not now</button>' +
+        "</div>";
+      el.classList.add("open");
+      var closeC = document.getElementById("card-sheet-close");
+      if (closeC) closeC.addEventListener("click", closeCardSheet);
+      var payBtn = document.getElementById("sq-pay-btn");
+      var amountFor = function () {
+        var pick = el.querySelector('input[name="sq-pay-choice"]:checked');
+        return pick && pick.value === "full" ? { cents: est.total, choice: "full" } : { cents: depCents, choice: "deposit" };
+      };
+      Array.prototype.forEach.call(el.querySelectorAll('input[name="sq-pay-choice"]'), function (r) {
+        r.addEventListener("change", function () {
+          if (payBtn && payBtn.dataset.busy !== "1") payBtn.textContent = "Pay " + money(amountFor().cents);
+        });
+      });
+      if (payBtn) {
+        payBtn.addEventListener("click", function () { chargeSquareCard(amountFor()); });
+        mountSquareCard("sq-pay-btn");
+      }
+      return;
+    }
     if (squareConfigured()) {
       el.innerHTML =
         '<div class="sheet" role="dialog" aria-modal="true" aria-labelledby="card-title">' + head +
@@ -1617,7 +1677,7 @@
     }
   }
 
-  function mountSquareCard() {
+  function mountSquareCard(buttonId) {
     var cfg = squareCfg();
     loadSquareSdk(cfg.sandbox).then(function () {
       /* Square.payments() returns the Payments object directly; Promise.resolve keeps this safe either way. */
@@ -1632,7 +1692,7 @@
       sqCard = card;
       document.getElementById("sq-card-container").innerHTML = "";
       return card.attach("#sq-card-container").then(function () {
-        var saveBtn = document.getElementById("sq-card-save");
+        var saveBtn = document.getElementById(buttonId || "sq-card-save");
         if (saveBtn) saveBtn.disabled = false;
       });
     }).catch(function () {
@@ -1702,6 +1762,94 @@
         btn.textContent = "Save card";
       }
       cardSheetError((err && err.message) || "Could not save the card. Try again.");
+    });
+  }
+
+  var sqChargeAttempt = 0;
+
+  /* TEST MODE charge: Square token -> pcs-pay /charge -> paymentId/paid status on /rides/{code} and the REQUESTS row. */
+  function chargeSquareCard(amount) {
+    var payBtn = document.getElementById("sq-pay-btn");
+    if (!sqCard || !payBtn || payBtn.dataset.busy === "1") return;
+    var cfg = squareCfg();
+    var code = state.code || "";
+    if (!code) {
+      cardSheetError("This ride has no booking code yet. Request the ride first.");
+      return;
+    }
+    payBtn.dataset.busy = "1";
+    payBtn.disabled = true;
+    payBtn.textContent = "Paying\u2026";
+    cardSheetError("");
+    sqChargeAttempt += 1;
+    var idem = ("ra-" + code + "-" + sqChargeAttempt + "-" + makeRideCode()).slice(0, 45);
+    var email = firebaseEmail() || "";
+    sqCard.tokenize().then(function (result) {
+      if (!result || result.status !== "OK" || !result.token) {
+        var first = result && result.errors && result.errors[0];
+        throw new Error((first && first.message) || "Check the card details and try again.");
+      }
+      return fetch(cfg.chargeUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          sourceId: result.token,
+          amountCents: amount.cents,
+          bookingCode: code,
+          buyerEmail: /@/.test(email) ? email : undefined,
+          note: "Rider app \u00b7 " + (amount.choice === "full" ? "paid in full" : "25% deposit") + (cfg.testMode ? " \u00b7 TEST" : ""),
+          idempotencyKey: idem
+        })
+      });
+    }).then(function (res) {
+      return res.json().catch(function () { return {}; }).then(function (data) {
+        if (!res.ok || !data || !data.ok || !data.paymentId) throw new Error((data && data.error) || "The payment didn't go through. Try again.");
+        return data;
+      });
+    }).then(function (data) {
+      var now = Date.now();
+      var patch = {
+        cardStatus: "on_file",
+        cardOnFileAt: now,
+        cardLast4: String(data.last4 || ""),
+        cardBrand: String(data.brand || ""),
+        paymentStatus: amount.choice === "full" ? "paid_in_full" : "deposit_paid",
+        paidCents: Number(data.amountCents) || amount.cents,
+        squarePaymentId: String(data.paymentId),
+        squarePaymentStatus: String(data.status || ""),
+        receiptUrl: /^https:\/\//i.test(data.receiptUrl || "") ? String(data.receiptUrl) : "",
+        paymentEnv: cfg.sandbox ? "sandbox" : "production",
+        paidAt: now,
+        updatedAt: now
+      };
+      function done() {
+        state.cardStatus = "on_file";
+        state.cardLast4 = patch.cardLast4;
+        state.cardBrand = patch.cardBrand;
+        state.paymentStatus = patch.paymentStatus;
+        state.paidCents = patch.paidCents;
+        state.receiptUrl = patch.receiptUrl;
+        saveRide(state.rideStatus || "pending_owner");
+        closeCardSheet();
+        render();
+      }
+      if (!syncOn()) { done(); return; }
+      var rowPatch = authFetch(openIndexUrl(code), {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ cardStatus: patch.cardStatus, paymentStatus: patch.paymentStatus, paidCents: patch.paidCents,
+          squarePaymentId: patch.squarePaymentId, paymentEnv: patch.paymentEnv, updatedAt: now })
+      }).catch(function () {});
+      /* Paid either way: show it even if the ride record update fails (Matthew can match the Square payment by code). */
+      return Promise.all([patchRide(code, patch).catch(function () {}), rowPatch]).then(done);
+    }).catch(function (err) {
+      var btn = document.getElementById("sq-pay-btn");
+      if (btn) {
+        btn.dataset.busy = "";
+        btn.disabled = false;
+        btn.textContent = "Pay " + money(amount.cents);
+      }
+      cardSheetError((err && err.message) || "The payment didn't go through. Try again.");
     });
   }
 
@@ -2159,8 +2307,10 @@
       '</div><div class="state">' +
       field(prefix + "-state", "State", val("State") || "TX", 'maxlength="2" placeholder="TX"' + (opts.required ? " required" : "")) +
       '</div><div class="zip">' +
-      field(prefix + "-zip", "ZIP", val("Zip"), 'inputmode="numeric" maxlength="10" placeholder="ZIP"') +
-      "</div></div></div>"
+      field(prefix + "-zip", 'ZIP <span class="optional-tag">optional</span>', val("Zip"), 'inputmode="numeric" maxlength="10" placeholder="Auto"') +
+      "</div></div>" +
+      '<p class="' + (addrGet(prefix, "Approx") === "missing" ? "error" : (addrGet(prefix, "Approx") ? "note" : "fine")) + ' addr-found" id="' + prefix + '-found" role="status">' + esc(foundNoteText(prefix)) + "</p>" +
+      "</div>"
     );
   }
 
@@ -2202,7 +2352,21 @@
         if (!el) return;
         el.addEventListener("input", function () {
           addrSet(prefix, pair[1], pair[0] === "state" ? el.value.toUpperCase() : el.value);
+          if (pair[0] === "city" || pair[0] === "state") {
+            /* City changed after a typed (not picked) address: look it up again. */
+            if (!addrGet(prefix, "Pinned") || addrGet(prefix, "Approx")) {
+              addrSet(prefix, "Lat", null);
+              addrSet(prefix, "Lng", null);
+              addrSet(prefix, "Approx", "");
+              addrSet(prefix, "Found", "");
+            }
+          }
         });
+        if (pair[0] === "city" || pair[0] === "state" || pair[0] === "zip") {
+          el.addEventListener("blur", function () {
+            setTimeout(function () { autoResolveField(prefix); }, 150);
+          });
+        }
       });
     });
   }
@@ -2592,7 +2756,11 @@
     var seq = 0;
     input.addEventListener("focus", primeSearchOrigin);
     input.addEventListener("blur", function () {
-      setTimeout(function () { box.hidden = true; }, 350);
+      setTimeout(function () {
+        box.hidden = true;
+        /* No suggestion picked: find what was typed (street + city, ZIP optional). */
+        if (!isCoord(addrGet(prefix, "Lat")) && String(addrGet(prefix, "City") || "").trim()) autoResolveField(prefix);
+      }, 450);
     });
     input.addEventListener("input", function () {
       var q = input.value.trim();
@@ -2600,6 +2768,11 @@
       addrSet(prefix, "Lat", null);
       addrSet(prefix, "Lng", null);
       addrSet(prefix, "Pinned", false);
+      addrSet(prefix, "Approx", "");
+      addrSet(prefix, "Found", "");
+      autoResolveSeq[prefix] = "";
+      var foundEl = document.getElementById(prefix + "-found");
+      if (foundEl) foundEl.textContent = "";
       if (prefix === "drop") state.dropFix = null;
       if (prefix === "pickup") state.pickupFromHere = false;
       clearTimeout(timer);
@@ -2636,9 +2809,20 @@
       var place = item.place;
       /* House number on a street-only match: the request step finds that exact house
          (instead of pinning the middle of a long road). */
-      if (place.approx) place = Object.assign({}, place, { lat: null, lng: null });
       applyPlace(prefix, place);
+      if (place.approx && isCoord(place.lat)) {
+        addrSet(prefix, "Pinned", false);
+        addrSet(prefix, "Approx", "street");
+        addrSet(prefix, "Found", [place.line1, place.city, place.state, String(place.zip || "").slice(0, 5)].filter(Boolean).join(", "));
+      } else {
+        addrSet(prefix, "Approx", "");
+        addrSet(prefix, "Found", [place.line1, place.city, place.state, String(place.zip || "").slice(0, 5)].filter(Boolean).join(", "));
+      }
+      var fEl = document.getElementById(prefix + "-found");
+      if (fEl) { fEl.textContent = foundNoteText(prefix); fEl.className = (place.approx ? "note" : "fine") + " addr-found"; }
+      autoResolveSeq[prefix] = "";
       box.hidden = true;
+      if (place.approx) autoResolveField(prefix); /* try for the exact house in the background */
     });
   }
 
@@ -2963,20 +3147,56 @@
     });
   }
 
-  function patchRideIfMatch(code, partial, etag) {
-    var headers = { "Content-Type": "application/json" };
-    if (etag) headers["if-match"] = etag;
+  /*
+    v48: Firebase REST does NOT allow "if-match" on PATCH (always 400 "not supported").
+    That made every live driver Accept fail. Conditional writes must be PUT: when we have the
+    ETag and the full ride we just read (including /secrets, so the PIN is kept), PUT the merged
+    ride with if-match (412 = someone else changed it first). Otherwise fall back to a plain PATCH.
+  */
+  function rideWriteError(res, tag) {
+    var err = new Error(tag || "ride");
+    err.status = res ? res.status : 0;
+    if (res && (res.status === 401 || res.status === 403)) err.denied = true;
+    return err;
+  }
+
+  function patchRideIfMatch(code, partial, etag, baseRide) {
+    var canPut = !!(etag && baseRide && typeof baseRide === "object" && baseRide.secrets && typeof baseRide.secrets === "object");
+    if (!canPut) {
+      return authFetch(rideUrl(code), {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(partial)
+      }).then(function (res) {
+        if (!res.ok) throw rideWriteError(res, "ride");
+        return res.text().then(function () {});
+      });
+    }
+    var merged = Object.assign({}, baseRide, partial);
+    delete merged.pin;
+    delete merged.pinHash;
     return authFetch(rideUrl(code), {
-      method: "PATCH",
-      headers: headers,
-      body: JSON.stringify(partial)
+      method: "PUT",
+      headers: { "Content-Type": "application/json", "if-match": etag },
+      body: JSON.stringify(merged)
     }).then(function (res) {
       if (res.status === 412) {
         var err = new Error("precondition");
         err.conflict = true;
         throw err;
       }
-      if (!res.ok) throw new Error("ride");
+      if (res.status === 400) {
+        /* Safety net: conditional write not accepted here -> plain PATCH (status was just checked). */
+        return authFetch(rideUrl(code), {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(partial)
+        }).then(function (res2) {
+          if (!res2.ok) throw rideWriteError(res2, "ride");
+          return res2.text().then(function () {});
+        });
+      }
+      if (!res.ok) throw rideWriteError(res, "ride");
       return res.text().then(function () {});
     });
   }
@@ -3595,9 +3815,17 @@
           if (!row.code) row.code = code;
           out.push(row);
         });
+        var me = isCoord(state.hereLat) && isCoord(state.hereLng) ? { lat: +state.hereLat, lng: +state.hereLng } : null;
+        out.forEach(function (r) {
+          r._distMi = me ? haversine(me, { lat: +r.pickupLat, lng: +r.pickupLng }) : null;
+        });
         out.sort(function (a, b) {
+          var aa = rideIsAsap(a) ? 0 : 1, bb = rideIsAsap(b) ? 0 : 1;
+          if (aa !== bb) return aa - bb;
+          if (aa === 0 && a._distMi != null && b._distMi != null && a._distMi !== b._distMi) return a._distMi - b._distMi;
           return String(a.date || "").localeCompare(String(b.date || "")) ||
-            String(a.time || "").localeCompare(String(b.time || ""));
+            String(a.time || "").localeCompare(String(b.time || "")) ||
+            ((a._distMi || 0) - (b._distMi || 0));
         });
         return out;
       });
@@ -3754,6 +3982,7 @@
     remote.updatedAt = remote.requestedAt;
     remote.isTest = !!state.isTest && testModeAvailable();
     remote.cardStatus = remote.isTest ? "test_skip" : (remote.cardStatus && remote.cardStatus !== "" ? remote.cardStatus : "none");
+    if (squareChargeOn() && squareCfg().testMode) remote.squareSandbox = true; /* Square TEST MODE (?squaretest=1): flags the ride so it is easy to spot and delete */
     var uid = firebaseUid();
     if (uid) remote.riderUid = uid;
     if (firebaseEmail()) remote.riderEmail = firebaseEmail();
@@ -3858,6 +4087,13 @@
     return null;
   }
 
+  function driverPickupDistanceLine() {
+    var me = isCoord(state.hereLat) && isCoord(state.hereLng) ? { lat: +state.hereLat, lng: +state.hereLng } : null;
+    var pick = placeCoords("pickup");
+    if (!me || !pick) return "";
+    return '<p class="fine">Pickup is about ' + esc(fmtMiles(haversine(me, pick))) + " from you (straight line).</p>";
+  }
+
   function openRideCard() {
     if (!state.selectedOpenCode || !state.pickupStreet) return "";
     var est = estimate();
@@ -3871,14 +4107,21 @@
       '<p class="fine">' + esc(prettyWhen()) + (state.phone ? " · " + esc(state.phone) : "") + "</p>" +
       "</div></div>" +
       '<div class="route-line"><p>' + esc(pickupLine()) + "</p>" + stopsSummaryHtml() + "<p>" + esc(dropLine()) + "</p></div>" +
+      driverPickupDistanceLine() +
       '<p class="fine">' + (est.ready
-        ? est.raw.toFixed(2) + " mi, billed as " + est.billed + " · about " + money(est.total)
-        : "Miles and fare show when both places are found.") + "</p>" +
+        ? est.raw.toFixed(2) + " mi, billed as " + est.billed + " · about " + money(est.total) +
+          (state.dropApprox ? " (drop-off is approximate)" : "")
+        : (state.dropLookup === "looking"
+          ? "Finding the drop-off on the map…"
+          : "Drop-off isn't on the map yet. You can still accept and use the address above; the fare is figured at drop-off.")) + "</p>" +
       commissionLine() +
       seatsWarningForRide(state, readDriverAccount()) +
+      (state.acceptNotice
+        ? '<p class="' + (state.acceptNoticeKind === "busy" ? "note" : "error") + ' accept-notice" id="accept-notice" role="alert">' + esc(state.acceptNotice) + "</p>"
+        : "") +
       '<div class="row-actions">' +
-      '<button class="btn" type="button" id="accept-ride">Accept</button>' +
-      '<button class="btn secondary" type="button" id="deny-ride">Deny</button>' +
+      '<button class="btn" type="button" id="accept-ride"' + (state.acceptBusy ? " disabled" : "") + ">" + (state.acceptBusy ? "Accepting…" : "Accept") + "</button>" +
+      '<button class="btn secondary" type="button" id="deny-ride"' + (state.acceptBusy ? " disabled" : "") + ">Deny</button>" +
       "</div></article>"
     );
   }
@@ -3895,6 +4138,9 @@
     }
     if (state.openListError) {
       return String(state.openListError);
+    }
+    if (state.acceptNotice && !state.selectedOpenCode && state.acceptNoticeKind !== "busy") {
+      return state.acceptNotice + (state.openRides.length ? " " + state.openRides.length + (state.openRides.length === 1 ? " open ride." : " open rides.") : "");
     }
     if (!state.openRides.length) {
       return "No open rides right now. New rider requests show up on this map.";
@@ -4574,10 +4820,15 @@
     state.dropLine2 = ride.dropLine2 || "";
     state.dropZip = ride.dropZip || "";
     state.dropPinned = !!ride.dropPinned;
+    state.dropApprox = ride.dropApprox || "";
+    state.dropFound = ride.dropFound || "";
     state.stopList = normalizeStops(ride.stopList);
     state.cardStatus = ride.cardStatus || "";
     state.cardLast4 = ride.cardLast4 || "";
     state.cardBrand = ride.cardBrand || "";
+    state.paymentStatus = ride.paymentStatus || "";
+    state.paidCents = Number(ride.paidCents) || 0;
+    state.receiptUrl = ride.receiptUrl || "";
     if (state.cardStatus === "test_skip") state.paymentSkipped = true;
     state.asap = rideIsAsap(ride);
     if (!state.asap && ride.date && ride.time && isPickupInPast(ride.date, ride.time)) {
@@ -4707,10 +4958,15 @@
       dropZip: state.dropZip || "",
       dropAddress: dropLine(),
       dropPinned: !!state.dropPinned,
+      dropApprox: state.dropApprox && state.dropApprox !== "missing" ? state.dropApprox : "",
+      dropFound: state.dropFound || "",
       stopList: compactStops(),
       cardStatus: state.cardStatus || "",
       cardLast4: state.cardLast4 || "",
       cardBrand: state.cardBrand || "",
+      paymentStatus: state.paymentStatus || "",
+      paidCents: state.paidCents || 0,
+      receiptUrl: state.receiptUrl || "",
       date: state.date,
       time: state.time,
       asap: !!state.asap,
@@ -4765,10 +5021,15 @@
     state.dropLine2 = "";
     state.dropZip = "";
     state.dropPinned = false;
+    state.dropApprox = "";
+    state.dropFound = "";
     state.stopList = [];
     state.cardStatus = "";
     state.cardLast4 = "";
     state.cardBrand = "";
+    state.paymentStatus = "";
+    state.paidCents = 0;
+    state.receiptUrl = "";
     state.cancelConfirm = false;
     state.cancelBusy = false;
     state.cancelError = "";
@@ -5677,10 +5938,38 @@
           state.cardStatus = state.isTest ? "test_skip" : "none";
           state.cardLast4 = "";
           state.cardBrand = "";
+          state.paymentStatus = "";
+          state.paidCents = 0;
+          state.receiptUrl = "";
           state.cancelConfirm = false;
           state.cancelBusy = false;
           state.cancelError = "";
+          var submitBtn = document.querySelector("#ride-form button[type=submit]");
+          if (submitBtn) { submitBtn.disabled = true; submitBtn.textContent = "Finding addresses…"; }
           geocodeMissing().then(function () {
+            if (submitBtn) { submitBtn.disabled = false; submitBtn.textContent = "Request this ride"; }
+            var dropKey = [state.dropStreet, state.dropCity, state.dropState].join("|");
+            if (!placeCoords("drop") && state.dropMissingAck !== dropKey) {
+              state.dropMissingAck = dropKey;
+              state.dropApprox = "missing";
+              state.error = "We couldn't find the To address \"" + dropLine() + "\" on the map, so miles and fare can't be figured yet. " +
+                "Check the street name and city (no ZIP needed), or pick it from the suggestions. Tap Request this ride again to send it anyway.";
+              render();
+              return;
+            }
+            if (placeCoords("drop") && state.dropApprox === "city" && state.dropMissingAck !== dropKey) {
+              state.dropMissingAck = dropKey;
+              state.error = "We could only place the To address at the " + (state.dropCity || "city") + " city center, so miles and fare are rough. " +
+                "Check the street name (no ZIP needed), or tap Request this ride again to send it anyway.";
+              render();
+              return;
+            }
+            if (!placeCoords("pickup") && state.pickupMissingAck !== state.pickupStreet) {
+              state.pickupMissingAck = state.pickupStreet;
+              state.error = "We couldn't find the From address on the map. Check the street and city, or tap Use current location. Tap Request this ride again to send it anyway.";
+              render();
+              return;
+            }
             saveRide("pending_owner", { clearDriver: true });
             var created = currentRide();
             state.customerGeocodeTried = true;
@@ -5980,33 +6269,205 @@
   }
 
 
-  function geocodeQuery(text, city, stateName, zip, prefix) {
-    var base = String(text || "").trim();
-    if (!base) return Promise.resolve(null);
-    var low = base.toLowerCase();
-    var parts = [base];
-    if (city && low.indexOf(String(city).toLowerCase()) === -1) parts.push(city);
-    var st = String(stateName || "TX").trim();
-    if (st && low.indexOf(" " + st.toLowerCase()) === -1) parts.push(st);
-    if (zip && low.indexOf(String(zip)) === -1) parts.push(zip);
-    var q = parts.join(", ");
-    function viaPhoton() {
-      return findPlaces(q, searchOrigin(prefix || "drop"), { city: city || "", zip: zip || "" }).then(function (items) {
-        return items[0] ? items[0].feature : null;
-      }).catch(function () { return null; });
-    }
-    /* House-number addresses: OpenStreetMap's Nominatim knows exact houses; Photon often only the street. */
-    if (!/^\d+[A-Za-z]?\s/.test(base)) return viaPhoton();
-    return withTimeout(fetch("https://nominatim.openstreetmap.org/search?format=jsonv2&limit=1&countrycodes=us&q=" + encodeURIComponent(q), {
+  /*
+    v48 address resolver. Riders do NOT know ZIP codes, so a ZIP is never needed:
+      1. OpenStreetMap Nominatim, structured (street + city + state [+ ZIP if given])  -> exact house
+      2. Nominatim free text                                                          -> exact house / street
+      3. Photon (nearest first around the rider / From pin), street words must match  -> house or street
+      4. Street name alone near the trip ("veilwood" -> Veilwood Cir, The Woodlands)  -> approximate (street)
+      5. City + state center                                                          -> approximate (city)
+    Returns a GeoJSON-like feature; properties.level = "exact" | "street" | "city",
+    properties.postcode / city / label are used to auto-fill the ZIP and show "Found: ...".
+  */
+  var GEO_LEVEL_RANK = { exact: 0, street: 1, city: 2 };
+  var STREET_MATCH_MAX_MI = 60;
+
+  function geoFeature(lat, lng, props) {
+    return { type: "Feature", geometry: { type: "Point", coordinates: [+lng, +lat] }, properties: props || {} };
+  }
+
+  function streetCoreTokens(street, city) {
+    var t = String(street || "").replace(/^\s*\d+[A-Za-z]?\s+/, "");
+    return focusTokens(t, city).filter(function (w) { return !/^\d+$/.test(w) && ["north", "south", "east", "west", "n", "s", "e", "w"].indexOf(w) === -1; });
+  }
+
+  function coreMatches(tokens, text) {
+    if (!tokens.length) return false;
+    return tokens.every(function (w) { return wordStarts(text, w); });
+  }
+
+  function nominatimHits(params, origin) {
+    return withTimeout(fetch("https://nominatim.openstreetmap.org/search?format=jsonv2&addressdetails=1&limit=5&countrycodes=us&" + params, {
       headers: { "Accept": "application/json" }
     }).then(function (res) {
       if (!res.ok) throw new Error("nominatim");
       return res.json();
     }), 7000).then(function (list) {
-      var hit = list && list[0];
-      if (!hit || !isCoord(+hit.lat) || !isCoord(+hit.lon)) return viaPhoton();
-      return { type: "Feature", geometry: { type: "Point", coordinates: [+hit.lon, +hit.lat] }, properties: { name: base, source: "nominatim" } };
-    }).catch(viaPhoton);
+      return (Array.isArray(list) ? list : []).map(function (hit) {
+        var lat = +hit.lat, lng = +hit.lon;
+        if (!isCoord(lat) || !isCoord(lng)) return null;
+        var a = hit.address || {};
+        return {
+          lat: lat, lng: lng,
+          house: a.house_number || "",
+          road: a.road || "",
+          city: a.city || a.town || a.village || a.hamlet || a.suburb || "",
+          state: stateCode(a.state || ""),
+          zip: String(a.postcode || "").slice(0, 5),
+          dist: haversine(origin, { lat: lat, lng: lng })
+        };
+      }).filter(function (h) { return h && !(h.dist > 300); }).sort(function (x, y) { return x.dist - y.dist; });
+    }).catch(function () { return []; });
+  }
+
+  function resolveAddress(text, city, stateName, zip, prefix) {
+    var base = String(text || "").trim();
+    if (!base) return Promise.resolve(null);
+    var st = String(stateName || "TX").trim() || "TX";
+    var low = base.toLowerCase();
+    var parts = [base];
+    if (city && low.indexOf(String(city).toLowerCase()) === -1) parts.push(city);
+    if (st && low.indexOf(" " + st.toLowerCase()) === -1) parts.push(st);
+    if (zip && low.indexOf(String(zip)) === -1) parts.push(zip);
+    var q = parts.join(", ");
+    var origin = searchOrigin(prefix || "drop");
+    var o = (origin && origin.point) || DEFAULT_SEARCH_CENTER;
+    var isAddr = /^\d+[A-Za-z]?\s/.test(base);
+    var num = isAddr ? (base.match(/^(\d+[A-Za-z]?)\s/) || [])[1] : "";
+    var core = streetCoreTokens(base, city);
+
+    function fromHit(h, level) {
+      var label = [[h.house, h.road].filter(Boolean).join(" ") || base, h.city, h.state, h.zip].filter(Boolean).join(", ");
+      return geoFeature(h.lat, h.lng, { name: base, source: "nominatim", level: level, postcode: h.zip, city: h.city, label: label });
+    }
+    function fromPhoton(it, level) {
+      var pl = it.place;
+      var line = pl.line1 || "";
+      if (level !== "exact" && num && !/^\d/.test(line)) line = "near " + line;
+      var label = [line, pl.city, pl.state, String(pl.zip || "").slice(0, 5)].filter(Boolean).join(", ");
+      return geoFeature(pl.lat, pl.lng, { name: base, source: "photon", level: level, postcode: String(pl.zip || "").slice(0, 5), city: pl.city, label: label });
+    }
+    function pickNominatim(hits) {
+      if (!hits.length) return null;
+      if (num) {
+        var exact = hits.filter(function (h) { return normText(h.house) === normText(num); })[0];
+        if (exact) return fromHit(exact, "exact");
+        var street = hits.filter(function (h) { return h.road && coreMatches(core, h.road); })[0];
+        return street ? fromHit(street, "street") : null;
+      }
+      return fromHit(hits[0], "exact");
+    }
+    function cityCenter() {
+      if (!city) return Promise.resolve(null);
+      return nominatimHits("city=" + encodeURIComponent(city) + "&state=" + encodeURIComponent(st), o).then(function (hits) {
+        var h = hits[0];
+        if (!h) return null;
+        return geoFeature(h.lat, h.lng, { name: base, source: "nominatim", level: "city", postcode: "", city: city, label: city + ", " + st + " (city center)" });
+      });
+    }
+    function viaPhoton() {
+      return findPlaces(q, origin, { city: city || "", zip: zip || "" }).then(function (items) {
+        var best = null;
+        items.some(function (it) {
+          var p = (it.feature && it.feature.properties) || {};
+          if (num) {
+            if (!coreMatches(core, p.street || p.name || "")) return false;
+            best = fromPhoton(it, normText(p.housenumber) === normText(num) ? "exact" : "street");
+            return true;
+          }
+          if (it.tier <= 1) { best = fromPhoton(it, "exact"); return true; }
+          return false;
+        });
+        return best;
+      }).catch(function () { return null; });
+    }
+    function viaStreetName() {
+      if (!core.length) return Promise.resolve(null);
+      var common = "lang=en&limit=10&lat=" + o.lat.toFixed(5) + "&lon=" + o.lng.toFixed(5) + "&location_bias_scale=0.1&q=";
+      return Promise.all([
+        photonFetch(common + encodeURIComponent(core.join(" ") + (city ? " " + city : ""))),
+        photonFetch(common + encodeURIComponent(core.join(" ")))
+      ]).then(function (lists) {
+        var items = rankPlaces([].concat(lists[0], lists[1]), core.join(" "), o, { city: city || "" }).filter(function (it) {
+          var p = (it.feature && it.feature.properties) || {};
+          return coreMatches(core, p.street || p.name || "") && it.dist <= STREET_MATCH_MAX_MI;
+        });
+        items.sort(function (x, y) {
+          var xs = (x.feature.properties || {}).osm_key === "highway" ? 0 : 1;
+          var ys = (y.feature.properties || {}).osm_key === "highway" ? 0 : 1;
+          return (x.cityKey - y.cityKey) || (xs - ys) || (x.dist - y.dist);
+        });
+        return items[0] ? fromPhoton(items[0], "street") : null;
+      });
+    }
+
+    var chain;
+    if (isAddr) {
+      var structured = "street=" + encodeURIComponent(base) + (city ? "&city=" + encodeURIComponent(city) : "") +
+        "&state=" + encodeURIComponent(st) + (zip ? "&postalcode=" + encodeURIComponent(zip) : "");
+      chain = nominatimHits(structured, o).then(pickNominatim).then(function (f) {
+        if (f && f.properties.level === "exact") return f;
+        return nominatimHits("q=" + encodeURIComponent(q), o).then(pickNominatim).then(function (g) {
+          var cand = [f, g].filter(Boolean);
+          var ex = cand.filter(function (c) { return c.properties.level === "exact"; })[0];
+          return ex || cand[0] || null;
+        });
+      }).then(function (f) {
+        if (f && f.properties.level === "exact") return f;
+        return viaPhoton().then(function (g) {
+          if (g && (!f || g.properties.level === "exact")) return g;
+          return f;
+        });
+      });
+    } else {
+      chain = viaPhoton();
+    }
+    return chain.then(function (f) {
+      return f || viaStreetName();
+    }).then(function (f) {
+      return f || cityCenter();
+    }).then(function (f) {
+      /* Map hit without a ZIP (common for streets/neighborhoods): look the ZIP up at that point. */
+      if (!f || f.properties.level === "city" || f.properties.postcode) return f;
+      var pt = featurePoint(f);
+      return withTimeout(fetch("https://nominatim.openstreetmap.org/reverse?format=jsonv2&addressdetails=1&zoom=18&lat=" + pt.lat + "&lon=" + pt.lng, {
+        headers: { "Accept": "application/json" }
+      }).then(function (res) { return res.ok ? res.json() : null; }), 6000).then(function (data) {
+        var a = (data && data.address) || {};
+        var z = String(a.postcode || "").slice(0, 5);
+        if (/^\d{5}$/.test(z)) {
+          f.properties.postcode = z;
+          if (!f.properties.city) f.properties.city = a.city || a.town || a.village || "";
+          if (f.properties.label && f.properties.label.indexOf(z) === -1) f.properties.label += " " + z;
+        }
+        return f;
+      }).catch(function () { return f; });
+    }).catch(function () { return null; });
+  }
+
+  function geocodeQuery(text, city, stateName, zip, prefix) {
+    return resolveAddress(text, city, stateName, zip, prefix);
+  }
+
+  /* Put a resolved place on the ride: pin + auto-filled ZIP / city + "Found:" label. */
+  function applyResolved(prefix, feature) {
+    var pt = featurePoint(feature);
+    if (!pt) return false;
+    var props = feature.properties || {};
+    addrSet(prefix, "Lat", pt.lat);
+    addrSet(prefix, "Lng", pt.lng);
+    var level = props.level || "exact";
+    addrSet(prefix, "Approx", level === "exact" ? "" : level);
+    addrSet(prefix, "Found", props.label || "");
+    if (level !== "city" && props.postcode && !String(addrGet(prefix, "Zip") || "").trim()) addrSet(prefix, "Zip", props.postcode);
+    if (props.city && !String(addrGet(prefix, "City") || "").trim()) addrSet(prefix, "City", props.city);
+    if (prefix === "drop") state.dropFix = pt;
+    resetDrivingRoute();
+    return true;
+  }
+
+  function levelRank(v) {
+    return v ? (GEO_LEVEL_RANK[v] != null ? GEO_LEVEL_RANK[v] : 3) : 0;
   }
 
   function ensureCustomerCoords() {
@@ -6026,7 +6487,14 @@
       if (moved && after) state.dropFix = { lat: +after.lat, lng: +after.lng };
       saveRide(state.rideStatus || (state.screen === "trip" ? "accepted" : "requested"));
       if (moved && after && syncOn() && state.code) {
-        patchRide(state.code, { dropLat: +after.lat, dropLng: +after.lng }).catch(function () {});
+        var dropPatch = { dropLat: +after.lat, dropLng: +after.lng, dropApprox: state.dropApprox && state.dropApprox !== "missing" ? state.dropApprox : "", dropFound: state.dropFound || "" };
+        if (state.dropZip) dropPatch.dropZip = state.dropZip;
+        patchRide(state.code, dropPatch).then(function () {
+          var latest = currentRide() || {};
+          Object.keys(dropPatch).forEach(function (k) { latest[k] = dropPatch[k]; });
+          if (!latest.code) latest.code = state.code;
+          if (String(latest.status || state.rideStatus || "") === "requested") putOpenRide(state.code, latest).catch(function () {});
+        }).catch(function () {});
       } else if (filledPick) {
         pushPlaceCoords();
       }
@@ -6037,36 +6505,88 @@
   function geocodeMissing() {
     var jobs = [];
     /* Picked from the list / current location: keep that exact pin (never swap to another store). */
-    var pickupPinned = !!state.pickupPinned && !!placeCoords("pickup");
-    var dropPinned = !!state.dropPinned && !!placeCoords("drop");
+    var pickupPinned = !!state.pickupPinned && !!placeCoords("pickup") && !state.pickupApprox;
+    var dropPinned = !!state.dropPinned && !!placeCoords("drop") && !state.dropApprox;
     (state.stopList || []).forEach(function (s, i) {
       if (!s || !String(s.street || "").trim()) return;
-      if (s.pinned && isCoord(s.lat) && isCoord(s.lng)) return;
+      if (s.pinned && isCoord(s.lat) && isCoord(s.lng) && !s.approx) return;
       jobs.push(geocodeQuery(s.street, s.city, s.state, s.zip, "stop" + i).then(function (feature) {
-        var pt = featurePoint(feature);
-        if (!pt || !state.stopList[i]) return;
-        state.stopList[i].lat = pt.lat;
-        state.stopList[i].lng = pt.lng;
+        if (!feature || !state.stopList[i]) return;
+        var had = isCoord(state.stopList[i].lat) && isCoord(state.stopList[i].lng);
+        if (had && levelRank((feature.properties || {}).level) > levelRank(state.stopList[i].approx)) return;
+        applyResolved("stop" + i, feature);
       }));
     });
     if (state.pickupStreet && !state.pickupFromHere && !pickupPinned) {
       jobs.push(geocodeQuery(state.pickupStreet, state.pickupCity, state.pickupState, state.pickupZip, "pickup").then(function (feature) {
         if (!feature) return;
         var saved = placeCoords("pickup");
-        if (!saved || placeLooksWeak(saved, feature, state.pickupStreet, state.pickupCity)) setCoords("pickup", feature);
+        var lvl = (feature.properties || {}).level;
+        if (!saved || (state.pickupApprox && levelRank(lvl) <= levelRank(state.pickupApprox)) ||
+            placeLooksWeak(saved, feature, state.pickupStreet, state.pickupCity)) applyResolved("pickup", feature);
       }));
     }
     if (state.dropStreet && !dropPinned) {
       jobs.push(geocodeQuery(state.dropStreet, state.dropCity, state.dropState, state.dropZip, "drop").then(function (feature) {
         if (!feature) return;
         var saved = placeCoords("drop");
-        if (!saved || placeLooksWeak(saved, feature, state.dropStreet, state.dropCity)) {
-          setCoords("drop", feature);
-          if (saved) state.dropFix = featurePoint(feature);
+        var lvl = (feature.properties || {}).level;
+        if (!saved || (state.dropApprox && levelRank(lvl) <= levelRank(state.dropApprox)) ||
+            placeLooksWeak(saved, feature, state.dropStreet, state.dropCity)) {
+          applyResolved("drop", feature);
+          if (lvl === "exact") state.dropPinned = true;
         }
       }));
     }
     return Promise.all(jobs);
+  }
+
+  /* Rider form: find the address as soon as street + city are typed (no ZIP needed). */
+  var autoResolveSeq = {};
+  function autoResolveField(prefix) {
+    if (ROLE !== "customer" || state.screen !== "home") return;
+    var street = String(addrGet(prefix, "Street") || "").trim();
+    var city = String(addrGet(prefix, "City") || "").trim();
+    if (street.length < 3) return;
+    if (addrGet(prefix, "Pinned") && isCoord(addrGet(prefix, "Lat")) && !addrGet(prefix, "Approx")) return;
+    if (prefix === "pickup" && state.pickupFromHere) return;
+    var key = street + "|" + city + "|" + (addrGet(prefix, "State") || "") + "|" + (addrGet(prefix, "Zip") || "");
+    if (autoResolveSeq[prefix] === key) return;
+    autoResolveSeq[prefix] = key;
+    var note = document.getElementById(prefix + "-found");
+    if (note) { note.textContent = "Finding this address…"; note.className = "fine addr-found"; }
+    resolveAddress(street, city, addrGet(prefix, "State"), addrGet(prefix, "Zip"), prefix).then(function (feature) {
+      if (autoResolveSeq[prefix] !== key) return;
+      var stillStreet = String(addrGet(prefix, "Street") || "").trim();
+      if (stillStreet !== street) return;
+      var el = document.getElementById(prefix + "-found");
+      if (!feature) {
+        addrSet(prefix, "Found", "");
+        addrSet(prefix, "Approx", "missing");
+        if (el) { el.textContent = "We couldn't find this address yet. Check the street name and city, or pick it from the list."; el.className = "error addr-found"; }
+        return;
+      }
+      applyResolved(prefix, feature);
+      var lvl = (feature.properties || {}).level;
+      if (lvl === "exact") addrSet(prefix, "Pinned", true);
+      var zipEl = document.getElementById(prefix + "-zip");
+      if (zipEl && !zipEl.value.trim() && addrGet(prefix, "Zip")) zipEl.value = addrGet(prefix, "Zip");
+      var cityEl = document.getElementById(prefix + "-city");
+      if (cityEl && !cityEl.value.trim() && addrGet(prefix, "City")) cityEl.value = addrGet(prefix, "City");
+      if (el) {
+        el.textContent = foundNoteText(prefix);
+        el.className = (lvl === "exact" ? "fine" : "note") + " addr-found";
+      }
+    });
+  }
+
+  function foundNoteText(prefix) {
+    var found = addrGet(prefix, "Found");
+    var lvl = addrGet(prefix, "Approx");
+    if (!found) return lvl === "missing" ? "We couldn't find this address yet. Check the street name and city, or pick it from the list." : "";
+    if (lvl === "city") return "Pinned at " + found + ". We couldn't find the exact street, so miles are approximate.";
+    if (lvl === "street") return "Pinned near " + String(found).replace(/^near\s+/i, "") + ". Exact house isn't on the map, so miles are close.";
+    return "\u2713 Found: " + found;
   }
 
   function draftText() {
@@ -6182,6 +6702,7 @@
   function selectOpenRide(code) {
     code = normalizeCode(code);
     if (!code) return;
+    if (state.selectedOpenCode !== code) setAcceptNotice("");
     state.selectedOpenCode = code;
     state.remoteLoading = true;
     getRide(code).then(function (ride) {
@@ -6198,6 +6719,16 @@
       state.driverCode = code;
       writeDriverCode(code);
       rememberRemote(ride);
+      state.dropLookup = "";
+      if (state.dropStreet && !placeCoords("drop")) {
+        state.dropLookup = "looking";
+        resolveAddress(state.dropStreet, state.dropCity, state.dropState, state.dropZip, "drop").then(function (feature) {
+          if (state.selectedOpenCode !== code) return;
+          state.dropLookup = feature ? "found" : "missing";
+          if (feature) applyResolved("drop", feature);
+          render();
+        });
+      }
       render();
     }).catch(function () {
       state.remoteLoading = false;
@@ -6206,11 +6737,97 @@
     });
   }
 
+  /* v48: Accept feedback lives on the ride card itself (the 3-second board poll no longer wipes it). */
+  function setAcceptNotice(msg, kind) {
+    state.acceptNotice = msg || "";
+    state.acceptNoticeKind = kind || (msg ? "error" : "");
+  }
+
+  function acceptRideOnce(code, account, attempt) {
+    return getRideWithEtag(code).then(function (pack) {
+      var ride = pack && pack.ride;
+      var etag = pack && pack.etag;
+      var st = String((ride && ride.status) || "").toLowerCase();
+      if (!ride) {
+        var err = new Error("missing");
+        err.missing = true;
+        throw err;
+      }
+      if (st === "accepted" || st === "started" || st === "completed") {
+        var mine = ride.driverId && ride.driverId === driverPresenceId();
+        var taken = new Error(mine ? "mine" : "taken");
+        if (mine) taken.mine = true; else taken.taken = true;
+        throw taken;
+      }
+      if (st === "cancelled" || st === "denied") {
+        var gone = new Error("cancelled");
+        gone.cancelled = st;
+        throw gone;
+      }
+      if (st === "pending_owner" || st === "pending-owner") {
+        var wait = new Error("pending-owner");
+        wait.pendingOwner = true;
+        throw wait;
+      }
+      if (st && st !== "requested") {
+        var bad = new Error("bad-status");
+        bad.badStatus = st;
+        throw bad;
+      }
+      if (ride.isTest && !isOwnerSession()) {
+        var notest = new Error("test-ride");
+        notest.testRide = true;
+        throw notest;
+      }
+      if (ride.isTest) state.isTest = true;
+      if (ride.pinHash) state.pinHash = ride.pinHash;
+      var now = Date.now();
+      var patch = {
+        status: "accepted",
+        acceptedAt: now,
+        driverId: driverPresenceId(),
+        driverUid: firebaseUid() || "",
+        updatedAt: now
+      };
+      if (ride.isTest) patch.isTest = true;
+      if (state.driverName) patch.driverName = state.driverName;
+      if (state.driverPhone) patch.driverPhone = state.driverPhone;
+      if (safePhoto(state.driverPhoto)) patch.driverPhoto = safePhoto(state.driverPhoto);
+      if (state.driverCarYear) patch.driverCarYear = state.driverCarYear;
+      if (state.driverCarMake) patch.driverCarMake = state.driverCarMake;
+      if (state.driverCarModel) patch.driverCarModel = state.driverCarModel;
+      if (state.driverCarPlate) patch.driverCarPlate = state.driverCarPlate;
+      if (state.driverCarSeats) patch.driverCarSeats = state.driverCarSeats;
+      if (safePhoto(state.driverCarPhoto)) patch.driverCarPhoto = safePhoto(state.driverCarPhoto);
+      if (account && account.email) patch.driverEmail = String(account.email).toLowerCase();
+      /* Drop-off was never pinned (no ZIP etc.): the driver app found it, save it on the ride. */
+      if (!isCoord(ride.dropLat) && isCoord(state.dropLat) && isCoord(state.dropLng)) {
+        patch.dropLat = +state.dropLat;
+        patch.dropLng = +state.dropLng;
+        if (state.dropZip && !ride.dropZip) patch.dropZip = state.dropZip;
+        patch.dropApprox = !!state.dropApprox;
+      }
+      return patchRideIfMatch(code, patch, etag, ride).catch(function (e) {
+        if (e && e.conflict && attempt < 2) return acceptRideOnce(code, account, attempt + 1).then(function () { return "retried"; });
+        throw e;
+      }).then(function (r) {
+        if (r === "retried") return;
+        return deleteOpenRide(code).catch(function () {});
+      });
+    });
+  }
+
   function acceptSelectedOpenRide() {
     stopOpenRideAlert();
-    if (!state.selectedOpenCode && !state.code) return;
+    if (state.acceptBusy) return;
+    if (!state.selectedOpenCode && !state.code) {
+      setAcceptNotice("Tap the rider's pin on the map first, then tap Accept.");
+      render();
+      return;
+    }
     if (!isDriverApproved()) {
       state.openListError = "pending-approval";
+      setAcceptNotice("Your driver account is still waiting for owner approval, so you can't accept rides yet.");
       render();
       return;
     }
@@ -6226,7 +6843,7 @@
       state.driverCarSeats = account.carSeats || "";
       if (safePhoto(account.carPhoto)) state.driverCarPhoto = safePhoto(account.carPhoto);
     }
-    var code = state.driverCode || state.code || state.selectedOpenCode || readDriverCode();
+    var code = state.selectedOpenCode || state.driverCode || state.code || readDriverCode();
     if (code) {
       state.code = code;
       state.driverCode = code;
@@ -6239,6 +6856,7 @@
       state.mode = "driver";
       state.screen = "trip";
       state.openListError = "";
+      setAcceptNotice("");
       render();
     }
     if (!syncOn() || !code) {
@@ -6246,77 +6864,52 @@
       return;
     }
     state.openListError = "";
+    state.acceptBusy = true;
+    setAcceptNotice("Accepting…", "busy");
     state.remoteLoading = true;
     render();
-    getRideWithEtag(code).then(function (pack) {
-      var ride = pack && pack.ride;
-      var etag = pack && pack.etag;
-      var st = String((ride && ride.status) || "").toLowerCase();
-      if (!ride) {
-        var err = new Error("missing");
-        err.taken = true;
-        throw err;
-      }
-      if (st === "accepted" || st === "started" || st === "completed" || st === "cancelled" || st === "denied") {
-        var taken = new Error("taken");
-        taken.taken = true;
-        throw taken;
-      }
-      if (st === "pending_owner" || st === "pending-owner") {
-        var wait = new Error("pending-owner");
-        wait.pendingOwner = true;
-        throw wait;
-      }
-      if (st && st !== "requested") {
-        var bad = new Error("bad-status");
-        bad.taken = true;
-        throw bad;
-      }
-      if (ride.isTest && !isOwnerSession()) {
-        var notest = new Error("test-ride");
-        notest.taken = true;
-        throw notest;
-      }
-      if (ride.isTest) state.isTest = true;
-      if (ride.pinHash) state.pinHash = ride.pinHash;
-      var patch = {
-        status: "accepted",
-        acceptedAt: Date.now(),
-        driverId: driverPresenceId(),
-        driverUid: firebaseUid() || "",
-        updatedAt: Date.now()
-      };
-      if (ride.isTest) patch.isTest = true;
-      if (state.driverName) patch.driverName = state.driverName;
-      if (state.driverPhone) patch.driverPhone = state.driverPhone;
-      if (safePhoto(state.driverPhoto)) patch.driverPhoto = safePhoto(state.driverPhoto);
-      if (state.driverCarYear) patch.driverCarYear = state.driverCarYear;
-      if (state.driverCarMake) patch.driverCarMake = state.driverCarMake;
-      if (state.driverCarModel) patch.driverCarModel = state.driverCarModel;
-      if (state.driverCarPlate) patch.driverCarPlate = state.driverCarPlate;
-      if (state.driverCarSeats) patch.driverCarSeats = state.driverCarSeats;
-      if (safePhoto(state.driverCarPhoto)) patch.driverCarPhoto = safePhoto(state.driverCarPhoto);
-      if (account && account.email) patch.driverEmail = String(account.email).toLowerCase();
-      return patchRideIfMatch(code, patch, etag).then(function () {
-        return deleteOpenRide(code).catch(function () {});
-      });
-    }).then(function () {
+    acceptRideOnce(code, account, 0).then(function () {
       state.remoteLoading = false;
+      state.acceptBusy = false;
       finishLocalAccept();
     }).catch(function (err) {
       state.remoteLoading = false;
-      if (err && err.pendingOwner) {
-        state.openListError = "This booking is still waiting for owner approval.";
+      state.acceptBusy = false;
+      var clear = false;
+      if (err && err.mine) {
+        /* Already ours (e.g. double tap): just open the trip. */
+        finishLocalAccept();
+        return;
+      } else if (err && err.pendingOwner) {
+        setAcceptNotice("This booking is still waiting for the owner to approve it in God mode.");
       } else if (err && (err.conflict || err.taken)) {
-        state.openListError = "That ride was already taken by another driver.";
+        setAcceptNotice("That ride was already taken by another driver.");
+        clear = true;
+      } else if (err && err.cancelled) {
+        setAcceptNotice(err.cancelled === "denied" ? "The owner denied this booking." : "The rider cancelled this ride.");
+        clear = true;
+      } else if (err && err.missing) {
+        setAcceptNotice("This ride is no longer in the system.");
+        clear = true;
+      } else if (err && err.testRide) {
+        setAcceptNotice("This is an owner TEST ride. Only the owner's driver login can accept it.");
+      } else if (err && err.badStatus) {
+        setAcceptNotice("This ride can't be accepted right now (status: " + err.badStatus + ").");
+      } else if (err && err.denied) {
+        setAcceptNotice("The database blocked this accept (permission " + (err.status || "") + "). Log out and back in, then try again. If it keeps happening, call the office.");
+      } else if (err && err.status) {
+        setAcceptNotice("Could not accept this ride (server error " + err.status + "). Tap Accept again.");
+      } else {
+        setAcceptNotice("Could not reach the server to accept this ride. Check your signal and tap Accept again.");
+      }
+      if (clear) {
         state.selectedOpenCode = "";
         clearRideFields();
         writeDriverCode("");
         state.driverCode = "";
         try { localStorage.removeItem(STORE); } catch (e2) {}
+        state.openListError = state.acceptNotice;
         refreshOpenRides(true);
-      } else {
-        state.openListError = "Could not accept this ride. Try again.";
       }
       render();
     });
