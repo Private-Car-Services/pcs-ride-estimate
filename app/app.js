@@ -3,7 +3,8 @@
    driver online time + screen wake lock.
    v50 (Oct 6): driver profile (car details + profile photo + car photo) is saved on the server under
    /rides/DRVRPRFL/{driverId} (driverId = email-based roster id), loaded at every login, and never wiped by
-   logout or a roster-password login. Only the opening odometer is asked after login. */
+   logout or a roster-password login. Only the opening odometer is asked after login.
+   v54: louder looping ride siren, rider↔driver chat (en route to pickup), rider History, God banner actions + pop-ups. */
 (function () {
   var BUSINESS_PHONE = "936-261-7878";
   var DRIVER_COMMISSION_RATE = 0.7;
@@ -85,6 +86,7 @@
   var openRideAlertTimer = null;
   var openRideAudioUnlocked = false;
   var openRideAudioCtx = null;
+  var openRideSirenNodes = [];
 
   function openRideAlertMuted() {
     try { return localStorage.getItem("pcs-driver-alert-mute") === "1"; } catch (err) { return false; }
@@ -94,10 +96,16 @@
     try { localStorage.setItem("pcs-driver-alert-mute", on ? "1" : "0"); } catch (err) {}
   }
 
-  /* v53: iOS 17+ - "playback" audio session so the ride chime plays even with the silent switch on. */
+  /* v53/v54: iOS 17+ silent-switch ignore; playback ducks/interrupts other audio when possible. */
   function setPlaybackAudioSession() {
     try {
-      if (navigator.audioSession && navigator.audioSession.type !== "playback") navigator.audioSession.type = "playback";
+      if (!navigator.audioSession) return;
+      var t = navigator.audioSession.type;
+      if (t === "playback" || t === "playAndRecord") return;
+      try { navigator.audioSession.type = "playback"; } catch (e1) {}
+      try {
+        if (navigator.audioSession.type !== "playback") navigator.audioSession.type = "playAndRecord";
+      } catch (e2) {}
     } catch (err) {}
   }
 
@@ -144,11 +152,21 @@
   }
 
   function beepOpenRideOnce() {
-    /* Default: short doorbell-style chime (ding–dong). Mute toggle still available. */
+    /* v54: one loud siren burst; the loop interval keeps it repeating until Accept/Deny. */
     if (openRideAlertMuted() || !openRideAudioUnlocked) return;
-    playRideChime(false);
+    playRideSiren(false);
   }
 
+  function stopRideSirenNodes() {
+    openRideSirenNodes.forEach(function (n) {
+      try { if (n.stop) n.stop(); } catch (e) {}
+      try { if (n.disconnect) n.disconnect(); } catch (e2) {}
+    });
+    openRideSirenNodes = [];
+    try { if (navigator.vibrate) navigator.vibrate(0); } catch (e3) {}
+  }
+
+  /* Unlock-bar test chime (short). Full alert uses playRideSiren. */
   function playRideChime(isTest) {
     setPlaybackAudioSession();
     try {
@@ -157,25 +175,54 @@
       if (!openRideAudioCtx) openRideAudioCtx = new AC();
       var ctx = openRideAudioCtx;
       if (ctx.state === "suspended") ctx.resume();
-      function tone(freq, start, dur, peak) {
+      var now = ctx.currentTime;
+      var o = ctx.createOscillator();
+      var g = ctx.createGain();
+      o.type = "square";
+      o.frequency.value = 980;
+      g.gain.value = 0.0001;
+      o.connect(g);
+      g.connect(ctx.destination);
+      g.gain.exponentialRampToValueAtTime(isTest ? 0.45 : 0.7, now + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.0001, now + 0.28);
+      o.start(now);
+      o.stop(now + 0.32);
+    } catch (err) {}
+    try {
+      if (navigator.vibrate) navigator.vibrate(isTest ? 60 : [200, 80, 200]);
+    } catch (err2) {}
+  }
+
+  /* v54: loud alternating high/low sweeps so the alert cuts through music in the car. */
+  function playRideSiren(isTest) {
+    setPlaybackAudioSession();
+    try {
+      var AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC) return;
+      if (!openRideAudioCtx) openRideAudioCtx = new AC();
+      var ctx = openRideAudioCtx;
+      if (ctx.state === "suspended") ctx.resume();
+      var now = ctx.currentTime;
+      var peak = isTest ? 0.55 : 0.95;
+      [[880, 0, 0.18], [1400, 0.18, 0.18], [880, 0.36, 0.18], [1400, 0.54, 0.18], [980, 0.72, 0.22]].forEach(function (t) {
         var o = ctx.createOscillator();
         var g = ctx.createGain();
-        o.type = "sine";
-        o.frequency.value = freq;
+        o.type = "sawtooth";
+        o.frequency.setValueAtTime(t[0], now + t[1]);
+        o.frequency.linearRampToValueAtTime(t[0] * (t[0] < 1000 ? 1.35 : 0.72), now + t[1] + t[2]);
         g.gain.value = 0.0001;
         o.connect(g);
         g.connect(ctx.destination);
-        g.gain.exponentialRampToValueAtTime(peak || 0.2, start + 0.015);
-        g.gain.exponentialRampToValueAtTime(0.0001, start + dur);
-        o.start(start);
-        o.stop(start + dur + 0.02);
-      }
-      var now = ctx.currentTime;
-      tone(880, now, 0.22, 0.55); /* louder ding */          /* ding */
-      tone(659.25, now + 0.28, 0.5, 0.5); /* louder dong */ /* dong */
+        g.gain.exponentialRampToValueAtTime(peak, now + t[1] + 0.02);
+        g.gain.exponentialRampToValueAtTime(0.0001, now + t[1] + t[2]);
+        o.start(now + t[1]);
+        o.stop(now + t[1] + t[2] + 0.03);
+        openRideSirenNodes.push(o);
+        openRideSirenNodes.push(g);
+      });
     } catch (err) {}
     try {
-      if (navigator.vibrate) navigator.vibrate(isTest ? 40 : [80, 40, 120]);
+      if (navigator.vibrate) navigator.vibrate(isTest ? 80 : [220, 60, 220, 60, 220, 60, 320]);
     } catch (err2) {}
   }
 
@@ -189,6 +236,7 @@
       clearInterval(openRideAlertTimer);
       openRideAlertTimer = null;
     }
+    stopRideSirenNodes();
   }
 
   function syncOpenRideAlert() {
@@ -198,7 +246,7 @@
       closeRidePopup();
       return;
     }
-    /* v51: pop-up + chime on every driver page (map, Home menu, Today, Earnings, finished trip). */
+    /* v51/v54: pop-up + looping siren on every driver page until Accept/Deny. */
     syncRidePopup();
     var n = countAlertableOpenRides();
     if (!n || openRideAlertMuted()) {
@@ -213,7 +261,7 @@
         return;
       }
       beepOpenRideOnce();
-    }, 4000);
+    }, 1400);
   }
 
   function openRideAlertToggleHtml() {
@@ -299,6 +347,7 @@
   function closeRidePopup() {
     ridePopupCode = "";
     ridePopupHtmlKey = "";
+    stopRideSirenNodes();
     var el = document.getElementById("ride-popup");
     if (el && el.parentNode) el.parentNode.removeChild(el);
   }
@@ -816,7 +865,11 @@
       "#ride-popup .rp-accept{background:#2e9d4f}#ride-popup .rp-deny{background:#8a2323}" +
       ".nav-btn-big{display:block;text-align:center;font-size:24px;font-weight:800;padding:18px 12px;margin:10px 0 6px;background:#1f6fd1;color:#fff !important;border-radius:14px;text-decoration:none;box-shadow:0 4px 14px rgba(0,0,0,.25)}" +
       ".trip-eta{font-size:18px;font-weight:700;margin:4px 0 10px}" +
-      ".rider-photo-pin{width:52px;height:52px;border-radius:50%;object-fit:cover;border:3px solid #f0d48a;box-shadow:0 0 0 3px rgba(11,28,51,.65),0 4px 10px rgba(0,0,0,.45);background:#0b1c33;display:block}";
+      ".rider-photo-pin{width:52px;height:52px;border-radius:50%;object-fit:cover;border:3px solid #f0d48a;box-shadow:0 0 0 3px rgba(11,28,51,.65),0 4px 10px rgba(0,0,0,.45);background:#0b1c33;display:block}" +
+      ".chat-box .chat-bubble{background:#14304f;border-radius:12px;padding:10px 12px;margin:8px 0;font-size:18px}" +
+      ".chat-box .chat-bubble.mine{background:#1a3d24}" +
+      ".chat-chips{display:flex;flex-wrap:wrap;gap:8px;margin:10px 0}" +
+      ".chat-chips .chat-chip{font-size:16px;font-weight:700;padding:12px 14px}";
     document.head.appendChild(s);
   }
 
@@ -1052,6 +1105,7 @@
   var MILES_HUB = "DRVRMLES"; /* 8-char hub (no I/O); DRVRMILZ wrongly had I */
   var ROSTER_HUB = "DRVRCMMS"; /* hire / approve / commission */
   var HISTORY_HUB = "DRVRHSTY"; /* completed ride history per driver */
+  var RIDER_HISTORY_HUB = "RDRHSTRY"; /* v54: completed ride history per rider */
   var CALENDAR_HUB = "PCSCALND"; /* God day board: PCS-titled calendar rides */
   var PROFILE_HUB = "DRVRPRFL"; /* v50: permanent driver profile (car + photos) per driver id */
   var lastDriverPatchAt = 0;
@@ -1153,6 +1207,16 @@
     boardMarkers: null,
     hubOpen: false,
     hubView: "menu",
+    chatMessages: [],
+    chatDraft: "",
+    chatError: "",
+    chatBusy: false,
+    chatStamp: "",
+    historyRows: [],
+    historyLoading: false,
+    historyError: "",
+    historyReceipt: null,
+    riderHistoryView: "",
     hubDay: "",
     commHidden: false,
     paymentSkipped: false,
@@ -4215,6 +4279,299 @@
     return base + ".json";
   }
 
+  function riderHistoryKey() {
+    var uid = firebaseUid();
+    if (uid) return String(uid).slice(0, 48);
+    var email = (firebaseEmail() || readSession() || "").trim().toLowerCase();
+    if (!email) {
+      try {
+        var acct = JSON.parse(localStorage.getItem("pcs-rider-account") || "null");
+        email = acct && acct.email ? String(acct.email).trim().toLowerCase() : "";
+      } catch (e) { email = ""; }
+    }
+    var id = email.replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+    return (id || "rider").slice(0, 48);
+  }
+
+  function riderHistoryUrl(rideCode) {
+    var base = databaseURL() + "/rides/" + encodeURIComponent(RIDER_HISTORY_HUB) + "/" + encodeURIComponent(riderHistoryKey());
+    if (rideCode) return base + "/" + encodeURIComponent(rideCode) + ".json";
+    return base + ".json";
+  }
+
+  function chatUrl(code, pushId) {
+    var base = databaseURL() + "/rides/" + encodeURIComponent(code) + "/chat";
+    if (pushId) return base + "/" + encodeURIComponent(pushId) + ".json";
+    return base + ".json";
+  }
+
+  function chatOpenForRole() {
+    var st = String(state.rideStatus || "").toLowerCase();
+    if (st !== "accepted") return false;
+    if (ROLE === "customer") return state.screen === "trip" || state.screen === "waiting";
+    if (ROLE === "driver") return state.screen === "trip";
+    return false;
+  }
+
+  function activeChatCode() {
+    if (ROLE === "driver") return state.driverCode || readDriverCode() || state.code || "";
+    return state.code || "";
+  }
+
+  function chatQuickReplies() {
+    return ["Here", "5 min away", "Looking for you", "Traffic — running late"];
+  }
+
+  function loadChatMessages() {
+    if (!syncOn() || !chatOpenForRole()) return;
+    var code = activeChatCode();
+    if (!code) return;
+    authFetch(chatUrl(code)).then(function (res) {
+      if (!res.ok) return null;
+      return res.text().then(function (t) {
+        if (!t || t === "null") return {};
+        try { return JSON.parse(t); } catch (e) { return {}; }
+      });
+    }).then(function (data) {
+      if (!data || typeof data !== "object") data = {};
+      var rows = Object.keys(data).map(function (id) {
+        var m = data[id] || {};
+        return {
+          id: id,
+          from: String(m.from || ""),
+          text: String(m.text || ""),
+          at: Number(m.at) || 0,
+          name: String(m.name || "")
+        };
+      }).filter(function (m) { return m.text; });
+      rows.sort(function (a, b) { return a.at - b.at; });
+      var stamp = rows.map(function (m) { return m.id + ":" + m.at; }).join("|");
+      if (stamp === state.chatStamp) return;
+      state.chatStamp = stamp;
+      state.chatMessages = rows;
+      if (chatOpenForRole()) render();
+    }).catch(function () {});
+  }
+
+  function sendChatMessage(textMsg, fromRole) {
+    var code = activeChatCode();
+    var msg = String(textMsg || "").trim().slice(0, 280);
+    if (!code || !msg || !syncOn()) return Promise.resolve(false);
+    if (!chatOpenForRole()) {
+      state.chatError = "Chat is only open until the ride starts.";
+      render();
+      return Promise.resolve(false);
+    }
+    if (/\b\d{3}[-.\s]?\d{3}[-.\s]?\d{4}\b/.test(msg)) {
+      state.chatError = "Please do not share phone numbers in chat.";
+      render();
+      return Promise.resolve(false);
+    }
+    state.chatBusy = true;
+    state.chatError = "";
+    var name = "";
+    if (fromRole === "driver") {
+      var acct = readDriverAccount() || {};
+      name = acct.name || state.driverName || "Driver";
+    } else {
+      name = state.name || "Rider";
+    }
+    var body = { from: fromRole, text: msg, at: Date.now(), name: name };
+    return authFetch(chatUrl(code), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body)
+    }).then(function (res) {
+      state.chatBusy = false;
+      if (!res.ok) throw new Error("chat");
+      state.chatDraft = "";
+      loadChatMessages();
+      return true;
+    }).catch(function () {
+      state.chatBusy = false;
+      state.chatError = "Message did not send. Try again.";
+      render();
+      return false;
+    });
+  }
+
+  function chatBoxHtml() {
+    if (!chatOpenForRole()) return "";
+    var rows = state.chatMessages || [];
+    var list = rows.length
+      ? rows.map(function (m) {
+          var mine = (ROLE === "driver" && m.from === "driver") || (ROLE === "customer" && m.from === "rider");
+          return '<div class="chat-bubble' + (mine ? " mine" : "") + '"><strong>' +
+            esc(m.from === "driver" ? (m.name || "Driver") : (m.name || "Rider")) +
+            "</strong><br>" + esc(m.text) + "</div>";
+        }).join("")
+      : '<p class="fine">No messages yet. Say hello.</p>';
+    var chips = "";
+    if (ROLE === "driver") {
+      chips = '<div class="chat-chips">' + chatQuickReplies().map(function (q) {
+        return '<button type="button" class="btn ghost chat-chip" data-chat-quick="' + esc(q) + '">' + esc(q) + "</button>";
+      }).join("") + "</div>";
+    }
+    return (
+      '<div class="card chat-box" id="ride-chat">' +
+      '<p class="tag">Chat · before pickup</p>' +
+      '<p class="fine">In-app only. No phone numbers.</p>' +
+      '<div class="chat-list" id="chat-list" style="max-height:180px;overflow:auto;font-size:18px;line-height:1.35">' + list + "</div>" +
+      chips +
+      '<form id="chat-form" autocomplete="off">' +
+      '<label for="chat-input">Message</label>' +
+      '<input id="chat-input" name="chat" type="text" maxlength="280" value="' + esc(state.chatDraft || "") + '" placeholder="Type a message" style="font-size:18px">' +
+      (state.chatError ? '<p class="error" role="alert">' + esc(state.chatError) + "</p>" : "") +
+      '<button class="btn" type="submit"' + (state.chatBusy ? " disabled" : "") + ">" + (state.chatBusy ? "Sending…" : "Send") + "</button>" +
+      "</form></div>"
+    );
+  }
+
+  function rememberRiderHistoryEntry(ride) {
+    if (!ride || !ride.code) return;
+    var st = String(ride.status || "").toLowerCase();
+    if (st !== "completed" && st !== "cancelled" && st !== "denied") return;
+    var entry = {
+      code: String(ride.code),
+      at: Number(ride.completedAt || ride.cancelledAt || ride.updatedAt || ride.acceptedAt || ride.requestedAt || Date.now()),
+      status: st,
+      pickup: ride.pickupAddress || [ride.pickupStreet, ride.pickupCity, ride.pickupState].filter(Boolean).join(", "),
+      drop: ride.dropAddress || [ride.dropStreet, ride.dropCity, ride.dropState].filter(Boolean).join(", "),
+      amountCents: ride.estimatedTotal != null && isFinite(+ride.estimatedTotal) ? Math.round(+ride.estimatedTotal) : null,
+      fareBeforeTax: ride.fareBeforeTax != null && isFinite(+ride.fareBeforeTax) ? Math.round(+ride.fareBeforeTax) : null,
+      when: ride.when || [ride.date, ride.time].filter(Boolean).join(" "),
+      name: ride.name || ""
+    };
+    try {
+      var key = "pcs-rider-history";
+      var list = JSON.parse(localStorage.getItem(key) || "[]");
+      if (!Array.isArray(list)) list = [];
+      list = list.filter(function (e) { return e && e.code !== entry.code; });
+      list.unshift(entry);
+      if (list.length > 80) list = list.slice(0, 80);
+      localStorage.setItem(key, JSON.stringify(list));
+    } catch (e) {}
+    if (syncOn() && ROLE === "customer") {
+      authFetch(riderHistoryUrl(entry.code), {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(entry)
+      }).catch(function () {});
+    }
+    if (syncOn() && ROLE === "driver") {
+      var rid = "";
+      if (ride.riderUid) rid = String(ride.riderUid).slice(0, 48);
+      else if (ride.riderEmail) {
+        rid = String(ride.riderEmail).toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 48);
+      }
+      if (rid) {
+        var url = databaseURL() + "/rides/" + encodeURIComponent(RIDER_HISTORY_HUB) + "/" + encodeURIComponent(rid) + "/" + encodeURIComponent(entry.code) + ".json";
+        authFetch(url, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(entry)
+        }).catch(function () {});
+      }
+    }
+  }
+
+  function loadRiderHistory() {
+    if (ROLE !== "customer" || !signedIn()) return Promise.resolve([]);
+    state.historyLoading = true;
+    var local = [];
+    try {
+      local = JSON.parse(localStorage.getItem("pcs-rider-history") || "[]");
+      if (!Array.isArray(local)) local = [];
+    } catch (e) { local = []; }
+    var remoteP = syncOn()
+      ? authFetch(riderHistoryUrl()).then(function (res) {
+          if (!res.ok) return {};
+          return res.text().then(function (t) {
+            if (!t || t === "null") return {};
+            try { return JSON.parse(t); } catch (e) { return {}; }
+          });
+        }).catch(function () { return {}; })
+      : Promise.resolve({});
+    return remoteP.then(function (data) {
+      var byCode = {};
+      local.forEach(function (e) { if (e && e.code) byCode[e.code] = e; });
+      Object.keys(data || {}).forEach(function (code) {
+        var e = data[code];
+        if (!e || typeof e !== "object") return;
+        if (!e.code) e.code = code;
+        byCode[code] = Object.assign({}, byCode[code] || {}, e);
+      });
+      var rows = Object.keys(byCode).map(function (c) { return byCode[c]; });
+      rows.sort(function (a, b) { return (Number(b.at) || 0) - (Number(a.at) || 0); });
+      state.historyRows = rows;
+      state.historyLoading = false;
+      state.historyError = "";
+      return rows;
+    }).catch(function () {
+      state.historyRows = local;
+      state.historyLoading = false;
+      state.historyError = "Could not load history.";
+      return local;
+    });
+  }
+
+  function fmtHistoryWhen(at) {
+    if (!at) return "";
+    try {
+      return new Date(Number(at)).toLocaleString("en-US", {
+        timeZone: "America/Chicago",
+        month: "short", day: "numeric", year: "numeric",
+        hour: "numeric", minute: "2-digit"
+      });
+    } catch (e) { return ""; }
+  }
+
+  function customerHistoryList() {
+    var rows = state.historyRows || [];
+    var body = "";
+    if (state.historyLoading) body = '<p class="lede">Loading…</p>';
+    else if (!rows.length) body = '<p class="lede">No rides yet.</p>';
+    else {
+      body = rows.map(function (r) {
+        var amt = r.amountCents != null ? money(r.amountCents) : "";
+        return (
+          '<button type="button" class="card history-row" data-history-code="' + esc(r.code || "") + '" style="text-align:left;width:100%;cursor:pointer">' +
+          '<p class="tag">' + esc(String(r.status || "").toUpperCase()) + (amt ? " · " + esc(amt) : "") + "</p>" +
+          '<p class="lede">' + esc(fmtHistoryWhen(r.at) || r.when || "") + "</p>" +
+          "<p>" + esc(r.pickup || "—") + " → " + esc(r.drop || "—") + "</p>" +
+          '<p class="fine">Code ' + esc(r.code || "") + "</p></button>"
+        );
+      }).join("");
+    }
+    return (
+      '<div class="app-nav"><button class="btn ghost" type="button" id="history-back">← Back</button></div>' +
+      "<h2>History</h2>" +
+      '<p class="lede">Past rides and receipts.</p>' +
+      (state.historyError ? '<p class="error">' + esc(state.historyError) + "</p>" : "") +
+      body
+    );
+  }
+
+  function customerHistoryReceipt() {
+    var r = state.historyReceipt || {};
+    var amt = r.amountCents != null ? money(r.amountCents) : "—";
+    var fare = r.fareBeforeTax != null ? money(r.fareBeforeTax) : "";
+    return (
+      '<div class="app-nav"><button class="btn ghost" type="button" id="receipt-back">← History</button></div>' +
+      "<h2>Receipt</h2>" +
+      '<div class="card">' +
+      '<p class="tag">' + esc(String(r.status || "").toUpperCase()) + "</p>" +
+      '<p class="lede">' + esc(fmtHistoryWhen(r.at) || r.when || "") + "</p>" +
+      "<p><strong>From</strong><br>" + esc(r.pickup || "—") + "</p>" +
+      "<p><strong>To</strong><br>" + esc(r.drop || "—") + "</p>" +
+      (fare ? "<p><strong>Fare before tax</strong> " + esc(fare) + "</p>" : "") +
+      "<p><strong>Total</strong> " + esc(amt) + "</p>" +
+      '<p class="fine">Ride code ' + esc(r.code || "") + "</p>" +
+      '<p class="fine">Amounts shown are what was stored for this ride. Not a new charge.</p>' +
+      "</div>"
+    );
+  }
+
   function calendarHubUrl(eventId) {
     var base = databaseURL() + "/rides/" + encodeURIComponent(CALENDAR_HUB);
     if (eventId) return base + "/" + encodeURIComponent(eventId) + ".json";
@@ -4829,6 +5186,24 @@
         body: JSON.stringify(entry)
       }).catch(function () {});
     }
+    rememberRiderHistoryEntry({
+      code: code,
+      status: "completed",
+      completedAt: entry.completedAt,
+      pickupStreet: state.pickupStreet,
+      pickupCity: state.pickupCity,
+      pickupState: state.pickupState,
+      dropStreet: state.dropStreet,
+      dropCity: state.dropCity,
+      dropState: state.dropState,
+      pickupAddress: entry.pickup,
+      dropAddress: entry.drop,
+      estimatedTotal: entry.fareTotal,
+      fareBeforeTax: entry.fareSub,
+      name: state.name,
+      riderEmail: state.riderEmail || (currentRide() && currentRide().riderEmail),
+      riderUid: state.riderUid || (currentRide() && currentRide().riderUid)
+    });
     return entry;
   }
 
@@ -5313,6 +5688,10 @@
     applyRide(ride);
     if (screen === "waiting" && (ride.status === "accepted" || ride.status === "started" || ride.status === "completed")) state.screen = "trip";
     if ((ride.status === "accepted" || ride.status === "started" || ride.status === "completed") && state.screen !== "trip") state.screen = "trip";
+    if (String(ride.status || "").toLowerCase() === "completed" || String(ride.status || "").toLowerCase() === "cancelled" || String(ride.status || "").toLowerCase() === "denied") {
+      rememberRiderHistoryEntry(ride);
+    }
+    if (String(ride.status || "").toLowerCase() === "accepted") loadChatMessages();
     var onlyDriver = !statusChanged && !placesChanged && !identityChanged && !cardChanged && driverChanged && state.screen === screen;
     if (onlyDriver && carMarker && isCoord(state.driverLat) && isCoord(state.driverLng)) {
       carMarker.setLatLng([+state.driverLat, +state.driverLng]);
@@ -5654,7 +6033,9 @@
         "</div></div>")
       : "";
     return (
-      '<div class="app-nav">' + logoutLine() + "</div>" +
+      '<div class="app-nav">' +
+      '<button class="btn ghost" type="button" id="open-history">History</button>' +
+      logoutLine() + "</div>" +
       (state.notice ? '<p class="note notice-ok" role="status">' + esc(state.notice) + "</p>" : "") +
       "<h2>Request a ride</h2>" +
       "<p class=\"lede\">Request goes to Private Car Services for confirmation. Card charges are not taken on this screen.</p>" +
@@ -5881,6 +6262,7 @@
         : "") +
       routeLedeHtml() +
       (started || completed ? "" : riderStageNote() + riderPinBanner()) +
+      (started || completed ? "" : chatBoxHtml()) +
       customerMapBlock(caption, driver) +
       moneyCard() +
       (completed
@@ -6458,6 +6840,7 @@
       "</p></div>" +
       (completed ? "" : mapBlock("Customer")) +
       pinGate +
+      (started || completed ? "" : chatBoxHtml()) +
       (started || completed ? "" : (
         '<div class="card"><p class="tag">This ride</p>' +
         stopsSummaryHtml() +
@@ -6506,6 +6889,8 @@
     if (!signedIn()) html = accountGate();
     else if (ROLE === "driver" && state.screen === "home") html = driverHome();
     else if (ROLE === "driver") html = driverTrip();
+    else if (ROLE === "customer" && state.riderHistoryView === "receipt") html = customerHistoryReceipt();
+    else if (ROLE === "customer" && state.riderHistoryView === "list") html = customerHistoryList();
     else if (state.screen === "waiting") html = customerWaiting();
     else if (state.screen === "trip") html = customerTrip();
     else html = customerHome();
@@ -7234,6 +7619,59 @@
         render();
       });
     }
+    /* v54: rider History + in-app chat */
+    var openHist = document.getElementById("open-history");
+    if (openHist) {
+      openHist.addEventListener("click", function () {
+        state.riderHistoryView = "list";
+        state.historyReceipt = null;
+        render();
+        loadRiderHistory().then(function () { render(); });
+      });
+    }
+    var histBack = document.getElementById("history-back");
+    if (histBack) {
+      histBack.addEventListener("click", function () {
+        state.riderHistoryView = "";
+        state.historyReceipt = null;
+        render();
+      });
+    }
+    var receiptBack = document.getElementById("receipt-back");
+    if (receiptBack) {
+      receiptBack.addEventListener("click", function () {
+        state.riderHistoryView = "list";
+        state.historyReceipt = null;
+        render();
+      });
+    }
+    Array.prototype.forEach.call(document.querySelectorAll("[data-history-code]"), function (btn) {
+      btn.addEventListener("click", function () {
+        var code = btn.getAttribute("data-history-code");
+        var row = null;
+        (state.historyRows || []).forEach(function (r) { if (r && r.code === code) row = r; });
+        if (!row) return;
+        state.historyReceipt = row;
+        state.riderHistoryView = "receipt";
+        render();
+      });
+    });
+    var chatForm = document.getElementById("chat-form");
+    if (chatForm) {
+      chatForm.addEventListener("submit", function (ev) {
+        ev.preventDefault();
+        var inp = document.getElementById("chat-input");
+        var msg = inp ? inp.value : state.chatDraft;
+        state.chatDraft = msg || "";
+        sendChatMessage(msg, ROLE === "driver" ? "driver" : "rider").then(function () { render(); });
+      });
+    }
+    Array.prototype.forEach.call(document.querySelectorAll("[data-chat-quick]"), function (btn) {
+      btn.addEventListener("click", function () {
+        var q = btn.getAttribute("data-chat-quick") || "";
+        sendChatMessage(q, "driver").then(function () { render(); });
+      });
+    });
     var backDriver = document.getElementById("back-driver");
     if (backDriver) {
       backDriver.addEventListener("click", function () {
@@ -8586,6 +9024,7 @@
       syncRide();
     }, 1000);
     setInterval(pullRemoteRide, 3000);
+    setInterval(function () { if (chatOpenForRole()) loadChatMessages(); }, 3000);
     setInterval(pollDriverRideCancel, 5000);
     setInterval(function () {
       if (ROLE === "driver" && signedIn() && canGoOnline() && driverCanTakeNew()) refreshOpenRides();
@@ -8676,4 +9115,18 @@
     if (!ride) return;
     ingestCustomerRide(ride);
   }
+
+  /* v54 test hooks (no UI). */
+  window.__pcsApp = {
+    playRideSiren: playRideSiren,
+    playRideChime: playRideChime,
+    stopOpenRideAlert: stopOpenRideAlert,
+    showRideSoundBar: showRideSoundBar,
+    chatOpenForRole: chatOpenForRole,
+    sendChatMessage: sendChatMessage,
+    loadChatMessages: loadChatMessages,
+    loadRiderHistory: loadRiderHistory,
+    rememberRiderHistoryEntry: rememberRiderHistoryEntry
+  };
+
 })();
