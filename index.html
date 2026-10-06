@@ -8,7 +8,8 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="styles.css?v=15" />
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
+  <link rel="stylesheet" href="styles.css?v=16" />
   <script src="config.js"></script>
 </head>
 <body>
@@ -124,7 +125,7 @@
           </div>
 
           <div class="field" id="manual-miles-field" hidden>
-            <label for="manual-miles">Driving miles (one way, only if the lookup fails)</label>
+            <label for="manual-miles">Driving miles (one way — only needed if the route lookup fails)</label>
             <input type="number" id="manual-miles" name="manual-miles" min="0.1" step="0.1" inputmode="decimal" placeholder="e.g. 22.5" />
           </div>
 
@@ -138,12 +139,14 @@
             </div>
             <div class="field">
               <label for="contact-phone">Phone</label>
-              <input type="tel" id="contact-phone" name="contact-phone" autocomplete="tel" required maxlength="40" />
+              <input type="tel" id="contact-phone" name="contact-phone" inputmode="tel" autocomplete="tel" required maxlength="40" placeholder="(936) 555-0123" aria-describedby="contact-phone-error" />
+              <p class="field-error" id="contact-phone-error" aria-live="polite" hidden></p>
             </div>
           </div>
           <div class="field">
             <label for="contact-email">Email</label>
-            <input type="email" id="contact-email" name="contact-email" autocomplete="email" maxlength="160" />
+            <input type="email" id="contact-email" name="contact-email" inputmode="email" autocomplete="email" autocapitalize="off" spellcheck="false" maxlength="160" aria-describedby="contact-email-error" />
+            <p class="field-error" id="contact-email-error" aria-live="polite" hidden></p>
           </div>
 
           <div class="field" id="flight-details" hidden>
@@ -192,10 +195,6 @@
         <button type="button" class="btn btn-primary btn-estimate" id="estimate-btn">
           Get estimate
         </button>
-        <a class="btn btn-secondary" id="text-request-btn" href="sms:9362617878">Text ride request</a>
-        <p class="route-status" id="text-request-note" hidden></p>
-        <div id="request-confirm" class="banner" hidden></div>
-        <a id="sms-launch" hidden href="sms:9362617878">Send text</a>
       </form>
 
       <aside class="results-col">
@@ -224,7 +223,14 @@
               <a class="btn btn-primary" href="tel:9362617878">Call 936-261-7878</a>
             </div>
 
-            <div class="booking-panel" id="booking-panel" aria-live="polite" hidden></div>
+            <div class="estimate-actions" id="estimate-actions">
+              <p class="actions-kicker">Next step — choose one</p>
+              <a class="btn btn-secondary btn-request" id="text-request-btn" href="sms:9362617878">Request this ride</a>
+              <p class="book-fine" id="request-fine">Opens a text to 936-261-7878 with your trip details. You tap send.</p>
+              <p class="route-status" id="text-request-note" hidden></p>
+              <div id="request-confirm" class="banner" hidden></div>
+              <div class="booking-panel" id="booking-panel" aria-live="polite" hidden></div>
+            </div>
 
             <div class="promo-banner" aria-label="Website booking promotion">
               <p class="promo-kicker">Website booking offer</p>
@@ -268,6 +274,11 @@
     </div>
   </footer>
 
-  <script src="app.js?v=15"></script>
+  <!-- Route map library: loads in the background so a slow CDN never holds up the form. -->
+  <script async src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin="" onload="window.PCS_leafletReady &amp;&amp; window.PCS_leafletReady()"></script>
+  <!-- Same Firebase hub + Square gating as the rider app (Book it writes the booking where God mode reads it). -->
+  <script src="app/sync-config.js?v=16"></script>
+  <script src="app/square-config.js?v=16"></script>
+  <script src="app.js?v=16"></script>
 </body>
 </html>

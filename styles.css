@@ -216,6 +216,30 @@ a {
   box-shadow: 0 0 0 3px rgba(28, 61, 107, 0.15);
 }
 
+.field input[aria-invalid="true"],
+.field input[aria-invalid="true"]:focus {
+  border-color: var(--danger);
+  box-shadow: 0 0 0 3px rgba(180, 35, 24, 0.15);
+}
+
+.field-error {
+  margin: 0.35rem 0 0;
+  font-size: 0.85rem;
+  font-weight: 600;
+  line-height: 1.35;
+  color: var(--danger);
+}
+
+.field-error[hidden] {
+  display: none;
+}
+
+#contact-phone,
+#contact-email {
+  scroll-margin-top: 110px;
+  scroll-margin-bottom: 40px;
+}
+
 .hint {
   margin: 0.3rem 0 0;
   font-size: 0.8rem;
@@ -256,11 +280,70 @@ a {
 
 .map {
   width: 100%;
-  height: 220px;
+  height: 240px;
   border-radius: 12px;
   border: 1px solid var(--border);
   margin-bottom: 0.75rem;
   background: #e8eef6;
+  /* Keep Leaflet's panes/controls under the sticky header and the suggestion lists. */
+  position: relative;
+  z-index: 0;
+  overflow: hidden;
+}
+
+.map[hidden] {
+  display: none;
+}
+
+/* Route map pins (v16) */
+.pin-icon {
+  background: transparent !important;
+  border: none !important;
+}
+
+.pin-float {
+  width: 88px;
+  text-align: center;
+  pointer-events: none;
+}
+
+.pin-label {
+  display: inline-block;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: var(--navy);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 700;
+  white-space: nowrap;
+  box-shadow: 0 2px 6px rgba(11, 31, 58, 0.3);
+}
+
+.pin-head {
+  display: block;
+  width: 16px;
+  height: 16px;
+  margin: 2px auto 0;
+  background: var(--accent);
+  border: 2px solid var(--navy);
+  border-radius: 50% 50% 50% 0;
+  transform: rotate(-45deg);
+}
+
+.pin-drop .pin-head {
+  background: var(--navy);
+  border-color: #fff;
+}
+
+.pin-stop .pin-head {
+  width: 12px;
+  height: 12px;
+  background: #fff;
+}
+
+/* Get estimate scrolls the estimate card into view below the sticky header. */
+#results {
+  scroll-margin-top: 5.5rem;
 }
 
 .route-status {
@@ -687,6 +770,39 @@ a {
   display: none !important;
 }
 
+/* —— Under the estimate: Request this ride / Book it —— */
+.estimate-actions {
+  margin: 1rem 0 0;
+  padding-top: 0.9rem;
+  border-top: 1px solid var(--border);
+}
+
+.actions-kicker {
+  margin: 0 0 0.5rem;
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--navy);
+}
+
+.estimate-actions .btn-request {
+  display: flex;
+  width: 100%;
+}
+
+.estimate-actions #text-request-note {
+  margin: 0.5rem 0 0;
+}
+
+.estimate-actions #request-confirm {
+  margin: 0.6rem 0 0;
+}
+
+.estimate-actions .booking-panel {
+  margin-top: 0.85rem;
+}
+
 /* —— Book it (25% deposit) —— */
 .booking-panel {
   margin: 1rem 0;
@@ -783,6 +899,47 @@ a {
   0%, 100% { transform: translateX(0); }
   25% { transform: translateX(-5px); }
   75% { transform: translateX(5px); }
+}
+
+.pay-choice {
+  margin: 0.75rem 0 0;
+  padding: 0;
+  border: 0;
+}
+
+.pay-choice legend {
+  font-weight: 600;
+  font-size: 0.9rem;
+  color: var(--navy);
+  margin-bottom: 0.3rem;
+}
+
+.pay-choice .check {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0.3rem 0;
+  font-size: 0.95rem;
+}
+
+.btn-book-step[aria-disabled="true"] {
+  opacity: 0.55;
+}
+
+.book-code {
+  margin: 0 0 0.4rem;
+  font-size: 0.95rem;
+  color: var(--navy);
+}
+
+.book-received {
+  margin-top: 0.6rem;
+  color: var(--ok);
+}
+
+.qp-card {
+  margin-top: 0.75rem;
+  min-height: 90px;
 }
 
 .booking-panel [hidden] {
@@ -911,6 +1068,35 @@ a {
   display: block;
   font-size: 0.8rem;
   color: var(--muted);
+}
+
+/* Nearest-first suggestions with distance (v16, same as the rider app) */
+.suggest-item .suggest-main {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 10px;
+  width: 100%;
+  font-size: 0.94rem;
+  color: var(--navy);
+}
+
+.suggest-item .suggest-dist {
+  flex: 0 0 auto;
+  font-style: normal;
+  font-weight: 700;
+  font-size: 0.8rem;
+  color: var(--navy-soft);
+  white-space: nowrap;
+}
+
+.suggest-note {
+  margin: 0;
+  padding: 0.45rem 0.85rem;
+  font-size: 0.78rem;
+  color: var(--muted);
+  border-bottom: 1px solid var(--border);
+  background: #f7f9fc;
 }
 
 .row.three {
