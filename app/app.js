@@ -1,4 +1,6 @@
-/* Private Car Services starter. Preview only: no texts, no charges, no API key. Shared rides use Firebase REST when PCS_SYNC.databaseURL is set. */
+/* Private Car Services starter. Preview only: no texts, no charges, no API key. Shared rides use Firebase REST when PCS_SYNC.databaseURL is set.
+   v47 (Oct 6): structured addresses + stops, nearest-first place search, card step before PIN, working rider cancel,
+   driver online time + screen wake lock. */
 (function () {
   var BUSINESS_PHONE = "936-261-7878";
   var DRIVER_COMMISSION_RATE = 0.7;
@@ -49,9 +51,17 @@
     return u && u.email ? String(u.email).trim().toLowerCase() : "";
   }
 
+  /* Owner (Matthew) emails. Used only for TEST ride mode while Firebase Auth is not live yet. */
+  var OWNER_EMAILS = ["mwragge78@gmail.com", "mwragge@privatetaxiservices.net"];
+
   function isOwnerSession() {
     var a = pcsAuth();
-    return !!(a && a.isOwnerSignedIn && a.isOwnerSignedIn());
+    if (a && a.hasConfig && a.hasConfig()) {
+      return !!(a.isOwnerSignedIn && a.isOwnerSignedIn());
+    }
+    /* Firebase Auth keys not added yet: fall back to the email this app is logged in with. */
+    var s = String(readSession() || "").trim().toLowerCase();
+    return !!s && OWNER_EMAILS.indexOf(s) !== -1;
   }
 
   function testModeAvailable() {
@@ -231,9 +241,25 @@
     pickupStreet: SAMPLE.pickupStreet,
     pickupCity: SAMPLE.pickupCity,
     pickupState: SAMPLE.pickupState,
+    pickupLine2: "",
+    pickupZip: "",
+    pickupPinned: false,
     dropStreet: SAMPLE.dropStreet,
     dropCity: SAMPLE.dropCity,
     dropState: SAMPLE.dropState,
+    dropLine2: "",
+    dropZip: "",
+    dropPinned: false,
+    stopList: [],
+    hereFix: null,
+    notice: "",
+    cardStatus: "",
+    cardLast4: "",
+    cardBrand: "",
+    cancelConfirm: false,
+    cancelBusy: false,
+    cancelError: "",
+    driverNotice: "",
     date: "",
     time: SAMPLE.time,
     asap: true,
@@ -715,6 +741,7 @@
       state.milesNeedStart = false;
       state.milesToday = Number(row.gpsMiles) || 0;
       state.milesStartOdo = Number(row.startOdometer);
+      ensureOnlineClock();
       return;
     }
     if (driverMidRide()) {
@@ -813,16 +840,104 @@
     row.gpsMiles = Math.round(((Number(row.gpsMiles) || 0) + dist) * 100) / 100;
     row.lastUpdate = now;
     if (!row.startedAt) row.startedAt = now;
+    if (!(Number(row.shiftStartAt) > 0)) row.shiftStartAt = now;
     persistMilesRow(row);
     state.milesToday = Number(row.gpsMiles) || 0;
-    var el = document.getElementById("miles-today");
-    if (el) el.textContent = "Today: " + Number(row.gpsMiles).toFixed(1) + " mi";
+    refreshMilesTodayDom();
     if (syncOn()) publishDriverPresence();
+  }
+
+  /* ---------- Time online today (login/shift open -> logout), stored on the same miles row ---------- */
+
+  function shiftOpen(row) {
+    return !!(row && !shiftClosed(row) && row.startOdometer != null && isFinite(Number(row.startOdometer)));
+  }
+
+  function onlineMsToday() {
+    var row = todayMilesRow();
+    if (!row) return 0;
+    var ms = Number(row.onlineMs) || 0;
+    var start = Number(row.shiftStartAt) || 0;
+    if (start > 0 && shiftOpen(row)) ms += Math.max(0, Date.now() - start);
+    return ms;
+  }
+
+  function fmtOnline(ms) {
+    var mins = Math.floor((Number(ms) || 0) / 60000);
+    var h = Math.floor(mins / 60);
+    var m = mins % 60;
+    return (h ? h + "h " : "") + m + "m online";
+  }
+
+  /* Start the online clock for an open shift (also covers shifts opened before this update). */
+  function ensureOnlineClock() {
+    if (ROLE !== "driver" || !signedIn()) return;
+    var row = todayMilesRow();
+    if (!shiftOpen(row) || Number(row.shiftStartAt) > 0) return;
+    row.shiftStartAt = Date.now();
+    if (row.onlineMs == null) row.onlineMs = 0;
+    persistMilesRow(row);
+  }
+
+  /* Close the running segment into onlineMs (mutates row; caller persists). */
+  function closeOnlineSegment(row, now) {
+    if (!row) return row;
+    var start = Number(row.shiftStartAt) || 0;
+    if (start > 0) row.onlineMs = (Number(row.onlineMs) || 0) + Math.max(0, (now || Date.now()) - start);
+    row.shiftStartAt = null;
+    return row;
   }
 
   function milesTodayLabel() {
     var n = Number(state.milesToday) || 0;
-    return "Today: " + n.toFixed(1) + " mi";
+    return "Today: " + n.toFixed(1) + " mi · " + fmtOnline(onlineMsToday());
+  }
+
+  function refreshMilesTodayDom() {
+    if (ROLE !== "driver") return;
+    var label = milesTodayLabel();
+    Array.prototype.forEach.call(document.querySelectorAll("#miles-today"), function (el) {
+      if (el.textContent !== label) el.textContent = label;
+    });
+  }
+
+  /* ---------- Keep the screen awake while logged in (Screen Wake Lock API) ---------- */
+
+  var wakeLockSentinel = null;
+  var wakeLockPending = false;
+
+  function wantWakeLock() {
+    return ROLE === "driver" && signedIn();
+  }
+
+  function acquireWakeLock() {
+    if (!wantWakeLock()) return;
+    if (!navigator.wakeLock || typeof navigator.wakeLock.request !== "function") return;
+    if (document.visibilityState !== "visible") return;
+    if (wakeLockPending || (wakeLockSentinel && !wakeLockSentinel.released)) return;
+    wakeLockPending = true;
+    try {
+      navigator.wakeLock.request("screen").then(function (sentinel) {
+        wakeLockPending = false;
+        wakeLockSentinel = sentinel;
+        try {
+          sentinel.addEventListener("release", function () {
+            if (wakeLockSentinel === sentinel) wakeLockSentinel = null;
+          });
+        } catch (err) {}
+        if (!wantWakeLock()) releaseWakeLock();
+      }).catch(function () { wakeLockPending = false; });
+    } catch (err) {
+      wakeLockPending = false;
+    }
+  }
+
+  function releaseWakeLock() {
+    var s = wakeLockSentinel;
+    wakeLockSentinel = null;
+    if (s && !s.released) {
+      try { s.release().catch(function () {}); } catch (err) {}
+    }
   }
 
   function vehicleNeededCard() {
@@ -1068,8 +1183,20 @@
     return { pickup: pickup, dropoff: dropoff, driver: driver, live: live };
   }
 
+  /* Stops with a map pin, in order. Route + miles go pickup -> stops -> drop-off. */
+  function viaPoints() {
+    return (state.stopList || []).map(function (s) {
+      return s && String(s.street || "").trim() ? pointFrom(s.lat, s.lng) : null;
+    }).filter(Boolean);
+  }
+
   function routeKey(a, b) {
-    return a.lat.toFixed(5) + "," + a.lng.toFixed(5) + ">" + b.lat.toFixed(5) + "," + b.lng.toFixed(5);
+    var key = a.lat.toFixed(5) + "," + a.lng.toFixed(5) + ">" + b.lat.toFixed(5) + "," + b.lng.toFixed(5);
+    var via = viaPoints();
+    if (via.length) {
+      key += "|" + via.map(function (p) { return p.lat.toFixed(5) + "," + p.lng.toFixed(5); }).join(";");
+    }
+    return key;
   }
 
   function routeStillOnScreen() {
@@ -1083,8 +1210,9 @@
     if (driving.key === key && driving.done) return;
     if (driving.pending === key) return;
     driving.pending = key;
+    var chain = [a].concat(viaPoints(), [b]);
     var url = "https://router.project-osrm.org/route/v1/driving/" +
-      a.lng + "," + a.lat + ";" + b.lng + "," + b.lat +
+      chain.map(function (p) { return p.lng + "," + p.lat; }).join(";") +
       "?overview=full&geometries=geojson";
     fetch(url).then(function (res) { return res.json(); }).then(function (data) {
       var route = data && data.routes && data.routes[0];
@@ -1114,7 +1242,15 @@
     ensureDrivingRoute(a, b);
     var key = routeKey(a, b);
     if (driving.key === key && driving.line && driving.line.length > 1) return driving.line;
-    return [[a.lat, a.lng], [b.lat, b.lng]];
+    return [a].concat(viaPoints(), [b]).map(function (p) { return [p.lat, p.lng]; });
+  }
+
+  function straightChainMiles(a, b) {
+    var chain = [a].concat(viaPoints(), [b]);
+    var sum = 0;
+    var i;
+    for (i = 1; i < chain.length; i += 1) sum += haversine(chain[i - 1], chain[i]);
+    return sum;
   }
 
   function drivenPathMiles() {
@@ -1152,7 +1288,7 @@
       var key = routeKey(pickup, dropoff);
       if (driving.key === key && driving.done && driving.miles != null) hundredths = driving.miles;
       else {
-        hundredths = Math.round(haversine(pickup, dropoff) * 100) / 100;
+        hundredths = Math.round(straightChainMiles(pickup, dropoff) * 100) / 100;
         if (!(driving.key === key && driving.done)) ensureDrivingRoute(pickup, dropoff);
       }
       /* Live trip: once we have a GPS path, bill the greater of planned vs driven. */
@@ -1313,26 +1449,287 @@
     }
   }
 
-  function paymentHoldCopy() {
-    var testing = testSkipPayEnabled();
-    var skipped = !!state.paymentSkipped;
-    var skipBlock = "";
-    if (testing) {
-      skipBlock = skipped
-        ? '<p class="fine" id="pay-skip-status">Testing: payment skipped — no charge.</p>'
-        : ('<button class="btn ghost" type="button" id="skip-pay-btn">Skip for testing</button>' +
-          '<p class="fine">Testing only · payment not required · no real Square charge.</p>');
-    }
+  /* ---------- Card step (Square), tied to this ride ---------- */
+
+  /*
+    Live card entry needs window.PCS_SQUARE (app/square-config.js): applicationId, locationId,
+    cardOnFileUrl (Matthew's small server that saves the card with Square). Without all three the
+    app shows the interim "we'll text you a secure link" step. It never opens the booking website.
+  */
+  function squareCfg() {
+    var c = window.PCS_SQUARE || {};
+    return {
+      appId: String(c.applicationId || "").trim(),
+      locationId: String(c.locationId || "").trim(),
+      endpoint: String(c.cardOnFileUrl || "").trim(),
+      sandbox: String(c.environment || "").toLowerCase() === "sandbox"
+    };
+  }
+
+  function squareConfigured() {
+    var c = squareCfg();
+    return !!(c.appId && c.locationId && /^https:\/\//i.test(c.endpoint));
+  }
+
+  function cardStatusOk(st) {
+    return st === "on_file" || st === "owner_ok" || st === "test_skip";
+  }
+
+  /* PIN only after the card step is done (or TEST ride / testing skip). */
+  function rideCardReady() {
+    if (state.isTest || isTestRide(currentRide())) return true;
+    if (state.paymentSkipped && testSkipPayEnabled()) return true;
+    return cardStatusOk(String(state.cardStatus || ""));
+  }
+
+  function paymentInfoCopy() {
     return (
       '<div class="card payment-card">' +
-      '<p class="tag">Payment' + (testing ? " · testing" : "") + "</p>" +
-      '<p class="lede">Add your card before the ride. You are not charged until after drop-off, so you can add a tip.</p>' +
-      '<p class="fine">A real card hold uses Square on a secure server. This screen never stores a card number or Square secret.</p>' +
-      '<button class="btn secondary" type="button" id="square-hold-btn">Continue to Square (card setup)</button>' +
-      '<p class="fine" id="square-hold-help"></p>' +
-      skipBlock +
+      '<p class="tag">Payment</p>' +
+      '<p class="lede">After you request, you add your card for this ride on a secure Square form. You are not charged until after drop-off, so you can add a tip.</p>' +
+      '<p class="fine">Your pickup PIN shows once your card is on file. This app never sees or stores your card number.</p>' +
       "</div>"
     );
+  }
+
+  function cardNeededHtml() {
+    var requested = String(state.cardStatus || "") === "link_requested";
+    var testing = testSkipPayEnabled();
+    return (
+      '<div class="card card-needed" id="card-needed">' +
+      '<p class="tag">Add your card to confirm your ride</p>' +
+      '<p class="lede">' + (requested
+        ? "We will text a secure Square card link to " + esc(state.phone || "your phone") + ". Your pickup PIN shows here as soon as your card is confirmed."
+        : "Your pickup PIN shows here after your card is on file. You are not charged until after drop-off, so you can add a tip.") + "</p>" +
+      '<button class="btn" type="button" id="square-hold-btn">' + (requested ? "Card link requested &#10003;" : "Add card for this ride") + "</button>" +
+      (testing
+        ? '<button class="btn ghost" type="button" id="skip-pay-btn">Skip for testing</button>' +
+          '<p class="fine">Testing only · no real Square charge.</p>'
+        : "") +
+      '<p class="fine">Questions? Call <a href="tel:' + BUSINESS_PHONE + '">' + esc(BUSINESS_PHONE) + "</a>.</p>" +
+      "</div>"
+    );
+  }
+
+  function paymentStatusCard() {
+    if (!rideCardReady()) return "";
+    var st = String(state.cardStatus || "");
+    var line;
+    if (state.isTest || st === "test_skip" || state.paymentSkipped) line = "Test ride: no card needed, no charge.";
+    else if (st === "owner_ok") line = "Payment confirmed by Private Car Services.";
+    else {
+      line = "Card on file" +
+        (state.cardLast4 ? " (" + (state.cardBrand || "card") + " ending " + state.cardLast4 + ")" : "") +
+        ". You are charged after drop-off, so you can add a tip.";
+    }
+    return '<div class="card payment-card"><p class="tag">Payment</p><p class="lede">' + esc(line) + "</p></div>";
+  }
+
+  var sqCard = null;
+  var sqLoading = null;
+
+  function loadSquareSdk(sandbox) {
+    if (window.Square && window.Square.payments) return Promise.resolve();
+    if (sqLoading) return sqLoading;
+    sqLoading = new Promise(function (resolve, reject) {
+      var s = document.createElement("script");
+      s.src = sandbox ? "https://sandbox.web.squarecdn.com/v1/square.js" : "https://web.squarecdn.com/v1/square.js";
+      s.async = true;
+      s.onload = function () { resolve(); };
+      s.onerror = function () { sqLoading = null; reject(new Error("square-sdk")); };
+      document.head.appendChild(s);
+    });
+    return sqLoading;
+  }
+
+  function cardSheetEl() {
+    var el = document.getElementById("card-sheet");
+    if (el) return el;
+    el = document.createElement("div");
+    el.id = "card-sheet";
+    el.className = "sheet-back card-sheet-back";
+    document.body.appendChild(el);
+    el.addEventListener("click", function (event) {
+      if (event.target === el) closeCardSheet();
+    });
+    return el;
+  }
+
+  function closeCardSheet() {
+    var el = document.getElementById("card-sheet");
+    if (el) {
+      el.classList.remove("open");
+      el.innerHTML = "";
+    }
+    if (sqCard && sqCard.destroy) {
+      try { sqCard.destroy(); } catch (err) {}
+    }
+    sqCard = null;
+  }
+
+  function cardSheetError(msg) {
+    var e = document.getElementById("sq-card-error");
+    if (e) e.textContent = msg || "";
+  }
+
+  function openCardStep() {
+    if (ROLE !== "customer") return;
+    var code = state.code || "";
+    var est = estimate();
+    var el = cardSheetEl();
+    var head = '<p class="tag">' + (code ? "Ride " + esc(code) : "This ride") +
+      (est.ready ? " · est. " + money(est.total) : "") + "</p>";
+    if (squareConfigured()) {
+      el.innerHTML =
+        '<div class="sheet" role="dialog" aria-modal="true" aria-labelledby="card-title">' + head +
+        '<h3 id="card-title">Add your card</h3>' +
+        '<p class="lede">Square keeps your card; this app never sees the number. You are charged after drop-off (plus any tip you add).</p>' +
+        '<div id="sq-card-container" class="sq-card"><p class="fine">Loading the secure card form…</p></div>' +
+        '<p class="error" id="sq-card-error" role="alert"></p>' +
+        '<button class="btn" type="button" id="sq-card-save" disabled>Save card</button>' +
+        '<button class="btn secondary" type="button" id="card-sheet-close">Not now</button>' +
+        "</div>";
+    } else {
+      var requested = String(state.cardStatus || "") === "link_requested";
+      el.innerHTML =
+        '<div class="sheet" role="dialog" aria-modal="true" aria-labelledby="card-title">' + head +
+        '<h3 id="card-title">Card setup</h3>' +
+        '<p class="lede">Card setup inside the app is being finalized. Private Car Services will text a secure Square payment link to ' +
+        esc(state.phone || "your phone") + " for this ride.</p>" +
+        '<p class="fine">Your pickup PIN appears on the ride screen as soon as your card is confirmed. Questions? Call <a href="tel:' +
+        BUSINESS_PHONE + '">' + esc(BUSINESS_PHONE) + "</a>.</p>" +
+        '<p class="error" id="sq-card-error" role="alert"></p>' +
+        (requested
+          ? '<p class="fine"><strong>Link requested.</strong> Watch for a text from Private Car Services.</p>'
+          : '<button class="btn" type="button" id="card-link-request">Text me the secure link</button>') +
+        '<button class="btn secondary" type="button" id="card-sheet-close">Close</button>' +
+        "</div>";
+    }
+    el.classList.add("open");
+    var closeBtn = document.getElementById("card-sheet-close");
+    if (closeBtn) closeBtn.addEventListener("click", closeCardSheet);
+    var linkBtn = document.getElementById("card-link-request");
+    if (linkBtn) linkBtn.addEventListener("click", requestCardLink);
+    var saveBtn = document.getElementById("sq-card-save");
+    if (saveBtn) {
+      saveBtn.addEventListener("click", saveSquareCard);
+      mountSquareCard();
+    }
+  }
+
+  function mountSquareCard() {
+    var cfg = squareCfg();
+    loadSquareSdk(cfg.sandbox).then(function () {
+      /* Square.payments() returns the Payments object directly; Promise.resolve keeps this safe either way. */
+      return Promise.resolve(window.Square.payments(cfg.appId, cfg.locationId)).then(function (payments) {
+        return payments.card();
+      });
+    }).then(function (card) {
+      if (!document.getElementById("sq-card-container")) {
+        try { card.destroy(); } catch (e) {}
+        return;
+      }
+      sqCard = card;
+      document.getElementById("sq-card-container").innerHTML = "";
+      return card.attach("#sq-card-container").then(function () {
+        var saveBtn = document.getElementById("sq-card-save");
+        if (saveBtn) saveBtn.disabled = false;
+      });
+    }).catch(function () {
+      cardSheetError("The secure card form did not load. Check your signal and try again, or call " + BUSINESS_PHONE + ".");
+    });
+  }
+
+  function saveSquareCard() {
+    var saveBtn = document.getElementById("sq-card-save");
+    if (!sqCard || !saveBtn) return;
+    var cfg = squareCfg();
+    var code = state.code || "";
+    var est = estimate();
+    saveBtn.disabled = true;
+    saveBtn.textContent = "Saving…";
+    cardSheetError("");
+    sqCard.tokenize().then(function (result) {
+      if (!result || result.status !== "OK" || !result.token) {
+        var first = result && result.errors && result.errors[0];
+        throw new Error((first && first.message) || "Check the card details and try again.");
+      }
+      return fetch(cfg.endpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          rideCode: code,
+          sourceId: result.token,
+          name: state.name || "",
+          phone: state.phone || "",
+          email: firebaseEmail() || readSession() || "",
+          estimateCents: est.ready ? est.total : null,
+          isTest: !!state.isTest
+        })
+      });
+    }).then(function (res) {
+      return res.json().catch(function () { return {}; }).then(function (data) {
+        if (!res.ok || !data || !data.ok) throw new Error((data && data.error) || "Square did not save the card. Try again.");
+        return data;
+      });
+    }).then(function (data) {
+      var patch = {
+        cardStatus: "on_file",
+        cardOnFileAt: Date.now(),
+        cardLast4: String(data.last4 || ""),
+        cardBrand: String(data.brand || ""),
+        squareCardId: String(data.cardId || ""),
+        squareCustomerId: String(data.customerId || "")
+      };
+      function done() {
+        state.cardStatus = "on_file";
+        state.cardLast4 = patch.cardLast4;
+        state.cardBrand = patch.cardBrand;
+        saveRide(state.rideStatus || "pending_owner");
+        closeCardSheet();
+        render();
+      }
+      if (syncOn() && code) {
+        return patchRide(code, patch).then(done, function () {
+          throw new Error("Square saved your card, but the ride did not update. Call " + BUSINESS_PHONE + " and we will confirm it.");
+        });
+      }
+      done();
+    }).catch(function (err) {
+      var btn = document.getElementById("sq-card-save");
+      if (btn) {
+        btn.disabled = false;
+        btn.textContent = "Save card";
+      }
+      cardSheetError((err && err.message) || "Could not save the card. Try again.");
+    });
+  }
+
+  function requestCardLink() {
+    var btn = document.getElementById("card-link-request");
+    var code = state.code || "";
+    var patch = { cardStatus: "link_requested", cardRequestedAt: Date.now() };
+    function done() {
+      state.cardStatus = "link_requested";
+      saveRide(state.rideStatus || "pending_owner");
+      closeCardSheet();
+      render();
+    }
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = "Sending request…";
+    }
+    if (!syncOn() || !code) {
+      done();
+      return;
+    }
+    patchRide(code, patch).then(done).catch(function () {
+      if (btn) {
+        btn.disabled = false;
+        btn.textContent = "Text me the secure link";
+      }
+      cardSheetError("That did not go through. Check your signal and try again, or call " + BUSINESS_PHONE + ".");
+    });
   }
 
   function cancelWarningCopy() {
@@ -1342,18 +1739,6 @@
       " may apply (25% of the estimate or $10, whichever is more). " +
       "Automatic card charges are not live yet — if you cancel, we will follow up about any fee."
     );
-  }
-
-  var SQUARE_CARD_SETUP_URL = "https://squareup.com/appointments/book/L077DQHSNJAG6";
-
-  function openSquareCardSetup() {
-    var help = document.getElementById("square-hold-help");
-    if (!SQUARE_CARD_SETUP_URL) {
-      if (help) help.textContent = "Square card setup link is not configured yet. A real hold needs a server or Square payment link.";
-      return;
-    }
-    if (help) help.textContent = "Opening Square for card setup. You are not charged until after the ride.";
-    window.open(SQUARE_CARD_SETUP_URL, "_blank", "noopener,noreferrer");
   }
 
   function openTurnByTurnToDrop() {
@@ -1395,23 +1780,140 @@
     render();
   }
 
+  function riderCanCancel(st) {
+    st = String(st || "").toLowerCase();
+    return st === "pending_owner" || st === "pending-owner" || st === "requested" || st === "accepted";
+  }
+
+  function cancelBlockHtml() {
+    if (!riderCanCancel(state.rideStatus)) return "";
+    var err = '<p class="error" role="alert">' + esc(state.cancelError || "") + "</p>";
+    if (state.cancelConfirm) {
+      var busy = !!state.cancelBusy;
+      return (
+        '<div class="card cancel-card" id="cancel-card">' +
+        '<p class="tag">Cancel this ride?</p>' +
+        '<p class="lede">' + esc(cancelWarningCopy()) + "</p>" +
+        err +
+        '<button class="btn danger" type="button" id="cancel-ride-yes"' + (busy ? " disabled" : "") + ">" +
+        (busy ? "Cancelling…" : "Yes, cancel this ride") + "</button>" +
+        '<button class="btn secondary" type="button" id="cancel-ride-no"' + (busy ? " disabled" : "") + ">Keep my ride</button>" +
+        "</div>"
+      );
+    }
+    return (
+      '<div class="card" id="cancel-card">' +
+      '<p class="tag">Cancel before pickup</p>' +
+      '<p class="lede">' + esc(cancelWarningCopy()) + "</p>" +
+      err +
+      '<button class="btn secondary" type="button" id="cancel-ride">Cancel ride</button>' +
+      "</div>"
+    );
+  }
+
+  /*
+    Old bug: this returned early unless status was "requested"/"accepted", but every new booking
+    starts as "pending_owner" (waiting for Matthew's OK), so the Cancel button silently did nothing.
+  */
   function cancelRiderRide() {
-    if (ROLE !== "customer") return;
-    if (state.rideStatus === "started" || state.rideStatus === "completed") return;
-    if (state.rideStatus !== "requested" && state.rideStatus !== "accepted") return;
-    var msg = cancelWarningCopy() + "\n\nCancel this ride?";
-    if (!window.confirm(msg)) return;
+    if (ROLE !== "customer" || state.cancelBusy) return;
+    var st = String(state.rideStatus || "").toLowerCase();
+    if (!riderCanCancel(st)) {
+      state.cancelError = st === "started"
+        ? "This ride has started, so it cannot be cancelled in the app. Call " + BUSINESS_PHONE + "."
+        : "This ride cannot be cancelled in the app. Call " + BUSINESS_PHONE + ".";
+      render();
+      return;
+    }
     var fee = cancelFeeCents();
     var code = state.code;
-    if (syncOn() && code) {
-      patchRide(code, { status: "cancelled", cancelFeeCents: fee, cancelledBy: "rider" }).catch(function () {});
-      deleteOpenRide(code).catch(function () {});
-    }
-    try { localStorage.removeItem(STORE); } catch (err) {}
-    writeRideOwner("");
-    clearRideFields();
-    state.screen = "home";
+    var now = Date.now();
+    state.cancelBusy = true;
+    state.cancelError = "";
     render();
+    function finish() {
+      try { localStorage.removeItem(STORE); } catch (err) {}
+      writeRideOwner("");
+      clearRideFields();
+      state.cancelBusy = false;
+      state.cancelConfirm = false;
+      state.screen = "home";
+      state.notice = "Your ride " + (code ? code + " " : "") + "was cancelled. If a cancel fee applies, Private Car Services will follow up.";
+      render();
+    }
+    function fail(err) {
+      state.cancelBusy = false;
+      state.cancelConfirm = true;
+      state.cancelError = err && err.started
+        ? "Your driver already started this ride, so it cannot be cancelled in the app. Call " + BUSINESS_PHONE + "."
+        : "Could not cancel. Check your signal and try again, or call " + BUSINESS_PHONE + ".";
+      render();
+    }
+    if (!syncOn() || !code) {
+      finish();
+      return;
+    }
+    getRide(code).catch(function () { return null; }).then(function (remote) {
+      var rst = String((remote && remote.status) || st).toLowerCase();
+      if (rst === "started" || rst === "completed") {
+        var e = new Error("started");
+        e.started = true;
+        throw e;
+      }
+      var patch = { status: "cancelled", cancelledAt: now, cancelledBy: "rider", cancelFeeCents: fee, updatedAt: now };
+      return patchRide(code, patch).then(function () {
+        /* Keep the row on the REQUESTS hub as "cancelled": drivers only list "requested" rows (so it leaves
+           their map at once) and God mode shows it as cancelled. */
+        var summary = openSummaryFromRide(code, Object.assign({}, currentRide() || {}, remote || {}, patch));
+        summary.status = "cancelled";
+        summary.cancelledAt = now;
+        summary.cancelledBy = "rider";
+        summary.cancelFeeCents = fee;
+        return authFetch(openIndexUrl(code), {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(summary)
+        }).then(function (res) {
+          if (!res.ok) throw new Error("open");
+        }).catch(function () {
+          return deleteOpenRide(code).catch(function () {});
+        });
+      });
+    }).then(finish, fail);
+  }
+
+  /* Driver side: if the rider cancels after you accepted, drop the trip and say so. */
+  var driverCancelPollBusy = false;
+
+  function pollDriverRideCancel() {
+    if (ROLE !== "driver" || !signedIn() || !syncOn() || state.screen !== "trip") return;
+    if (state.rideStatus !== "accepted" || driverCancelPollBusy) return;
+    var code = state.driverCode || state.code || readDriverCode();
+    if (!code) return;
+    driverCancelPollBusy = true;
+    getRide(code).then(function (ride) {
+      driverCancelPollBusy = false;
+      if (!ride || String(ride.status || "").toLowerCase() !== "cancelled") return;
+      var now = state.driverCode || state.code || readDriverCode();
+      if (state.screen !== "trip" || now !== code) return;
+      state.driverNotice = (state.name ? state.name + " cancelled" : "The rider cancelled") +
+        " ride " + code + ". It is off your map, and you can take another ride.";
+      writeDriverCode("");
+      state.driverCode = "";
+      state.selectedOpenCode = "";
+      try { localStorage.removeItem(STORE); } catch (err) {}
+      clearRideFields();
+      state.screen = "home";
+      render();
+      refreshOpenRides(true);
+    }).catch(function () { driverCancelPollBusy = false; });
+  }
+
+  function routeLedeHtml() {
+    var n = filledStops().length;
+    return "<p class=\"lede\">" + esc(pickupLine()) + " → " + esc(dropLine()) +
+      (n ? " (" + n + (n === 1 ? " stop" : " stops") + " on the way)" : "") +
+      "<br>" + esc(prettyWhen()) + "</p>";
   }
 
   function syncActiveTripFare(extra) {
@@ -1443,17 +1945,37 @@
     patchRide(code, patch).catch(function () {});
   }
 
-  function addressLine(street, city, stateName) {
-    var cityState = [city, stateName].filter(Boolean).join(", ");
-    return [street, cityState].filter(Boolean).join(", ");
+  /* "Line 1, Line 2, City, ST ZIP" — line 2 and ZIP only when filled in (older rides have neither). */
+  function addressLine(street, city, stateName, line2, zip) {
+    var stZip = [stateName, zip].filter(Boolean).join(" ");
+    return [street, line2, city, stZip].filter(function (part) {
+      return part != null && String(part).trim() !== "";
+    }).join(", ");
   }
 
   function pickupLine() {
-    return addressLine(state.pickupStreet, state.pickupCity, state.pickupState);
+    return addressLine(state.pickupStreet, state.pickupCity, state.pickupState, state.pickupLine2, state.pickupZip);
   }
 
   function dropLine() {
-    return addressLine(state.dropStreet, state.dropCity, state.dropState);
+    return addressLine(state.dropStreet, state.dropCity, state.dropState, state.dropLine2, state.dropZip);
+  }
+
+  function stopLine(stop) {
+    if (!stop) return "";
+    return addressLine(stop.street, stop.city, stop.state, stop.line2, stop.zip);
+  }
+
+  function filledStops() {
+    return (state.stopList || []).filter(function (s) { return s && String(s.street || "").trim(); });
+  }
+
+  function stopsSummaryHtml() {
+    var list = filledStops();
+    if (!list.length) return "";
+    return list.map(function (s, i) {
+      return "<p><strong>Stop " + (i + 1) + "</strong><br>" + esc(stopLine(s)) + "</p>";
+    }).join("");
   }
 
   function prettyWhen() {
@@ -1544,12 +2066,166 @@
     );
   }
 
+  /* ---------- Structured addresses (From / To / stops), same layout as the quote page ---------- */
+
+  var MAX_STOPS = 5;
+
+  function blankStop() {
+    return { street: "", line2: "", city: "", state: "TX", zip: "", lat: null, lng: null, pinned: false };
+  }
+
+  function stopIndex(prefix) {
+    var m = /^stop(\d+)$/.exec(String(prefix || ""));
+    return m ? Number(m[1]) : -1;
+  }
+
+  /* prefix: "pickup" | "drop" | "stop0".."stop4"; key: Street, Line2, City, State, Zip, Lat, Lng, Pinned */
+  function addrGet(prefix, key) {
+    var i = stopIndex(prefix);
+    if (i >= 0) {
+      var s = (state.stopList || [])[i];
+      return s ? s[key.toLowerCase()] : undefined;
+    }
+    return state[prefix + key];
+  }
+
+  function addrSet(prefix, key, value) {
+    var i = stopIndex(prefix);
+    if (i >= 0) {
+      if (!state.stopList) state.stopList = [];
+      if (!state.stopList[i]) state.stopList[i] = blankStop();
+      state.stopList[i][key.toLowerCase()] = value;
+      return;
+    }
+    state[prefix + key] = value;
+  }
+
+  function normalizeStops(raw) {
+    var list = [];
+    if (Array.isArray(raw)) list = raw.slice();
+    else if (raw && typeof raw === "object") {
+      list = Object.keys(raw).sort(function (a, b) { return Number(a) - Number(b); }).map(function (k) { return raw[k]; });
+    }
+    return list.filter(function (s) { return s && typeof s === "object"; }).slice(0, MAX_STOPS).map(function (s) {
+      return {
+        street: String(s.street || ""),
+        line2: String(s.line2 || ""),
+        city: String(s.city || ""),
+        state: String(s.state || "TX"),
+        zip: String(s.zip || ""),
+        lat: isCoord(s.lat) ? +s.lat : null,
+        lng: isCoord(s.lng) ? +s.lng : null,
+        pinned: !!s.pinned
+      };
+    });
+  }
+
+  function compactStops() {
+    return filledStops().map(function (s) {
+      return {
+        street: String(s.street || "").trim(),
+        line2: String(s.line2 || "").trim(),
+        city: String(s.city || "").trim(),
+        state: String(s.state || "TX").trim().toUpperCase(),
+        zip: String(s.zip || "").trim(),
+        lat: isCoord(s.lat) ? +s.lat : null,
+        lng: isCoord(s.lng) ? +s.lng : null,
+        pinned: !!s.pinned,
+        address: stopLine(s)
+      };
+    });
+  }
+
+  function addrBlockHtml(prefix, title, opts) {
+    opts = opts || {};
+    var val = function (key) { var v = addrGet(prefix, key); return v == null ? "" : String(v); };
+    return (
+      '<div class="group addr-block" data-prefix="' + prefix + '">' +
+      '<div class="addr-head"><p class="group-title">' + esc(title) + "</p>" +
+      (opts.remove ? '<button type="button" class="link-btn remove-stop" data-stop-remove="' + opts.index + '">Remove</button>' : "") +
+      "</div>" +
+      '<div class="locate addr-line1">' +
+      '<div class="label-row"><label for="' + prefix + '-street">Address line 1</label>' +
+      (opts.locate ? '<button class="locate-mini" type="button" id="use-location">&#128205; Use current location</button>' : "") +
+      "</div>" +
+      '<input id="' + prefix + '-street" name="' + prefix + '-street" value="' + esc(val("Street")) +
+      '" autocomplete="off" autocorrect="off" spellcheck="false" maxlength="140" placeholder="Search a place or street address"' +
+      (opts.required ? " required" : "") + ">" +
+      '<div class="suggest" id="' + prefix + '-results" hidden></div>' +
+      "</div>" +
+      field(prefix + "-line2", 'Address line 2 <span class="optional-tag">optional</span>', val("Line2"), 'maxlength="80" placeholder="Apt, suite, gate, terminal"') +
+      '<div class="row three"><div class="city">' +
+      field(prefix + "-city", "City", val("City"), 'maxlength="80" placeholder="City"' + (opts.required ? " required" : "")) +
+      '</div><div class="state">' +
+      field(prefix + "-state", "State", val("State") || "TX", 'maxlength="2" placeholder="TX"' + (opts.required ? " required" : "")) +
+      '</div><div class="zip">' +
+      field(prefix + "-zip", "ZIP", val("Zip"), 'inputmode="numeric" maxlength="10" placeholder="ZIP"') +
+      "</div></div></div>"
+    );
+  }
+
+  function stopsHtml() {
+    var list = state.stopList || [];
+    var blocks = list.map(function (s, i) {
+      return addrBlockHtml("stop" + i, "Stop " + (i + 1), { remove: true, index: i });
+    }).join("");
+    return (
+      '<div class="stops-block">' + blocks +
+      (list.length < MAX_STOPS
+        ? '<button type="button" class="link-add-stop" id="add-stop">' + (list.length ? "+ Add another stop" : "+ Add a stop") + "</button>"
+        : "") +
+      '<p class="fine">Only if you need to stop on the way. Each stop adds ' + money(EXTRA_STOP_CENTS) +
+      ". Stops happen in order between From and To.</p></div>"
+    );
+  }
+
+  function addrPrefixes() {
+    var out = ["pickup", "drop"];
+    (state.stopList || []).forEach(function (s, i) { out.push("stop" + i); });
+    return out;
+  }
+
+  function readAddr(prefix) {
+    var el = function (part) { return document.getElementById(prefix + "-" + part); };
+    if (!el("street")) return;
+    addrSet(prefix, "Street", el("street").value.trim());
+    if (el("line2")) addrSet(prefix, "Line2", el("line2").value.trim());
+    if (el("city")) addrSet(prefix, "City", el("city").value.trim());
+    if (el("state")) addrSet(prefix, "State", (el("state").value.trim() || "TX").toUpperCase());
+    if (el("zip")) addrSet(prefix, "Zip", el("zip").value.trim());
+  }
+
+  function wireAddressInputs() {
+    addrPrefixes().forEach(function (prefix) {
+      [["line2", "Line2"], ["city", "City"], ["state", "State"], ["zip", "Zip"]].forEach(function (pair) {
+        var el = document.getElementById(prefix + "-" + pair[0]);
+        if (!el) return;
+        el.addEventListener("input", function () {
+          addrSet(prefix, pair[1], pair[0] === "state" ? el.value.toUpperCase() : el.value);
+        });
+      });
+    });
+  }
+
+  var US_STATES = {
+    alabama: "AL", alaska: "AK", arizona: "AZ", arkansas: "AR", california: "CA", colorado: "CO",
+    connecticut: "CT", delaware: "DE", "district of columbia": "DC", florida: "FL", georgia: "GA",
+    hawaii: "HI", idaho: "ID", illinois: "IL", indiana: "IN", iowa: "IA", kansas: "KS", kentucky: "KY",
+    louisiana: "LA", maine: "ME", maryland: "MD", massachusetts: "MA", michigan: "MI", minnesota: "MN",
+    mississippi: "MS", missouri: "MO", montana: "MT", nebraska: "NE", nevada: "NV", "new hampshire": "NH",
+    "new jersey": "NJ", "new mexico": "NM", "new york": "NY", "north carolina": "NC", "north dakota": "ND",
+    ohio: "OH", oklahoma: "OK", oregon: "OR", pennsylvania: "PA", "rhode island": "RI",
+    "south carolina": "SC", "south dakota": "SD", tennessee: "TN", texas: "TX", utah: "UT", vermont: "VT",
+    virginia: "VA", washington: "WA", "west virginia": "WV", wisconsin: "WI", wyoming: "WY"
+  };
+
   function stateCode(name) {
-    var known = { texas: "TX", louisiana: "LA", oklahoma: "OK", arkansas: "AR" };
     if (!name) return "TX";
     var n = String(name).trim();
+    var iso = /^US-([A-Za-z]{2})$/.exec(n);
+    if (iso) return iso[1].toUpperCase();
     if (n.length === 2) return n.toUpperCase();
-    return known[n.toLowerCase()] || "TX";
+    return US_STATES[n.toLowerCase()] || n;
   }
 
   function placeLine(p) {
@@ -1561,56 +2237,45 @@
   function setCoords(prefix, feature) {
     var coords = feature && feature.geometry && feature.geometry.coordinates;
     if (!coords) return;
-    state[prefix + "Lng"] = coords[0];
-    state[prefix + "Lat"] = coords[1];
+    addrSet(prefix, "Lng", coords[0]);
+    addrSet(prefix, "Lat", coords[1]);
   }
 
-  function applyPlace(prefix, feature) {
-    var p = feature.properties || feature;
-    var streetEl = document.getElementById(prefix + "-street");
-    var cityEl = document.getElementById(prefix + "-city");
-    var stateEl = document.getElementById(prefix + "-state");
-    if (streetEl) streetEl.value = placeLine(p);
-    if (cityEl && (p.city || p.county)) cityEl.value = p.city || p.county;
-    if (stateEl) stateEl.value = stateCode(p.state);
-    state[prefix + "Street"] = streetEl ? streetEl.value : placeLine(p);
-    if (cityEl) state[prefix + "City"] = cityEl.value;
-    if (stateEl) state[prefix + "State"] = stateEl.value;
-    setCoords(prefix, feature);
+  function resetDrivingRoute() {
+    driving.key = "";
+    driving.done = false;
+    driving.miles = null;
+    driving.line = null;
+  }
+
+  /* place: { line1, city, state, zip, lat, lng, fromHere } */
+  function applyPlace(prefix, place) {
+    if (!place) return;
+    function put(key, part, value) {
+      var el = document.getElementById(prefix + "-" + part);
+      if (el) el.value = value;
+      addrSet(prefix, key, value);
+    }
+    put("Street", "street", place.line1 || "");
+    put("City", "city", place.city || "");
+    put("State", "state", place.state || "TX");
+    put("Zip", "zip", place.zip || "");
+    var hasPoint = isCoord(place.lat) && isCoord(place.lng);
+    addrSet(prefix, "Lat", hasPoint ? +place.lat : null);
+    addrSet(prefix, "Lng", hasPoint ? +place.lng : null);
+    addrSet(prefix, "Pinned", hasPoint);
+    if (prefix === "pickup") state.pickupFromHere = !!place.fromHere;
+    resetDrivingRoute();
     if (prefix === "drop") {
       state.dropFix = pointFrom(state.dropLat, state.dropLng);
       state.useDrivenMiles = false;
       state.endedEarly = false;
-      driving.key = "";
-      driving.done = false;
-      driving.miles = null;
-      driving.line = null;
       if (ROLE === "driver" && state.rideStatus === "started") {
         syncActiveTripFare();
         render();
       }
     }
   }
-
-
-  var CITY_BIAS = {
-    montgomery: { lat: 30.39, lon: -95.70 },
-    conroe: { lat: 30.31, lon: -95.46 },
-    "the woodlands": { lat: 30.17, lon: -95.46 },
-    woodlands: { lat: 30.17, lon: -95.46 },
-    magnolia: { lat: 30.21, lon: -95.75 },
-    tomball: { lat: 30.10, lon: -95.62 },
-    spring: { lat: 30.08, lon: -95.42 },
-    humble: { lat: 30.00, lon: -95.26 },
-    "new caney": { lat: 30.15, lon: -95.22 },
-    porter: { lat: 30.11, lon: -95.23 },
-    navasota: { lat: 30.39, lon: -96.09 }
-  };
-  var FALLBACK_BIAS = { lat: 30.05, lon: -95.4 };
-  var KNOWN_CITIES = [
-    "the woodlands", "new caney", "montgomery", "conroe", "magnolia", "tomball",
-    "spring", "humble", "porter", "navasota", "willis", "houston"
-  ];
 
   function normText(value) {
     return String(value || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").replace(/\s+/g, " ").trim();
@@ -1621,20 +2286,10 @@
     return (" " + normText(text) + " ").indexOf(" " + word + " ") !== -1;
   }
 
-  function biasFor(city) {
-    var key = normText(city);
-    if (CITY_BIAS[key]) return CITY_BIAS[key];
-    return FALLBACK_BIAS;
-  }
-
-  function cityFromText(text) {
-    var hay = " " + normText(text) + " ";
-    var found = "";
-    var i;
-    for (i = 0; i < KNOWN_CITIES.length; i += 1) {
-      if (hay.indexOf(" " + KNOWN_CITIES[i] + " ") !== -1 && KNOWN_CITIES[i].length > found.length) found = KNOWN_CITIES[i];
-    }
-    return found;
+  /* Word starts with the typed piece ("krog" matches "Kroger"). */
+  function wordStarts(text, piece) {
+    if (!piece) return false;
+    return (" " + normText(text)).indexOf(" " + piece) !== -1;
   }
 
   function focusTokens(text, city) {
@@ -1667,118 +2322,6 @@
     return { lat: +coords[1], lng: +coords[0] };
   }
 
-  function scoreFeature(feature, text, city) {
-    var props = feature.properties || {};
-    var tokens = focusTokens(text, city);
-    var name = props.name || "";
-    var street = [props.housenumber, props.street].filter(Boolean).join(" ");
-    var osmValue = String(props.osm_value || "").toLowerCase();
-    var osmKey = String(props.osm_key || "").toLowerCase();
-    var score = 0;
-    var i;
-    for (i = 0; i < tokens.length; i += 1) {
-      var weight = i === 0 ? 14 : 6;
-      if (hasWord(name, tokens[i])) score += weight;
-      if (hasWord(street, tokens[i])) score += 4;
-    }
-    if (city) {
-      if (sameCity(props, city)) score += 12;
-      else if (normText(props.city || props.town || props.village || "")) score -= 10;
-      else score -= 3;
-    }
-    var q = normText(text);
-    var inCity = !city || sameCity(props, city);
-    if (q.indexOf("walmart") !== -1) {
-      if (inCity && (osmValue === "supermarket" || hasWord(name, "walmart"))) score += 28;
-      if (osmValue === "golf_course" || osmKey === "leisure") score -= 36;
-      if (osmKey === "highway" || osmValue === "residential" || osmValue === "neighbourhood" || osmValue === "neighborhood" || osmValue === "suburb") score -= 24;
-    }
-    if (tokens.length && hasWord(name, tokens[0])) {
-      if (osmValue === "supermarket" || osmValue === "department_store" || osmValue === "mall") score += 8;
-      if (osmValue === "fuel" && q.indexOf("gas") === -1 && q.indexOf("fuel") === -1) score -= 4;
-    }
-    if (tokens.length && !hasWord(name, tokens[0]) && !hasWord(street, tokens[0])) {
-      if (osmKey === "leisure" || osmKey === "highway" || osmKey === "place") score -= 16;
-    }
-    var point = featurePoint(feature);
-    if (point) {
-      var bias = biasFor(city);
-      score -= Math.min(haversine(point, { lat: bias.lat, lng: bias.lon }), 80) * 0.2;
-    }
-    return score;
-  }
-
-  function rankFeatures(features, text, city) {
-    var seen = {};
-    var ranked = [];
-    (features || []).forEach(function (feature) {
-      var props = feature.properties || {};
-      var point = featurePoint(feature);
-      var id = String(props.osm_id || "") + "|" + normText(props.name) + "|" +
-        (point ? point.lat.toFixed(5) + "," + point.lng.toFixed(5) : "");
-      if (seen[id]) return;
-      seen[id] = 1;
-      ranked.push(feature);
-      feature._score = scoreFeature(feature, text, city);
-    });
-    ranked.sort(function (a, b) { return b._score - a._score; });
-    return ranked;
-  }
-
-  function composeQuery(text, city, stateName) {
-    var parts = [];
-    var base = String(text || "").trim();
-    if (base) parts.push(base);
-    var low = base.toLowerCase();
-    if (city && low.indexOf(String(city).toLowerCase()) === -1) parts.push(city);
-    var st = String(stateName || "TX").trim();
-    if (st && low.indexOf(st.toLowerCase()) === -1) parts.push(st);
-    if (low.indexOf("texas") === -1 && st.toUpperCase() === "TX") parts.push("Texas");
-    return parts.filter(Boolean).join(", ");
-  }
-
-  function photonSearch(q, bias) {
-    var url = "https://photon.komoot.io/api/?limit=8&lat=" + bias.lat + "&lon=" + bias.lon + "&q=" + encodeURIComponent(q);
-    return fetch(url).then(function (res) { return res.json(); }).then(function (data) {
-      return (data && data.features) || [];
-    }).catch(function () { return []; });
-  }
-
-  function placeQueryCity(text, city) {
-    return city || cityFromText(text) || "";
-  }
-
-  function collectPlaces(text, city, stateName) {
-    var usedCity = placeQueryCity(text, city);
-    var bias = biasFor(usedCity);
-    var query = composeQuery(text, usedCity, stateName || "TX");
-    return photonSearch(query, bias).then(function (features) {
-      var tokens = focusTokens(text, usedCity);
-      var first = tokens[0];
-      if (!first || looksLikeAddress(text)) return features;
-      var named = features.some(function (feature) {
-        var props = feature.properties || {};
-        return hasWord(props.name, first) || hasWord(props.street, first);
-      });
-      if (named) return features;
-      return photonSearch(composeQuery(first, usedCity, stateName || "TX"), bias).then(function (more) {
-        return features.concat(more);
-      });
-    });
-  }
-
-  function typedCity(prefix) {
-    var el = document.getElementById(prefix + "-city");
-    if (el && el.value.trim()) return el.value.trim();
-    return state[prefix + "City"] || "";
-  }
-
-  function typedState(prefix) {
-    var el = document.getElementById(prefix + "-state");
-    if (el && el.value.trim()) return el.value.trim();
-    return state[prefix + "State"] || "TX";
-  }
-
   function placeLooksWeak(saved, feature, text, city) {
     var next = featurePoint(feature);
     if (!saved || !next) return false;
@@ -1795,15 +2338,268 @@
     return tokens.some(function (word) { return hasWord(name, word) || hasWord(props.street, word); });
   }
 
-  function wireSearch(inputId, resultsId, prefix) {
-    var input = document.getElementById(inputId);
-    var box = document.getElementById(resultsId);
+  /* ---------- Place search: nearest first, from the rider's location ---------- */
+
+  /* Lake Conroe / Conroe service area. Used only when we have no location and no From pin yet. */
+  var DEFAULT_SEARCH_CENTER = { lat: 30.33, lng: -95.52 };
+  var SEARCH_RADIUS_MI = 40;
+
+  /* Local ZIP -> city, only used when map data has no city (unincorporated areas). */
+  var ZIP_CITY = {
+    "77301": "Conroe", "77302": "Conroe", "77303": "Conroe", "77304": "Conroe", "77306": "Conroe",
+    "77384": "Conroe", "77385": "Conroe",
+    "77316": "Montgomery", "77356": "Montgomery",
+    "77380": "The Woodlands", "77381": "The Woodlands", "77382": "The Woodlands",
+    "77354": "Magnolia", "77355": "Magnolia",
+    "77375": "Tomball", "77377": "Tomball",
+    "77357": "New Caney", "77365": "Porter", "77372": "Splendora",
+    "77373": "Spring", "77379": "Spring", "77386": "Spring", "77388": "Spring", "77389": "Spring",
+    "77338": "Humble", "77346": "Humble",
+    "77868": "Navasota", "77320": "Huntsville", "77340": "Huntsville"
+  };
+
+  var POI_KINDS = {
+    supermarket: "Grocery store", convenience: "Convenience store", fuel: "Gas station",
+    restaurant: "Restaurant", fast_food: "Fast food", cafe: "Cafe", bar: "Bar", pub: "Bar",
+    pharmacy: "Pharmacy", hospital: "Hospital", clinic: "Clinic", doctors: "Doctor", dentist: "Dentist",
+    aerodrome: "Airport", terminal: "Airport terminal", hotel: "Hotel", motel: "Motel",
+    school: "School", college: "College", university: "University", place_of_worship: "Church",
+    bank: "Bank", department_store: "Department store", mall: "Mall", car_repair: "Auto repair",
+    parking: "Parking", bus_station: "Bus station", station: "Station", cinema: "Movie theater",
+    post_office: "Post office", library: "Library", townhall: "City hall", courthouse: "Courthouse",
+    hardware: "Hardware store", doityourself: "Hardware store", variety_store: "Store", general: "Store"
+  };
+
+  function cityFromProps(p) {
+    p = p || {};
+    var poi = normText(p.name);
+    var picks = [p.city, p.town, p.village, p.hamlet];
+    var i;
+    for (i = 0; i < picks.length; i += 1) {
+      var c = String(picks[i] || "").trim();
+      if (c && normText(c) !== poi) return c;
+    }
+    var zip = String(p.postcode || "").slice(0, 5);
+    if (ZIP_CITY[zip]) return ZIP_CITY[zip];
+    var county = String(p.county || "").trim();
+    if (county) return /county$/i.test(county) ? county : county + " County";
+    var district = String(p.district || "").trim();
+    if (district && normText(district) !== poi) return district;
+    return "";
+  }
+
+  function photonIsPoi(p) {
+    if (!p || !p.name) return false;
+    var key = String(p.osm_key || "");
+    return ["highway", "place", "boundary", "landuse", "natural", "waterway"].indexOf(key) === -1;
+  }
+
+  function photonPlace(feature) {
+    var p = (feature && feature.properties) || {};
+    var c = (feature && feature.geometry && feature.geometry.coordinates) || [];
+    var street = [p.housenumber, p.street].filter(Boolean).join(" ");
+    var poi = photonIsPoi(p);
+    var line1;
+    if (poi) line1 = street && normText(p.name) !== normText(street) ? p.name + ", " + street : p.name;
+    else line1 = street || p.name || "";
+    return {
+      line1: line1,
+      city: cityFromProps(p),
+      state: stateCode(p.state),
+      zip: String(p.postcode || "").slice(0, 10),
+      lat: isCoord(c[1]) ? +c[1] : null,
+      lng: isCoord(c[0]) ? +c[0] : null,
+      category: poi ? (POI_KINDS[String(p.osm_value || "")] || "") : ""
+    };
+  }
+
+  function withTimeout(promise, ms) {
+    return new Promise(function (resolve, reject) {
+      var t = setTimeout(function () { reject(new Error("timeout")); }, ms);
+      promise.then(function (v) { clearTimeout(t); resolve(v); }, function (e) { clearTimeout(t); reject(e); });
+    });
+  }
+
+  function photonFetch(params) {
+    return withTimeout(fetch("https://photon.komoot.io/api/?" + params).then(function (res) {
+      if (!res.ok) throw new Error("photon");
+      return res.json();
+    }), 8000).then(function (data) {
+      return (data && data.features) || [];
+    }).catch(function () { return []; });
+  }
+
+  function hereFresh() {
+    var h = state.hereFix;
+    if (!h || !isCoord(h.lat) || !isCoord(h.lng)) return null;
+    if (Date.now() - Number(h.at || 0) > 30 * 60 * 1000) return null;
+    return { lat: +h.lat, lng: +h.lng };
+  }
+
+  /* Where "nearest" is measured from: your location -> From pin -> service area. */
+  function searchOrigin(prefix) {
+    var here = hereFresh();
+    if (here) return { point: here, from: "you" };
+    if (ROLE === "driver" && isCoord(state.hereLat) && isCoord(state.hereLng)) {
+      return { point: { lat: +state.hereLat, lng: +state.hereLng }, from: "you" };
+    }
+    var pick = placeCoords("pickup");
+    if (pick && prefix !== "pickup") return { point: pick, from: "pickup" };
+    return { point: DEFAULT_SEARCH_CENTER, from: "" };
+  }
+
+  var originPriming = false;
+
+  /* If location is already allowed, grab it quietly so "nearest" means nearest to you. Never prompts. */
+  function primeSearchOrigin() {
+    if (ROLE !== "customer" || hereFresh() || originPriming) return;
+    if (!navigator.geolocation || !navigator.permissions || !navigator.permissions.query) return;
+    originPriming = true;
+    navigator.permissions.query({ name: "geolocation" }).then(function (status) {
+      if (!status || status.state !== "granted") { originPriming = false; return; }
+      navigator.geolocation.getCurrentPosition(function (pos) {
+        originPriming = false;
+        state.hereFix = { lat: pos.coords.latitude, lng: pos.coords.longitude, at: Date.now() };
+      }, function () { originPriming = false; }, { enableHighAccuracy: false, timeout: 8000, maximumAge: 300000 });
+    }).catch(function () { originPriming = false; });
+  }
+
+  function searchWords(q) {
+    var skip = { tx: 1, texas: 1, usa: 1, us: 1, the: 1, of: 1, and: 1, at: 1, near: 1 };
+    return normText(q).split(" ").filter(function (w) { return w.length >= 2 && !skip[w]; });
+  }
+
+  /* 0 = name/address matches what was typed, 1 = partial match, 2 = loose match. */
+  function placeTier(p, q) {
+    var words = searchWords(q);
+    var num = looksLikeAddress(q) ? (normText(q).split(" ")[0] || "") : "";
+    var text = words.filter(function (w) { return !/^\d+$/.test(w); });
+    var name = p.name || "";
+    var street = p.street || "";
+    if (num) {
+      var streetHit = !text.length || text.some(function (w) { return wordStarts(street, w) || wordStarts(name, w); });
+      if (normText(p.housenumber) === num && streetHit) return 0;
+      return streetHit ? 1 : 2;
+    }
+    if (!text.length) return 1;
+    if (text.every(function (w) { return wordStarts(name, w); })) return 0;
+    if (text.some(function (w) { return wordStarts(name, w) || wordStarts(street, w); })) return 1;
+    return 2;
+  }
+
+  /*
+    Rank Photon results: best text match first, then (when geocoding a typed address) same city/ZIP,
+    then real distance from the origin. Fuel pumps next to the same store are folded into the store.
+  */
+  function rankPlaces(features, q, origin, want) {
+    var seen = {};
+    var wantGas = /\b(gas|fuel|station|pump)\b/.test(normText(q));
+    var items = [];
+    (features || []).forEach(function (f) {
+      var p = (f && f.properties) || {};
+      if (p.countrycode && String(p.countrycode).toUpperCase() !== "US") return;
+      var place = photonPlace(f);
+      if (!isCoord(place.lat) || !isCoord(place.lng) || !place.line1) return;
+      var idA = String(p.osm_type || "") + String(p.osm_id || "");
+      var idB = normText(place.line1) + "|" + place.zip;
+      if ((idA && seen[idA]) || seen[idB]) return;
+      if (idA) seen[idA] = 1;
+      seen[idB] = 1;
+      var cityKey = 0;
+      if (want && (want.city || want.zip)) {
+        var cityOk = want.city && normText(cityFromProps(p)) === normText(want.city);
+        var zipOk = want.zip && String(p.postcode || "").slice(0, 5) === String(want.zip).slice(0, 5);
+        cityKey = cityOk || zipOk ? 0 : 1;
+      }
+      items.push({
+        feature: f,
+        place: place,
+        tier: placeTier(p, q),
+        cityKey: cityKey,
+        fuel: String(p.osm_value || "") === "fuel",
+        nameKey: normText(p.name),
+        dist: haversine(origin, { lat: place.lat, lng: place.lng })
+      });
+    });
+    /* Nobody books a Lake Conroe car to another state: drop matches more than 300 miles away. */
+    items = items.filter(function (it) { return !(it.dist > 300); });
+    if (!wantGas) {
+      items = items.filter(function (it) {
+        if (!it.fuel || !it.nameKey) return true;
+        return !items.some(function (other) {
+          return other !== it && !other.fuel && other.nameKey === it.nameKey &&
+            haversine({ lat: other.place.lat, lng: other.place.lng }, { lat: it.place.lat, lng: it.place.lng }) < 0.5;
+        });
+      });
+    }
+    items.sort(function (a, b) {
+      return (a.tier - b.tier) || (a.cityKey - b.cityKey) || (a.dist - b.dist);
+    });
+    return items;
+  }
+
+  function findPlaces(q, origin, want) {
+    var o = (origin && origin.point) || DEFAULT_SEARCH_CENTER;
+    var lat = o.lat.toFixed(5);
+    var lon = o.lng.toFixed(5);
+    var dLat = SEARCH_RADIUS_MI / 69;
+    var dLon = SEARCH_RADIUS_MI / (69 * Math.cos((o.lat * Math.PI) / 180));
+    var bbox = [o.lng - dLon, o.lat - dLat, o.lng + dLon, o.lat + dLat].map(function (n) { return n.toFixed(4); }).join(",");
+    /* location_bias_scale low = distance matters more than how "famous" a place is. */
+    var common = "lang=en&lat=" + lat + "&lon=" + lon + "&location_bias_scale=0.1&zoom=12&q=" + encodeURIComponent(q);
+    var calls = [
+      photonFetch("limit=15&bbox=" + bbox + "&" + common), /* nearby (about 40 mi around you) */
+      photonFetch("limit=8&" + common) /* farther places (airports, other cities) still show */
+    ];
+    var streetOnly = looksLikeAddress(q) ? String(q).replace(/^\s*\d+[A-Za-z]?\s+/, "") : "";
+    if (streetOnly.length >= 3) {
+      /* Map data often has the street but not each house number: also look up the street by itself. */
+      calls.push(photonFetch("limit=8&bbox=" + bbox + "&" + common.replace(/&q=.*$/, "&q=" + encodeURIComponent(streetOnly))).catch(function () { return []; }));
+    }
+    return Promise.all(calls).then(function (lists) {
+      return rankPlaces([].concat.apply([], lists), q, o, want);
+    });
+  }
+
+  function fmtMiles(d) {
+    if (!isFinite(d)) return "";
+    return (d < 10 ? d.toFixed(1) : String(Math.round(d))) + " mi";
+  }
+
+  function suggestNoteHtml(origin) {
+    if (origin && origin.from === "you") return '<p class="suggest-note">Closest to you first</p>';
+    if (origin && origin.from === "pickup") return '<p class="suggest-note">Closest to your pickup first</p>';
+    return '<p class="suggest-note">Tip: tap Use current location for the closest places</p>';
+  }
+
+  function suggestItemHtml(item, i) {
+    var pl = item.place;
+    var sub = [pl.city, [pl.state, pl.zip].filter(Boolean).join(" ")].filter(Boolean).join(", ");
+    if (pl.category) sub = sub ? sub + " · " + pl.category : pl.category;
+    return (
+      '<button type="button" class="suggest-item" data-i="' + i + '">' +
+      '<span class="suggest-main"><strong>' + esc(pl.line1) + "</strong>" +
+      '<em class="suggest-dist">' + esc(fmtMiles(item.dist)) + "</em></span>" +
+      "<span>" + esc(sub) + "</span></button>"
+    );
+  }
+
+  function wireSearch(prefix) {
+    var input = document.getElementById(prefix + "-street");
+    var box = document.getElementById(prefix + "-results");
     if (!input || !box) return;
     var timer = 0;
+    var seq = 0;
+    input.addEventListener("focus", primeSearchOrigin);
+    input.addEventListener("blur", function () {
+      setTimeout(function () { box.hidden = true; }, 350);
+    });
     input.addEventListener("input", function () {
       var q = input.value.trim();
-      state[prefix + "Lat"] = null;
-      state[prefix + "Lng"] = null;
+      addrSet(prefix, "Street", input.value);
+      addrSet(prefix, "Lat", null);
+      addrSet(prefix, "Lng", null);
+      addrSet(prefix, "Pinned", false);
       if (prefix === "drop") state.dropFix = null;
       if (prefix === "pickup") state.pickupFromHere = false;
       clearTimeout(timer);
@@ -1812,59 +2608,128 @@
         box.innerHTML = "";
         return;
       }
+      var mine = ++seq;
       timer = setTimeout(function () {
-        var city = typedCity(prefix);
-        var stateName = typedState(prefix);
-        collectPlaces(q, city, stateName).then(function (features) {
-          var ranked = rankFeatures(features, q, placeQueryCity(q, city)).slice(0, 5);
-          if (input.value.trim() !== q || !ranked.length) {
-            box.hidden = true;
-            return;
-          }
-          box._places = ranked;
-          box.innerHTML = ranked.map(function (f, i) {
-            var p = f.properties || {};
-            var sub = [p.city || p.county, stateCode(p.state)].filter(Boolean).join(", ");
-            return '<button type="button" class="suggest-item" data-i="' + i + '"><strong>' + esc(placeLine(p)) + "</strong><span>" + esc(sub) + "</span></button>";
-          }).join("");
+        var origin = searchOrigin(prefix);
+        findPlaces(q, origin).then(function (items) {
+          if (mine !== seq || input.value.trim() !== q) return;
+          var num = (q.match(/^(\d+[A-Za-z]?)\s+/) || [])[1];
+          items = items.slice(0, 6).map(function (it) {
+            var pl = it.place;
+            if (!num || pl.category || /^\d/.test(String(pl.line1 || ""))) return it;
+            /* Typed "1099 McCaleb" but the map only knows the street: keep the house number. */
+            return Object.assign({}, it, { place: Object.assign({}, pl, { line1: num + " " + pl.line1, approx: true }) });
+          });
+          box._places = items;
+          box.innerHTML = items.length
+            ? suggestNoteHtml(origin) + items.map(suggestItemHtml).join("")
+            : '<p class="suggest-note">No matches yet. Keep typing, or fill in line 1, city and ZIP yourself.</p>';
           box.hidden = false;
         }).catch(function () { box.hidden = true; });
-      }, 350);
+      }, 300);
     });
     box.addEventListener("click", function (event) {
       var btn = event.target.closest ? event.target.closest(".suggest-item") : null;
       if (!btn || !box._places) return;
-      var feature = box._places[Number(btn.getAttribute("data-i"))];
-      if (!feature) return;
-      applyPlace(prefix, feature);
+      var item = box._places[Number(btn.getAttribute("data-i"))];
+      if (!item) return;
+      var place = item.place;
+      /* House number on a street-only match: the request step finds that exact house
+         (instead of pinning the middle of a long road). */
+      if (place.approx) place = Object.assign({}, place, { lat: null, lng: null });
+      applyPlace(prefix, place);
       box.hidden = true;
+    });
+  }
+
+  /* ---------- Current location -> line 1 / city / state / ZIP ---------- */
+
+  function nominatimPlace(data) {
+    var a = data && data.address;
+    if (!a || !a.road) return null;
+    var zip = String(a.postcode || "").slice(0, 10);
+    var city = a.city || a.town || a.village || a.hamlet || ZIP_CITY[zip.slice(0, 5)] || a.county || "";
+    return {
+      line1: [a.house_number, a.road].filter(Boolean).join(" "),
+      city: String(city),
+      state: stateCode(a["ISO3166-2-lvl4"] || a.state),
+      zip: zip
+    };
+  }
+
+  function photonReversePlace(features) {
+    var list = (features || []).filter(function (f) { return f && f.properties; });
+    if (!list.length) return null;
+    function rank(f) {
+      var p = f.properties;
+      if (p.housenumber && p.street) return 0;
+      if (p.osm_key === "highway" || p.type === "street") return 1;
+      if (p.street) return 2;
+      return 3;
+    }
+    list.sort(function (a, b) { return rank(a) - rank(b); });
+    var p = list[0].properties;
+    var street = [p.housenumber, p.street].filter(Boolean).join(" ");
+    var line1 = street || (p.osm_key === "highway" || p.type === "street" ? p.name : "") || p.name || "";
+    if (!line1) return null;
+    return { line1: line1, city: cityFromProps(p), state: stateCode(p.state), zip: String(p.postcode || "").slice(0, 10) };
+  }
+
+  /* Never rejects. Nominatim first (it often has the house number), Photon reverse as backup. */
+  function reverseGeocode(lat, lng) {
+    var q = "lat=" + encodeURIComponent(lat) + "&lon=" + encodeURIComponent(lng);
+    return withTimeout(fetch("https://nominatim.openstreetmap.org/reverse?format=jsonv2&addressdetails=1&zoom=18&" + q).then(function (res) {
+      if (!res.ok) throw new Error("nominatim");
+      return res.json();
+    }), 6000).then(function (data) {
+      var place = nominatimPlace(data);
+      if (!place) throw new Error("nominatim-empty");
+      return place;
+    }).catch(function () {
+      return withTimeout(fetch("https://photon.komoot.io/reverse?limit=5&lang=en&" + q).then(function (res) {
+        if (!res.ok) throw new Error("photon");
+        return res.json();
+      }), 6000).then(function (data) {
+        return photonReversePlace(data && data.features);
+      }).catch(function () { return null; });
+    }).then(function (place) {
+      return place || {
+        line1: "Current location (" + Number(lat).toFixed(5) + ", " + Number(lng).toFixed(5) + ")",
+        city: "",
+        state: "TX",
+        zip: ""
+      };
     });
   }
 
   function wireLocation() {
     var locBtn = document.getElementById("use-location");
-    if (!locBtn || !navigator.geolocation) return;
+    if (!locBtn) return;
     locBtn.addEventListener("click", function () {
+      if (!navigator.geolocation) {
+        locBtn.textContent = "Location not available";
+        return;
+      }
       locBtn.disabled = true;
       locBtn.textContent = "Finding you…";
       navigator.geolocation.getCurrentPosition(function (pos) {
-        var url = "https://photon.komoot.io/reverse?limit=1&lat=" + pos.coords.latitude + "&lon=" + pos.coords.longitude;
-        fetch(url).then(function (res) { return res.json(); }).then(function (data) {
-          var feature = data.features && data.features[0];
-          if (feature) applyPlace("pickup", feature);
-          state.pickupLat = pos.coords.latitude;
-          state.pickupLng = pos.coords.longitude;
-          state.pickupFromHere = true;
+        var lat = pos.coords.latitude;
+        var lng = pos.coords.longitude;
+        state.hereFix = { lat: lat, lng: lng, at: Date.now() };
+        reverseGeocode(lat, lng).then(function (place) {
+          place.lat = lat;
+          place.lng = lng;
+          place.fromHere = true;
+          applyPlace("pickup", place);
           locBtn.disabled = false;
-          locBtn.textContent = "Use current location";
-        }).catch(function () {
-          locBtn.disabled = false;
-          locBtn.textContent = "Could not find that place";
+          locBtn.innerHTML = "&#128205; Use current location";
+          var cityEl = document.getElementById("pickup-city");
+          if (cityEl && !cityEl.value.trim()) cityEl.focus();
         });
       }, function () {
         locBtn.disabled = false;
-        locBtn.textContent = "Location unavailable";
-      }, { enableHighAccuracy: true, timeout: 10000 });
+        locBtn.textContent = "Location blocked — type the address";
+      }, { enableHighAccuracy: true, timeout: 12000, maximumAge: 60000 });
     });
   }
 
@@ -2630,6 +3495,15 @@
       dropStreet: (ride && ride.dropStreet) || "",
       dropCity: (ride && ride.dropCity) || "",
       dropState: (ride && ride.dropState) || "TX",
+      pickupLine2: (ride && ride.pickupLine2) || "",
+      pickupZip: (ride && ride.pickupZip) || "",
+      pickupAddress: (ride && ride.pickupAddress) || "",
+      dropLine2: (ride && ride.dropLine2) || "",
+      dropZip: (ride && ride.dropZip) || "",
+      dropAddress: (ride && ride.dropAddress) || "",
+      stops: ride && ride.stops != null ? Number(ride.stops) || 0 : 0,
+      stopAddresses: normalizeStops(ride && ride.stopList).map(stopLine),
+      cardStatus: (ride && ride.cardStatus) || "",
       date: (ride && ride.date) || "",
       time: (ride && ride.time) || "",
       asap: !!(ride && rideIsAsap(ride)),
@@ -2794,6 +3668,7 @@
       carPlate: normalizePlate(account.carPlate),
       carSeats: account.carSeats || "",
       gpsMilesToday: Number(state.milesToday) || 0,
+      onlineMinutesToday: Math.floor(onlineMsToday() / 60000),
       startOdometer: state.milesStartOdo
     };
     return authFetch(driversUrl(driverPresenceId()), {
@@ -2878,6 +3753,7 @@
     remote.createdAt = remote.requestedAt;
     remote.updatedAt = remote.requestedAt;
     remote.isTest = !!state.isTest && testModeAvailable();
+    remote.cardStatus = remote.isTest ? "test_skip" : (remote.cardStatus && remote.cardStatus !== "" ? remote.cardStatus : "none");
     var uid = firebaseUid();
     if (uid) remote.riderUid = uid;
     if (firebaseEmail()) remote.riderEmail = firebaseEmail();
@@ -2957,6 +3833,7 @@
 
   function riderPinBanner() {
     var pin = ensureRidePin();
+    if (!rideCardReady()) return cardNeededHtml();
     if (!pin) return "";
     return (
       '<div class="pin-box">' +
@@ -2993,7 +3870,7 @@
       '<h2 style="font-size:18px">' + esc(state.name || "Rider") + "</h2>" +
       '<p class="fine">' + esc(prettyWhen()) + (state.phone ? " · " + esc(state.phone) : "") + "</p>" +
       "</div></div>" +
-      '<div class="route-line"><p>' + esc(pickupLine()) + "</p><p>" + esc(dropLine()) + "</p></div>" +
+      '<div class="route-line"><p>' + esc(pickupLine()) + "</p>" + stopsSummaryHtml() + "<p>" + esc(dropLine()) + "</p></div>" +
       '<p class="fine">' + (est.ready
         ? est.raw.toFixed(2) + " mi, billed as " + est.billed + " · about " + money(est.total)
         : "Miles and fare show when both places are found.") + "</p>" +
@@ -3051,12 +3928,13 @@
       String(ride.driverCarMake || "") !== String(state.driverCarMake || "") ||
       String(ride.driverCarModel || "") !== String(state.driverCarModel || "") ||
       String(ride.driverCarSeats || "") !== String(state.driverCarSeats || "");
-    if (!statusChanged && !placesChanged && !driverChanged && !codeChanged && !identityChanged) return;
+    var cardChanged = (ride.cardStatus || "") !== (state.cardStatus || "");
+    if (!statusChanged && !placesChanged && !driverChanged && !codeChanged && !identityChanged && !cardChanged) return;
     var screen = state.screen;
     applyRide(ride);
     if (screen === "waiting" && (ride.status === "accepted" || ride.status === "started" || ride.status === "completed")) state.screen = "trip";
     if ((ride.status === "accepted" || ride.status === "started" || ride.status === "completed") && state.screen !== "trip") state.screen = "trip";
-    var onlyDriver = !statusChanged && !placesChanged && !identityChanged && driverChanged && state.screen === screen;
+    var onlyDriver = !statusChanged && !placesChanged && !identityChanged && !cardChanged && driverChanged && state.screen === screen;
     if (onlyDriver && carMarker && isCoord(state.driverLat) && isCoord(state.driverLng)) {
       carMarker.setLatLng([+state.driverLat, +state.driverLng]);
       refreshDriverEtaDom();
@@ -3360,7 +4238,7 @@
       })() + "</p>" +
       '<button class="btn" type="submit">Log in</button>' +
       "</form>" +
-      '<a class="btn secondary" href="signup/?v=21">Create an account</a>'
+      '<a class="btn secondary" href="signup/?v=22">Create an account</a>'
     );
   }
 
@@ -3394,6 +4272,7 @@
       : "";
     return (
       '<div class="app-nav">' + logoutLine() + "</div>" +
+      (state.notice ? '<p class="note notice-ok" role="status">' + esc(state.notice) + "</p>" : "") +
       "<h2>Request a ride</h2>" +
       "<p class=\"lede\">Request goes to Private Car Services for confirmation. Card charges are not taken on this screen.</p>" +
       (testModeAvailable()
@@ -3402,20 +4281,9 @@
         : "") +
       (state.isTest ? testBannerHtml() : "") +
       "<form id=\"ride-form\" autocomplete=\"off\">" +
-      '<div class="group"><p class="group-title">Pickup</p>' +
-      locateField("pickup-street", "Street", state.pickupStreet, "pickup-results", "use-location") +
-      '<div class="row"><div class="city">' +
-      field("pickup-city", "City", state.pickupCity, "required") +
-      '</div><div class="state">' +
-      field("pickup-state", "State", state.pickupState, 'required maxlength="2"') +
-      "</div></div></div>" +
-      '<div class="group"><p class="group-title">Drop-off</p>' +
-      locateField("drop-street", "Street", state.dropStreet, "drop-results", "") +
-      '<div class="row"><div class="city">' +
-      field("drop-city", "City", state.dropCity, "required") +
-      '</div><div class="state">' +
-      field("drop-state", "State", state.dropState, 'required maxlength="2"') +
-      "</div></div></div>" +
+      addrBlockHtml("pickup", "From", { locate: true, required: true }) +
+      addrBlockHtml("drop", "To", { required: true }) +
+      stopsHtml() +
       '<div class="group"><p class="group-title">When</p>' +
       '<div class="when-modes" role="tablist" aria-label="Pickup time">' +
       '<button type="button" role="tab" id="when-asap" aria-selected="' + (state.asap ? "true" : "false") + '">ASAP</button>' +
@@ -3439,7 +4307,7 @@
       field("rider-phone", "Phone", state.phone, 'type="tel" inputmode="tel" required') +
       "</div>" +
       '<p class="note">Miles round up to the next whole mile. Texas tax is 8.25% and is estimate-only, not a charge.</p>' +
-      paymentHoldCopy() +
+      paymentInfoCopy() +
       '<p class="fine">Cancel before pickup: a fee of 25% of the estimate or $10 (whichever is more) may apply. Automatic charging is not live yet.</p>' +
       '<p class="error" id="form-error" role="alert">' + esc(state.error) + "</p>" +
       '<button class="btn" type="submit">Request this ride</button>' +
@@ -3500,7 +4368,7 @@
       pin("pin-drop", "pin-drop", "Drop-off", drop) +
       '<div class="pin pin-car" id="pin-car" style="left:' + start.x + '%;top:' + start.y + '%"><div class="car-face" id="illus-car">' + CAR_SVG + "</div></div>" +
       "</div>" +
-      '<p class="map-caption">' + (isFinite(state.hereLat) && route.live ? "You, pickup, and drop-off" : (route.live ? "Your route" : "Sample map · Willis")) + "</p>" +
+      '<p class="map-caption">' + (isFinite(state.hereLat) && route.live ? "You, pickup, and drop-off" : (route.live ? "Your route" : "Sample map")) + "</p>" +
       "</div>" +
       '<p class="legend"><span><i class="swatch"></i> ' + (isFinite(state.hereLat) ? "You" : "Sample car") + "</span>" +
       '<span><i class="swatch you"></i> ' + esc(youLabel) + "</span>" +
@@ -3532,7 +4400,6 @@
       grid +
       '<polyline points="' + (roadAttr || (start.x + "," + start.y + " " + pickup.x + "," + pickup.y + " " + drop.x + "," + drop.y)) +
       '" fill="none" stroke="#e7c56a" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>' +
-      '<text x="50" y="48" text-anchor="middle" fill="#f0d48a" font-size="5" font-family="Georgia, serif">WILLIS</text>' +
       "</svg>"
     );
   }
@@ -3611,7 +4478,7 @@
     var both = !!(placeCoords("pickup") && placeCoords("drop"));
     var driver = savedDriverPoint();
     var caption = !both
-      ? "Sample map · Willis"
+      ? "Your route"
       : (driver ? "Your driver" : "Driver location shows once they accept on a linked phone.");
     var near = driverNearPickup();
     var started = state.rideStatus === "started";
@@ -3626,26 +4493,21 @@
           : waitingStatusBlock(near || state.driverName ? "Driver on the way" : "Drivers are available"))) +
       driverIdentityLine() +
       driverEtaLine() +
-      "<p class=\"lede\">" + esc(pickupLine()) + " → " + esc(dropLine()) + "<br>" + esc(prettyWhen()) + "</p>" +
+      routeLedeHtml() +
       (started || completed ? "" : riderPinBanner()) +
       customerMapBlock(caption, driver) +
       moneyCard() +
       (completed
-        ? '<div class="card payment-card"><p class="tag">Pay after the ride' + (testSkipPayEnabled() ? " · testing" : "") + "</p>" +
-          '<p class="lede">Your card on file is charged after drop-off so you can add a tip.</p>' +
-          (state.paymentSkipped || testSkipPayEnabled()
-            ? '<p class="fine">Testing: no real Square charge on this screen.</p>' +
-              (state.paymentSkipped ? "" : '<button class="btn ghost" type="button" id="skip-pay-btn">Skip for testing</button>')
-            : '<button class="btn secondary" type="button" id="square-hold-btn">Continue to Square</button>') +
+        ? '<div class="card payment-card"><p class="tag">Pay after the ride</p>' +
+          '<p class="lede">' + esc(state.isTest || state.cardStatus === "test_skip" || state.paymentSkipped
+            ? "Test ride: no charge."
+            : (state.cardStatus === "on_file"
+              ? "Your card on file is charged after drop-off, so you can add a tip."
+              : "Private Car Services will text your receipt and a secure payment link.")) + "</p>" +
           "</div>"
         : "") +
-      (state.rideStatus === "accepted"
-        ? '<div class="card">' +
-          '<p class="tag">Cancel before pickup</p>' +
-          '<p class="lede">' + esc(cancelWarningCopy()) + "</p>" +
-          '<button class="btn secondary" type="button" id="cancel-ride">Cancel ride</button>' +
-          "</div>"
-        : "") +
+      (started || completed ? "" : paymentStatusCard()) +
+      cancelBlockHtml() +
       (started
         ? '<p class="fine">This ride has started. Only your driver can complete or end it.</p>'
         : "") +
@@ -3658,9 +4520,11 @@
     var testTop = testBannerHtml();
     var both = !!(placeCoords("pickup") && placeCoords("drop"));
     var driver = savedDriverPoint();
-    var caption = !both ? "Sample map · Willis" : (driver ? "Your driver" : "Your route");
+    var caption = !both ? "Your route" : (driver ? "Your driver" : "Your route");
     var st = String(state.rideStatus || "").toLowerCase();
-    var note = st === "pending_owner"
+    var note = st === "cancelled"
+      ? "This ride was cancelled. Tap ← Request to book a new ride, or call " + BUSINESS_PHONE + "."
+      : st === "pending_owner"
       ? "Your request was saved. Private Car Services must confirm it before drivers can accept."
       : (st === "denied"
         ? "This booking was declined. Call " + BUSINESS_PHONE + " or request a different time."
@@ -3673,28 +4537,24 @@
       : (st === "pending_owner"
         ? "Waiting for confirmation"
         : (near ? "Waiting for a driver" : (driversOnlineNow().length ? "Drivers are available" : "Waiting for a driver")));
-    var canCancel = st === "requested" || st === "accepted" || st === "pending_owner";
     var statusHtml = st === "denied"
       ? '<div class="status"><i></i><span>Booking declined</span></div>'
-      : waitingStatusBlock(waitLabel);
+      : (st === "cancelled"
+        ? '<div class="status"><i></i><span>Ride cancelled</span></div>'
+        : waitingStatusBlock(waitLabel));
+    var live = st !== "denied" && st !== "cancelled";
     return (
       '<button class="btn ghost" type="button" id="back-home">← Request</button>' +
       statusHtml +
       driverIdentityLine() +
       driverEtaLine() +
-      "<p class=\"lede\">" + esc(pickupLine()) + " → " + esc(dropLine()) + "<br>" + esc(prettyWhen()) + "</p>" +
-      testTop + riderPinBanner() +
+      routeLedeHtml() +
+      testTop + (live ? riderPinBanner() : "") +
       customerMapBlock(caption, driver) +
       moneyCard() +
-      paymentHoldCopy() +
-      '<p class="note">' + note + "</p>" +
-      (canCancel
-        ? '<div class="card">' +
-          '<p class="tag">Cancel before pickup</p>' +
-          '<p class="lede">' + esc(cancelWarningCopy()) + "</p>" +
-          '<button class="btn secondary" type="button" id="cancel-ride">Cancel ride</button>' +
-          "</div>"
-        : "")
+      (live ? paymentStatusCard() : "") +
+      '<p class="note">' + esc(note) + "</p>" +
+      cancelBlockHtml()
     );
   }
 
@@ -3708,6 +4568,17 @@
     state.dropStreet = ride.dropStreet || "";
     state.dropCity = ride.dropCity || "";
     state.dropState = ride.dropState || "TX";
+    state.pickupLine2 = ride.pickupLine2 || "";
+    state.pickupZip = ride.pickupZip || "";
+    state.pickupPinned = !!ride.pickupPinned;
+    state.dropLine2 = ride.dropLine2 || "";
+    state.dropZip = ride.dropZip || "";
+    state.dropPinned = !!ride.dropPinned;
+    state.stopList = normalizeStops(ride.stopList);
+    state.cardStatus = ride.cardStatus || "";
+    state.cardLast4 = ride.cardLast4 || "";
+    state.cardBrand = ride.cardBrand || "";
+    if (state.cardStatus === "test_skip") state.paymentSkipped = true;
     state.asap = rideIsAsap(ride);
     if (!state.asap && ride.date && ride.time && isPickupInPast(ride.date, ride.time)) {
       state.date = "";
@@ -3828,6 +4699,18 @@
       dropStreet: state.dropStreet,
       dropCity: state.dropCity,
       dropState: state.dropState,
+      pickupLine2: state.pickupLine2 || "",
+      pickupZip: state.pickupZip || "",
+      pickupAddress: pickupLine(),
+      pickupPinned: !!state.pickupPinned,
+      dropLine2: state.dropLine2 || "",
+      dropZip: state.dropZip || "",
+      dropAddress: dropLine(),
+      dropPinned: !!state.dropPinned,
+      stopList: compactStops(),
+      cardStatus: state.cardStatus || "",
+      cardLast4: state.cardLast4 || "",
+      cardBrand: state.cardBrand || "",
       date: state.date,
       time: state.time,
       asap: !!state.asap,
@@ -3876,6 +4759,19 @@
     state.pickupCity = "";
     state.dropStreet = "";
     state.dropCity = "";
+    state.pickupLine2 = "";
+    state.pickupZip = "";
+    state.pickupPinned = false;
+    state.dropLine2 = "";
+    state.dropZip = "";
+    state.dropPinned = false;
+    state.stopList = [];
+    state.cardStatus = "";
+    state.cardLast4 = "";
+    state.cardBrand = "";
+    state.cancelConfirm = false;
+    state.cancelBusy = false;
+    state.cancelError = "";
     state.date = "";
     state.time = "";
     state.asap = true;
@@ -4039,6 +4935,10 @@
     return (
       accountNav() +
       '<p class="fine" id="miles-today">' + esc(milesTodayLabel()) + "</p>" +
+      (state.driverNotice
+        ? '<div class="card notice-card" role="status"><p class="lede">' + esc(state.driverNotice) + "</p>" +
+          '<button class="btn ghost" type="button" id="dismiss-driver-notice">OK</button></div>'
+        : "") +
       approvalGateCard() +
       vehicleNeededCard() +
       milesStartCard() +
@@ -4150,6 +5050,7 @@
       pinGate +
       (started || completed ? "" : (
         '<div class="card"><p class="tag">This ride</p>' +
+        stopsSummaryHtml() +
         "<p><strong>Drop-off</strong><br>" + esc(dropLine()) + "</p>" +
         commissionLine() +
         "<p class=\"fine\">" + esc(prettyWhen()) + ". Miles round up. Texas tax 8.25% stays estimate-only.</p></div>"
@@ -4157,6 +5058,7 @@
       (started ? (
         '<div class="card"><p class="tag">This ride</p>' +
         "<p><strong>Pickup</strong><br>" + esc(pickupLine()) + "</p>" +
+        stopsSummaryHtml() +
         "<p><strong>Drop-off</strong><br>" + esc(dropLine()) + "</p>" +
         "<p class=\"fine\">" + esc(prettyWhen()) + "</p></div>" +
         driverFareCard("") +
@@ -4255,12 +5157,8 @@
       var el = document.getElementById(id);
       return el ? el.value.trim() : "";
     }
-    state.pickupStreet = val("pickup-street");
-    state.pickupCity = val("pickup-city");
-    state.pickupState = val("pickup-state").toUpperCase();
-    state.dropStreet = val("drop-street");
-    state.dropCity = val("drop-city");
-    state.dropState = val("drop-state").toUpperCase();
+    addrPrefixes().forEach(readAddr);
+    state.stops = filledStops().length;
     if (state.asap) {
       stampAsapNow();
     } else {
@@ -4276,6 +5174,7 @@
 
   function formComplete() {
     var whenOk = state.asap || (state.date && state.time);
+    if (filledStops().some(function (s) { return !String(s.city || "").trim() || !String(s.state || "").trim(); })) return false;
     return state.pickupStreet && state.pickupCity && state.pickupState &&
       state.dropStreet && state.dropCity && state.dropState &&
       whenOk && state.name && state.phone;
@@ -4323,6 +5222,7 @@
           if (ROLE === "driver") {
             ensureMilesDayReady();
             followGps();
+            acquireWakeLock();
             refreshRosterStatus().then(function () {
               if (canGoOnline()) {
                 refreshOpenRides(true);
@@ -4449,6 +5349,7 @@
           if (ROLE === "driver") {
             ensureMilesDayReady();
             followGps();
+            acquireWakeLock();
             refreshRosterStatus().then(function () {
               if (canGoOnline()) {
                 refreshOpenRides(true);
@@ -4497,6 +5398,7 @@
           render();
           return;
         }
+        if (document.getElementById("ride-form")) readForm();
         state.isTest = !!testToggle.checked;
         if (state.isTest) {
           state.paymentSkipped = true;
@@ -4522,6 +5424,13 @@
     function finishDriverLogout() {
       stopOpenRideAlert();
       if (ROLE === "driver") {
+        var openRow = todayMilesRow();
+        if (openRow && Number(openRow.shiftStartAt) > 0) {
+          closeOnlineSegment(openRow, Date.now());
+          openRow.lastUpdate = Date.now();
+          persistMilesRow(openRow);
+        }
+        releaseWakeLock();
         clearDriverPresence();
         state.milesEndPrompt = false;
         state.milesTrackLat = null;
@@ -4560,7 +5469,10 @@
           gpsMiles: keepMiles,
           startedAt: prev.startedAt || now,
           lastUpdate: now,
-          shiftClosed: false
+          shiftClosed: false,
+          /* Online time: earlier shifts today + this shift from now. */
+          onlineMs: Number(closeOnlineSegment(Object.assign({}, prev), now).onlineMs) || 0,
+          shiftStartAt: now
         };
         if (prev.endOdometer != null) row.priorEndOdometer = prev.endOdometer;
         /* Explicitly reopen: no endOdometer / shiftClosed on the new shift row. */
@@ -4575,6 +5487,7 @@
         state.milesTrackAt = 0;
         persistMilesRow(row).then(function () {
           followGps();
+          acquireWakeLock();
           refreshOpenRides(true);
           publishDriverPresence();
           render();
@@ -4600,6 +5513,7 @@
             startedAt: Date.now(),
             lastUpdate: Date.now()
           };
+          closeOnlineSegment(row, Date.now());
           row.endOdometer = odo;
           row.shiftClosed = true;
           row.lastUpdate = Date.now();
@@ -4607,6 +5521,7 @@
         } else {
           var closed = todayMilesRow();
           if (closed) {
+            closeOnlineSegment(closed, Date.now());
             closed.shiftClosed = true;
             closed.lastUpdate = Date.now();
             persistMilesRow(closed);
@@ -4620,6 +5535,7 @@
       milesEndSkip.addEventListener("click", function () {
         var closed = todayMilesRow();
         if (closed) {
+          closeOnlineSegment(closed, Date.now());
           closed.shiftClosed = true;
           closed.lastUpdate = Date.now();
           persistMilesRow(closed);
@@ -4658,9 +5574,32 @@
         render();
       });
     }
-    wireSearch("pickup-street", "pickup-results", "pickup");
-    wireSearch("drop-street", "drop-results", "drop");
+    addrPrefixes().forEach(function (prefix) { wireSearch(prefix); });
+    wireAddressInputs();
     wireLocation();
+    var addStopBtn = document.getElementById("add-stop");
+    if (addStopBtn) {
+      addStopBtn.addEventListener("click", function () {
+        if (document.getElementById("ride-form")) readForm();
+        if (!state.stopList) state.stopList = [];
+        if (state.stopList.length >= MAX_STOPS) return;
+        state.stopList.push(blankStop());
+        var idx = state.stopList.length - 1;
+        render();
+        var first = document.getElementById("stop" + idx + "-street");
+        if (first) first.focus();
+      });
+    }
+    Array.prototype.forEach.call(document.querySelectorAll("[data-stop-remove]"), function (btn) {
+      btn.addEventListener("click", function () {
+        if (document.getElementById("ride-form")) readForm();
+        var i = Number(btn.getAttribute("data-stop-remove"));
+        if (isFinite(i) && state.stopList && state.stopList[i]) state.stopList.splice(i, 1);
+        state.stops = filledStops().length;
+        resetDrivingRoute();
+        render();
+      });
+    });
     var whenAsapBtn = document.getElementById("when-asap");
     var whenSchedBtn = document.getElementById("when-schedule");
     if (whenAsapBtn) {
@@ -4687,10 +5626,22 @@
       form.addEventListener("submit", function (event) {
         event.preventDefault();
         readForm();
+        state.notice = "";
+        state.stopList = (state.stopList || []).filter(function (s) { return s && String(s.street || "").trim(); });
+        state.stops = state.stopList.length;
+        var badStop = -1;
+        state.stopList.forEach(function (s, i) {
+          if (badStop < 0 && (!String(s.city || "").trim() || !String(s.state || "").trim())) badStop = i;
+        });
+        if (badStop >= 0) {
+          state.error = "Finish Stop " + (badStop + 1) + " (address line 1, city and state), or remove it.";
+          render();
+          return;
+        }
         if (!formComplete()) {
           state.error = state.asap
-            ? "Add pickup, drop-off, name, and phone."
-            : "Add pickup, drop-off, date, time, name, and phone.";
+            ? "Add From and To (address line 1, city, state), plus your name and phone."
+            : "Add From and To (address line 1, city, state), date, time, name, and phone.";
           render();
           return;
         }
@@ -4723,6 +5674,12 @@
           state.pinDraft = "";
           state.pinError = "";
           state.paymentSkipped = !!state.isTest; /* TEST rides never charge / never open Square */
+          state.cardStatus = state.isTest ? "test_skip" : "none";
+          state.cardLast4 = "";
+          state.cardBrand = "";
+          state.cancelConfirm = false;
+          state.cancelBusy = false;
+          state.cancelError = "";
           geocodeMissing().then(function () {
             saveRide("pending_owner", { clearDriver: true });
             var created = currentRide();
@@ -4797,6 +5754,7 @@
     var backHome = document.getElementById("back-home");
     if (backHome) {
       backHome.addEventListener("click", function () {
+        if (String(state.rideStatus || "").toLowerCase() === "cancelled") discardStoredRide();
         state.mode = "customer";
         state.screen = "home";
         render();
@@ -4893,20 +5851,50 @@
     var cancelRide = document.getElementById("cancel-ride");
     if (cancelRide) {
       cancelRide.addEventListener("click", function () {
+        state.cancelConfirm = true;
+        state.cancelError = "";
+        render();
+        var card = document.getElementById("cancel-card");
+        if (card && card.scrollIntoView) card.scrollIntoView({ block: "center" });
+      });
+    }
+    var cancelYes = document.getElementById("cancel-ride-yes");
+    if (cancelYes) {
+      cancelYes.addEventListener("click", function () {
         cancelRiderRide();
+      });
+    }
+    var cancelNo = document.getElementById("cancel-ride-no");
+    if (cancelNo) {
+      cancelNo.addEventListener("click", function () {
+        state.cancelConfirm = false;
+        state.cancelError = "";
+        render();
       });
     }
     var squareHold = document.getElementById("square-hold-btn");
     if (squareHold) {
       squareHold.addEventListener("click", function () {
-        openSquareCardSetup();
+        openCardStep();
       });
     }
     var skipPay = document.getElementById("skip-pay-btn");
     if (skipPay) {
       skipPay.addEventListener("click", function () {
         state.paymentSkipped = true;
+        state.cardStatus = "test_skip";
         try { localStorage.setItem("PCS_TEST_SKIP_PAY", "true"); } catch (e) {}
+        if (state.code && state.rideStatus) {
+          saveRide(state.rideStatus);
+          if (syncOn()) patchRide(state.code, { cardStatus: "test_skip", cardSkippedAt: Date.now() }).catch(function () {});
+        }
+        render();
+      });
+    }
+    var dismissNotice = document.getElementById("dismiss-driver-notice");
+    if (dismissNotice) {
+      dismissNotice.addEventListener("click", function () {
+        state.driverNotice = "";
         render();
       });
     }
@@ -4992,12 +5980,33 @@
   }
 
 
-  function geocodeQuery(text, city, stateName) {
-    var usedCity = placeQueryCity(text, city);
-    return collectPlaces(text, usedCity, stateName || "TX").then(function (features) {
-      var ranked = rankFeatures(features, text, usedCity);
-      return ranked[0] || null;
-    }).catch(function () { return null; });
+  function geocodeQuery(text, city, stateName, zip, prefix) {
+    var base = String(text || "").trim();
+    if (!base) return Promise.resolve(null);
+    var low = base.toLowerCase();
+    var parts = [base];
+    if (city && low.indexOf(String(city).toLowerCase()) === -1) parts.push(city);
+    var st = String(stateName || "TX").trim();
+    if (st && low.indexOf(" " + st.toLowerCase()) === -1) parts.push(st);
+    if (zip && low.indexOf(String(zip)) === -1) parts.push(zip);
+    var q = parts.join(", ");
+    function viaPhoton() {
+      return findPlaces(q, searchOrigin(prefix || "drop"), { city: city || "", zip: zip || "" }).then(function (items) {
+        return items[0] ? items[0].feature : null;
+      }).catch(function () { return null; });
+    }
+    /* House-number addresses: OpenStreetMap's Nominatim knows exact houses; Photon often only the street. */
+    if (!/^\d+[A-Za-z]?\s/.test(base)) return viaPhoton();
+    return withTimeout(fetch("https://nominatim.openstreetmap.org/search?format=jsonv2&limit=1&countrycodes=us&q=" + encodeURIComponent(q), {
+      headers: { "Accept": "application/json" }
+    }).then(function (res) {
+      if (!res.ok) throw new Error("nominatim");
+      return res.json();
+    }), 7000).then(function (list) {
+      var hit = list && list[0];
+      if (!hit || !isCoord(+hit.lat) || !isCoord(+hit.lon)) return viaPhoton();
+      return { type: "Feature", geometry: { type: "Point", coordinates: [+hit.lon, +hit.lat] }, properties: { name: base, source: "nominatim" } };
+    }).catch(viaPhoton);
   }
 
   function ensureCustomerCoords() {
@@ -5027,15 +6036,28 @@
 
   function geocodeMissing() {
     var jobs = [];
-    if (state.pickupStreet && !state.pickupFromHere) {
-      jobs.push(geocodeQuery(state.pickupStreet, state.pickupCity, state.pickupState).then(function (feature) {
+    /* Picked from the list / current location: keep that exact pin (never swap to another store). */
+    var pickupPinned = !!state.pickupPinned && !!placeCoords("pickup");
+    var dropPinned = !!state.dropPinned && !!placeCoords("drop");
+    (state.stopList || []).forEach(function (s, i) {
+      if (!s || !String(s.street || "").trim()) return;
+      if (s.pinned && isCoord(s.lat) && isCoord(s.lng)) return;
+      jobs.push(geocodeQuery(s.street, s.city, s.state, s.zip, "stop" + i).then(function (feature) {
+        var pt = featurePoint(feature);
+        if (!pt || !state.stopList[i]) return;
+        state.stopList[i].lat = pt.lat;
+        state.stopList[i].lng = pt.lng;
+      }));
+    });
+    if (state.pickupStreet && !state.pickupFromHere && !pickupPinned) {
+      jobs.push(geocodeQuery(state.pickupStreet, state.pickupCity, state.pickupState, state.pickupZip, "pickup").then(function (feature) {
         if (!feature) return;
         var saved = placeCoords("pickup");
         if (!saved || placeLooksWeak(saved, feature, state.pickupStreet, state.pickupCity)) setCoords("pickup", feature);
       }));
     }
-    if (state.dropStreet) {
-      jobs.push(geocodeQuery(state.dropStreet, state.dropCity, state.dropState).then(function (feature) {
+    if (state.dropStreet && !dropPinned) {
+      jobs.push(geocodeQuery(state.dropStreet, state.dropCity, state.dropState, state.dropZip, "drop").then(function (feature) {
         if (!feature) return;
         var saved = placeCoords("drop");
         if (!saved || placeLooksWeak(saved, feature, state.dropStreet, state.dropCity)) {
@@ -5464,6 +6486,9 @@
       }
       window.L.marker([pickup.lat, pickup.lng], { icon: pinIcon("Pickup", "pin-you") }).addTo(liveMap);
       window.L.marker([drop.lat, drop.lng], { icon: pinIcon("Drop-off", "pin-drop") }).addTo(liveMap);
+      viaPoints().forEach(function (p, i) {
+        window.L.marker([p.lat, p.lng], { icon: pinIcon("Stop " + (i + 1), "pin-drop") }).addTo(liveMap);
+      });
       if (driver) {
         carMarker = window.L.marker([driver.lat, driver.lng], {
           icon: window.L.divIcon({
@@ -5728,6 +6753,7 @@
     if (ROLE === "driver" && signedIn()) {
       ensureMilesDayReady();
       followGps();
+      acquireWakeLock();
       refreshRosterStatus().then(function () {
         if (canGoOnline()) {
           refreshOpenRides(true);
@@ -5745,6 +6771,7 @@
       syncRide();
     }, 1000);
     setInterval(pullRemoteRide, 3000);
+    setInterval(pollDriverRideCancel, 5000);
     setInterval(function () {
       if (ROLE === "driver" && signedIn() && state.screen === "home" && canGoOnline() && !state.hubOpen) refreshOpenRides();
     }, 3000);
@@ -5770,8 +6797,17 @@
     });
     document.addEventListener("visibilitychange", function () {
       if (document.visibilityState !== "visible") return;
-      if (ROLE === "driver" && signedIn()) nudgeGps();
+      if (ROLE === "driver" && signedIn()) {
+        nudgeGps();
+        acquireWakeLock(); /* the browser drops the lock when the app is hidden */
+        refreshMilesTodayDom();
+      }
     });
+    if (ROLE === "driver") {
+      /* Some browsers only grant the lock after a tap. */
+      document.addEventListener("pointerdown", function () { acquireWakeLock(); }, true);
+      setInterval(refreshMilesTodayDom, 30000);
+    }
     setInterval(function () {
       if (ROLE !== "driver" || !signedIn()) return;
       if (document.visibilityState === "hidden") return;

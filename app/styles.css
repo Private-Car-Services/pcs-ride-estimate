@@ -813,3 +813,66 @@ a.btn + .btn, .btn + a.btn, a.btn + a.btn { margin-top: 8px; }
 .scheduled-ride-card .lede {
   margin-top: 0;
 }
+
+/* ---------- v46 (Oct 6): structured addresses, stops, nearest-first suggestions ---------- */
+.addr-block { margin: 0 0 14px; }
+.addr-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.addr-head .group-title { margin-bottom: 2px; }
+.label-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.label-row label { margin: 8px 0 6px; }
+.locate-mini {
+  background: transparent;
+  border: 0;
+  padding: 6px 0;
+  color: var(--gold-2);
+  font-size: 14px;
+  font-weight: 700;
+  text-align: right;
+  cursor: pointer;
+}
+.locate-mini:disabled { opacity: 0.7; }
+.optional-tag { text-transform: none; letter-spacing: 0; color: var(--muted); opacity: 0.8; font-weight: 400; }
+.row.three .city { flex: 1 1 auto; min-width: 0; }
+.row.three .state { width: 64px; flex: 0 0 64px; }
+.row.three .zip { width: 92px; flex: 0 0 92px; }
+.suggest { max-height: 360px; overflow-y: auto; }
+.suggest-item { cursor: pointer; }
+.suggest-item .suggest-main {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 10px;
+  width: 100%;
+  color: var(--ink);
+  font-size: 15px;
+}
+.suggest-item .suggest-main strong { font-weight: 700; }
+.suggest-item .suggest-dist {
+  flex: 0 0 auto;
+  font-style: normal;
+  font-weight: 800;
+  color: var(--gold-2);
+  font-size: 13px;
+  white-space: nowrap;
+}
+.suggest-note { margin: 0; padding: 8px 12px; color: var(--muted); font-size: 12px; border-bottom: 1px solid rgba(212, 177, 90, 0.18); }
+.stops-block { margin: 4px 0 14px; }
+.link-add-stop, .link-btn {
+  background: transparent;
+  border: 0;
+  padding: 8px 0;
+  color: var(--gold-2);
+  font-size: 16px;
+  font-weight: 800;
+  cursor: pointer;
+}
+.link-btn.remove-stop { font-size: 14px; font-weight: 700; color: #ffc9c9; }
+
+/* Card step + cancel */
+.card-needed { border-color: rgba(240, 212, 138, 0.7); }
+.card-sheet-back { align-items: center; overflow-y: auto; }
+.sq-card { min-height: 96px; margin: 10px 0 4px; }
+.btn.danger { background: linear-gradient(180deg, #e7867a, #b8473b); color: #fff; }
+.cancel-card { border-color: rgba(231, 134, 122, 0.6); }
+.notice-ok { background: rgba(143, 208, 168, 0.12); border: 1px solid rgba(143, 208, 168, 0.4); border-radius: 12px; padding: 10px 12px; }
+.notice-card { border-color: rgba(231, 134, 122, 0.6); }
