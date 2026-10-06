@@ -1100,6 +1100,16 @@
       pickupLng: ride ? ride.pickupLng : null,
       dropLat: ride ? ride.dropLat : null,
       dropLng: ride ? ride.dropLng : null,
+      /* v48: keep the fields the driver app filters/shows on (TEST rides must stay hidden from other drivers). */
+      isTest: !!(ride && (ride.isTest === true || String(ride.isTest).toLowerCase() === "true")),
+      cardStatus: (ride && ride.cardStatus) || "",
+      pickupZip: (ride && ride.pickupZip) || "",
+      dropZip: (ride && ride.dropZip) || "",
+      pickupAddress: (ride && ride.pickupAddress) || "",
+      dropAddress: (ride && ride.dropAddress) || "",
+      pickupLine2: (ride && ride.pickupLine2) || "",
+      dropLine2: (ride && ride.dropLine2) || "",
+      stops: ride && ride.stops != null ? Number(ride.stops) || 0 : 0,
       updatedAt: Date.now(),
       requestedAt: (ride && (ride.requestedAt || ride.createdAt)) || Date.now()
     };
@@ -1111,6 +1121,93 @@
       if (!res.ok) throw new Error("open");
       return res.text().then(function () {});
     });
+  }
+
+  function godIsCoord(n) { return typeof n === "number" && isFinite(n) && Math.abs(n) <= 180; }
+
+  function godMiles(a, b) {
+    var R = 3958.8, toR = Math.PI / 180;
+    var dLat = (b.lat - a.lat) * toR, dLng = (b.lng - a.lng) * toR;
+    var h = Math.sin(dLat / 2) * Math.sin(dLat / 2) + Math.cos(a.lat * toR) * Math.cos(b.lat * toR) * Math.sin(dLng / 2) * Math.sin(dLng / 2);
+    return 2 * R * Math.asin(Math.sqrt(h));
+  }
+
+  function godTimeout(promise, ms) {
+    return new Promise(function (resolve, reject) {
+      var t = setTimeout(function () { reject(new Error("timeout")); }, ms);
+      promise.then(function (v) { clearTimeout(t); resolve(v); }, function (e) { clearTimeout(t); reject(e); });
+    });
+  }
+
+  /* street + city + state (ZIP optional) -> { lat, lng, zip, level, label } nearest the pickup. */
+  function findDropForRide(ride) {
+    var street = String((ride && ride.dropStreet) || "").trim();
+    var city = String((ride && ride.dropCity) || "").trim();
+    var st = String((ride && ride.dropState) || "TX").trim() || "TX";
+    var zip = String((ride && ride.dropZip) || "").trim();
+    if (!street) return Promise.resolve(null);
+    var near = godIsCoord(ride.pickupLat) && godIsCoord(ride.pickupLng) ? { lat: +ride.pickupLat, lng: +ride.pickupLng } : { lat: 30.33, lng: -95.52 };
+    var num = (street.match(/^(\d+[A-Za-z]?)\s/) || [])[1] || "";
+    var skip = { dr: 1, drive: 1, st: 1, street: 1, rd: 1, road: 1, ln: 1, lane: 1, ave: 1, avenue: 1, blvd: 1, ct: 1, court: 1, cir: 1, circle: 1, way: 1, trl: 1, trail: 1, pkwy: 1, loop: 1, n: 1, s: 1, e: 1, w: 1, north: 1, south: 1, east: 1, west: 1 };
+    var core = street.replace(/^\s*\d+[A-Za-z]?\s+/, "").toLowerCase().replace(/[^a-z0-9 ]+/g, " ").split(/\s+/).filter(function (w) { return w.length > 2 && !skip[w]; });
+    function coreOk(text) {
+      var t = " " + String(text || "").toLowerCase().replace(/[^a-z0-9]+/g, " ");
+      return core.length && core.every(function (w) { return t.indexOf(" " + w) !== -1; });
+    }
+    function nominatim(params) {
+      return godTimeout(fetch("https://nominatim.openstreetmap.org/search?format=jsonv2&addressdetails=1&limit=5&countrycodes=us&" + params).then(function (r) {
+        if (!r.ok) throw new Error("nominatim");
+        return r.json();
+      }), 7000).then(function (list) {
+        return (Array.isArray(list) ? list : []).map(function (h) {
+          var a = h.address || {};
+          var pt = { lat: +h.lat, lng: +h.lon };
+          return { lat: pt.lat, lng: pt.lng, house: a.house_number || "", road: a.road || "", city: a.city || a.town || a.village || "", zip: String(a.postcode || "").slice(0, 5), dist: godMiles(near, pt) };
+        }).filter(function (h) { return godIsCoord(h.lat) && h.dist < 300; }).sort(function (a, b) { return a.dist - b.dist; });
+      }).catch(function () { return []; });
+    }
+    function label(h) { return [[h.house, h.road].filter(Boolean).join(" "), h.city, st, h.zip].filter(Boolean).join(", "); }
+    var structured = "street=" + encodeURIComponent(street) + (city ? "&city=" + encodeURIComponent(city) : "") + "&state=" + encodeURIComponent(st) + (zip ? "&postalcode=" + encodeURIComponent(zip) : "");
+    return nominatim(structured).then(function (hits) {
+      var exact = hits.filter(function (h) { return num && h.house === num; })[0];
+      if (exact) return { lat: exact.lat, lng: exact.lng, zip: exact.zip, level: "exact", label: label(exact) };
+      var road = hits.filter(function (h) { return coreOk(h.road); })[0];
+      if (road) return { lat: road.lat, lng: road.lng, zip: road.zip, level: "street", label: "near " + label(road) };
+      /* Street name alone, nearest the pickup (e.g. "Veilwood" -> Veilwood Cir, The Woodlands). */
+      return godTimeout(fetch("https://photon.komoot.io/api/?limit=10&lang=en&location_bias_scale=0.1&lat=" + near.lat + "&lon=" + near.lng + "&q=" + encodeURIComponent(core.join(" "))).then(function (r) { return r.json(); }), 8000).then(function (data) {
+        var best = null;
+        ((data && data.features) || []).forEach(function (f) {
+          var pr = f.properties || {};
+          var c = (f.geometry && f.geometry.coordinates) || [];
+          var pt = { lat: +c[1], lng: +c[0] };
+          if (!godIsCoord(pt.lat) || !coreOk(pr.street || pr.name)) return;
+          if (pr.countrycode && String(pr.countrycode).toUpperCase() !== "US") return;
+          var d = godMiles(near, pt);
+          if (d > 60) return;
+          if (!best || d < best.dist) best = { lat: pt.lat, lng: pt.lng, zip: String(pr.postcode || "").slice(0, 5), level: "street", dist: d, label: "near " + [pr.name || pr.street, pr.city, st, String(pr.postcode || "").slice(0, 5)].filter(Boolean).join(", ") };
+        });
+        return best;
+      }).catch(function () { return null; });
+    }).then(function (found) {
+      if (found || !city) return found;
+      return nominatim("city=" + encodeURIComponent(city) + "&state=" + encodeURIComponent(st)).then(function (hits) {
+        var h = hits[0];
+        return h ? { lat: h.lat, lng: h.lng, zip: "", level: "city", label: city + ", " + st + " (city center)" } : null;
+      });
+    });
+  }
+
+  /* Approve / Mark card OK: if the To place was never pinned, find it now and save it on the ride. */
+  function fillMissingDrop(code, ride) {
+    if (!ride || (godIsCoord(ride.dropLat) && godIsCoord(ride.dropLng)) || !ride.dropStreet) return Promise.resolve(ride);
+    return findDropForRide(ride).then(function (f) {
+      if (!f) return ride;
+      var patch = { dropLat: f.lat, dropLng: f.lng, dropApprox: f.level === "exact" ? "" : f.level, dropFound: f.label || "" };
+      if (f.zip && !ride.dropZip && f.level !== "city") patch.dropZip = f.zip;
+      return patchRide(code, patch).then(function () {
+        return Object.assign({}, ride, patch);
+      }).catch(function () { return ride; });
+    }).catch(function () { return ride; });
   }
 
   function approveBooking(code) {
@@ -1134,15 +1231,40 @@
         ownerApprovedAt: next.ownerApprovedAt,
         updatedAt: next.updatedAt
       }).then(function () {
+        return fillMissingDrop(code, next);
+      }).then(function (filled) {
+        next = filled || next;
         return putOpenSummary(code, next);
       }).then(function () {
-        state.actionNotice = "Approved booking " + code + " — drivers can accept it now.";
+        state.actionNotice = "Approved booking " + code + " — drivers can accept it now." +
+          (godIsCoord(next.dropLat) ? (next.dropApprox ? " Drop-off pinned approximately (" + (next.dropFound || "") + ")." : "") : " Drop-off address isn't on the map; drivers can still accept and see the address.");
         state.pendingBanner = "";
         return true;
       });
     }).catch(function () {
       state.actionNotice = "Could not approve booking " + code + ".";
       return false;
+    });
+  }
+
+  function markCardOk(code) {
+    var now = Date.now();
+    return getRide(code).then(function (ride) {
+      if (!ride) throw new Error("missing");
+      var st = String(ride.status || "").toLowerCase();
+      var wasPending = st === "pending_owner" || st === "pending-owner";
+      var patch = { cardStatus: "owner_ok", cardOwnerOkAt: now, updatedAt: now };
+      if (wasPending) {
+        patch.status = "requested";
+        patch.ownerApprovedAt = now;
+      }
+      return patchRide(code, patch).then(function () {
+        var next = Object.assign({}, ride, patch);
+        if (next.status !== "requested") return wasPending;
+        return fillMissingDrop(code, next).then(function (filled) {
+          return putOpenSummary(code, filled || next);
+        }).then(function () { return wasPending; });
+      });
     });
   }
 
@@ -2287,8 +2409,9 @@
         if (!code) return;
         if (!window.confirm("Mark the card OK for ride " + code + "? Do this after the rider pays or adds a card through your Square link.")) return;
         btn.disabled = true;
-        patchRide(String(code).toUpperCase(), { cardStatus: "owner_ok", cardOwnerOkAt: Date.now(), updatedAt: Date.now() }).then(function () {
-          state.actionNotice = "Card marked OK for " + code + " — the rider now gets their PIN.";
+        markCardOk(String(code).toUpperCase()).then(function (wasPending) {
+          state.actionNotice = "Card marked OK for " + code + " — the rider now gets their PIN." +
+            (wasPending ? " Booking approved too, so drivers can accept it now." : "");
         }).catch(function () {
           state.actionNotice = "Could not update the card status for " + code + ".";
         }).then(function () {
