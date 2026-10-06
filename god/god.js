@@ -1118,6 +1118,10 @@
     if (!code) return Promise.resolve(false);
     return getRide(code).then(function (ride) {
       if (!ride) throw new Error("missing");
+      if (String(ride.status || "").toLowerCase() === "cancelled") {
+        state.actionNotice = "Booking " + code + " was already cancelled by the rider.";
+        return false;
+      }
       var next = Object.assign({}, ride, {
         status: "requested",
         ownerApprovedAt: Date.now(),
@@ -2053,6 +2057,51 @@
     return esc(ride.driverName);
   }
 
+  function rideAddressText(r, which) {
+    var full = r && r[which + "Address"];
+    if (full) return String(full);
+    return [r[which + "Street"], r[which + "Line2"], r[which + "City"],
+      [r[which + "State"], r[which + "Zip"]].filter(Boolean).join(" ")].filter(Boolean).join(", ");
+  }
+
+  function rideStopsText(r) {
+    var list = Array.isArray(r && r.stopAddresses) ? r.stopAddresses : [];
+    if (!list.length && Array.isArray(r && r.stopList)) {
+      list = r.stopList.map(function (s) {
+        return s && (s.address || [s.street, s.line2, s.city, [s.state, s.zip].filter(Boolean).join(" ")].filter(Boolean).join(", "));
+      });
+    }
+    return list.filter(Boolean);
+  }
+
+  function isCancelledRide(r) {
+    return String((r && r.status) || "").toLowerCase() === "cancelled";
+  }
+
+  /* Hide cancelled rows after 12 hours so the board stays clean. */
+  function showOnRidesPanel(r) {
+    if (!isCancelledRide(r)) return true;
+    var at = Number(r.cancelledAt || r.updatedAt) || 0;
+    return !at || Date.now() - at < 12 * 3600 * 1000;
+  }
+
+  function cardStatusHtml(r) {
+    var st = String((r && r.cardStatus) || "").toLowerCase();
+    if (st === "on_file") {
+      return "<strong>Card</strong> On file" + (r.cardLast4 ? " (" + esc(r.cardBrand || "card") + " •••• " + esc(r.cardLast4) + ")" : "");
+    }
+    if (st === "owner_ok") return "<strong>Card</strong> OK'd by you";
+    if (st === "test_skip") return "<strong>Card</strong> Skipped (TEST ride)";
+    if (st === "link_requested") return '<strong>Card</strong> <span style="color:#ffc96b">Needs payment link — text the rider a Square link</span>';
+    if (st === "none") return "<strong>Card</strong> Not added yet";
+    return "";
+  }
+
+  function cardNeedsOk(r) {
+    var st = String((r && r.cardStatus) || "").toLowerCase();
+    return (st === "none" || st === "link_requested") && !isCancelledRide(r) && String(r.status || "").toLowerCase() !== "denied";
+  }
+
   function ridesPanelHtml() {
     if (state.ridesError === "denied") {
       return '<p class="empty">Open ride requests cannot be read (permission denied). No riders invented.</p>';
@@ -2060,13 +2109,17 @@
     if (state.ridesError) {
       return '<p class="empty">Could not load ride requests. Showing none.</p>';
     }
-    if (!state.rides.length) {
+    var shown = (state.rides || []).filter(showOnRidesPanel);
+    if (!shown.length) {
       return bookingAlertBannerHtml() + '<p class="empty">No riders requesting a ride right now.</p>';
     }
-    var cards = state.rides.map(function (r) {
+    var cards = shown.map(function (r) {
       var active = isActiveTrip(r);
       var pending = isPendingOwner(r);
       var denied = String(r.status || "").toLowerCase() === "denied";
+      var cancelled = isCancelledRide(r);
+      var stops = rideStopsText(r);
+      var cardLine = cardStatusHtml(r);
       var requestAt = r.updatedAt || r.requestedAt || r.createdAt || null;
       var pickupWhen = fmtWhen(r.date, r.time, r);
       var dropWhen = r.dropTime || r.dropoffTime || r.etaDrop || null;
@@ -2075,17 +2128,27 @@
         ? '<span class="badge on-trip">' + esc(r.status || "on trip") + "</span>"
         : (pending
           ? '<span class="badge pending">Needs your OK</span>'
-          : (denied
-            ? '<span class="badge">Denied</span>'
-            : '<span class="badge">Open to drivers</span>'));
+          : (cancelled
+            ? '<span class="badge">Cancelled' + (r.cancelledBy === "rider" ? " by rider" : "") + "</span>"
+            : (denied
+              ? '<span class="badge">Denied</span>'
+              : '<span class="badge">Open to drivers</span>')));
+      var okCardBtn = cardNeedsOk(r)
+        ? '<button type="button" class="btn btn-ghost btn-card-ok" data-ride-code="' + esc(r.code || "") + '">Mark card OK</button>'
+        : "";
       var actions = pending
         ? ('<div class="commission-row" style="margin-top:8px">' +
           '<button type="button" class="btn btn-gold btn-approve-booking" data-ride-code="' + esc(r.code || "") + '">Approve booking</button>' +
           '<button type="button" class="btn btn-fire btn-deny-booking" data-ride-code="' + esc(r.code || "") + '">Deny</button>' +
+          okCardBtn +
           "</div>")
+        : (okCardBtn ? '<div class="commission-row" style="margin-top:8px">' + okCardBtn + "</div>" : "");
+      var cancelLine = cancelled
+        ? "<br><strong>Cancelled</strong> " + esc(fmtClock(r.cancelledAt || r.updatedAt)) +
+          (Number(r.cancelFeeCents) > 0 ? " · cancel fee $" + (Number(r.cancelFeeCents) / 100).toFixed(2) : "")
         : "";
       return (
-        '<article class="card' + (active ? " paired" : "") + (pending ? " pending-booking" : "") + '">' +
+        '<article class="card' + (active ? " paired" : "") + (pending ? " pending-booking" : "") + '"' + (cancelled ? ' style="opacity:0.65"' : "") + ">" +
           "<h3>" + esc(displayName(r.name, "Rider")) + badge + "</h3>" +
           '<p class="meta">' +
           "<strong>Code</strong> " + esc(r.code || "—") + "<br>" +
@@ -2093,9 +2156,12 @@
           "<strong>Wait time</strong> " + esc(waitLabel(requestAt)) + "<br>" +
           "<strong>Pickup time</strong> " + esc(pickupWhen) + "<br>" +
           "<strong>Drop-off time</strong> " + esc(String(dropWhen)) + "<br>" +
-          "<strong>Pickup</strong> " + esc([r.pickupStreet, r.pickupCity, r.pickupState].filter(Boolean).join(", ") || "—") + "<br>" +
-          "<strong>Drop-off</strong> " + esc([r.dropStreet, r.dropCity, r.dropState].filter(Boolean).join(", ") || "—") +
+          "<strong>Pickup</strong> " + esc(rideAddressText(r, "pickup") || "—") + "<br>" +
+          stops.map(function (s, i) { return "<strong>Stop " + (i + 1) + "</strong> " + esc(s) + "<br>"; }).join("") +
+          "<strong>Drop-off</strong> " + esc(rideAddressText(r, "drop") || "—") +
           (r.phone ? "<br><strong>Phone</strong> " + esc(r.phone) : "") +
+          (cardLine ? "<br>" + cardLine : "") +
+          cancelLine +
           (active && r.driverName ? "<br><strong>Driver</strong> " + rideDriverNameHtml(r) : "") +
           "</p>" +
           actions +
@@ -2210,6 +2276,22 @@
         if (!window.confirm("Deny booking " + code + "? The rider will see it as denied.")) return;
         btn.disabled = true;
         denyBooking(code).then(function () {
+          btn.disabled = false;
+          refresh();
+        });
+      });
+    });
+    Array.prototype.forEach.call(list.querySelectorAll(".btn-card-ok"), function (btn) {
+      btn.addEventListener("click", function () {
+        var code = btn.getAttribute("data-ride-code");
+        if (!code) return;
+        if (!window.confirm("Mark the card OK for ride " + code + "? Do this after the rider pays or adds a card through your Square link.")) return;
+        btn.disabled = true;
+        patchRide(String(code).toUpperCase(), { cardStatus: "owner_ok", cardOwnerOkAt: Date.now(), updatedAt: Date.now() }).then(function () {
+          state.actionNotice = "Card marked OK for " + code + " — the rider now gets their PIN.";
+        }).catch(function () {
+          state.actionNotice = "Could not update the card status for " + code + ".";
+        }).then(function () {
           btn.disabled = false;
           refresh();
         });
