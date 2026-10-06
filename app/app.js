@@ -4,7 +4,9 @@
    v50 (Oct 6): driver profile (car details + profile photo + car photo) is saved on the server under
    /rides/DRVRPRFL/{driverId} (driverId = email-based roster id), loaded at every login, and never wiped by
    logout or a roster-password login. Only the opening odometer is asked after login.
-   v54: louder looping ride siren, rider↔driver chat (en route to pickup), rider History, God banner actions + pop-ups. */
+   v54: louder looping ride siren, rider↔driver chat (en route to pickup), rider History, God banner actions + pop-ups.
+   v56: ride alert plays the approved bell chime (driver/ride-chime.mp3, C6-E6-G6-E6) instead of the siren;
+        waiting rides auto-select so Accept/Deny are on the main board (no pin tap); popup sits above the sound bar. */
 (function () {
   var BUSINESS_PHONE = "936-261-7878";
   var DRIVER_COMMISSION_RATE = 0.7;
@@ -87,6 +89,29 @@
   var openRideAudioUnlocked = false;
   var openRideAudioCtx = null;
   var openRideSirenNodes = [];
+  /* v56: approved ride chime, fetched + decoded once (after the unlock tap) on openRideAudioCtx. */
+  var RIDE_CHIME_URL = rideChimeUrl();
+  var RIDE_CHIME_NOTES = [[1046.5, 0], [1318.5, 0.18], [1568, 0.36], [1318.5, 0.58]]; /* C6 E6 G6 E6 (fallback only) */
+  var rideChimeBuf = null;
+  var rideChimeLoad = null;
+  var rideChimeFailedAt = 0;
+  var rideChimeWaiting = false;
+  var rideAlertGen = 0; /* bumps on stop so a burst still waiting on the file never plays late */
+  var rideAlertBuzzing = false; /* vibrate(0) only after an alert buzz (avoids Chrome's pre-tap vibrate warning) */
+
+  /* app.js is app/app.js (loaded from /app/ and as ../app.js from /app/driver/), so the chime is driver/ride-chime.mp3
+     relative to this script: /pcs-ride-estimate/app/driver/ride-chime.mp3 on GitHub Pages, /app/driver/ride-chime.mp3 locally. */
+  function rideChimeUrl() {
+    try {
+      var src = document.currentScript && document.currentScript.src;
+      if (src) return new URL("driver/ride-chime.mp3", src).href;
+    } catch (e) {}
+    try {
+      var m = String(location.pathname || "").match(/^(.*?)\/app(?:\/|$)/);
+      return new URL("ride-chime.mp3", location.origin + (m ? m[1] : "") + "/app/driver/").href;
+    } catch (e2) {}
+    return "ride-chime.mp3";
+  }
 
   function openRideAlertMuted() {
     try { return localStorage.getItem("pcs-driver-alert-mute") === "1"; } catch (err) { return false; }
@@ -128,13 +153,19 @@
     bar.setAttribute("style", "position:fixed;top:0;left:0;right:0;z-index:10050;width:100%;margin:0;border:0;border-radius:0;" +
       "padding:calc(16px + env(safe-area-inset-top)) 14px 16px;background:#e3b341;color:#0b1c33;font-size:20px;font-weight:800;" +
       "text-align:center;box-shadow:0 3px 12px rgba(0,0,0,.45);cursor:pointer");
-    bar.addEventListener("click", function (ev) {
-      ev.preventDefault();
-      ev.stopPropagation();
+    /* v56: test sound = one burst of the ride chime. touchend as well as click: on phones the bar used to vanish
+       (sound came on during the touch) before its click fired, so the test sound never played. */
+    var done = false;
+    function onTap(ev) {
+      if (ev && ev.type === "click") { ev.preventDefault(); ev.stopPropagation(); }
+      if (done) return;
+      done = true;
       keepRideAudioAwake();
-      playRideChime(true); /* short test chime so the driver hears it works */
+      playRideChime(true);
       hideRideSoundBar();
-    });
+    }
+    bar.addEventListener("touchend", onTap);
+    bar.addEventListener("click", onTap);
     document.body.appendChild(bar);
   }
 
@@ -152,78 +183,154 @@
   }
 
   function beepOpenRideOnce() {
-    /* v54: one loud siren burst; the loop interval keeps it repeating until Accept/Deny. */
+    /* v56: one chime burst; the loop interval keeps it repeating until Accept/Deny. */
     if (openRideAlertMuted() || !openRideAudioUnlocked) return;
-    playRideSiren(false);
+    playRideAlertSound(false);
   }
 
   function stopRideSirenNodes() {
+    rideAlertGen++;
     openRideSirenNodes.forEach(function (n) {
       try { if (n.stop) n.stop(); } catch (e) {}
       try { if (n.disconnect) n.disconnect(); } catch (e2) {}
     });
     openRideSirenNodes = [];
-    try { if (navigator.vibrate) navigator.vibrate(0); } catch (e3) {}
+    if (rideAlertBuzzing) {
+      rideAlertBuzzing = false;
+      try { if (navigator.vibrate) navigator.vibrate(0); } catch (e3) {}
+    }
   }
 
-  /* Unlock-bar test chime (short). Full alert uses playRideSiren. */
-  function playRideChime(isTest) {
-    setPlaybackAudioSession();
-    try {
-      var AC = window.AudioContext || window.webkitAudioContext;
-      if (!AC) return;
-      if (!openRideAudioCtx) openRideAudioCtx = new AC();
-      var ctx = openRideAudioCtx;
-      if (ctx.state === "suspended") ctx.resume();
-      var now = ctx.currentTime;
-      var o = ctx.createOscillator();
-      var g = ctx.createGain();
-      o.type = "square";
-      o.frequency.value = 980;
-      g.gain.value = 0.0001;
-      o.connect(g);
-      g.connect(ctx.destination);
-      g.gain.exponentialRampToValueAtTime(isTest ? 0.45 : 0.7, now + 0.02);
-      g.gain.exponentialRampToValueAtTime(0.0001, now + 0.28);
-      o.start(now);
-      o.stop(now + 0.32);
-    } catch (err) {}
-    try {
-      if (navigator.vibrate) navigator.vibrate(isTest ? 60 : [200, 80, 200]);
-    } catch (err2) {}
-  }
-
-  /* v54: loud alternating high/low sweeps so the alert cuts through music in the car. */
-  function playRideSiren(isTest) {
-    setPlaybackAudioSession();
-    try {
-      var AC = window.AudioContext || window.webkitAudioContext;
-      if (!AC) return;
-      if (!openRideAudioCtx) openRideAudioCtx = new AC();
-      var ctx = openRideAudioCtx;
-      if (ctx.state === "suspended") ctx.resume();
-      var now = ctx.currentTime;
-      var peak = isTest ? 0.55 : 0.95;
-      [[880, 0, 0.18], [1400, 0.18, 0.18], [880, 0.36, 0.18], [1400, 0.54, 0.18], [980, 0.72, 0.22]].forEach(function (t) {
-        var o = ctx.createOscillator();
-        var g = ctx.createGain();
-        o.type = "sawtooth";
-        o.frequency.setValueAtTime(t[0], now + t[1]);
-        o.frequency.linearRampToValueAtTime(t[0] * (t[0] < 1000 ? 1.35 : 0.72), now + t[1] + t[2]);
-        g.gain.value = 0.0001;
-        o.connect(g);
-        g.connect(ctx.destination);
-        g.gain.exponentialRampToValueAtTime(peak, now + t[1] + 0.02);
-        g.gain.exponentialRampToValueAtTime(0.0001, now + t[1] + t[2]);
-        o.start(now + t[1]);
-        o.stop(now + t[1] + t[2] + 0.03);
-        openRideSirenNodes.push(o);
-        openRideSirenNodes.push(g);
+  /* v56: fetch + decode driver/ride-chime.mp3 once into an AudioBuffer. Resolves null on failure (fallback tones play);
+     a failed load is retried on a later tap, at most every 15 s. */
+  function loadRideChime() {
+    if (rideChimeBuf) return Promise.resolve(rideChimeBuf);
+    if (rideChimeLoad) return rideChimeLoad;
+    var ctx = openRideAudioCtx;
+    if (!ctx || typeof fetch !== "function" || !ctx.decodeAudioData) return Promise.resolve(null);
+    if (rideChimeFailedAt && Date.now() - rideChimeFailedAt < 15000) return Promise.resolve(null);
+    rideChimeLoad = fetch(RIDE_CHIME_URL).then(function (res) {
+      if (!res || !res.ok) throw new Error("ride-chime " + (res && res.status));
+      return res.arrayBuffer();
+    }).then(function (ab) {
+      return new Promise(function (resolve, reject) {
+        var p = ctx.decodeAudioData(ab, resolve, reject); /* callback form for older iOS Safari */
+        if (p && p.then) p.then(resolve, reject);
       });
-    } catch (err) {}
+    }).then(function (buf) {
+      if (!buf) throw new Error("ride-chime decode");
+      rideChimeBuf = buf;
+      rideChimeFailedAt = 0;
+      rideChimeLoad = null;
+      return buf;
+    }).catch(function () {
+      rideChimeFailedAt = Date.now();
+      rideChimeLoad = null;
+      return null;
+    });
+    return rideChimeLoad;
+  }
+
+  /* Alert nodes are tracked so Accept/Deny/stop cuts the sound off; they drop out of the list when finished. */
+  function trackRideAlertNodes(nodes, endNode) {
+    nodes.forEach(function (n) { openRideSirenNodes.push(n); });
     try {
-      if (navigator.vibrate) navigator.vibrate(isTest ? 80 : [220, 60, 220, 60, 220, 60, 320]);
+      endNode.onended = function () {
+        openRideSirenNodes = openRideSirenNodes.filter(function (n) { return nodes.indexOf(n) === -1; });
+        nodes.forEach(function (n) { try { n.disconnect(); } catch (e) {} });
+      };
+    } catch (e) {}
+  }
+
+  /* The approved chime file at full level (GainNode 1.0, no extra quieting). */
+  function rideChimeFromBuffer(ctx, isTest) {
+    var src = ctx.createBufferSource();
+    var g = ctx.createGain();
+    src.buffer = rideChimeBuf;
+    g.gain.value = 1.0;
+    src.connect(g);
+    g.connect(ctx.destination);
+    src.start(0);
+    if (!isTest) trackRideAlertNodes([src, g], src);
+  }
+
+  /* Fallback if the file cannot be fetched/decoded: the same four bell notes from oscillators
+     (sine + quiet 2x partial, master gain 0.95). Never the old sawtooth siren. */
+  function rideChimeFallback(ctx, isTest) {
+    try {
+      var now = ctx.currentTime + 0.01;
+      var master = ctx.createGain();
+      master.gain.value = 0.95;
+      master.connect(ctx.destination);
+      var nodes = [master];
+      var last = null;
+      RIDE_CHIME_NOTES.forEach(function (n, i) {
+        var len = i === RIDE_CHIME_NOTES.length - 1 ? 0.67 : 0.5;
+        [[1, 0.85], [2, 0.12]].forEach(function (pt) {
+          var o = ctx.createOscillator();
+          var g = ctx.createGain();
+          o.type = "sine";
+          o.frequency.value = n[0] * pt[0];
+          g.gain.setValueAtTime(0.0001, now + n[1]);
+          g.gain.exponentialRampToValueAtTime(pt[1], now + n[1] + 0.008);
+          g.gain.exponentialRampToValueAtTime(0.0001, now + n[1] + len);
+          o.connect(g);
+          g.connect(master);
+          o.start(now + n[1]);
+          o.stop(now + n[1] + len + 0.02);
+          nodes.push(o, g);
+          last = o;
+        });
+      });
+      if (!isTest) trackRideAlertNodes(nodes, last);
+    } catch (err) {}
+  }
+
+  /* v56: one burst of the ride chime (~1.25 s). isTest = unlock-bar test (not cut off by stop, ignores mute like before). */
+  function playRideAlertSound(isTest) {
+    setPlaybackAudioSession();
+    var ctx;
+    try {
+      var AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC) return;
+      if (!openRideAudioCtx) openRideAudioCtx = new AC();
+      ctx = openRideAudioCtx;
+      if (ctx.state === "suspended") ctx.resume();
+    } catch (err) { return; }
+    try {
+      if (navigator.vibrate) navigator.vibrate(isTest ? 60 : [220, 60, 220, 60, 220, 60, 320]);
+      if (!isTest) rideAlertBuzzing = true;
     } catch (err2) {}
+    if (rideChimeBuf) {
+      try { rideChimeFromBuffer(ctx, isTest); } catch (err3) { rideChimeFallback(ctx, isTest); }
+      return;
+    }
+    if (rideChimeWaiting) return; /* a burst is already waiting for the file */
+    rideChimeWaiting = true;
+    var gen = rideAlertGen;
+    var done = false;
+    function go() {
+      if (done) return;
+      done = true;
+      rideChimeWaiting = false;
+      if (!isTest && (gen !== rideAlertGen || openRideAlertMuted())) return;
+      if (rideChimeBuf) {
+        try { rideChimeFromBuffer(ctx, isTest); return; } catch (err4) {}
+      }
+      rideChimeFallback(ctx, isTest);
+    }
+    loadRideChime().then(go, go);
+    setTimeout(go, 2500); /* slow network: do not stay silent, play the fallback tones */
+  }
+
+  /* Unlock-bar test sound: one burst of the new chime. */
+  function playRideChime(isTest) {
+    playRideAlertSound(isTest !== false);
+  }
+
+  /* v54 name kept for test hooks; v56 plays the chime (the sawtooth siren is gone). */
+  function playRideSiren(isTest) {
+    playRideAlertSound(!!isTest);
   }
 
   function countAlertableOpenRides() {
@@ -246,7 +353,7 @@
       closeRidePopup();
       return;
     }
-    /* v51/v54: pop-up + looping siren on every driver page until Accept/Deny. */
+    /* v51/v54/v56: pop-up + looping chime on every driver page until Accept/Deny. */
     syncRidePopup();
     var n = countAlertableOpenRides();
     if (!n || openRideAlertMuted()) {
@@ -316,8 +423,10 @@
   }
 
   /* iOS: keep Web Audio alive. Any tap resumes it (iOS suspends it after the app is hidden). */
-  function keepRideAudioAwake() {
+  function keepRideAudioAwake(ev) {
     if (ROLE !== "driver") return;
+    /* a tap on the gold bar itself leaves the bar for its own handler (it plays the test chime, then hides) */
+    var onBar = !!(ev && ev.target && ev.target.id === "ride-sound-bar");
     openRideAudioUnlocked = true;
     setPlaybackAudioSession();
     try {
@@ -327,8 +436,8 @@
       if (!ctx) return;
       if (ctx.state !== "running" && ctx.resume) {
         var r = ctx.resume();
-        if (r && r.then) r.then(function () { if (rideSoundRunning()) hideRideSoundBar(); }).catch(function () {});
-      } else if (ctx.state === "running") hideRideSoundBar();
+        if (r && r.then) r.then(function () { if (rideSoundRunning() && !onBar) hideRideSoundBar(); }).catch(function () {});
+      } else if (ctx.state === "running" && !onBar) hideRideSoundBar();
       if (!openRideAudioPrimed) {
         var src = ctx.createBufferSource();
         src.buffer = ctx.createBuffer(1, 1, 22050);
@@ -336,6 +445,7 @@
         src.start(0);
         openRideAudioPrimed = true;
       }
+      loadRideChime(); /* v56: one-time fetch + decode of the chime after the first tap */
     } catch (err) {}
   }
 
@@ -500,6 +610,7 @@
         return;
       }
       if (!ride.code) ride.code = code;
+      applyRide(ride); /* v56: same as pin-tap path so Accept has addresses ready immediately */
       rememberRemote(ride);
       state.code = code;
       state.driverCode = code;
@@ -850,7 +961,7 @@
     var s = document.createElement("style");
     s.id = "v51-style";
     s.textContent =
-      "#ride-popup{position:fixed;inset:0;z-index:9999;background:rgba(5,14,28,.93);display:flex;align-items:center;justify-content:center;padding:16px}" +
+      "#ride-popup{position:fixed;inset:0;z-index:11000;background:rgba(5,14,28,.93);display:flex;align-items:center;justify-content:center;padding:16px}" +
       "#ride-popup .rp-card{background:#0b1c33;color:#fff;border:2px solid #f0d48a;border-radius:20px;max-width:460px;width:100%;padding:20px;box-shadow:0 10px 40px rgba(0,0,0,.5);max-height:92vh;overflow:auto}" +
       "#ride-popup .rp-title{font-size:30px;font-weight:800;color:#f0d48a;margin:0 0 14px;text-align:center}" +
       "#ride-popup .rp-who{display:flex;gap:14px;align-items:center;margin-bottom:12px}" +
@@ -860,9 +971,13 @@
       "#ride-popup .rp-row{margin:10px 0;font-size:17px;line-height:1.35}" +
       "#ride-popup .rp-row b{display:block;color:#f0d48a;font-size:12px;letter-spacing:.08em;text-transform:uppercase}" +
       "#ride-popup .rp-fare{font-size:24px;font-weight:800;margin:14px 0 4px}" +
-      "#ride-popup .rp-actions{display:flex;gap:12px;margin-top:16px}" +
-      "#ride-popup .rp-actions button{flex:1;font-size:24px;font-weight:800;padding:20px 10px;border-radius:14px;border:0;color:#fff;cursor:pointer}" +
+      "#ride-popup .rp-actions{display:flex;gap:12px;margin-top:16px;flex-wrap:wrap}" +
+      "#ride-popup .rp-actions button{flex:1 1 140px;font-size:24px;font-weight:800;padding:20px 10px;border-radius:14px;border:0;color:#fff;cursor:pointer;min-height:64px}" +
       "#ride-popup .rp-accept{background:#2e9d4f}#ride-popup .rp-deny{background:#8a2323}" +
+      /* v56: board Accept/Deny — full-width, same weight as the popup; no pin-tap required (auto-selected below). */
+      ".open-ride-card .row-actions{display:flex;flex-direction:column;gap:10px;margin-top:12px}" +
+      ".open-ride-card .row-actions .btn,#accept-ride{width:100%;font-size:22px;font-weight:800;padding:18px 14px;min-height:60px;background:#2e9d4f;border-color:#2e9d4f}" +
+      ".open-ride-card .row-actions .btn.secondary,#deny-ride{width:100%;font-size:20px;font-weight:700;padding:16px 14px;min-height:52px;background:#8a2323;border-color:#8a2323;color:#fff}" +
       ".nav-btn-big{display:block;text-align:center;font-size:24px;font-weight:800;padding:18px 12px;margin:10px 0 6px;background:#1f6fd1;color:#fff !important;border-radius:14px;text-decoration:none;box-shadow:0 4px 14px rgba(0,0,0,.25)}" +
       ".trip-eta{font-size:18px;font-weight:700;margin:4px 0 10px}" +
       ".rider-photo-pin{width:52px;height:52px;border-radius:50%;object-fit:cover;border:3px solid #f0d48a;box-shadow:0 0 0 3px rgba(11,28,51,.65),0 4px 10px rgba(0,0,0,.45);background:#0b1c33;display:block}" +
@@ -5606,6 +5721,43 @@
     return '<p class="fine">Pickup is about ' + esc(fmtMiles(haversine(me, pick))) + " from you (straight line).</p>";
   }
 
+  /* v56: Accept/Deny on the main board as soon as a ride is waiting — uses the open-request list
+     (same source as the popup). No pin tap, and does not wait for getRide of the full ride doc. */
+  function waitingAcceptCard() {
+    if (ROLE !== "driver" || !signedIn() || !canGoOnline() || !driverCanTakeNew() || state.acceptBusy) return "";
+    var list = alertableOpenRides();
+    if (!list.length) return "";
+    var row = null;
+    list.forEach(function (r) { if (r.code === ridePopupCode) row = r; });
+    if (!row) row = list[0];
+    /* Full selected card already on screen for this ride — do not double up. */
+    if (state.selectedOpenCode === row.code && state.pickupStreet) return "";
+    if (!ridePopupInfo[row.code]) loadRidePopupInfo(row.code);
+    var info = ridePopupInfo[row.code];
+    var when = rideIsAsap(row) ? "ASAP" : (row.when || [row.date, row.time].filter(Boolean).join(" "));
+    var fare = info && info.commCents != null ? "Est. commission " + money(info.commCents) : (info ? "Commission figured at drop-off" : "Est. commission: figuring…");
+    var me = pointFrom(state.hereLat, state.hereLng);
+    var away = me && isCoord(row.pickupLat) ? haversine(me, { lat: +row.pickupLat, lng: +row.pickupLng }) : null;
+    var acceptLabel = rideIsAsap(row) ? "Accept · Start" : "Accept";
+    return (
+      '<article class="card open-ride-card waiting-accept-card" id="waiting-accept-card" data-ride-code="' + esc(row.code) + '">' +
+      '<p class="tag">' + (row.isTest ? "TEST request" : "Ride requested") + "</p>" +
+      (row.isTest ? '<p class="tag" style="background:#7a1f1f;color:#fff;">TEST — owner practice only</p>' : "") +
+      '<h2 style="font-size:20px;margin:4px 0 8px">' + esc(row.name || "Rider") + (when ? " · " + esc(when) : "") + "</h2>" +
+      '<div class="route-line"><p><b>Pickup</b> ' + esc(rowAddress(row, "pickup") || "On the map") +
+      (away != null ? " · " + esc(fmtMiles(away)) + " from you" : "") + "</p>" +
+      "<p><b>Drop-off</b> " + esc(rowAddress(row, "drop") || "Ask the rider") + "</p></div>" +
+      '<p class="rp-fare" style="font-size:22px;font-weight:800;margin:12px 0">' + esc(fare) + "</p>" +
+      (state.acceptNotice
+        ? '<p class="' + (state.acceptNoticeKind === "busy" ? "note" : "error") + ' accept-notice" id="accept-notice" role="alert">' + esc(state.acceptNotice) + "</p>"
+        : "") +
+      '<div class="row-actions">' +
+      '<button class="btn" type="button" id="accept-ride"' + (state.acceptBusy ? " disabled" : "") + ">" + (state.acceptBusy ? "Accepting…" : acceptLabel) + "</button>" +
+      '<button class="btn secondary" type="button" id="deny-ride"' + (state.acceptBusy ? " disabled" : "") + ">Deny</button>" +
+      "</div></article>"
+    );
+  }
+
   function openRideCard() {
     if (!state.selectedOpenCode || !state.pickupStreet) return "";
     var est = estimate();
@@ -5657,9 +5809,13 @@
     if (!state.openRides.length) {
       return "No open rides right now. New rider requests show up on this map.";
     }
+    /* v56: Accept/Deny are on the screen (popup + auto-selected card). Do not send the driver hunting for a pin. */
+    if (state.selectedOpenCode) {
+      return "Ride waiting — tap Accept or Deny below.";
+    }
     return state.openRides.length +
-      (state.openRides.length === 1 ? " open ride" : " open rides") +
-      ". Tap a rider pin to review.";
+      (state.openRides.length === 1 ? " open ride waiting." : " open rides waiting.") +
+      " Accept or Deny below.";
   }
 
   function driverBoardStatus() {
@@ -6751,6 +6907,7 @@
           (isFinite(state.hereLat) ? "" : '<p class="fine">Allow location so the map can show where you are.</p>') +
           '<p class="legend"><span><i class="swatch"></i> You</span>' +
           '<span><i class="swatch you"></i> Rider pickup</span></p>' +
+          waitingAcceptCard() +
           openRideCard()
         ))
     );
@@ -7690,13 +7847,20 @@
     var accept = document.getElementById("accept-ride");
     if (accept) {
       accept.addEventListener("click", function () {
-        acceptSelectedOpenRide();
+        /* v56: waiting card may show before the full ride is selected — Accept always goes through the popup path. */
+        var waiting = document.getElementById("waiting-accept-card");
+        var code = (waiting && waiting.getAttribute("data-ride-code")) || state.selectedOpenCode || state.code;
+        if (waiting && code) popupAccept(code);
+        else acceptSelectedOpenRide();
       });
     }
     var deny = document.getElementById("deny-ride");
     if (deny) {
       deny.addEventListener("click", function () {
-        denySelectedOpenRide();
+        var waiting = document.getElementById("waiting-accept-card");
+        var code = (waiting && waiting.getAttribute("data-ride-code")) || state.selectedOpenCode || state.code;
+        if (waiting && code) popupDeny(code);
+        else denySelectedOpenRide();
       });
     }
     var pinForm = document.getElementById("start-pin-form");
@@ -8294,16 +8458,41 @@
           changed = true;
         }
       }
+      /* v56: when a ride is waiting and nothing is selected, auto-open it so Accept/Deny show on the
+         main board (Matthew: no extra tap on the client pin first). Same pick as the ride popup. */
+      var autoSelect = false;
+      if (!state.selectedOpenCode && !state.acceptBusy && canGoOnline() && driverCanTakeNew()) {
+        var waiting = alertableOpenRides();
+        if (waiting.length) {
+          selectOpenRide(waiting[0].code);
+          autoSelect = true;
+        }
+      }
       // Full render only when forced or the Accept/Deny card must rebuild.
       // Routine polls update the status line + map markers in place (map stays alive).
       if (force || selectionCleared) {
+        if (!autoSelect) render();
+        return;
+      }
+      if (autoSelect) {
+        /* Still render immediately so waitingAcceptCard (Accept/Deny) is on screen while getRide loads. */
         render();
         return;
       }
       if (changed || prevError) {
+        /* Rebuild when a new waiting ride appears so Accept/Deny show without a pin tap. */
+        if (changed && alertableOpenRides().length && !document.getElementById("accept-ride")) {
+          render();
+          return;
+        }
         var status = document.getElementById("board-status");
         if (status) status.textContent = driverBoardStatusInner();
         syncDriverBoardMarkers();
+        var waitEl = document.getElementById("waiting-accept-card");
+        if (waitEl && !document.getElementById("open-ride-card")) {
+          /* Refresh the waiting card's Est. commission / addresses in place via a light re-render. */
+          render();
+        }
       }
     }).catch(function (err) {
       if (seq !== openListSeq) return;
@@ -8445,7 +8634,7 @@
     stopOpenRideAlert();
     if (state.acceptBusy) return;
     if (!state.selectedOpenCode && !state.code) {
-      setAcceptNotice("Tap the rider's pin on the map first, then tap Accept.");
+      setAcceptNotice("No ride selected. Wait for the request card, or tap Accept on the Ride requested screen.");
       render();
       return;
     }
@@ -9121,6 +9310,11 @@
 
   /* v54 test hooks (no UI). */
   window.__pcsApp = {
+    playRideAlertSound: playRideAlertSound,
+    loadRideChime: loadRideChime,
+    rideChimeUrl: function () { return RIDE_CHIME_URL; },
+    rideChimeReady: function () { return !!rideChimeBuf; },
+    syncOpenRideAlert: syncOpenRideAlert,
     playRideSiren: playRideSiren,
     playRideChime: playRideChime,
     stopOpenRideAlert: stopOpenRideAlert,
