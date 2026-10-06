@@ -87,6 +87,9 @@
     driverDetailDay: "",
     pendingAlertCodes: {},
     pendingBanner: "",
+    trackedRideCodes: {},
+    shownPendingPopup: {},
+    shownAcceptPopup: {},
     focusDriverId: "",
     focusNote: "",
     calendar: [],
@@ -1316,17 +1319,186 @@
     var mail = "mailto:mwragge78@gmail.com?subject=" + encodeURIComponent("PCS booking pending " + (first.code || "")) +
       "&body=" + encodeURIComponent("Pending booking " + (first.code || "") + " from " + label);
     var sms = "sms:9362617878?&body=" + encodeURIComponent("PCS pending booking " + (first.code || "") + " " + label);
+    var actionRows = pending.map(function (r) {
+      var code = String(r.code || "");
+      var who = displayName(r.name, "Rider") + " · " + fmtWhen(r.date, r.time, r);
+      return (
+        '<div class="banner-ride" style="margin:10px 0;padding:10px;border:1px solid rgba(240,212,138,.35);border-radius:12px">' +
+        '<p class="lede" style="margin:0 0 8px"><strong>' + esc(who) + "</strong> · " + esc(code) + "</p>" +
+        '<p class="fine" style="margin:0 0 8px">' + esc(rideAddressText(r, "pickup") || "Pickup") + " → " + esc(rideAddressText(r, "drop") || "Drop-off") + "</p>" +
+        '<div class="row-actions" style="display:flex;flex-wrap:wrap;gap:8px">' +
+        '<button type="button" class="btn btn-gold btn-approve-booking" data-ride-code="' + esc(code) + '">Approve booking</button>' +
+        '<button type="button" class="btn btn-fire btn-deny-booking" data-ride-code="' + esc(code) + '">Deny</button>' +
+        '<button type="button" class="btn btn-ghost btn-card-ok" data-ride-code="' + esc(code) + '">Mark card OK</button>' +
+        "</div></div>"
+      );
+    }).join("");
     return (
       '<div class="card booking-alert" id="booking-alert" style="border:2px solid var(--gold);margin:0 0 12px;padding:12px;background:#1a2e1a">' +
       '<p class="tag">New booking needs your OK</p>' +
       '<p class="lede"><strong>' + esc(String(pending.length)) + '</strong> pending · ' + esc(label) + "</p>" +
       '<p class="fine">Approve so drivers can see it. Deny notifies the rider in-app.</p>' +
-      '<div class="row-actions" style="display:flex;flex-wrap:wrap;gap:8px">' +
+      actionRows +
+      '<div class="row-actions" style="display:flex;flex-wrap:wrap;gap:8px;margin-top:8px">' +
       '<a class="btn btn-ghost" href="' + mail + '">Email me a reminder</a>' +
       '<a class="btn btn-ghost" href="' + sms + '">Text reminder</a>' +
       '<button type="button" class="btn btn-ghost" id="enable-booking-notify">Enable browser alerts</button>' +
       "</div></div>"
     );
+  }
+
+  function softGodChime() {
+    try {
+      var AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC) return;
+      if (!window.__godAudioCtx) window.__godAudioCtx = new AC();
+      var ctx = window.__godAudioCtx;
+      if (ctx.state === "suspended") return; /* do not block / force unlock */
+      var now = ctx.currentTime;
+      var o = ctx.createOscillator();
+      var g = ctx.createGain();
+      o.type = "sine";
+      o.frequency.value = 880;
+      g.gain.value = 0.0001;
+      o.connect(g);
+      g.connect(ctx.destination);
+      g.gain.exponentialRampToValueAtTime(0.2, now + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.0001, now + 0.25);
+      o.start(now);
+      o.stop(now + 0.28);
+    } catch (e) {}
+  }
+
+  function ensureGodPopupStyle() {
+    if (document.getElementById("god-popup-style")) return;
+    var s = document.createElement("style");
+    s.id = "god-popup-style";
+    s.textContent =
+      "#god-ride-popup{position:fixed;inset:0;z-index:12000;background:rgba(5,14,28,.92);display:flex;align-items:center;justify-content:center;padding:16px}" +
+      "#god-ride-popup .gp-card{background:#0b1c33;color:#fff;border:2px solid #f0d48a;border-radius:18px;max-width:520px;width:100%;padding:20px}" +
+      "#god-ride-popup .gp-title{font-size:28px;font-weight:800;color:#f0d48a;margin:0 0 12px;text-align:center}" +
+      "#god-ride-popup .gp-row{margin:10px 0;font-size:17px;line-height:1.35}" +
+      "#god-ride-popup .gp-row b{display:block;color:#f0d48a;font-size:12px;letter-spacing:.08em;text-transform:uppercase}" +
+      "#god-ride-popup .gp-actions{display:flex;flex-wrap:wrap;gap:10px;margin-top:16px}" +
+      "#god-ride-popup .gp-actions button{flex:1;min-width:120px;font-size:18px;font-weight:800;padding:16px 10px;border-radius:12px;border:0;color:#fff;cursor:pointer}" +
+      "#god-ride-popup .gp-ok{background:#2e9d4f}#god-ride-popup .gp-deny{background:#8a2323}#god-ride-popup .gp-ghost{background:#345}";
+    document.head.appendChild(s);
+  }
+
+  function hideGodRidePopup() {
+    var el = document.getElementById("god-ride-popup");
+    if (el && el.parentNode) el.parentNode.removeChild(el);
+  }
+
+  function showGodPendingPopup(ride) {
+    if (!ride || !ride.code) return;
+    ensureGodPopupStyle();
+    hideGodRidePopup();
+    var code = String(ride.code);
+    var el = document.createElement("div");
+    el.id = "god-ride-popup";
+    el.innerHTML =
+      '<div class="gp-card" role="dialog" aria-modal="true">' +
+      '<p class="gp-title">New ride needs your OK</p>' +
+      '<div class="gp-row"><b>Rider</b>' + esc(displayName(ride.name, "Rider")) + "</div>" +
+      '<div class="gp-row"><b>When</b>' + esc(fmtWhen(ride.date, ride.time, ride)) + "</div>" +
+      '<div class="gp-row"><b>Pickup</b>' + esc(rideAddressText(ride, "pickup") || "—") + "</div>" +
+      '<div class="gp-row"><b>Drop-off</b>' + esc(rideAddressText(ride, "drop") || "—") + "</div>" +
+      '<div class="gp-row"><b>Code</b>' + esc(code) + "</div>" +
+      '<div class="gp-actions">' +
+      '<button type="button" class="gp-ok" id="gp-approve" data-ride-code="' + esc(code) + '">Approve</button>' +
+      '<button type="button" class="gp-deny" id="gp-deny" data-ride-code="' + esc(code) + '">Deny</button>' +
+      '<button type="button" class="gp-ghost" id="gp-cardok" data-ride-code="' + esc(code) + '">Mark card OK</button>' +
+      '<button type="button" class="gp-ghost" id="gp-dismiss">Dismiss</button>' +
+      "</div></div>";
+    document.body.appendChild(el);
+    softGodChime();
+    el.addEventListener("click", function (ev) {
+      var t = ev.target;
+      if (!t || !t.id) return;
+      var c = t.getAttribute("data-ride-code") || code;
+      if (t.id === "gp-dismiss") { hideGodRidePopup(); return; }
+      if (t.id === "gp-approve") {
+        t.disabled = true;
+        approveBooking(c).then(function () { hideGodRidePopup(); refresh(); });
+      } else if (t.id === "gp-deny") {
+        if (!window.confirm("Deny booking " + c + "?")) return;
+        t.disabled = true;
+        denyBooking(c).then(function () { hideGodRidePopup(); refresh(); });
+      } else if (t.id === "gp-cardok") {
+        if (!window.confirm("Mark the card OK for ride " + c + "?")) return;
+        t.disabled = true;
+        markCardOk(String(c).toUpperCase()).then(function () {
+          state.actionNotice = "Card marked OK for " + c + ".";
+          hideGodRidePopup();
+          refresh();
+        });
+      }
+    });
+  }
+
+  function showGodAcceptPopup(ride) {
+    if (!ride || !ride.code) return;
+    ensureGodPopupStyle();
+    hideGodRidePopup();
+    var code = String(ride.code);
+    var driver = ride.driverName || "A driver";
+    var rider = displayName(ride.name, "Rider");
+    var el = document.createElement("div");
+    el.id = "god-ride-popup";
+    el.innerHTML =
+      '<div class="gp-card" role="dialog" aria-modal="true">' +
+      '<p class="gp-title">Driver picked up the ride</p>' +
+      '<div class="gp-row"><b>Driver</b>' + esc(driver) + "</div>" +
+      '<div class="gp-row"><b>Rider</b>' + esc(rider) + "</div>" +
+      '<div class="gp-row"><b>Ride code</b>' + esc(code) + "</div>" +
+      '<div class="gp-actions"><button type="button" class="gp-ok" id="gp-dismiss">OK</button></div></div>';
+    document.body.appendChild(el);
+    softGodChime();
+    el.addEventListener("click", function (ev) {
+      if (ev.target && ev.target.id === "gp-dismiss") hideGodRidePopup();
+    });
+  }
+
+  function maybeShowGodPopups(merged) {
+    var list = merged || [];
+    var openCodes = {};
+    list.forEach(function (r) {
+      if (!r || !r.code) return;
+      var code = String(r.code);
+      openCodes[code] = true;
+      state.trackedRideCodes[code] = {
+        name: r.name || "",
+        date: r.date,
+        time: r.time,
+        asap: r.asap,
+        pickup: rideAddressText(r, "pickup"),
+        drop: rideAddressText(r, "drop")
+      };
+      if (isPendingOwner(r) && !state.shownPendingPopup[code]) {
+        state.shownPendingPopup[code] = true;
+        showGodPendingPopup(r);
+      }
+      if (isActiveTrip(r) && !state.shownAcceptPopup[code]) {
+        state.shownAcceptPopup[code] = true;
+        showGodAcceptPopup(r);
+      }
+    });
+    Object.keys(state.trackedRideCodes).forEach(function (code) {
+      if (openCodes[code] || state.shownAcceptPopup[code]) return;
+      getRide(code).then(function (ride) {
+        if (!ride) return;
+        if (!ride.code) ride.code = code;
+        var st = String(ride.status || "").toLowerCase();
+        if ((st === "accepted" || st === "started") && !state.shownAcceptPopup[code]) {
+          state.shownAcceptPopup[code] = true;
+          showGodAcceptPopup(ride);
+        }
+        if (st === "completed" || st === "cancelled" || st === "denied") {
+          delete state.trackedRideCodes[code];
+        }
+      });
+    });
   }
 
   function listOpenRides() {
@@ -1485,6 +1657,7 @@
         if (pending.length) {
           state.pendingBanner = pending.length + " booking(s) waiting for your OK";
         }
+        maybeShowGodPopups(merged || []);
       });
     }).catch(function (err) {
       state.rides = [];
@@ -2378,9 +2551,20 @@
   }
 
   function bindBookingActions() {
-    var list = document.getElementById("rides-list");
-    if (!list) return;
-    Array.prototype.forEach.call(list.querySelectorAll(".btn-approve-booking"), function (btn) {
+    var roots = [document.getElementById("rides-list"), document.getElementById("booking-alert"), document.getElementById("root")].filter(Boolean);
+    function eachBtn(sel, fn) {
+      var seen = {};
+      roots.forEach(function (root) {
+        Array.prototype.forEach.call(root.querySelectorAll(sel), function (btn) {
+          var code = btn.getAttribute("data-ride-code") || btn.id || Math.random();
+          var key = sel + "|" + code + "|" + (btn.textContent || "");
+          if (seen[key]) return;
+          seen[key] = true;
+          fn(btn);
+        });
+      });
+    }
+    eachBtn(".btn-approve-booking", function (btn) {
       btn.addEventListener("click", function () {
         var code = btn.getAttribute("data-ride-code");
         if (!code) return;
@@ -2391,7 +2575,7 @@
         });
       });
     });
-    Array.prototype.forEach.call(list.querySelectorAll(".btn-deny-booking"), function (btn) {
+    eachBtn(".btn-deny-booking", function (btn) {
       btn.addEventListener("click", function () {
         var code = btn.getAttribute("data-ride-code");
         if (!code) return;
@@ -2403,7 +2587,7 @@
         });
       });
     });
-    Array.prototype.forEach.call(list.querySelectorAll(".btn-card-ok"), function (btn) {
+    eachBtn(".btn-card-ok", function (btn) {
       btn.addEventListener("click", function () {
         var code = btn.getAttribute("data-ride-code");
         if (!code) return;
@@ -2819,4 +3003,14 @@
   } else {
     boot();
   }
+
+  window.__pcsGod = {
+    showGodPendingPopup: showGodPendingPopup,
+    showGodAcceptPopup: showGodAcceptPopup,
+    maybeShowGodPopups: maybeShowGodPopups,
+    bookingAlertBannerHtml: bookingAlertBannerHtml,
+    approveBooking: approveBooking,
+    denyBooking: denyBooking,
+    markCardOk: markCardOk
+  };
 })();
