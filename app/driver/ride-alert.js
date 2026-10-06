@@ -1,4 +1,4 @@
-/* PCS driver: new-ride alert for the Profile page (v51).
+/* PCS driver: new-ride alert for the Profile page (v51; v53: iOS silent-mode + tap-to-enable sound bar).
    The main driver app (app.js) has its own pop-up; this small script makes the Profile page chime too.
    Accept happens in the driver app (same Accept code); Deny here is remembered there too. */
 (function () {
@@ -52,12 +52,45 @@
     return [r[p + "Street"], r[p + "City"], r[p + "State"]].filter(Boolean).join(", ");
   }
 
+  /* v53: iOS 17+ plays the chime even with the silent switch on. */
+  function playbackSession() {
+    try { if (navigator.audioSession && navigator.audioSession.type !== "playback") navigator.audioSession.type = "playback"; } catch (e) {}
+  }
+  function running() { return !!ctx && ctx.state === "running"; }
+  function hideBar() {
+    var b = document.getElementById("ride-sound-bar");
+    if (b && b.parentNode) b.parentNode.removeChild(b);
+  }
+  /* Big gold bar on each fresh open until tapped (iOS needs a tap before any sound). Nothing is remembered. */
+  function showBar() {
+    if (!session() || running() || document.getElementById("ride-sound-bar") || !document.body) return;
+    var b = document.createElement("button");
+    b.type = "button";
+    b.id = "ride-sound-bar";
+    b.textContent = "\uD83D\uDD14 Tap to turn on ride alert sound";
+    b.setAttribute("style", "position:fixed;top:0;left:0;right:0;z-index:10050;width:100%;margin:0;border:0;border-radius:0;" +
+      "padding:calc(16px + env(safe-area-inset-top)) 14px 16px;background:#e3b341;color:#0b1c33;font-size:20px;font-weight:800;" +
+      "text-align:center;box-shadow:0 3px 12px rgba(0,0,0,.45);cursor:pointer;font-family:inherit");
+    b.addEventListener("click", function (ev) {
+      ev.preventDefault();
+      ev.stopPropagation();
+      wake();
+      chime(true); /* short test chime */
+      hideBar();
+    });
+    document.body.appendChild(b);
+  }
+
   function wake() {
+    playbackSession();
     try {
       var AC = window.AudioContext || window.webkitAudioContext;
       if (AC && !ctx) ctx = new AC();
       if (!ctx) return;
-      if (ctx.state !== "running" && ctx.resume) ctx.resume();
+      if (ctx.state !== "running" && ctx.resume) {
+        var r = ctx.resume();
+        if (r && r.then) r.then(function () { if (running()) hideBar(); }).catch(function () {});
+      } else if (ctx.state === "running") hideBar();
       if (!primed) {
         var s = ctx.createBufferSource();
         s.buffer = ctx.createBuffer(1, 1, 22050);
@@ -69,6 +102,11 @@
   }
   function beep() {
     if (ls(MUTE) === "1" || !ctx) return;
+    chime(false);
+  }
+  function chime(isTest) {
+    if (!ctx) return;
+    playbackSession();
     try {
       if (ctx.state === "suspended") ctx.resume();
       var now = ctx.currentTime;
@@ -86,7 +124,7 @@
         o.stop(now + t[1] + t[2] + 0.02);
       });
     } catch (e) {}
-    try { if (navigator.vibrate) navigator.vibrate([80, 40, 120]); } catch (e2) {}
+    try { if (navigator.vibrate) navigator.vibrate(isTest ? 40 : [80, 40, 120]); } catch (e2) {}
   }
 
   function hide() {
@@ -176,8 +214,16 @@
     }).catch(function () {});
   }
 
+  playbackSession();
+  document.addEventListener("touchstart", wake, true);
+  document.addEventListener("pointerdown", wake, true);
   document.addEventListener("touchend", wake, true);
   document.addEventListener("click", wake, true);
+  if (document.body) showBar(); else document.addEventListener("DOMContentLoaded", showBar);
+  document.addEventListener("visibilitychange", function () {
+    if (document.visibilityState !== "visible") return;
+    setTimeout(function () { if (!running()) showBar(); }, 800);
+  });
   setInterval(tick, 4000);
   setTimeout(tick, 800);
 })();
