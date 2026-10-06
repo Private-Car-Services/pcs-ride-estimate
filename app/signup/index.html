@@ -47,9 +47,7 @@
         <label for="confirm">Confirm password</label>
         <input id="confirm" name="confirm" type="password" autocomplete="new-password" required>
         <div class="card">
-          <p class="note">Your card is added through Square at checkout. This page never stores a card number.</p>
-          <button class="btn secondary" type="button" id="square-btn" disabled>Continue to Square</button>
-          <p class="fine" id="square-help">Square link not added yet.</p>
+          <p class="note">No card needed to sign up. After you request a ride, you add your card for that ride on a secure Square form inside the app. This page never stores a card number.</p>
         </div>
         <p class="error" id="form-error" role="alert"></p>
         <button class="btn" type="submit">Save account</button>
@@ -57,13 +55,9 @@
     </main>
   </div>
   <script>
-    var SQUARE_SIGNUP_URL = "https://squareup.com/appointments/book/L077DQHSNJAG6";
-
     (function () {
       var form = document.getElementById("signup-form");
       var errorEl = document.getElementById("form-error");
-      var squareBtn = document.getElementById("square-btn");
-      var squareHelp = document.getElementById("square-help");
       var missionLink = document.getElementById("mission-link");
       var missionCopy = document.getElementById("mission-copy");
 
@@ -73,14 +67,6 @@
         missionCopy.hidden = !show;
         missionLink.setAttribute("aria-expanded", String(show));
       });
-
-      if (SQUARE_SIGNUP_URL) {
-        squareBtn.disabled = false;
-        squareHelp.textContent = "";
-        squareBtn.addEventListener("click", function () {
-          window.open(SQUARE_SIGNUP_URL, "_blank", "noopener,noreferrer");
-        });
-      }
 
       function digits(value) {
         return String(value || "").replace(/\D/g, "");
