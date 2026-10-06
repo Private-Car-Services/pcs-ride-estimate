@@ -1,6 +1,9 @@
 /* Private Car Services starter. Preview only: no texts, no charges, no API key. Shared rides use Firebase REST when PCS_SYNC.databaseURL is set.
    v47 (Oct 6): structured addresses + stops, nearest-first place search, card step before PIN, working rider cancel,
-   driver online time + screen wake lock. */
+   driver online time + screen wake lock.
+   v50 (Oct 6): driver profile (car details + profile photo + car photo) is saved on the server under
+   /rides/DRVRPRFL/{driverId} (driverId = email-based roster id), loaded at every login, and never wiped by
+   logout or a roster-password login. Only the opening odometer is asked after login. */
 (function () {
   var BUSINESS_PHONE = "936-261-7878";
   var DRIVER_COMMISSION_RATE = 0.7;
@@ -223,6 +226,7 @@
   var ROSTER_HUB = "DRVRCMMS"; /* hire / approve / commission */
   var HISTORY_HUB = "DRVRHSTY"; /* completed ride history per driver */
   var CALENDAR_HUB = "PCSCALND"; /* God day board: PCS-titled calendar rides */
+  var PROFILE_HUB = "DRVRPRFL"; /* v50: permanent driver profile (car + photos) per driver id */
   var lastDriverPatchAt = 0;
   var lastDriverPatchLat = null;
   var lastDriverPatchLng = null;
@@ -946,11 +950,15 @@
   function vehicleNeededCard() {
     if (ROLE !== "driver" || !signedIn() || driverMidRide()) return "";
     if (hasCompleteCar(readDriverAccount())) return "";
+    if (state.profileSyncing) {
+      return '<div class="card vehicle-needed"><p class="tag">One moment</p>' +
+        '<p class="lede">Loading your driver profile…</p></div>';
+    }
     return (
       '<div class="card vehicle-needed">' +
       '<p class="tag">Car details required</p>' +
       '<p class="lede">Add your car year, make, model, plate, seats, and a front-right photo before going online.</p>' +
-      '<a class="btn" href="signup/?v=21">Complete vehicle profile</a>' +
+      '<a class="btn" href="signup/?v=23">Complete vehicle profile</a>' +
       "</div>"
     );
   }
@@ -3575,6 +3583,158 @@
     }).catch(function () {});
   }
 
+  /* ---- v50: permanent driver profile on the server ----
+     Before v50 the car details and both photos lived only in this device's localStorage. A roster-password
+     login (any time the saved account had no passwordHash, e.g. after using the Profile page) replaced the
+     saved account with just name/phone/email, so the driver had to redo the whole vehicle profile.
+     Now: /rides/DRVRPRFL/{driverId} holds the profile, keyed by the stable email-based roster id. */
+  var PROFILE_FIELDS = ["name", "phone", "photo", "carYear", "carMake", "carModel", "carPlate", "carSeats", "carColor", "carPhoto"];
+  var PROFILE_PHOTO_FIELDS = { photo: 1, carPhoto: 1 };
+  var profileSyncPromise = null;
+
+  function driverIdForEmail(email) {
+    var e = String(email || "").trim().toLowerCase();
+    return e.replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 48);
+  }
+
+  function profileUrl(id) {
+    return databaseURL() + "/rides/" + encodeURIComponent(PROFILE_HUB) + "/" + encodeURIComponent(id) + ".json";
+  }
+
+  function profileValue(key, value) {
+    if (PROFILE_PHOTO_FIELDS[key]) return safePhoto(value);
+    if (value == null) return "";
+    if (key === "carPlate") return normalizePlate(value);
+    return value;
+  }
+
+  function hasProfileValue(key, value) {
+    var v = profileValue(key, value);
+    return v !== "" && v != null;
+  }
+
+  function mergeDriverProfile(local, remote) {
+    /* Returns { account, changed, needPush }. Never drops a field that either side has. */
+    var acc = Object.assign({}, local || {});
+    var localAt = Number(acc.profileUpdatedAt) || 0;
+    var remoteAt = remote ? (Number(remote.updatedAt) || 0) : 0;
+    var remoteNewer = !!remote && remoteAt > localAt;
+    var changed = false;
+    var needPush = false;
+    PROFILE_FIELDS.forEach(function (k) {
+      var lv = hasProfileValue(k, acc[k]);
+      var rv = remote ? hasProfileValue(k, remote[k]) : false;
+      if (rv && (!lv || (remoteNewer && profileValue(k, remote[k]) !== profileValue(k, acc[k])))) {
+        acc[k] = profileValue(k, remote[k]);
+        changed = true;
+      } else if (lv && (!rv || (!remoteNewer && localAt > remoteAt && profileValue(k, remote[k]) !== profileValue(k, acc[k])))) {
+        needPush = true;
+      }
+    });
+    if (remoteNewer) {
+      acc.profileUpdatedAt = remoteAt;
+      changed = true;
+    }
+    return { account: acc, changed: changed, needPush: needPush };
+  }
+
+  function writeDriverAccountLocal(account) {
+    try { localStorage.setItem("pcs-driver-account", JSON.stringify(account)); return true; } catch (err) { return false; }
+  }
+
+  function pushDriverProfile(account) {
+    /* PUT the full profile (only profile fields; never passwords). Also copy the car text onto the roster row
+       (never approvalStatus / active / commissionPct) so God mode sees it. */
+    if (!syncOn() || !account || !account.email) return Promise.resolve(false);
+    var id = driverIdForEmail(account.email);
+    if (!id) return Promise.resolve(false);
+    var at = Number(account.profileUpdatedAt) || Date.now();
+    var row = { email: String(account.email).trim().toLowerCase(), driverId: id, updatedAt: at };
+    var uid = firebaseUid() || account.uid || "";
+    if (uid) row.uid = uid;
+    PROFILE_FIELDS.forEach(function (k) {
+      if (hasProfileValue(k, account[k])) row[k] = profileValue(k, account[k]);
+    });
+    return authFetch(profileUrl(id), {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(row)
+    }).then(function (res) {
+      if (!res.ok) throw new Error("profile " + res.status);
+      return res.text();
+    }).then(function () {
+      if (!(Number(account.profileUpdatedAt) > 0)) {
+        var cur = readDriverAccount();
+        if (cur && String(cur.email || "").toLowerCase() === row.email) {
+          cur.profileUpdatedAt = at;
+          writeDriverAccountLocal(cur);
+        }
+      }
+      /* Roster car text: only PATCH an existing roster row (PATCH would create a half row otherwise). */
+      return authFetch(rosterUrl(id)).then(function (res) {
+        if (!res.ok) return "";
+        return res.text();
+      }).then(function (text) {
+        if (!text || text === "null") return;
+        var car = {};
+        ["carYear", "carMake", "carModel", "carPlate", "carSeats"].forEach(function (k) {
+          if (hasProfileValue(k, row[k])) car[k] = row[k];
+        });
+        if (!Object.keys(car).length) return;
+        car.profileUpdatedAt = at;
+        return authFetch(rosterUrl(id), {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(car)
+        });
+      }).catch(function () {});
+    }).then(function () { return true; });
+  }
+
+  function fetchDriverProfile(email) {
+    var id = driverIdForEmail(email);
+    if (!syncOn() || !id) return Promise.resolve(null);
+    return authFetch(profileUrl(id)).then(function (res) {
+      if (res.status === 404) return null;
+      if (!res.ok) throw new Error("profile " + res.status);
+      return res.text().then(function (text) {
+        if (!text || text === "null") return null;
+        var row = null;
+        try { row = JSON.parse(text); } catch (e) { row = null; }
+        if (!row || typeof row !== "object") return null;
+        if (row.email && String(row.email).trim().toLowerCase() !== String(email).trim().toLowerCase()) return null;
+        return row;
+      });
+    });
+  }
+
+  function syncDriverProfile() {
+    /* Load the saved profile from the server into this device, and back up anything only this device has.
+       Resolves (never rejects) within ~8s so login is never stuck. */
+    if (ROLE !== "driver") return Promise.resolve();
+    if (profileSyncPromise) return profileSyncPromise;
+    var local = readDriverAccount();
+    var email = local && local.email ? String(local.email).trim().toLowerCase() : String(readSession() || "").trim().toLowerCase();
+    if (!syncOn() || !email || email.indexOf("@") < 0) return Promise.resolve();
+    state.profileSyncing = true;
+    var work = fetchDriverProfile(email).then(function (remote) {
+      var cur = readDriverAccount() || {};
+      if (cur.email && String(cur.email).trim().toLowerCase() !== email) return;
+      if (!cur.email) cur.email = email;
+      var merged = mergeDriverProfile(cur, remote);
+      if (merged.changed) writeDriverAccountLocal(merged.account);
+      if (merged.needPush) return pushDriverProfile(merged.account).catch(function () {});
+    }).catch(function () {
+      state.profileSyncError = true;
+    });
+    var timeout = new Promise(function (resolve) { setTimeout(resolve, 8000); });
+    profileSyncPromise = Promise.race([work, timeout]).then(function () {
+      state.profileSyncing = false;
+      profileSyncPromise = null;
+    });
+    return profileSyncPromise;
+  }
+
   function rideLogStorageKey() {
     return "pcs-driver-ride-log-" + driverPresenceId();
   }
@@ -4074,7 +4234,7 @@
   }
 
   function driverProfileLink() {
-    return '<a class="nav-link" href="signup/?v=21">Profile</a>';
+    return '<a class="nav-link" href="signup/?v=23">Profile</a>';
   }
 
   function selectedOpenRide() {
@@ -4453,6 +4613,7 @@
       ["carYear", "carMake", "carModel", "carPlate", "carSeats"].forEach(function (k) {
         if (row[k] != null && row[k] !== "" && (account[k] == null || account[k] === "")) account[k] = row[k];
       });
+      /* v50: never drop the saved car details / photos here (keep = same-email account on this device). */
       try { localStorage.setItem("pcs-driver-account", JSON.stringify(account)); } catch (err) {}
       return account;
     });
@@ -4484,7 +4645,7 @@
       })() + "</p>" +
       '<button class="btn" type="submit">Log in</button>' +
       "</form>" +
-      '<a class="btn secondary" href="signup/?v=22">Create an account</a>'
+      '<a class="btn secondary" href="signup/?v=23">Create an account</a>'
     );
   }
 
@@ -5083,7 +5244,7 @@
       '<p class="lede">Keep the map clean. Open today\'s numbers, history, or profile here.</p>' +
       '<button class="btn" type="button" id="hub-today">Today</button>' +
       '<button class="btn secondary" type="button" id="hub-history">Earnings & history</button>' +
-      '<a class="btn secondary" href="signup/?v=21">Profile</a>' +
+      '<a class="btn secondary" href="signup/?v=23">Profile</a>' +
       logoutLine()
     );
   }
@@ -5481,6 +5642,8 @@
           accountSyncTried = true;
           syncAccountProfile(ROLE === "driver" ? "driver" : "rider", account);
           if (ROLE === "driver") {
+            /* v50: pull the saved car details + photos from the server (or back them up if only here). */
+            syncDriverProfile().then(function () { render(); });
             ensureMilesDayReady();
             followGps();
             acquireWakeLock();
@@ -5507,26 +5670,30 @@
             return;
           }
           var account = accountForRole();
-          var hasLocal = !!(account && (account.email || account.username) && account.passwordHash);
-          var emailMatches = hasLocal && account.email && loginEmail === String(account.email).trim().toLowerCase();
-          var legacyUsernameMatches = hasLocal && account.username && loginEmail === String(account.username).trim().toLowerCase();
-          if (!hasLocal || (!emailMatches && !legacyUsernameMatches)) {
+          var emailMatches = !!(account && account.email && loginEmail === String(account.email).trim().toLowerCase());
+          var legacyUsernameMatches = !!(account && account.username && loginEmail === String(account.username).trim().toLowerCase());
+          /* v50: same-email account on this device (kept even if it has no passwordHash, e.g. after the
+             Profile page saved it) so a roster login never wipes the car details and photos. */
+          var sameAccount = (emailMatches || legacyUsernameMatches) ? account : null;
+          var hasLocal = !!(sameAccount && sameAccount.passwordHash);
+          if (!hasLocal) {
             /* v46: account not in this app's storage (iOS Home Screen app has separate storage from
                Safari, or another phone). Fall back to the driver roster record. */
-            tryRosterLogin(null);
+            tryRosterLogin(null, sameAccount);
             return;
           }
           sha256Hex(password).then(function (hex) {
             if (hex !== account.passwordHash) {
               /* Password may have been set on another device: check the roster hash if one exists. */
-              tryRosterLogin(account);
+              tryRosterLogin(account, account);
               return;
             }
             if (ROLE === "driver") backfillRosterPassword(loginEmail, password);
             afterLocalLogin(account);
           });
         }
-        function tryRosterLogin(localSame) {
+        function tryRosterLogin(localSame, keepAccount) {
+          var keep = keepAccount || localSame || null;
           var noAccountMsg = "No driver account found for that email. Tap Create an account first.";
           var mismatchMsg = "That email or password does not match your driver account.";
           if (ROLE !== "driver" || !syncOn()) {
@@ -5548,7 +5715,7 @@
                 }
                 state.loginSetupEmail = "";
                 state.loginSetupDraft = "";
-                return saveRosterAccountLocally(row, password, localSame).then(afterLocalLogin);
+                return saveRosterAccountLocally(row, password, keep).then(afterLocalLogin);
               });
             }
             if (localSame) {
@@ -5577,7 +5744,7 @@
             return writeRosterPassword(found.id, password).catch(function () {}).then(function () {
               state.loginSetupEmail = "";
               state.loginSetupDraft = "";
-              return saveRosterAccountLocally(row, password, null).then(afterLocalLogin);
+              return saveRosterAccountLocally(row, password, keep).then(afterLocalLogin);
             });
           }).catch(function () {
             loginFail("Could not reach the driver roster. Check signal and try again.");
@@ -5596,6 +5763,8 @@
           try {
             var key = ROLE === "driver" ? "pcs-driver-account" : "pcs-rider-account";
             var prev = accountForRole() || {};
+            /* v50: another driver's saved account on this device is not merged into this one. */
+            if (prev.email && String(prev.email).trim().toLowerCase() !== loginEmail) prev = {};
             var next = Object.assign({}, prev, { email: loginEmail, uid: firebaseUid() });
             delete next.passwordHash;
             localStorage.setItem(key, JSON.stringify(next));
@@ -5608,6 +5777,8 @@
           accountSyncTried = true;
           syncAccountProfile(ROLE === "driver" ? "driver" : "rider", account);
           if (ROLE === "driver") {
+            /* v50: pull the saved car details + photos from the server (or back them up if only here). */
+            syncDriverProfile().then(function () { render(); });
             ensureMilesDayReady();
             followGps();
             acquireWakeLock();
@@ -7413,6 +7584,9 @@
     if (signedIn() && !accountSyncTried) {
       accountSyncTried = true;
       syncAccountProfile(ROLE === "driver" ? "driver" : "rider", accountForRole());
+    }
+    if (ROLE === "driver" && signedIn()) {
+      syncDriverProfile().then(function () { render(); });
     }
     render();
   });
