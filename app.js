@@ -1024,7 +1024,7 @@
       let more = [];
       if (q.length >= 3) {
         const box = suggestBox(block);
-        if (box && !airports.length && (!box._items || !box._items.length)) {
+        if (box && document.activeElement === input && !airports.length && (!box._items || !box._items.length)) {
           box._items = [];
           box.innerHTML = '<p class="suggest-note">Searching…</p>';
           box.hidden = false;
@@ -1045,7 +1045,7 @@
               free.then((list) => {
                 const box = suggestBox(block);
                 if (!list.length || !box || box.hidden || box._touched) return;
-                if (seq !== suggestSeq || input.value.trim() !== q) return;
+                if (seq !== suggestSeq || input.value.trim() !== q || document.activeElement !== input) return;
                 const names = airports.map((a) => normText(a.main));
                 const rest = list.filter((m) => !names.some((n) => normText(m.main).indexOf(n.replace(/ [a-z]{3}$/, '')) === 0));
                 renderSuggest(block, airports.concat(rest).slice(0, 6), suggestNoteHtml(origin));
@@ -1057,7 +1057,8 @@
           if (!more.length) more = (await googleSuggest(q, origin)) || [];
         }
       }
-      if (seq !== suggestSeq || input.value.trim() !== q) return;
+      // Results that arrive after the customer left the field (or pressed Escape) must not reopen the list.
+      if (seq !== suggestSeq || input.value.trim() !== q || document.activeElement !== input) return;
       const airportNames = airports.map((a) => normText(a.main));
       more = more.filter((m) => !airportNames.some((n) => normText(m.main).indexOf(n.replace(/ [a-z]{3}$/, '')) === 0));
       const items = airports.concat(more).slice(0, 6);
@@ -2681,7 +2682,11 @@
     });
     els.form.addEventListener('keydown', (event) => {
       const t = event.target;
-      if (event.key === 'Escape' && t && t.dataset && t.dataset.part === 'line1') hideSuggest(t.closest('.addr-block'));
+      if (event.key === 'Escape' && t && t.dataset && t.dataset.part === 'line1') {
+        clearTimeout(suggestTimer);
+        suggestSeq += 1; // drop results still on the way
+        hideSuggest(t.closest('.addr-block'));
+      }
     });
     els.form.addEventListener('click', (event) => {
       const item = event.target.closest ? event.target.closest('.suggest-item') : null;
