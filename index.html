@@ -163,6 +163,13 @@
             </select>
           </div>
 
+          <div class="field" id="intl-arrival-row" hidden>
+            <label for="intl-arrival" style="display:flex;gap:0.6rem;align-items:flex-start;cursor:pointer">
+              <input type="checkbox" id="intl-arrival" name="intl-arrival" style="width:1.3rem;height:1.3rem;padding:0;margin:0.1rem 0 0;flex:0 0 auto" />
+              <span>International arrival (+$15 service fee for extended wait and parking)</span>
+            </label>
+          </div>
+
           <div class="field">
             <label for="service-type">Service</label>
             <select id="service-type" name="service-type">
@@ -281,6 +288,6 @@
   <!-- Same Firebase hub + Square gating as the rider app (Book it writes the booking where God mode reads it). -->
   <script src="app/sync-config.js?v=16"></script>
   <script src="app/square-config.js?v=60"></script>
-  <script src="app.js?v=61"></script>
+  <script src="app.js?v=62"></script>
 </body>
 </html>

@@ -19,6 +19,11 @@
  * current location / From pin are biased to the chosen service area (Greater Houston 29.76,-95.37 or Waco
  * 31.55,-97.15; no area picked = Greater Houston) instead of all of Texas; no distance is shown for that default bias,
  * and matches within 50 mi (~80 km) of the area center are listed first (Google's order kept inside each group).
+ * v21 (PCS v62, Oct 7, 2026): International arrival. When From is an airport (airport pick-up rate) the form shows
+ * "International arrival (+$15 service fee for extended wait and parking)". Ticked = its own line "International
+ * arrivals service fee $15.00" after the short-notice % and before tax (taxed 8.25%), so the total, the 25% deposit,
+ * the booking (internationalArrival, internationalFeeCents, feeLines, estimateCents) and the request text include it.
+ * Hidden + cleared for any other ride. Ticking / unticking re-prices the shown estimate without a new route lookup.
  */
 (function () {
   'use strict';
@@ -36,6 +41,9 @@
   // (same gating as the rider app). Until then the customer sees "we'll send your secure payment link".
   // No Square secrets/API keys ever go on this site.
   const DEPOSIT_PCT = 0.25;
+  // v62: Square item "$15 International Arrivals service fee" (taxed, same 8.25%).
+  const INTL_ARRIVAL_FEE = 15;
+  const INTL_ARRIVAL_LABEL = 'International arrivals service fee';
   const RIDE_CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
   const OPEN_HUB = 'REQUESTS';
   // Auto "Book it" only for Greater Houston, Mon–Fri 8:00 am–6:00 pm America/Chicago (same hours as the rider app).
@@ -145,6 +153,8 @@
     airline: document.getElementById('airline'),
     flightNumber: document.getElementById('flight-number'),
     flightDirection: document.getElementById('flight-direction'),
+    intlArrivalRow: document.getElementById('intl-arrival-row'),
+    intlArrival: document.getElementById('intl-arrival'),
     textRequestButton: document.getElementById('text-request-btn'),
     promoBookButton: document.getElementById('promo-book-btn'),
     textRequestNote: document.getElementById('text-request-note'),
@@ -246,7 +256,7 @@
     return diff >= 0 && diff < 24 * 60 * 60 * 1000;
   }
 
-  function computeEstimate({ miles, serviceType, passengers, stops, dateStr, timeStr, isHoliday, shortNotice, airport }) {
+  function computeEstimate({ miles, serviceType, passengers, stops, dateStr, timeStr, isHoliday, shortNotice, airport, internationalArrival }) {
     if (serviceType === 'hourly' || serviceType === 'van') {
       return { callForQuote: true, serviceType };
     }
@@ -313,6 +323,13 @@
       total += surcharge;
     }
 
+    // v62: flat fee, airport pick-ups only, after the short-notice % and before tax (so it is taxed).
+    const intl = !!internationalArrival && kind === 'airport-pick';
+    if (intl) {
+      items.push({ label: INTL_ARRIVAL_LABEL, amount: INTL_ARRIVAL_FEE });
+      total += INTL_ARRIVAL_FEE;
+    }
+
     const stateTax = Math.round(total * 0.0825 * 100) / 100;
     items.push({
       label: 'Texas tax (8.25%)',
@@ -331,6 +348,9 @@
       airport: airport || null,
       holiday: !!isHoliday,
       shortNotice: !!shortNotice,
+      internationalArrival: intl,
+      internationalFee: intl ? INTL_ARRIVAL_FEE : 0,
+      rawMiles: actualMiles,
     };
   }
 
@@ -1353,6 +1373,30 @@
     [els.airline, els.flightNumber, els.flightDirection].forEach((field) => {
       field.required = required;
     });
+    updateIntlArrival();
+  }
+
+  /** v62: International arrival checkbox only when From is an airport (airport pick-up rate). Hidden = unticked. */
+  function intlArrivalEligible() {
+    const airport = detectAirport();
+    return !!(airport && airport.kind === 'airport-pick');
+  }
+
+  function updateIntlArrival() {
+    if (!els.intlArrivalRow || !els.intlArrival) return;
+    const ok = intlArrivalEligible();
+    els.intlArrivalRow.hidden = !ok;
+    if (!ok && els.intlArrival.checked) els.intlArrival.checked = false;
+  }
+
+  function intlArrivalTicked() {
+    return !!(els.intlArrival && els.intlArrival.checked && intlArrivalEligible());
+  }
+
+  /** Tick / untick re-prices the estimate already shown (same route + miles), deposit included. */
+  function repriceForIntlArrival() {
+    if (!lastEstimate || lastEstimate.callForQuote || typeof lastEstimate.rawMiles !== 'number') return;
+    renderEstimate(computeEstimate(currentInputs(lastEstimate.rawMiles)));
   }
 
   function serviceLabel() {
@@ -1411,6 +1455,7 @@
         'Arrival or departure: ' + els.flightDirection.value
       );
     }
+    if (intlArrivalTicked()) lines.push('International arrival: yes (+$15 service fee)');
     if (result && !result.callForQuote && typeof result.total === 'number') {
       lines.push('Rate: ' + result.tier.label + (result.shortNotice ? ' + short notice' : ''));
       lines.push('Miles: ' + result.actualMiles.toFixed(1) + ' (billed ' + result.miles + ')');
@@ -1943,6 +1988,8 @@
       if (els.flightNumber.value.trim()) notes.push('Flight: ' + els.flightNumber.value.trim());
       if (els.flightDirection.value) notes.push(els.flightDirection.value);
     }
+    const intl = !!result.internationalArrival;
+    if (intl) notes.push('International arrival (+$15 service fee)');
     return {
       code,
       status: 'pending_owner',
@@ -1974,6 +2021,11 @@
       depositCents: Math.round(deposit * 100),
       payChoice: payChoice === 'full' ? 'full' : 'deposit',
       amountDueCents: Math.round(due * 100),
+      internationalArrival: intl,
+      ...(intl ? {
+        internationalFeeCents: INTL_ARRIVAL_FEE * 100,
+        feeLines: [{ label: INTL_ARRIVAL_LABEL, cents: INTL_ARRIVAL_FEE * 100, taxed: true }],
+      } : {}),
       cardStatus: 'link_requested',
       cardRequestedAt: now,
       paymentStatus: 'awaiting_payment',
@@ -1989,7 +2041,7 @@
     const keys = ['code', 'status', 'source', 'name', 'phone', 'email', 'pickupStreet', 'pickupCity', 'pickupState', 'pickupLine2',
       'pickupZip', 'pickupAddress', 'dropStreet', 'dropCity', 'dropState', 'dropLine2', 'dropZip', 'dropAddress', 'stops',
       'stopAddresses', 'cardStatus', 'date', 'time', 'asap', 'when', 'pickupLat', 'pickupLng', 'dropLat', 'dropLng', 'isTest',
-      'estimateCents', 'amountDueCents', 'payChoice', 'serviceArea', 'passengers'];
+      'estimateCents', 'amountDueCents', 'payChoice', 'serviceArea', 'passengers', 'internationalArrival'];
     const out = {};
     keys.forEach((k) => { if (ride[k] !== undefined) out[k] = ride[k]; });
     out.updatedAt = Date.now();
@@ -2658,6 +2710,7 @@
       isHoliday: isHolidayDate(dateStr),
       shortNotice: isShortNotice(dateStr, timeStr),
       airport: detectAirport(),
+      internationalArrival: intlArrivalTicked(),
     };
   }
 
@@ -2861,7 +2914,8 @@
       if (!event.target.closest || !event.target.closest('.addr-line1')) hideAllSuggest();
     });
 
-    const CONTACT_ONLY = ['contact-name', 'contact-email', 'contact-phone', 'airline', 'flight-number', 'flight-direction'];
+    const CONTACT_ONLY = ['contact-name', 'contact-email', 'contact-phone', 'airline', 'flight-number', 'flight-direction', 'intl-arrival'];
+    if (els.intlArrival) els.intlArrival.addEventListener('change', repriceForIntlArrival);
     const staleBooking = (event) => {
       const id = event && event.target && event.target.id;
       if (event && (!id || CONTACT_ONLY.indexOf(id) !== -1)) return;
