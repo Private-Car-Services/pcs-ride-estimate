@@ -15,6 +15,10 @@
  * (POST /places/autocomplete + /places/details; the key is a Worker secret, daily-capped). If the Worker says capped /
  * fallback or is slow, the v18 search (free map data, then the Maps JS key if loaded) runs as before. Picking a Google
  * suggestion fills line 1, city, state, ZIP (overwritten) and the exact pin. "Powered by Google" under the list.
+ * v20 (PCS v61, Oct 7, 2026): "+ Add a stop" and stop blocks sit between From and To. Google suggestions with no
+ * current location / From pin are biased to the chosen service area (Greater Houston 29.76,-95.37 or Waco
+ * 31.55,-97.15; no area picked = Greater Houston) instead of all of Texas; no distance is shown for that default bias,
+ * and matches within 50 mi (~80 km) of the area center are listed first (Google's order kept inside each group).
  */
 (function () {
   'use strict';
@@ -1025,15 +1029,36 @@
       unit: /^[A-Za-z]?\d+[A-Za-z]?$/.test(String(d.unit || '').trim()) ? '#' + String(d.unit).trim() : String(d.unit || '').trim(),
     };
   }
+  // v61: Google bias when there is no current location / From pin: the chosen service area (not all of Texas).
+  const GOOGLE_AREA_BIAS = {
+    'Greater Houston area': { lat: 29.7604, lng: -95.3698 },
+    'Waco area': { lat: 31.55, lng: -97.15 },
+  };
+  const GOOGLE_AREA_MI = 50; // about 80 km around the area center (Houston: Conroe / The Woodlands / Montgomery)
+  // With the default area bias, matches inside the area come first (Google's order kept inside each group).
+  // p.miles is the Worker's distance from the bias point. Location / From-pin bias keeps Google's order.
+  function rankAreaFirst(preds, bias) {
+    if (!bias || !bias.area || !Array.isArray(preds)) return preds;
+    const inArea = (p) => p && p.miles != null && isFinite(p.miles) && +p.miles <= GOOGLE_AREA_MI;
+    return preds.filter(inArea).concat(preds.filter((p) => !inArea(p)));
+  }
+  function workerPlacesBias(origin) {
+    if (origin && origin.from && origin.point && isFinite(origin.point.lat) && isFinite(origin.point.lng)) {
+      return { lat: +origin.point.lat, lng: +origin.point.lng, area: false };
+    }
+    const a = GOOGLE_AREA_BIAS[serviceArea()] || GOOGLE_AREA_BIAS['Greater Houston area'];
+    return { lat: a.lat, lng: a.lng, area: true };
+  }
   async function workerGoogleSuggest(block, q, origin) {
     const body = { input: q, sessionToken: workerPlacesToken(block) };
-    if (origin && origin.from && origin.point && isFinite(origin.point.lat)) { body.lat = +origin.point.lat; body.lng = +origin.point.lng; }
+    const bias = workerPlacesBias(origin);
+    body.lat = bias.lat; body.lng = bias.lng;
     const data = await placesPost('/autocomplete', body);
     if (!data || !Array.isArray(data.predictions) || !data.predictions.length) return null;
-    return data.predictions.map((p) => ({
+    return rankAreaFirst(data.predictions, bias).map((p) => ({
       main: p.main,
       sub: p.sub || '',
-      dist: p.miles != null && isFinite(p.miles) ? fmtMiles(+p.miles) : '',
+      dist: !bias.area && p.miles != null && isFinite(p.miles) ? fmtMiles(+p.miles) : '',
       google: true,
       resolve: () => workerPlaceDetails(block, p),
     }));

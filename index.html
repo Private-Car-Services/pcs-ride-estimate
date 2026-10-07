@@ -88,6 +88,13 @@
             </div>
           </fieldset>
 
+          <!-- v61: stops sit BETWEEN From and To, in driving order -->
+          <div class="stops-block">
+            <div id="stops-list"></div>
+            <button type="button" class="link-add-stop" id="add-stop-btn">+ Add a stop</button>
+            <p class="stops-price" id="stops-price">Only if you need to stop somewhere on the way. Each stop adds $11. Stops happen in order between From and To.</p>
+          </div>
+
           <fieldset class="addr-block" data-addr="dropoff">
             <legend>To</legend>
             <p class="addr-note">Where the ride ends.</p>
@@ -117,12 +124,6 @@
               </div>
             </div>
           </fieldset>
-
-          <div class="stops-block">
-            <div id="stops-list"></div>
-            <button type="button" class="link-add-stop" id="add-stop-btn">+ Add a stop</button>
-            <p class="stops-price" id="stops-price">Only if you need to stop somewhere on the way. Each stop adds $11. Stops happen in order between From and To.</p>
-          </div>
 
           <div class="field" id="manual-miles-field" hidden>
             <label for="manual-miles">Driving miles (one way — only needed if the route lookup fails)</label>
@@ -280,6 +281,6 @@
   <!-- Same Firebase hub + Square gating as the rider app (Book it writes the booking where God mode reads it). -->
   <script src="app/sync-config.js?v=16"></script>
   <script src="app/square-config.js?v=60"></script>
-  <script src="app.js?v=60"></script>
+  <script src="app.js?v=61"></script>
 </body>
 </html>
