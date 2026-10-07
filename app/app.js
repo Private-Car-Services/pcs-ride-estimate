@@ -36,11 +36,18 @@
    v61 (Oct 7): "Request a ride" form order is From, Stop 1, Stop 2, ..., "+ Add a stop" (+ help text), To.
         Stop order sent with the ride is unchanged. Google suggestions with no current location / From pin are biased
         to Greater Houston (29.7604,-95.3698) instead of all of Texas; no distance is shown for that default bias, and
-        matches within 50 mi (~80 km) of Houston are listed first (Google's order kept inside each group). */
+        matches within 50 mi (~80 km) of Houston are listed first (Google's order kept inside each group).
+   v62 (Oct 7): International arrival. When From is an airport (airport pick-up rate), the booking form shows
+        "International arrival (+$15 service fee for extended wait and parking)". Ticked = its own line
+        "International arrivals service fee $15.00" before tax (so it is taxed 8.25%). Saved on the ride
+        (internationalArrival, internationalFeeCents, feeLines) and included in estimateCents / fareTotal, so the
+        card hold, cancel fee and the after-drop-off charge all include it. Hidden + cleared for other rides. */
 (function () {
   var BUSINESS_PHONE = "936-261-7878";
   var DRIVER_COMMISSION_RATE = 0.7;
   var EXTRA_FEE = 0;
+  var INTL_ARRIVAL_CENTS = 1500; /* v62: Square item "$15 International Arrivals service fee" (taxed) */
+  var INTL_ARRIVAL_LABEL = "International arrivals service fee";
   var BASE_CENTS = 1100;
   var EXTRA_PAX_CENTS = 500;
   var EXTRA_STOP_CENTS = 1100;
@@ -1939,6 +1946,7 @@
     state.notice = "";
     state.customerGeocodeTried = false;
     state.estimateCents = 0;
+    state.internationalArrival = false;
     var acct = readRiderAccount() || {};
     state.name = acct.name || "";
     state.phone = acct.phone || "";
@@ -2214,6 +2222,7 @@
     time: SAMPLE.time,
     asap: true,
     tripType: "auto",
+    internationalArrival: false,
     error: "",
     passengers: 2,
     stops: 0,
@@ -2422,11 +2431,15 @@
   }
 
   function detectAirportKind() {
+    return airportKindFrom(state.tripType,
+      [state.pickupStreet, state.pickupCity, state.pickupState].join(" "),
+      [state.dropStreet, state.dropCity, state.dropState].join(" "));
+  }
+
+  function airportKindFrom(tripType, pick, drop) {
     /* Explicit trip type (estimator-style) wins; otherwise infer from addresses. */
-    var forced = String(state.tripType || "auto").toLowerCase();
+    var forced = String(tripType || "auto").toLowerCase();
     if (forced === "airport-drop" || forced === "airport-pick" || forced === "local") return forced;
-    var pick = [state.pickupStreet, state.pickupCity, state.pickupState].join(" ");
-    var drop = [state.dropStreet, state.dropCity, state.dropState].join(" ");
     var pickAir = addressLooksAirport(pick);
     var dropAir = addressLooksAirport(drop);
     if (pickAir && !dropAir) return "airport-pick";
@@ -3386,7 +3399,9 @@
     }
     var beforeNotice = baseCents + mileage + paxCents + stopCents + waitCents;
     var notice = miles.ready && isShortNotice() ? Math.round(beforeNotice * SHORT_NOTICE_PCT) : 0;
-    var sub = beforeNotice + notice;
+    /* v62: flat $15 international arrivals fee, its own line, after the short-notice % and before tax (taxed). */
+    var intlCents = state.internationalArrival ? INTL_ARRIVAL_CENTS : 0;
+    var sub = beforeNotice + notice + intlCents;
     var tax = Math.round(sub * TAX_RATE);
     return {
       ready: miles.ready,
@@ -3405,6 +3420,8 @@
       waitMinutes: waitBillableMinutes(),
       waitStops: (state.autoWaits || []).length,
       notice: notice,
+      internationalArrival: !!intlCents,
+      intlCents: intlCents,
       sub: sub,
       tax: tax,
       total: sub + tax
@@ -3420,6 +3437,7 @@
       fareSub: est.sub,
       fareTax: est.tax,
       fareTotal: est.total,
+      internationalFeeCents: est.intlCents || 0,
       waitCents: est.waitCents || 0,
       waitMinutes: est.waitMinutes || 0,
       autoWaits: (state.autoWaits || []).slice()
@@ -4833,6 +4851,7 @@
     addrSet(prefix, "Pinned", hasPoint);
     if (prefix === "pickup") state.pickupFromHere = !!place.fromHere;
     resetDrivingRoute();
+    updateIntlArrivalRow();
     if (prefix === "drop") {
       state.dropFix = pointFrom(state.dropLat, state.dropLng);
       state.useDrivenMiles = false;
@@ -7109,6 +7128,7 @@
       dropLat: ride ? ride.dropLat : null,
       dropLng: ride ? ride.dropLng : null,
       isTest: !!(ride && ride.isTest),
+      internationalArrival: !!(ride && ride.internationalArrival),
       updatedAt: Date.now()
     };
   }
@@ -8095,6 +8115,7 @@
       '<option value="airport-pick"' + (state.tripType === "airport-pick" ? " selected" : "") + ">Airport pick-up</option>" +
       "</select>" +
       '<p class="fine">Airport bases match the estimator: pick-up and drop-off differ by time of day.</p>' +
+      intlArrivalRowHtml() +
       "</div>" +
       '<div class="group"><p class="group-title">Rider</p>' +
       field("rider-name", "Name", state.name, "required") +
@@ -8107,6 +8128,36 @@
       "</form>" +
       '<p class="fine">After you request, the owner confirms the booking before drivers see it. Call 936-261-7878 if you need help.</p>'
     );
+  }
+
+  /* v62: International arrival checkbox (only when From is an airport = airport pick-up rate). */
+  function intlArrivalEligible() {
+    var v = function (id, fallback) { var el = document.getElementById(id); return el ? el.value : (fallback || ""); };
+    if (!document.getElementById("ride-form")) return detectAirportKind() === "airport-pick";
+    return airportKindFrom(v("trip-type", state.tripType),
+      [v("pickup-street", state.pickupStreet), v("pickup-city", state.pickupCity), v("pickup-state", state.pickupState)].join(" "),
+      [v("drop-street", state.dropStreet), v("drop-city", state.dropCity), v("drop-state", state.dropState)].join(" ")) === "airport-pick";
+  }
+
+  function intlArrivalRowHtml() {
+    var ok = detectAirportKind() === "airport-pick";
+    if (!ok) state.internationalArrival = false;
+    return '<div id="intl-arrival-row" style="margin-top:10px"' + (ok ? "" : " hidden") + ">" +
+      '<label for="intl-arrival" style="display:flex;gap:10px;align-items:flex-start;font-weight:600;text-transform:none;letter-spacing:normal;font-size:15px;line-height:1.35">' +
+      '<input type="checkbox" id="intl-arrival" name="intl-arrival" style="width:22px;height:22px;min-height:0;padding:0;flex:0 0 auto;margin-top:2px"' +
+      (ok && state.internationalArrival ? " checked" : "") + ">" +
+      "<span>International arrival (+$15 service fee for extended wait and parking)</span></label></div>";
+  }
+
+  /* Show/hide as From / To / trip type change (typed or picked). Hidden = unticked. */
+  function updateIntlArrivalRow() {
+    var row = document.getElementById("intl-arrival-row");
+    var box = document.getElementById("intl-arrival");
+    if (!row || !box) return;
+    var ok = intlArrivalEligible();
+    row.hidden = !ok;
+    if (!ok) { box.checked = false; state.internationalArrival = false; }
+    else state.internationalArrival = !!box.checked;
   }
 
   function moneyCard() {
@@ -8130,6 +8181,7 @@
       '<div class="money-row"><span>Mileage (' + est.billed + " mi × " + money(est.perMileCents) + ")</span><span>" + money(est.mileage) + "</span></div>" +
       (est.notice ? '<div class="money-row"><span>Under 24 hours notice (+25%)</span><span>' + money(est.notice) + "</span></div>" : "") +
       (est.waitCents ? '<div class="money-row"><span>Wait ($0.40/min after you confirmed a stop)</span><span>' + money(est.waitCents) + "</span></div>" : "") +
+      (est.intlCents ? '<div class="money-row" id="intl-fee-row"><span>' + esc(INTL_ARRIVAL_LABEL) + "</span><span>" + money(est.intlCents) + "</span></div>" : "") +
       '<div class="money-row"><span>Miles</span><span>' + est.raw.toFixed(2) + " mi, billed as " + est.billed + " (rounded up)</span></div>" +
       '<div class="money-row"><span>Fare before tax</span><span>' + money(est.sub) + "</span></div>" +
       '<div class="money-row"><span>Texas tax 8.25%</span><span>' + money(est.tax) + "</span></div>" +
@@ -8367,6 +8419,7 @@
     state.dropApprox = ride.dropApprox || "";
     state.dropFound = ride.dropFound || "";
     state.stopList = normalizeStops(ride.stopList);
+    state.internationalArrival = !!ride.internationalArrival; /* v62 */
     state.cardStatus = ride.cardStatus || "";
     state.cardLast4 = ride.cardLast4 || "";
     state.cardBrand = ride.cardBrand || "";
@@ -8520,6 +8573,7 @@
       dropApprox: state.dropApprox && state.dropApprox !== "missing" ? state.dropApprox : "",
       dropFound: state.dropFound || "",
       stopList: compactStops(),
+      internationalArrival: !!state.internationalArrival,
       cardStatus: state.cardStatus || "",
       cardLast4: state.cardLast4 || "",
       cardBrand: state.cardBrand || "",
@@ -8555,6 +8609,10 @@
       waitMinutes: waitBillableMinutes()
     };
     if (state.code) rideOut.code = state.code;
+    if (state.internationalArrival) { /* v62: fee line kept on every save (rider + driver) */
+      rideOut.internationalFeeCents = INTL_ARRIVAL_CENTS;
+      rideOut.feeLines = [{ label: INTL_ARRIVAL_LABEL, cents: INTL_ARRIVAL_CENTS, taxed: true }];
+    }
     if (ROLE === "customer") {
       rideOut.hasCardOnFile = !!state.hasCardOnFile;
       if (state.estimateCents) rideOut.estimateCents = state.estimateCents;
@@ -8617,6 +8675,7 @@
     state.time = "";
     state.asap = true;
     state.tripType = "auto";
+    state.internationalArrival = false;
     state.rideStatus = "";
     state.pickupLat = null;
     state.pickupLng = null;
@@ -8828,6 +8887,7 @@
       (est.waitCents || (state.autoWaits || []).length
         ? '<div class="money-row"><span>Wait</span><span data-live-wait>' + esc(waitLabelText() || (money(est.waitCents) + " wait")) + "</span></div>"
         : "") +
+      (est.intlCents ? '<div class="money-row" id="driver-intl-row"><span>International arrival</span><span>' + money(est.intlCents) + " fee · extended wait / parking</span></div>" : "") +
       '<div class="total-row"><span>' + (finalLabel ? "Commission" : "Est. commission") + "</span><span data-live-comm>" + money(commissionCentsFor(est) || 0) + "</span></div>" +
       '<p class="fine">' + driverCommissionPct() + "% of the fare before tax and fees. Miles round up. Still 4½ min → Are you OK?; at 5 min (if OK) we ask about an extra stop — Yes starts " + money(WAIT_CENTS_PER_MIN) + "/min wait. Estimate only · not a payout.</p></div>"
     );
@@ -9032,6 +9092,8 @@
     state.phone = val("rider-phone");
     var tripEl = document.getElementById("trip-type");
     if (tripEl) state.tripType = tripEl.value || "auto";
+    var intlEl = document.getElementById("intl-arrival");
+    if (intlEl) state.internationalArrival = !!intlEl.checked && detectAirportKind() === "airport-pick";
   }
 
   function formComplete() {
@@ -9452,6 +9514,12 @@
     addrPrefixes().forEach(function (prefix) { wireSearch(prefix); });
     wireAddressInputs();
     wireLocation();
+    var rideFormEl = document.getElementById("ride-form");
+    if (rideFormEl && document.getElementById("intl-arrival-row")) {
+      rideFormEl.addEventListener("input", updateIntlArrivalRow);
+      rideFormEl.addEventListener("change", updateIntlArrivalRow);
+      updateIntlArrivalRow();
+    }
     var addStopBtn = document.getElementById("add-stop");
     if (addStopBtn) {
       addStopBtn.addEventListener("click", function () {
@@ -10263,6 +10331,7 @@
     }
     if (prefix === "drop") state.dropFix = pt;
     resetDrivingRoute();
+    updateIntlArrivalRow();
     return true;
   }
 
@@ -11338,6 +11407,8 @@
 
   /* v54 test hooks (no UI). */
   window.__pcsApp = {
+    estimate: estimate,
+    intlArrivalEligible: intlArrivalEligible,
     placeNameVariants: placeNameVariants,
     googleSuggest: googleSuggest,
     riderAgreed: riderAgreed,
