@@ -1,6 +1,8 @@
 /* PCS driver: new-ride alert for the Profile page (v51; v53: iOS silent-mode + tap-to-enable sound bar;
    v54: loud looping alert that ducks other audio until Accept/Deny;
-   v56: the harsh siren is replaced by the approved bell chime (ride-chime.mp3, C6-E6-G6-E6) on a ~1.4 s loop).
+   v56: the harsh siren is replaced by the approved bell chime (ride-chime.mp3, C6-E6-G6-E6) on a ~1.4 s loop;
+   v57: iPhone sound fix: unlock on every tap, primed <audio> + Web Audio both play, gold bar until a chime really
+   played, red "Tap here to hear ride alerts" banner when blocked, resume after app switch, old mute cleared once).
    The main driver app (app.js) has its own pop-up; this small script makes the Profile page alert too.
    Accept happens in the driver app (same Accept code); Deny here is remembered there too. */
 (function () {
@@ -14,21 +16,10 @@
   var ASAP_EXPIRE_MS = 20 * 60 * 1000;
   var DISMISS_MS = 12 * 3600000;
   var approved = null;
-  var ctx = null;
-  var primed = false;
-  var shownCode = "";
-  var lastBeep = 0;
   var sirenTimer = null;
-  var sirenNodes = [];
-  /* v56: approved chime file, fetched + decoded once (after the unlock tap) on the same AudioContext. */
+  var shownCode = "";
+  /* v57: approved chime file; played by the shared sound engine below (Web Audio buffer + primed <audio>). */
   var CHIME_URL = chimeUrl();
-  var CHIME_NOTES = [[1046.5, 0], [1318.5, 0.18], [1568, 0.36], [1318.5, 0.58]]; /* C6 E6 G6 E6 (fallback only) */
-  var chimeBuf = null;
-  var chimeLoad = null;
-  var chimeFailedAt = 0;
-  var chimeWaiting = false;
-  var alertGen = 0; /* bumps on stop so a burst still waiting on the file never plays late */
-  var buzzing = false; /* vibrate(0) only after an alert buzz (avoids Chrome's pre-tap vibrate warning) */
 
   /* ride-chime.mp3 sits next to this script in app/driver/. document.currentScript gives
      /pcs-ride-estimate/app/driver/ride-alert.js on GitHub Pages (and /app/driver/ride-alert.js locally),
@@ -80,217 +71,452 @@
     return [r[p + "Street"], r[p + "City"], r[p + "State"]].filter(Boolean).join(", ");
   }
 
-  /* v53/v54: iOS 17+ silent-switch ignore; prefer playback so the alert ducks/interrupts other audio. */
-  function playbackSession() {
-    try {
-      if (!navigator.audioSession) return;
-      var t = navigator.audioSession.type;
-      if (t !== "playback" && t !== "playAndRecord") {
-        try { navigator.audioSession.type = "playback"; } catch (e1) {}
-        try { if (navigator.audioSession.type !== "playback") navigator.audioSession.type = "playAndRecord"; } catch (e2) {}
-      }
-    } catch (e) {}
-  }
-  function running() { return !!ctx && ctx.state === "running"; }
-  function hideBar() {
-    var b = document.getElementById("ride-sound-bar");
-    if (b && b.parentNode) b.parentNode.removeChild(b);
-  }
-  /* Big gold bar on each fresh open until tapped (iOS needs a tap before any sound). Nothing is remembered. */
-  function showBar() {
-    if (!session() || running() || document.getElementById("ride-sound-bar") || !document.body) return;
-    var b = document.createElement("button");
-    b.type = "button";
-    b.id = "ride-sound-bar";
-    b.textContent = "\uD83D\uDD14 Tap to turn on ride alert sound";
-    b.setAttribute("style", "position:fixed;top:0;left:0;right:0;z-index:10050;width:100%;margin:0;border:0;border-radius:0;" +
-      "padding:calc(16px + env(safe-area-inset-top)) 14px 16px;background:#e3b341;color:#0b1c33;font-size:20px;font-weight:800;" +
-      "text-align:center;box-shadow:0 3px 12px rgba(0,0,0,.45);cursor:pointer;font-family:inherit");
-    /* v56: test sound = one burst of the ride chime. touchend as well as click: on phones the bar used to vanish
-       (sound came on during the touch) before its click fired, so the test sound never played. */
-    var done = false;
-    function onTap(ev) {
-      if (ev && ev.type === "click") { ev.preventDefault(); ev.stopPropagation(); }
-      if (done) return;
-      done = true;
-      wake();
-      chime(true);
-      hideBar();
+  /* ===== v57 ride-alert sound engine (same code in app.js and driver/ride-alert.js) =====
+     iPhone/iPad home-screen app: sound only works after a real tap, and iOS can silently drop Web Audio after an
+     app switch or screen lock. So, belt and suspenders:
+       - EVERY touch / click / key (not only the gold bar) synchronously creates/resumes the AudioContext, plays a
+         1-sample silent buffer, and primes an HTMLAudioElement (muted play, then pause + rewind) inside the gesture.
+         iOS then lets that same element play later with no tap.
+       - A ride alert plays through BOTH: the decoded chime buffer looping on the AudioContext AND the primed
+         <audio> element (loop, volume 1). Stop both on Accept / Deny / hide.
+       - If play is blocked (NotAllowedError), a big red "Tap here to hear ride alerts" banner shows; tapping it
+         unlocks and plays the chime right away.
+       - The gold "Tap to turn on ride alert sound" bar stays at the top until a chime has really played in THIS
+         page session (AudioContext running AND <audio>.play() resolved). Nothing is saved: iOS forgets the unlock on
+         every reopen. It comes back after an app switch if the AudioContext did not come back.
+     o = { url, muted(), wantBar(), onUi() } */
+  function pcsAlertAudio(o) {
+    var AC = window.AudioContext || window.webkitAudioContext;
+    var ctx = null;
+    var el = null;
+    var elPrimed = false;   /* <audio> was play()-ed inside a gesture without NotAllowedError */
+    var elHeard = false;    /* <audio>.play() of the real (unmuted) chime resolved in this page session */
+    var buf = null;
+    var loading = null;
+    var failedAt = 0;
+    var alerting = false;
+    var alertGen = 0;
+    var loopSrc = null;
+    var loopStartedRunning = false; /* a loop started while suspended/interrupted is restarted once the context runs */
+    var loopNodes = [];
+    var oscNodes = [];
+    var watch = null;
+    var buzzing = false;
+    var blocked = false;
+    var testing = false;
+    var testTimer = null;
+    var stats = { unlocks: 0, elPlays: 0, bufStarts: 0, oscBursts: 0, blocked: 0 };
+    function noop() {}
+    function isMuted() { try { return !!(o.muted && o.muted()); } catch (e) { return false; } }
+    /* audioSession first (before any AudioContext), only if the API exists. Never playAndRecord (earpiece on iPhone). */
+    function setSession() {
+      try {
+        var s = navigator.audioSession;
+        if (s && s.type !== "playback") s.type = "playback";
+      } catch (e) {}
     }
-    b.addEventListener("touchend", onTap);
-    b.addEventListener("click", onTap);
-    document.body.appendChild(b);
-  }
-
-  function wake(ev) {
-    /* a tap on the gold bar itself leaves the bar for its own handler (it plays the test chime, then hides) */
-    var onBar = !!(ev && ev.target && ev.target.id === "ride-sound-bar");
-    playbackSession();
-    try {
-      var AC = window.AudioContext || window.webkitAudioContext;
-      if (AC && !ctx) ctx = new AC();
-      if (!ctx) return;
-      if (ctx.state !== "running" && ctx.resume) {
-        var r = ctx.resume();
-        if (r && r.then) r.then(function () { if (running() && !onBar) hideBar(); }).catch(function () {});
-      } else if (ctx.state === "running" && !onBar) hideBar();
-      if (!primed) {
-        var s = ctx.createBufferSource();
-        s.buffer = ctx.createBuffer(1, 1, 22050);
-        s.connect(ctx.destination);
-        s.start(0);
-        primed = true;
-      }
-      loadChime();
-    } catch (e) {}
-  }
-  function stopSiren() {
-    alertGen++;
-    if (sirenTimer) { clearInterval(sirenTimer); sirenTimer = null; }
-    sirenNodes.forEach(function (n) {
-      try { if (n.stop) n.stop(); } catch (e) {}
-      try { if (n.disconnect) n.disconnect(); } catch (e2) {}
-    });
-    sirenNodes = [];
-    if (buzzing) {
-      buzzing = false;
-      try { if (navigator.vibrate) navigator.vibrate(0); } catch (e3) {}
+    function makeCtx() {
+      if (ctx || !AC) return ctx;
+      setSession();
+      try {
+        ctx = new AC();
+        try { ctx.onstatechange = function () { if (alerting) startCtxLoop(); ui(); }; } catch (e1) {}
+      } catch (e) { ctx = null; }
+      return ctx;
     }
-  }
-  function beep() {
-    if (ls(MUTE) === "1" || !ctx) return;
-    playChime(false);
-  }
-
-  /* v56: fetch + decode ride-chime.mp3 once into an AudioBuffer. Resolves null on failure (fallback tones play);
-     a failed load is retried on a later tap, at most every 15 s. */
-  function loadChime() {
-    if (chimeBuf) return Promise.resolve(chimeBuf);
-    if (chimeLoad) return chimeLoad;
-    if (!ctx || typeof fetch !== "function" || !ctx.decodeAudioData) return Promise.resolve(null);
-    if (chimeFailedAt && Date.now() - chimeFailedAt < 15000) return Promise.resolve(null);
-    var c = ctx;
-    chimeLoad = fetch(CHIME_URL).then(function (res) {
-      if (!res || !res.ok) throw new Error("ride-chime " + (res && res.status));
-      return res.arrayBuffer();
-    }).then(function (ab) {
-      return new Promise(function (resolve, reject) {
-        var p = c.decodeAudioData(ab, resolve, reject); /* callback form for older iOS Safari */
-        if (p && p.then) p.then(resolve, reject);
-      });
-    }).then(function (buf) {
-      if (!buf) throw new Error("ride-chime decode");
-      chimeBuf = buf;
-      chimeFailedAt = 0;
-      chimeLoad = null;
-      return buf;
-    }).catch(function () {
-      chimeFailedAt = Date.now();
-      chimeLoad = null;
-      return null;
-    });
-    return chimeLoad;
-  }
-  /* Alert nodes are tracked so Deny / hide cuts the sound off; they drop out of the list when finished. */
-  function track(nodes, endNode) {
-    nodes.forEach(function (n) { sirenNodes.push(n); });
-    try {
-      endNode.onended = function () {
-        sirenNodes = sirenNodes.filter(function (n) { return nodes.indexOf(n) === -1; });
-        nodes.forEach(function (n) { try { n.disconnect(); } catch (e) {} });
-      };
-    } catch (e) {}
-  }
-  /* The approved chime file at full level (GainNode 1.0, no extra quieting). */
-  function chimeFromBuffer(isTest) {
-    var src = ctx.createBufferSource();
-    var g = ctx.createGain();
-    src.buffer = chimeBuf;
-    g.gain.value = 1.0;
-    src.connect(g);
-    g.connect(ctx.destination);
-    src.start(0);
-    if (!isTest) track([src, g], src);
-  }
-  /* Fallback if the file cannot be fetched/decoded: the same four bell notes from oscillators
-     (sine + quiet 2x partial, master gain 0.95). Never the old sawtooth siren. */
-  function chimeFallback(isTest) {
-    try {
-      var now = ctx.currentTime + 0.01;
-      var master = ctx.createGain();
-      master.gain.value = 0.95;
-      master.connect(ctx.destination);
-      var nodes = [master];
-      var last = null;
-      CHIME_NOTES.forEach(function (n, i) {
-        var len = i === CHIME_NOTES.length - 1 ? 0.67 : 0.5;
-        [[1, 0.85], [2, 0.12]].forEach(function (pt) {
-          var o = ctx.createOscillator();
-          var g = ctx.createGain();
-          o.type = "sine";
-          o.frequency.value = n[0] * pt[0];
-          g.gain.setValueAtTime(0.0001, now + n[1]);
-          g.gain.exponentialRampToValueAtTime(pt[1], now + n[1] + 0.008);
-          g.gain.exponentialRampToValueAtTime(0.0001, now + n[1] + len);
-          o.connect(g);
-          g.connect(master);
-          o.start(now + n[1]);
-          o.stop(now + n[1] + len + 0.02);
-          nodes.push(o, g);
-          last = o;
+    function makeEl() {
+      if (el) return el;
+      if (typeof Audio !== "function") return null;
+      try {
+        el = new Audio();
+        el.preload = "auto";
+        el.setAttribute("playsinline", "");
+        el.setAttribute("webkit-playsinline", "");
+        try { el.playsInline = true; } catch (e1) {}
+        el.src = o.url;
+        try { el.load(); } catch (e2) {}
+      } catch (e) { el = null; }
+      return el;
+    }
+    function ctxRunning() { return !!ctx && ctx.state === "running"; }
+    /* "Really heard": AudioContext running AND the <audio> element's play() resolved. */
+    function ready() { return ctxRunning() && elHeard; }
+    function resumeCtx() {
+      if (!ctx || ctx.state === "running" || ctx.state === "closed" || !ctx.resume) return;
+      try {
+        var p = ctx.resume();
+        if (p && p.then) p.then(function () { ui(); if (alerting) startCtxLoop(); }, noop);
+      } catch (e) {}
+    }
+    function load() {
+      if (buf) return Promise.resolve(buf);
+      if (loading) return loading;
+      if (!ctx || typeof fetch !== "function" || !ctx.decodeAudioData) return Promise.resolve(null);
+      if (failedAt && Date.now() - failedAt < 15000) return Promise.resolve(null);
+      var c = ctx;
+      loading = fetch(o.url).then(function (res) {
+        if (!res || !res.ok) throw new Error("ride-chime " + (res && res.status));
+        return res.arrayBuffer();
+      }).then(function (ab) {
+        return new Promise(function (resolve, reject) {
+          var p = c.decodeAudioData(ab, resolve, reject); /* callback form for older iOS Safari */
+          if (p && p.then) p.then(resolve, reject);
         });
+      }).then(function (b) {
+        if (!b) throw new Error("ride-chime decode");
+        buf = b;
+        failedAt = 0;
+        loading = null;
+        if (alerting) startCtxLoop();
+        return b;
+      }).catch(function () {
+        failedAt = Date.now();
+        loading = null;
+        return null;
       });
-      if (!isTest) track(nodes, last);
-    } catch (e) {}
-  }
-  /* v56: one burst of the ride chime (~1.25 s). isTest = the unlock-bar test (ignores mute, not cut by stop). */
-  function playChime(isTest) {
-    if (!ctx) return;
-    if (!isTest && ls(MUTE) === "1") return;
-    playbackSession();
-    try { if (ctx.state === "suspended") ctx.resume(); } catch (e) {}
-    try {
-      if (navigator.vibrate) navigator.vibrate(isTest ? 60 : [220, 60, 220, 60, 220, 60, 320]);
-      if (!isTest) buzzing = true;
-    } catch (e2) {}
-    if (chimeBuf) {
-      try { chimeFromBuffer(isTest); } catch (e3) { chimeFallback(isTest); }
-      return;
+      return loading;
     }
-    if (chimeWaiting) return; /* a burst is already waiting for the file */
-    chimeWaiting = true;
-    var gen = alertGen;
-    var done = false;
-    function go() {
-      if (done) return;
-      done = true;
-      chimeWaiting = false;
-      if (!isTest && (gen !== alertGen || ls(MUTE) === "1")) return;
-      if (chimeBuf) {
-        try { chimeFromBuffer(isTest); return; } catch (e4) {}
+    function primeEl() {
+      var e = el;
+      if (!e || alerting || testing || !e.paused) return;
+      var p = null;
+      e.muted = true;
+      try { p = e.play(); } catch (x) { p = null; }
+      try { e.pause(); } catch (x2) {}
+      try { e.currentTime = 0; } catch (x3) {}
+      e.muted = false;
+      try { e.volume = 1; } catch (x4) {}
+      if (p && p.then) {
+        p.then(function () {
+          elPrimed = true;
+          if (!alerting && !testing) { try { e.pause(); e.currentTime = 0; } catch (x5) {} }
+        }, function (err) {
+          /* AbortError = our own pause() won the race: the gesture was accepted. NotAllowedError = not a real gesture. */
+          if (err && err.name === "NotAllowedError") return;
+          elPrimed = true;
+        });
+      } else {
+        elPrimed = true;
       }
-      chimeFallback(isTest);
     }
-    loadChime().then(go, go);
-    setTimeout(go, 2500); /* slow network: do not stay silent, play the fallback tones */
+    /* Runs synchronously inside every user gesture. opts.noPrime: caller plays the element itself right after. */
+    function unlock(opts) {
+      stats.unlocks++;
+      setSession();
+      makeCtx();
+      if (ctx) {
+        resumeCtx();
+        try {
+          var s = ctx.createBufferSource();
+          s.buffer = ctx.createBuffer(1, 1, 22050);
+          s.connect(ctx.destination);
+          s.start(0);
+        } catch (e) {}
+        load();
+      }
+      makeEl();
+      if (alerting) {
+        /* a ride is ringing: this tap makes it audible right now */
+        if (el && (el.paused || blocked)) playEl(false);
+        startCtxLoop();
+      } else if (!(opts && opts.noPrime)) {
+        primeEl();
+      }
+    }
+    function onBlocked() {
+      blocked = true;
+      stats.blocked++;
+      ui();
+    }
+    function playEl(isTest) {
+      var e = makeEl();
+      if (!e) return null;
+      var gen = alertGen;
+      e.loop = !isTest;
+      e.muted = false;
+      try { e.volume = 1; } catch (x0) {}
+      try { e.currentTime = 0; } catch (x1) {}
+      var p = null;
+      try { p = e.play(); } catch (x2) { onBlocked(); return null; }
+      stats.elPlays++;
+      if (p && p.then) {
+        p.then(function () {
+          elPrimed = true;
+          elHeard = true;
+          blocked = false;
+          if (!isTest && (!alerting || gen !== alertGen)) { try { e.pause(); e.currentTime = 0; } catch (x3) {} }
+          ui();
+        }, function (err) {
+          if (err && err.name === "AbortError") return;
+          if (!isTest && (!alerting || gen !== alertGen)) return;
+          onBlocked();
+        });
+      } else {
+        elHeard = true;
+        ui();
+      }
+      return p;
+    }
+    function trackOsc(nodes, last) {
+      nodes.forEach(function (n) { oscNodes.push(n); });
+      try {
+        last.onended = function () {
+          oscNodes = oscNodes.filter(function (n) { return nodes.indexOf(n) === -1; });
+          nodes.forEach(function (n) { try { n.disconnect(); } catch (e) {} });
+        };
+      } catch (e) {}
+    }
+    /* Fallback (file not decoded yet / failed): same four bell notes from oscillators. Never the old sawtooth siren. */
+    function oscBurst(isTest) {
+      if (!ctx) return;
+      try {
+        var notes = [[1046.5, 0], [1318.5, 0.18], [1568, 0.36], [1318.5, 0.58]];
+        var now = ctx.currentTime + 0.01;
+        var master = ctx.createGain();
+        master.gain.value = 0.95;
+        master.connect(ctx.destination);
+        var nodes = [master];
+        var last = null;
+        notes.forEach(function (n, i) {
+          var len = i === notes.length - 1 ? 0.67 : 0.5;
+          [[1, 0.85], [2, 0.12]].forEach(function (pt) {
+            var osc = ctx.createOscillator();
+            var g = ctx.createGain();
+            osc.type = "sine";
+            osc.frequency.value = n[0] * pt[0];
+            g.gain.setValueAtTime(0.0001, now + n[1]);
+            g.gain.exponentialRampToValueAtTime(pt[1], now + n[1] + 0.008);
+            g.gain.exponentialRampToValueAtTime(0.0001, now + n[1] + len);
+            osc.connect(g);
+            g.connect(master);
+            osc.start(now + n[1]);
+            osc.stop(now + n[1] + len + 0.02);
+            nodes.push(osc, g);
+            last = osc;
+          });
+        });
+        stats.oscBursts++;
+        if (!isTest) trackOsc(nodes, last);
+      } catch (e) {}
+    }
+    /* Decoded chime looping on the AudioContext (gain 1.0). Same period as the looping <audio> element. */
+    function startCtxLoop() {
+      if (!alerting || !ctx || !buf) return;
+      if (loopSrc && (loopStartedRunning || ctx.state !== "running")) return;
+      if (loopSrc) { /* started while the context was not running: restart now that it is */
+        loopNodes.forEach(function (n) { try { if (n.stop) n.stop(); } catch (e0) {} try { n.disconnect(); } catch (e1) {} });
+        loopNodes = [];
+        loopSrc = null;
+      }
+      try {
+        var src = ctx.createBufferSource();
+        var g = ctx.createGain();
+        src.buffer = buf;
+        src.loop = true;
+        g.gain.value = 1.0;
+        src.connect(g);
+        g.connect(ctx.destination);
+        src.start(0);
+        loopSrc = src;
+        loopStartedRunning = ctx.state === "running";
+        loopNodes = [src, g];
+        stats.bufStarts++;
+      } catch (e) { loopSrc = null; }
+    }
+    function vibrate(p) {
+      try { if (navigator.vibrate && (navigator.userActivation ? navigator.userActivation.hasBeenActive : true)) navigator.vibrate(p); } catch (e) {}
+    }
+    function tickAlert() {
+      if (!alerting) return;
+      if (isMuted()) { stopAlert(); return; }
+      vibrate([220, 60, 220, 60, 220, 60, 320]);
+      buzzing = true;
+      resumeCtx();
+      if (el && el.paused && !blocked) playEl(false);
+      if (!buf) { load(); oscBurst(false); }
+      else startCtxLoop();
+    }
+    /* Ride arrived: both paths at once, until stopAlert(). Idempotent while ringing. */
+    function startAlert() {
+      if (isMuted()) { stopAlert(); return; }
+      if (alerting) return;
+      alerting = true;
+      alertGen++;
+      testing = false;
+      setSession();
+      makeCtx();
+      makeEl();
+      resumeCtx();
+      playEl(false);
+      startCtxLoop();
+      tickAlert();
+      watch = setInterval(tickAlert, 1400);
+      ui();
+    }
+    function stopAlert() {
+      var was = alerting;
+      alerting = false;
+      alertGen++;
+      if (watch) { clearInterval(watch); watch = null; }
+      loopNodes.concat(oscNodes).forEach(function (n) {
+        try { if (n.stop) n.stop(); } catch (e) {}
+        try { if (n.disconnect) n.disconnect(); } catch (e2) {}
+      });
+      loopNodes = [];
+      oscNodes = [];
+      loopSrc = null;
+      if (el && !testing) {
+        try { el.pause(); } catch (e3) {}
+        try { el.currentTime = 0; } catch (e4) {}
+        el.loop = false;
+      }
+      if (buzzing) { buzzing = false; vibrate(0); }
+      if (blocked || was) { blocked = false; ui(); }
+    }
+    /* Gold-bar test: plays NOW inside the tap via the primed element (works before the buffer is decoded). */
+    function test() {
+      unlock({ noPrime: true });
+      if (alerting) return;
+      testing = true;
+      vibrate(60);
+      var p = playEl(true);
+      if (!el || !p) oscBurst(true); /* no <audio> support: Web Audio only */
+      if (testTimer) clearTimeout(testTimer);
+      testTimer = setTimeout(function () { testing = false; }, 1600);
+      ui();
+    }
+    /* ---- UI: gold bar (until really heard) + red banner (blocked while ringing) ---- */
+    function barStyle(bg, fg, z) {
+      return "position:fixed;top:0;left:0;right:0;z-index:" + z + ";width:100%;margin:0;border:0;border-radius:0;" +
+        "padding:calc(16px + env(safe-area-inset-top)) 14px 16px;background:" + bg + ";color:" + fg + ";font-size:20px;font-weight:800;" +
+        "text-align:center;box-shadow:0 3px 12px rgba(0,0,0,.45);cursor:pointer;font-family:inherit;display:block;" +
+        "-webkit-tap-highlight-color:transparent;touch-action:manipulation";
+    }
+    function addBar(id, text, bg, fg, z, onTap) {
+      var b = document.getElementById(id);
+      if (b) return b;
+      b = document.createElement("button");
+      b.type = "button";
+      b.id = id;
+      b.textContent = text;
+      b.setAttribute("style", barStyle(bg, fg, z));
+      var last = 0;
+      function tap(ev) {
+        if (ev && ev.type === "click") { try { ev.preventDefault(); ev.stopPropagation(); } catch (e) {} }
+        var now = Date.now();
+        if (now - last < 700) return; /* touchend + click of one tap */
+        last = now;
+        onTap();
+      }
+      b.addEventListener("touchend", tap);
+      b.addEventListener("click", tap);
+      document.body.appendChild(b);
+      return b;
+    }
+    function removeEl(id) {
+      var b = document.getElementById(id);
+      if (b && b.parentNode) b.parentNode.removeChild(b);
+    }
+    function wantBar() { try { return o.wantBar ? !!o.wantBar() : true; } catch (e) { return true; } }
+    function ui() {
+      if (!document.body) return;
+      if (!wantBar()) { removeEl("ride-sound-bar"); removeEl("ride-sound-blocked"); return; }
+      if (blocked && alerting) {
+        addBar("ride-sound-blocked", "\uD83D\uDD0A Tap here to hear ride alerts", "#c0161b", "#fff", 11050, function () {
+          unlock({ noPrime: true });
+          if (!alerting) { test(); return; }
+          playEl(false);
+          startCtxLoop();
+        });
+      } else {
+        removeEl("ride-sound-blocked");
+      }
+      if (ready()) removeEl("ride-sound-bar");
+      else addBar("ride-sound-bar", "\uD83D\uDD14 Tap to turn on ride alert sound", "#e3b341", "#0b1c33", 10050, test);
+      try { if (o.onUi) o.onUi(); } catch (e) {}
+    }
+    /* App switch / screen lock: iOS leaves the context suspended or "interrupted". Try to resume; if it does not
+       come back, the gold bar returns so the next tap fixes it. */
+    function onReturn() {
+      if (document.visibilityState && document.visibilityState !== "visible") return;
+      resumeCtx();
+      if (alerting && el && el.paused) playEl(false);
+      ui();
+      setTimeout(ui, 700);
+    }
+    function onGesture(ev) {
+      var t = ev && ev.target;
+      var id = t && t.id;
+      /* bar / banner taps run their own handler (they play right away); still unlock the context here */
+      if (id === "ride-sound-bar" || id === "ride-sound-blocked") { unlock({ noPrime: true }); return; }
+      unlock();
+    }
+    function install() {
+      setSession();
+      ["touchstart", "touchend", "pointerdown", "pointerup", "mousedown", "click", "keydown"].forEach(function (t) {
+        document.addEventListener(t, onGesture, true);
+      });
+      document.addEventListener("visibilitychange", onReturn);
+      window.addEventListener("pageshow", onReturn);
+      window.addEventListener("focus", onReturn);
+      if (document.body) ui(); else document.addEventListener("DOMContentLoaded", ui);
+      setInterval(ui, 2000); /* nothing can quietly remove the bar */
+    }
+    return {
+      install: install,
+      unlock: unlock,
+      test: test,
+      startAlert: startAlert,
+      stopAlert: stopAlert,
+      load: load,
+      ui: ui,
+      ready: ready,
+      onReturn: onReturn,
+      info: function () {
+        return {
+          ctxState: ctx ? ctx.state : "none", elPrimed: elPrimed, elHeard: elHeard, alerting: alerting, blocked: blocked,
+          bufReady: !!buf, elPaused: el ? el.paused : null, elLoop: el ? el.loop : null, elMuted: el ? el.muted : null,
+          elSrc: el ? el.src : "", stats: stats
+        };
+      },
+      url: function () { return o.url; },
+      bufReady: function () { return !!buf; }
+    };
   }
-  /* Unlock-bar test sound: one burst of the new chime. */
-  function chime(isTest) {
-    playChime(isTest !== false);
-  }
-  function playSirenBurst(isTest) { /* v54 name kept for test hooks; now the chime */
-    if (!ctx || ls(MUTE) === "1") return;
-    playChime(!!isTest);
+  /* ===== end v57 engine ===== */
+
+
+  /* v57: mute defaults to OFF; a mute saved by an older version is cleared once (shared key with app.js). */
+  (function resetOldMute() {
+    try {
+      if (localStorage.getItem("pcs-driver-alert-mute-v57") !== "1") {
+        localStorage.removeItem(MUTE);
+        localStorage.setItem("pcs-driver-alert-mute-v57", "1");
+      }
+    } catch (e) {}
+  })();
+  function muted() { return ls(MUTE) === "1"; }
+  var audio = pcsAlertAudio({ url: CHIME_URL, muted: muted, wantBar: function () { return !!session(); } });
+  function stopSiren() {
+    if (sirenTimer) { clearInterval(sirenTimer); sirenTimer = null; }
+    audio.stopAlert();
   }
   function startSirenLoop() {
-    if (ls(MUTE) === "1") { stopSiren(); return; }
+    if (muted()) { stopSiren(); return; }
+    audio.startAlert();
     if (sirenTimer) return;
-    playChime(false);
     sirenTimer = setInterval(function () {
-      if (!shownCode || ls(MUTE) === "1" || !document.getElementById("ride-popup")) { stopSiren(); return; }
-      playChime(false);
+      if (!shownCode || muted() || !document.getElementById("ride-popup")) { stopSiren(); return; }
+      audio.startAlert(); /* idempotent while ringing */
     }, 1400);
   }
+  function playChime(isTest) {
+    if (isTest) audio.test();
+    else startSirenLoop();
+  }
+  function chime(isTest) { playChime(isTest !== false); }
+  function playSirenBurst(isTest) { playChime(!!isTest); }
+  function showBar() { audio.ui(); }
 
   function hide() {
     stopSiren();
@@ -380,29 +606,131 @@
     }).catch(function () {});
   }
 
-  playbackSession();
-  document.addEventListener("touchstart", wake, true);
-  document.addEventListener("pointerdown", wake, true);
-  document.addEventListener("touchend", wake, true);
-  document.addEventListener("click", wake, true);
-  if (document.body) showBar(); else document.addEventListener("DOMContentLoaded", showBar);
-  document.addEventListener("visibilitychange", function () {
-    if (document.visibilityState !== "visible") return;
-    setTimeout(function () { if (!running()) showBar(); }, 800);
-  });
+  audio.install(); /* v57: unlock on every tap; gold bar until a chime really played; resume after app switch */
+
+  /* v57: Alert/SOS on Profile page too (same police-help flow as app.js). */
+  function ensureSosButton() {
+    if (document.getElementById("pcs-sos-btn")) return;
+    if (!document.getElementById("pcs-sos-style")) {
+      var st = document.createElement("style");
+      st.id = "pcs-sos-style";
+      st.textContent =
+        "#pcs-sos-btn{position:fixed;right:12px;bottom:calc(14px + env(safe-area-inset-bottom));z-index:10040;" +
+        "width:64px;height:64px;border-radius:50%;border:3px solid #fff;background:#c0161b;color:#fff;" +
+        "font-size:13px;font-weight:900;line-height:1.05;box-shadow:0 4px 16px rgba(0,0,0,.45);" +
+        "cursor:pointer;font-family:inherit;-webkit-tap-highlight-color:transparent}" +
+        "#pcs-sos-overlay{position:fixed;inset:0;z-index:11500;background:rgba(5,14,28,.94);display:flex;align-items:center;justify-content:center;padding:16px}" +
+        "#pcs-sos-overlay .box{background:#0b1c33;color:#fff;border:2px solid #c0161b;border-radius:18px;max-width:420px;width:100%;padding:20px;text-align:center}" +
+        "#pcs-sos-overlay h2{color:#ff6b6b;margin:0 0 10px;font-size:24px}" +
+        "#pcs-sos-overlay .row{display:flex;flex-wrap:wrap;gap:10px;margin-top:14px}" +
+        "#pcs-sos-overlay .row a,#pcs-sos-overlay .row button{flex:1;min-width:110px;padding:16px 8px;border:0;border-radius:12px;font-size:18px;font-weight:800;color:#fff;text-decoration:none;cursor:pointer}" +
+        "#pcs-sos-overlay .yes{background:#2e9d4f}#pcs-sos-overlay .no{background:#8a2323}" +
+        "#pcs-sos-overlay .call{background:#c0161b}#pcs-sos-overlay .ghost{background:#345}";
+      document.head.appendChild(st);
+    }
+    var b = document.createElement("button");
+    b.type = "button";
+    b.id = "pcs-sos-btn";
+    b.setAttribute("aria-label", "Alert SOS");
+    b.innerHTML = "ALERT<br>SOS";
+    b.addEventListener("click", function (ev) {
+      try { ev.preventDefault(); ev.stopPropagation(); } catch (e) {}
+      openSosFlow();
+    });
+    (document.body || document.documentElement).appendChild(b);
+  }
+  function sosCoords(cb) {
+    if (!navigator.geolocation) { cb(null, null); return; }
+    try {
+      navigator.geolocation.getCurrentPosition(
+        function (p) { cb(+p.coords.latitude, +p.coords.longitude); },
+        function () { cb(null, null); },
+        { enableHighAccuracy: true, timeout: 8000, maximumAge: 15000 }
+      );
+    } catch (e) { cb(null, null); }
+  }
+  function openSosFlow() {
+    if (document.getElementById("pcs-sos-overlay")) return;
+    var ov = document.createElement("div");
+    ov.id = "pcs-sos-overlay";
+    ov.innerHTML =
+      '<div class="box" role="dialog" aria-modal="true"><h2>Alert / SOS</h2>' +
+      "<p>Request police help? We open the 911 dialer and show your location. Matthew gets a red God-mode alert. This app cannot call 911 by itself.</p>" +
+      '<div class="row"><button type="button" class="yes" id="sos-yes">Yes</button>' +
+      '<button type="button" class="no" id="sos-no">No</button></div></div>';
+    document.body.appendChild(ov);
+    ov.addEventListener("click", function (ev) {
+      var t = ev.target;
+      if (!t || !t.id) return;
+      if (t.id === "sos-no") { ov.parentNode.removeChild(ov); return; }
+      if (t.id !== "sos-yes") return;
+      ov.parentNode.removeChild(ov);
+      sosCoords(function (lat, lng) {
+        var name = "";
+        var phone = "";
+        var email = session();
+        try {
+          var acc = JSON.parse(ls("pcs-driver-account") || "{}") || {};
+          name = acc.name || "";
+          phone = acc.phone || "";
+        } catch (e) {}
+        var id = "police_driver_" + driverId() + "_" + Date.now();
+        var body = {
+          kind: "police_assist", priority: "high", at: Date.now(), role: "driver",
+          driverId: driverId(), personId: driverId(), name: name || "Driver", phone: phone,
+          email: email, rideCode: ls(CODE) || "", lat: lat, lng: lng,
+          message: "Driver requested police assistance (Alert / SOS button). Call 911 / them if they cannot.",
+          source: "sos_button"
+        };
+        try {
+          if (db()) fetch(db() + "/rides/SAFETY/" + encodeURIComponent(id) + ".json", {
+            method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body)
+          }).catch(function () {});
+        } catch (e2) {}
+        try { location.href = "tel:911"; } catch (e3) {}
+        var loc = (lat != null && lng != null) ? (+lat).toFixed(6) + ", " + (+lng).toFixed(6) : "Location unavailable";
+        var sc = document.createElement("div");
+        sc.id = "pcs-sos-overlay";
+        sc.innerHTML =
+          '<div class="box"><h2>Police assistance</h2>' +
+          "<p>Tap Call 911 to open the dialer. Copy your location for the operator.</p>" +
+          '<p style="font-size:20px;font-weight:800;word-break:break-all">' + esc(loc) + "</p>" +
+          '<div class="row"><a class="call" href="tel:911">Call 911</a>' +
+          '<button type="button" class="ghost" id="sos-copy">Copy location</button>' +
+          (lat != null ? '<a class="yes" href="https://www.google.com/maps?q=' + encodeURIComponent((+lat) + "," + (+lng)) + '">Open in Maps</a>' : "") +
+          '<button type="button" class="no" id="sos-close">Close</button></div></div>';
+        document.body.appendChild(sc);
+        sc.addEventListener("click", function (ev2) {
+          var t2 = ev2.target;
+          if (!t2 || !t2.id) return;
+          if (t2.id === "sos-close") sc.parentNode.removeChild(sc);
+          if (t2.id === "sos-copy") {
+            try {
+              if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(loc);
+              t2.textContent = "Copied";
+            } catch (e4) {}
+          }
+        });
+      });
+    });
+  }
+  if (document.body) ensureSosButton(); else document.addEventListener("DOMContentLoaded", ensureSosButton);
   setInterval(tick, 4000);
   setTimeout(tick, 800);
   /* Test hooks (no UI). */
   window.__pcsRideAlert = {
     playChime: playChime,
-    loadChime: loadChime,
+    loadChime: audio.load,
     chimeUrl: function () { return CHIME_URL; },
-    chimeReady: function () { return !!chimeBuf; },
+    chimeReady: function () { return audio.bufReady(); },
+    audio: audio,
     playSirenBurst: playSirenBurst,
     startSirenLoop: startSirenLoop,
     stopSiren: stopSiren,
     showBar: showBar,
     hide: hide,
-    chime: chime
+    chime: chime,
+    ensureSosButton: ensureSosButton,
+    openSosFlow: openSosFlow
   };
 })();
