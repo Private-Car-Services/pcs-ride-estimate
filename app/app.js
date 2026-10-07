@@ -2260,8 +2260,10 @@
     payError: "",
     cancelFeeStatus: "",
     hasCardOnFile: false,
-    tipChoice: "20",
+    tipChoice: "", /* v66: NO default tip. The rider must tap one (No tip is fine). */
     tipCustom: "",
+    tipFor: "",      /* v66: ride code the tip choice belongs to */
+    payConfirm: null, /* v66: "Charge $X to Visa ending NNNN?" snapshot */
     payBusy: false,
     payNotice: "",
     payAttempt: 0,
@@ -4324,8 +4326,11 @@
     state.payError = "";
     state.cancelFeeStatus = "";
     state.hasCardOnFile = false;
-    state.tipChoice = "20";
+    state.refundedCents = 0;
+    state.tipChoice = ""; /* v66: never preselect a tip */
     state.tipCustom = "";
+    state.tipFor = "";
+    state.payConfirm = null;
     state.payBusy = false;
     state.payNotice = "";
     state.payAttempt = 0;
@@ -4335,6 +4340,97 @@
 
   function tipBaseCents() {
     return state.finalSubCents > 0 ? state.finalSubCents : state.finalFareCents;
+  }
+
+  /* ===== v66: the tip is the rider's explicit choice, kept per ride (memory + sessionStorage) =====
+     Before v66 the pay step started with 20% picked, and the choice lived only in memory, so a reopened app,
+     Home -> Back to my ride, or a tap lost to a screen refresh charged 20% even though the rider meant No tip
+     (ride T4KV2L37: $16.38 fare + $3.03 tip charged). Now nothing is picked until the rider taps a choice,
+     the choice survives redraws / GPS / status updates / reloads in the same session, and Pay shows the exact total. */
+  var TIP_STORE_PREFIX = "pcs-tip-v66-";
+  var tipMem = {};
+
+  function tipValid(c) {
+    c = String(c == null ? "" : c);
+    return c === "custom" || TIP_CHOICES.indexOf(c) !== -1;
+  }
+
+  function tipPicked() {
+    return tipValid(state.tipChoice);
+  }
+
+  /* Ready to pay = a choice was tapped, and a custom ("Other") tip has a real amount. */
+  function tipReady() {
+    if (!tipPicked()) return false;
+    if (String(state.tipChoice) === "custom") return tipCentsChosen() > 0;
+    return true;
+  }
+
+  function saveTipChoice() {
+    var code = state.code || "";
+    if (!code) return;
+    state.tipFor = code;
+    var rec = { c: String(state.tipChoice || ""), x: String(state.tipCustom || "") };
+    tipMem[code] = rec;
+    try { sessionStorage.setItem(TIP_STORE_PREFIX + code, JSON.stringify(rec)); } catch (e) {}
+  }
+
+  function setTipChoice(c) {
+    state.tipChoice = tipValid(c) ? String(c) : "";
+    state.payConfirm = null; /* changing the tip always closes the confirm step */
+    saveTipChoice();
+  }
+
+  /* Called when the screen switches to a ride (applyRide). Same ride -> keep what the rider tapped. */
+  function syncTipForRide(code) {
+    code = String(code || "");
+    if (!code || code === state.tipFor) return;
+    var rec = tipMem[code] || null;
+    if (!rec) {
+      try { rec = JSON.parse(sessionStorage.getItem(TIP_STORE_PREFIX + code) || "null"); } catch (e) { rec = null; }
+    }
+    state.tipChoice = rec && tipValid(rec.c) ? String(rec.c) : "";
+    state.tipCustom = rec && rec.x ? String(rec.x).slice(0, 7) : "";
+    state.tipFor = code;
+    state.payConfirm = null;
+    if (rec) tipMem[code] = rec;
+  }
+
+  function payUsesSavedCard() {
+    return state.cardStatus === "on_file" && state.hasCardOnFile && !state.payNewCard;
+  }
+
+  function payBtnLabel(failedSaved) {
+    if (state.payBusy) return "Paying\u2026";
+    if (!tipPicked()) return "Pick a tip option (No tip is fine)";
+    if (!tipReady()) return "Enter a tip amount (or tap No tip)";
+    var tip = tipCentsChosen();
+    var amt = money(payTotalCents()) + (tip > 0 ? " (incl. " + money(tip) + " tip)" : "");
+    return (failedSaved ? "Try my saved card again \u00b7 " : "Pay ") + amt;
+  }
+
+  function payCardWords(newCard) {
+    if (newCard) return "the card you entered";
+    var last4 = String(state.cardLast4 || "").replace(/\D/g, "").slice(-4);
+    return last4.length === 4 ? cardBrandName(state.cardBrand) + " ending " + last4 : "your card on file";
+  }
+
+  /* A confirm snapshot is only good while nothing it shows has changed. */
+  function payConfirmStillGood(c) {
+    return !!c && c.code === (state.code || "") && c.choice === String(state.tipChoice || "") && c.tip === tipCentsChosen() &&
+      c.total === payTotalCents() && c.newCard === !payUsesSavedCard() && tipReady();
+  }
+
+  function payConfirmHtml() {
+    var c = state.payConfirm;
+    var deposit = state.paymentStatus === "deposit_paid" ? (Number(state.paidCents) || 0) : 0;
+    return '<div class="pay-confirm" id="pay-confirm" role="alertdialog" aria-labelledby="pay-confirm-q" style="border:2px solid #f0d48a;border-radius:14px;padding:12px;margin:10px 0">' +
+      '<p class="lede" id="pay-confirm-q" style="margin:0 0 4px"><strong>Charge ' + esc(money(c.total)) + " to " + esc(payCardWords(c.newCard)) + "?</strong></p>" +
+      '<p class="fine" id="pay-confirm-split" style="margin:0 0 10px">(fare ' + esc(money(c.fare)) + (deposit ? " after the " + esc(money(deposit)) + " deposit" : "") +
+      " + tip " + esc(money(c.tip)) + (c.tip ? "" : ", no tip") + ")</p>" +
+      '<button class="btn" type="button" id="pay-confirm-yes">Confirm \u00b7 charge ' + esc(money(c.total)) + "</button>" +
+      '<button class="btn secondary" type="button" id="pay-confirm-change" style="margin-top:8px">Change tip</button>' +
+      "</div>";
   }
 
   function tipCentsChosen() {
@@ -4364,16 +4460,26 @@
     return Math.max(0, state.finalFareCents - deposit) + tipCentsChosen();
   }
 
+  var payCardHtmlBuilt = null; /* v66: last pay card html built for the current render */
+
   function payAfterRideHtml() {
+    var out = payAfterRideHtmlInner();
+    payCardHtmlBuilt = out;
+    return out;
+  }
+
+  function payAfterRideHtmlInner() {
     var testRide = state.isTest || state.cardStatus === "test_skip" || state.paymentSkipped;
     if (testRide) return '<div class="card payment-card" id="pay-after"><p class="tag">Payment</p><p class="lede">Test ride: no charge.</p></div>';
     if (rideFullyPaid()) {
       var refunded = state.paymentStatus === "refunded" || state.paymentStatus === "partially_refunded";
-      return '<div class="card payment-card" id="pay-after"><p class="tag">' + (refunded ? "Refunded" : "Paid \u2014 thank you!") + "</p>" +
+      var partRefund = state.paymentStatus === "partially_refunded" && state.refundedCents > 0; /* v66 */
+      return '<div class="card payment-card" id="pay-after"><p class="tag">' + (partRefund ? "Paid \u2014 part refunded" : refunded ? "Refunded" : "Paid \u2014 thank you!") + "</p>" +
         '<p class="lede"><strong>' + esc(money(state.chargedCents || state.paidCents || 0)) + "</strong>" +
         (state.tipCents ? " (fare " + esc(money(Math.max(0, (state.chargedCents || 0) - state.tipCents))) + " + tip " + esc(money(state.tipCents)) + ")" : "") +
         (state.cardLast4 ? " \u00b7 " + esc(state.cardBrand || "card") + " ending " + esc(state.cardLast4) : "") + "</p>" +
-        (refunded ? '<p class="fine">Private Car Services refunded this payment. Your bank shows it in a few days.</p>' : "") +
+        (partRefund ? '<p class="fine" id="pay-refund-line">Private Car Services refunded ' + esc(money(state.refundedCents)) + ' of this payment to your card. Your bank shows it in a few days.</p>'
+          : refunded ? '<p class="fine">Private Car Services refunded this payment. Your bank shows it in a few days.</p>' : "") +
         (/^https:\/\//i.test(state.receiptUrl || "") ? '<p><a class="btn ghost" id="rider-receipt-link" href="' + esc(state.receiptUrl) + '" target="_blank" rel="noopener">View receipt</a></p>' : "") +
         '<p class="fine">Your receipt is also in History.</p></div>';
     }
@@ -4387,13 +4493,17 @@
       return '<div class="card payment-card" id="pay-after"><p class="tag">Pay after the ride</p><p class="lede">Final fare ' + esc(money(state.finalFareCents)) +
         ". Private Car Services will text your receipt and a secure payment link.</p></div>";
     }
-    var useSaved = state.cardStatus === "on_file" && state.hasCardOnFile && !state.payNewCard;
+    var useSaved = payUsesSavedCard();
+    syncTipForRide(state.code);
+    if (state.payConfirm && !payConfirmStillGood(state.payConfirm)) state.payConfirm = null; /* v66: stale confirm -> back to Pay */
     var tipBase = tipBaseCents();
+    /* v66: nothing is picked until the rider taps; every option stays tappable; the picked one is solid gold with a check. */
+    var chipStyle = function (on) { return on ? "" : ' style="border:1px solid rgba(240,212,138,.65)"'; };
     var chips = TIP_CHOICES.map(function (c) {
       var on = String(state.tipChoice) === c;
       var label = c === "0" ? "No tip" : c + "% \u00b7 " + money(Math.round(tipBase * Number(c) / 100));
-      return '<button type="button" class="btn ' + (on ? "" : "ghost ") + 'tip-chip" data-tip="' + c + '" aria-pressed="' + (on ? "true" : "false") + '">' + esc(label) + "</button>";
-    }).join("") + '<button type="button" class="btn ' + (state.tipChoice === "custom" ? "" : "ghost ") + 'tip-chip" data-tip="custom" aria-pressed="' + (state.tipChoice === "custom" ? "true" : "false") + '">Other</button>';
+      return '<button type="button" class="btn ' + (on ? "" : "ghost ") + 'tip-chip" data-tip="' + c + '" aria-pressed="' + (on ? "true" : "false") + '"' + chipStyle(on) + ">" + (on ? "\u2713 " : "") + esc(label) + "</button>";
+    }).join("") + '<button type="button" class="btn ' + (state.tipChoice === "custom" ? "" : "ghost ") + 'tip-chip" data-tip="custom" aria-pressed="' + (state.tipChoice === "custom" ? "true" : "false") + '"' + chipStyle(state.tipChoice === "custom") + ">" + (state.tipChoice === "custom" ? "\u2713 " : "") + "Other</button>";
     var deposit = state.paymentStatus === "deposit_paid" ? (Number(state.paidCents) || 0) : 0;
     var tip = tipCentsChosen();
     var total = payTotalCents();
@@ -4407,12 +4517,12 @@
       (state.finalTaxCents ? '<div class="money-row"><span>Texas tax 8.25%</span><span>' + esc(money(state.finalTaxCents)) + "</span></div>" : "") +
       '<div class="money-row"><span>Final fare</span><span>' + esc(money(state.finalFareCents)) + "</span></div>" +
       (deposit ? '<div class="money-row"><span>Deposit already paid</span><span>\u2212' + esc(money(deposit)) + "</span></div>" : "") +
-      '<p class="fine" style="margin-top:10px">Add a tip for your driver?</p>' +
+      '<p class="fine" style="margin-top:10px">Add a tip for your driver? <span id="tip-pick-hint">' + esc(tipPicked() ? "You can change it any time before you pay." : "Tap one to continue. No tip is fine.") + "</span></p>" +
       '<div class="tip-chips" style="display:flex;flex-wrap:wrap;gap:8px;margin:6px 0">' + chips + "</div>" +
       (state.tipChoice === "custom"
         ? '<label for="tip-custom">Tip amount ($)</label><input id="tip-custom" type="text" inputmode="decimal" maxlength="7" value="' + esc(state.tipCustom || "") + '" placeholder="5.00">'
         : "") +
-      '<div class="money-row"><span>Tip</span><span id="pay-tip-amt">' + esc(money(tip)) + "</span></div>" +
+      '<div class="money-row"><span>Tip</span><span id="pay-tip-amt">' + esc(tipPicked() ? money(tip) : "pick one") + "</span></div>" +
       '<div class="total-row"><span>Total</span><span id="pay-total-amt">' + esc(money(total)) + "</span></div>" +
       (useSaved
         ? '<p class="fine" id="pay-card-line"><strong>' + esc(cardOnFileWords(state)) + '</strong>. You\u2019ll be charged on this card.</p>' +
@@ -4421,8 +4531,9 @@
           '<p class="fine">Enter a card (number, date, CVV and the card\u2019s billing ZIP). Square keeps it; this app never sees the number.</p><div id="sq-card-container" class="sq-card"><p class="fine">Loading the secure card form\u2026</p></div>') +
       '<p class="error" id="pay-error" role="alert">' + esc(payFailWords(state.payError || (state.paymentStatus === "charge_failed" && useSaved ? "Your saved card didn\u2019t go through." : ""), !useSaved)) + "</p>" +
       (failed && useSaved ? '<button class="btn" type="button" id="pay-other-card2">Update card to finish paying</button>' : "") +
-      '<button class="btn' + (failed && useSaved ? " secondary" : "") + '" type="button" id="pay-now-btn"' + (state.payBusy ? " disabled" : "") + ">" +
-      (state.payBusy ? "Paying\u2026" : (failed && useSaved ? "Try my saved card again \u00b7 " : "Pay ") + esc(money(total))) + "</button>" +
+      (state.payConfirm && !state.payBusy ? payConfirmHtml()
+        : '<button class="btn' + (failed && useSaved ? " secondary" : "") + '" type="button" id="pay-now-btn" data-failed="' + (failed && useSaved ? "1" : "0") + '"' +
+          (state.payBusy || !tipReady() ? " disabled" : "") + ">" + esc(payBtnLabel(failed && useSaved)) + "</button>") +
       '<p class="fine">Questions about the fare? Call <a href="tel:' + BUSINESS_PHONE + '">' + esc(BUSINESS_PHONE) + "</a> before you pay.</p>" +
       (state.payBusy ? "" : '<button class="btn secondary" type="button" id="pay-later-btn">Pay later · back to Home</button>' +
         '<p class="fine" id="pay-later-note">' + esc(payLaterNote()) + "</p>") +
@@ -4446,6 +4557,7 @@
     dropPayCard();
     state.payError = "";
     state.payNewCard = false;
+    state.payConfirm = null;
     goRiderHome();
   }
 
@@ -4453,9 +4565,12 @@
     var t = document.getElementById("pay-tip-amt");
     var tot = document.getElementById("pay-total-amt");
     var btn = document.getElementById("pay-now-btn");
-    if (t) t.textContent = money(tipCentsChosen());
+    if (t) t.textContent = tipPicked() ? money(tipCentsChosen()) : "pick one";
     if (tot) tot.textContent = money(payTotalCents());
-    if (btn && !state.payBusy) btn.textContent = (/^Try my saved card again/.test(btn.textContent) ? "Try my saved card again \u00b7 " : "Pay ") + money(payTotalCents());
+    if (btn && !state.payBusy) { /* v66: same words + total as the charge */
+      btn.textContent = payBtnLabel(btn.getAttribute("data-failed") === "1");
+      btn.disabled = !tipReady();
+    }
   }
 
   var payCardMounted = false;
@@ -4484,11 +4599,16 @@
     });
   }
 
+  /* v66: tapping Pay never charges. It checks the tip, then shows "Charge $X to Visa ending NNNN? (fare $A + tip $B)". */
   function payFinalFare() {
     if (state.payBusy || ROLE !== "customer") return;
-    var cfg = squareCfg();
     var code = state.code || "";
     if (!code || !finalPayOn()) return;
+    if (!tipPicked()) {
+      state.payError = "Pick a tip option first (No tip is fine).";
+      render();
+      return;
+    }
     var tip = tipCentsChosen();
     if (state.tipChoice === "custom" && String(state.tipCustom || "").trim() && !tip) {
       state.payError = "Enter a tip amount like 5.00, or pick No tip.";
@@ -4500,12 +4620,43 @@
       render();
       return;
     }
-    var useSaved = state.cardStatus === "on_file" && state.hasCardOnFile && !state.payNewCard;
-    var expected = payTotalCents();
+    if (state.tipChoice === "custom" && !tip) {
+      state.payError = "Enter a tip amount like 5.00, or pick No tip.";
+      render();
+      return;
+    }
+    var total = payTotalCents();
+    state.payConfirm = { code: code, tip: tip, total: total, fare: Math.max(0, total - tip), choice: String(state.tipChoice),
+      newCard: !payUsesSavedCard(), at: Date.now() };
+    if (/tip|total changed|fare changed/i.test(state.payError || "")) state.payError = "";
+    render();
+    var q = document.getElementById("pay-confirm");
+    if (q && q.scrollIntoView) { try { q.scrollIntoView({ block: "center", behavior: "smooth" }); } catch (e) {} }
+  }
+
+  /* v66: Confirm -> charge exactly what the confirm step showed (same tip + total sent to the Worker). */
+  function payConfirmed() {
+    if (state.payBusy || ROLE !== "customer") return;
+    var c = state.payConfirm;
+    if (!c) return;
+    if (!payConfirmStillGood(c)) {
+      state.payConfirm = null;
+      state.payError = "The total changed. Check it and tap Pay again.";
+      render();
+      return;
+    }
+    state.payConfirm = null;
+    chargeFinalFare(c.tip, c.total);
+  }
+
+  function chargeFinalFare(tip, expected) {
+    var cfg = squareCfg();
+    var code = state.code || "";
+    if (!code || !finalPayOn()) return;
+    var useSaved = payUsesSavedCard();
     state.payBusy = true;
     state.payError = "";
-    var btn = document.getElementById("pay-now-btn");
-    if (btn) { btn.disabled = true; btn.textContent = "Paying\u2026"; }
+    render(); /* "Paying…" (the card form, if any, is kept by render) */
     var tokenP = useSaved ? Promise.resolve(null) : (sqCard ? sqCard.tokenize().then(function (r) {
       if (!r || r.status !== "OK" || !r.token) {
         var first = r && r.errors && r.errors[0];
@@ -4561,13 +4712,22 @@
     });
   }
 
+  /* v66: the pay card is kept as-is when a redraw would draw the same thing, so bind each element only once. */
+  function bindOnce(el, type, fn) {
+    if (!el) return;
+    var k = "__pcsOn_" + type;
+    if (el[k]) return;
+    el[k] = true;
+    el.addEventListener(type, fn);
+  }
+
   function bindPayAfterRide() {
     var box = document.getElementById("pay-after");
     if (!box) return;
     Array.prototype.forEach.call(box.querySelectorAll(".tip-chip"), function (b) {
-      b.addEventListener("click", function () {
-        state.tipChoice = b.getAttribute("data-tip") || "0";
-        state.payError = "";
+      bindOnce(b, "click", function () {
+        setTipChoice(b.getAttribute("data-tip") || "");
+        if (/tip|total changed/i.test(state.payError || "")) state.payError = "";
         render();
         if (state.tipChoice === "custom") {
           var inp = document.getElementById("tip-custom");
@@ -4577,31 +4737,43 @@
     });
     var custom = document.getElementById("tip-custom");
     if (custom) {
-      custom.addEventListener("input", function () {
+      bindOnce(custom, "input", function () {
         state.tipCustom = custom.value;
+        saveTipChoice();
+        if (state.payConfirm) { state.payConfirm = null; render(); return; }
         refreshPayTotals();
       });
     }
+    bindOnce(document.getElementById("pay-confirm-yes"), "click", payConfirmed);
+    bindOnce(document.getElementById("pay-confirm-change"), "click", function () {
+      state.payConfirm = null;
+      render();
+      var on = document.querySelector('#pay-after .tip-chip[aria-pressed="true"]') || document.querySelector("#pay-after .tip-chip");
+      if (on) {
+        try { on.scrollIntoView({ block: "center", behavior: "smooth" }); } catch (e) {}
+        try { on.focus({ preventScroll: true }); } catch (e) {}
+      }
+    });
     ["pay-other-card", "pay-other-card2"].forEach(function (id) {
       var a = document.getElementById(id);
-      if (a) a.addEventListener("click", function (ev) {
+      if (a) bindOnce(a, "click", function (ev) {
         ev.preventDefault();
         state.payNewCard = true;
+        state.payConfirm = null;
         state.payError = "";
         render();
       });
     });
-    var pay = document.getElementById("pay-now-btn");
-    if (pay) pay.addEventListener("click", payFinalFare);
+    bindOnce(document.getElementById("pay-now-btn"), "click", payFinalFare);
     var savedBack = document.getElementById("pay-saved-card");
-    if (savedBack) savedBack.addEventListener("click", function (ev) {
+    if (savedBack) bindOnce(savedBack, "click", function (ev) {
       ev.preventDefault();
       state.payNewCard = false;
+      state.payConfirm = null;
       state.payError = "";
       render();
     });
-    var later = document.getElementById("pay-later-btn");
-    if (later) later.addEventListener("click", payLater); /* v63c */
+    bindOnce(document.getElementById("pay-later-btn"), "click", payLater); /* v63c */
     if (document.getElementById("sq-card-container")) mountPayCard();
   }
 
@@ -8121,6 +8293,7 @@
       (Number(ride.fareTotal) || 0) !== (state.finalFareCents || 0) ||
       (ride.paymentStatus || "") !== (state.paymentStatus || "") ||
       (ride.receiptUrl || "") !== (state.receiptUrl || "") ||
+      (Number(ride.refundedCents) || 0) !== (state.refundedCents || 0) || /* v66 */
       (ride.cancelFeeStatus || "") !== (state.cancelFeeStatus || "");
     if (ROLE === "customer") {
       /* v59: a parked driver re-stamps driverLocAt without moving; keep it (and driverId) for the cancel rule. */
@@ -8925,6 +9098,7 @@
     state.finalTaxCents = Number(ride.fareTax) || 0;
     state.chargedCents = Number(ride.chargedCents) || 0;
     state.tipCents = Number(ride.tipCents) || 0;
+    state.refundedCents = Number(ride.refundedCents) || 0; /* v66: God mode refund (full or part) */
     state.payError = ride.paymentStatus === "charge_failed" ? String(ride.payError || "") : "";
     state.cancelFeeStatus = ride.cancelFeeStatus || "";
     state.hasCardOnFile = !!(ride.squareCardId || ride.hasCardOnFile);
@@ -8970,6 +9144,7 @@
     else if (!state.autoWaits) state.autoWaits = [];
     state.holiday = !!ride.holiday;
     if (ride.code) state.code = ride.code;
+    syncTipForRide(state.code); /* v66: same ride keeps the tapped tip; another ride starts with none */
     var incomingPin = normalizeStoredPin(ride.pin);
     if (incomingPin) state.pin = incomingPin;
     if (ride.pinHash) state.pinHash = ride.pinHash;
@@ -9488,7 +9663,10 @@
     return box && box.dataset.mounted === "1" ? box : null;
   }
 
+  var graftFreeze = null; /* v66: an unchanged pay card is left exactly as it is */
+
   function graftKeeping(oldParent, newParent, keep) {
+    if (graftFreeze && oldParent === graftFreeze) return true;
     var oldHolder = keep;
     while (oldHolder && oldHolder.parentNode !== oldParent) oldHolder = oldHolder.parentNode;
     var newHolder = newParent.querySelector("#" + keep.id);
@@ -9600,7 +9778,26 @@
     else if (state.riderView === "book") html = customerHome();
     else html = riderHomeScreen();
     var focusKeep = captureAppFocus(app); /* v63c */
-    if (!keepPayCardRender(app, html)) app.innerHTML = html; /* v63c: never rebuild a live Square card form */
+    /* v66: if the pay card would be drawn exactly the same, keep the old one (same buttons, same listeners), so a tap
+       on a tip / Pay / Confirm button is never swallowed by a GPS or status refresh landing mid-tap. */
+    var paySig = html.indexOf('id="pay-after"') !== -1 ? payCardHtmlBuilt : null;
+    payCardHtmlBuilt = null;
+    var oldPay = app.querySelector("#pay-after");
+    var keepPay = !!(paySig && oldPay && oldPay.__pcsSig === paySig);
+    var grafted = false;
+    if (keepPay && !payCardLiveIn(app)) {
+      /* the old pay card never leaves the page (a node that is taken out, even for a moment, loses the tap) */
+      var payTpl = document.createElement("div");
+      payTpl.innerHTML = html;
+      grafted = graftKeeping(app, payTpl, oldPay);
+    } else {
+      graftFreeze = keepPay ? oldPay : null;
+      grafted = keepPayCardRender(app, html);
+      graftFreeze = null;
+    }
+    if (!grafted) app.innerHTML = html; /* v63c: never rebuild a live Square card form */
+    var placedPay = app.querySelector("#pay-after");
+    if (placedPay) placedPay.__pcsSig = paySig;
     restoreAppFocus(app, focusKeep);
     ensureSosButton();
     if (keptBoard) {
@@ -12161,6 +12358,10 @@
     payTotalCents: payTotalCents,
     tipCentsChosen: tipCentsChosen,
     tipCapCents: tipCapCents,
+    tipPicked: tipPicked,
+    tipReady: tipReady,
+    payBtnLabel: payBtnLabel,
+    payConfirmed: payConfirmed,
     historyPayLine: historyPayLine,
     historyAmount: historyAmount,
     payFinalFare: payFinalFare,
