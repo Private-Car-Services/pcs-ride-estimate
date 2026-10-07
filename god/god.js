@@ -1,6 +1,9 @@
 /* Private Car Services — PCS God mode (Matthew only). v25/v45: day board from PCS calendar + assign/commission.
    v57: visual pop-ups for every new ride request and every accept; safety alerts (police assist red banner +
-   pop-up, soft not-OK notes). No sound in God mode. */
+   pop-up, soft not-OK notes). No sound in God mode.
+   v58: Square LIVE. Payments panel (card saved / charged $X / failed / refunded / deposit / cancel fee + receipts),
+   Refund button (God password re-checked by the pcs-pay Worker, never stored), Charge fare now (no tip) for a
+   completed ride the rider didn't pay, Charge cancel fee. Mark card OK stays as the override. */
 (function () {
   "use strict";
 
@@ -14,6 +17,10 @@
   var HISTORY_HUB = "DRVRHSTY"; /* completed ride logs; 8-char no I/O */
   var SAFETY_HUB = "SAFETY"; /* v57: driver safety / police-assist alerts from the driver app */
   var CALENDAR_HUB = "PCSCALND"; /* scheduled PCS calendar rides for day board */
+  /* v58: payments index written by the pcs-pay Worker (completed rides leave REQUESTS, this keeps them listed). */
+  var PAY_HUB = "PAYMENTS";
+  var PAY_WORKER = (window.PCS_PAY_WORKER || "https://pcs-pay.pcsrides.workers.dev").replace(/\/+$/, "");
+  var PAY_SHOW_DAYS = 30;
   var DEFAULT_COMMISSION_PCT = 70;
   var SESSION_KEY = "pcs-god-session"; /* legacy pre-v24 key — cleared, never trusted */
   /* v24: owner sign-in survives iOS app switching (localStorage) until Sign out. */
@@ -61,6 +68,11 @@
     "</svg>";
 
   var state = {
+    payments: {},
+    paymentsError: "",
+    payRides: {},
+    payBusy: {},
+    payNotice: "",
     screen: "login",
     emailInput: "",
     passwordInput: "",
@@ -1982,7 +1994,15 @@
       state.calendarError = err && err.denied ? "denied" : "error";
     });
 
-    Promise.all([rosterP, driversP, ridesP, milesP, historyP, calendarP, safetyP]).then(function () {
+    var paymentsP = listPayments().then(function (rows) {
+      state.paymentsError = "";
+      state.payments = rows || {};
+      return refreshPayRides();
+    }).catch(function (err) {
+      state.paymentsError = err && err.denied ? "denied" : "error";
+    });
+
+    Promise.all([rosterP, driversP, ridesP, milesP, historyP, calendarP, safetyP, paymentsP]).then(function () {
       state.loading = false;
       state.lastRefreshAt = Date.now();
       renderBoardLists();
@@ -2674,6 +2694,35 @@
     return "";
   }
 
+  /* v58: one-line payment status for a ride (rides panel). */
+  function ridePayLineHtml(r) {
+    if (!r) return "";
+    var ps = String(r.paymentStatus || "").toLowerCase();
+    var bits = [];
+    if (ps === "charged") {
+      bits.push('<span style="color:#7fe09a">Charged ' + esc(fmtCents(r.chargedCents)) +
+        (Number(r.tipCents) > 0 ? " (tip " + esc(fmtCents(r.tipCents)) + ")" : "") + "</span>");
+    } else if (ps === "charge_failed") {
+      bits.push('<span style="color:#ff8a8a">Charge failed' + (r.payError ? ": " + esc(String(r.payError).slice(0, 80)) : "") + "</span>");
+    } else if (ps === "refunded") {
+      bits.push('<span style="color:#ffc96b">Refunded ' + esc(fmtCents(r.refundedCents)) + "</span>");
+    } else if (ps === "partially_refunded") {
+      bits.push('<span style="color:#ffc96b">Part refunded ' + esc(fmtCents(r.refundedCents)) + "</span>");
+    } else if (ps === "deposit_paid") {
+      bits.push("Deposit paid " + esc(fmtCents(r.paidCents)));
+    } else if (ps === "paid_in_full") {
+      bits.push("Paid in full " + esc(fmtCents(r.paidCents)));
+    } else if (String(r.status || "").toLowerCase() === "completed" && r.squareCardId) {
+      bits.push('<span style="color:#ffc96b">Not charged yet</span>');
+    }
+    var cf = String(r.cancelFeeStatus || "").toLowerCase();
+    if (cf === "charged") bits.push("Cancel fee " + esc(fmtCents(r.cancelFeeCents)));
+    else if (cf === "failed") bits.push('<span style="color:#ff8a8a">Cancel fee failed</span>');
+    else if (cf === "refunded") bits.push("Cancel fee refunded");
+    if (!bits.length) return "";
+    return "<strong>Payment</strong> " + bits.join(" · ");
+  }
+
   function cardNeedsOk(r) {
     var st = String((r && r.cardStatus) || "").toLowerCase();
     return (st === "none" || st === "link_requested") && !isCancelledRide(r) && String(r.status || "").toLowerCase() !== "denied";
@@ -2697,6 +2746,8 @@
       var cancelled = isCancelledRide(r);
       var stops = rideStopsText(r);
       var cardLine = cardStatusHtml(r);
+      var payLine = ridePayLineHtml(r);
+      if (payLine) cardLine = cardLine ? cardLine + "<br>" + payLine : payLine;
       var requestAt = r.updatedAt || r.requestedAt || r.createdAt || null;
       var pickupWhen = fmtWhen(r.date, r.time, r);
       var dropWhen = r.dropTime || r.dropoffTime || r.etaDrop || null;
@@ -2754,6 +2805,16 @@
     var b = document.getElementById("day-board");
     if (d) d.innerHTML = driversPanelHtml();
     if (r) r.innerHTML = ridesPanelHtml();
+    var pl = document.getElementById("payments-list");
+    if (pl) {
+      /* v58: only redraw when something changed, so a Refund / Charge tap is never lost to the 5 s poll. */
+      var payHtml = paymentsPanelHtml();
+      if (pl.getAttribute("data-html-sig") !== String(payHtml.length) + ":" + hashStr(payHtml)) {
+        pl.innerHTML = payHtml;
+        pl.setAttribute("data-html-sig", String(payHtml.length) + ":" + hashStr(payHtml));
+        pl.removeAttribute("data-bound");
+      }
+    }
     if (b) {
       var wrap = document.createElement("div");
       wrap.innerHTML = dayBoardHtml();
@@ -2762,6 +2823,7 @@
     }
     bindDriverActions();
     bindBookingActions();
+    bindPaymentActions();
     bindSafetyActions();
     bindLocateActions();
     bindDayBoardActions();
@@ -2844,6 +2906,368 @@
           focusDriver(btn.getAttribute("data-driver-id"));
         });
       });
+    });
+  }
+
+
+  /* ---------------- v58 Payments (pcs-pay Worker) ---------------- */
+  function paymentsUrl() {
+    return baseUrl() + "/rides/" + PAY_HUB + ".json";
+  }
+
+  function listPayments() {
+    return fetch(paymentsUrl(), { cache: "no-store" }).then(function (res) {
+      if (res.status === 401 || res.status === 403) {
+        var e = new Error("denied");
+        e.denied = true;
+        throw e;
+      }
+      if (!res.ok) throw new Error("payments " + res.status);
+      return res.text().then(function (text) {
+        if (!text || text === "null") return {};
+        try { return JSON.parse(text) || {}; } catch (err) { return {}; }
+      });
+    });
+  }
+
+  function payRecOk(rec) {
+    return !!(rec && typeof rec === "object" && String(rec.status || "").toUpperCase() === "COMPLETED");
+  }
+
+  function payEntries() {
+    var raw = state.payments || {};
+    var cutoff = Date.now() - PAY_SHOW_DAYS * 86400000;
+    var out = [];
+    Object.keys(raw).forEach(function (code) {
+      var p = raw[code];
+      if (!p || typeof p !== "object") return;
+      if (!/^[A-HJ-NP-Z2-9]{8}$/.test(code)) return;
+      p.code = code;
+      if ((Number(p.updatedAt) || 0) < cutoff) return;
+      out.push(p);
+    });
+    out.sort(function (a, b) { return (Number(b.updatedAt) || 0) - (Number(a.updatedAt) || 0); });
+    return out.slice(0, 40);
+  }
+
+  /* Rides that still might need a God-mode charge: re-read them (max every 30s each) to know completed/cancelled. */
+  function refreshPayRides() {
+    var now = Date.now();
+    var want = payEntries().filter(function (p) {
+      if (payRecOk(p.final) || payRecOk(p.cancel)) return false;
+      if (!p.card) return false;
+      if (now - (Number(p.updatedAt) || 0) > 3 * 86400000) return false;
+      var c = state.payRides[p.code];
+      return !c || now - c.at > 30000;
+    }).slice(0, 12);
+    return Promise.all(want.map(function (p) {
+      return fetch(rideUrl(p.code), { cache: "no-store" }).then(function (res) {
+        if (!res.ok) return null;
+        return res.json();
+      }).then(function (ride) {
+        state.payRides[p.code] = { at: Date.now(), ride: ride && typeof ride === "object" ? ride : null };
+      }).catch(function () {});
+    }));
+  }
+
+  function payRideOf(code) {
+    var c = state.payRides[code];
+    return c && c.ride ? c.ride : null;
+  }
+
+  function receiptLink(url, label) {
+    var u = String(url || "");
+    if (!/^https:\/\/[a-z0-9.-]*squareup(sandbox)?\.com\//i.test(u)) return "";
+    return ' <a href="' + esc(u) + '" target="_blank" rel="noopener" style="color:#f0d48a">' + esc(label || "Receipt") + "</a>";
+  }
+
+  function refundedOf(p, key) {
+    var r = p && p[key];
+    return r && typeof r === "object" ? Number(r.totalRefundedCents) || 0 : 0;
+  }
+
+  function canChargeFare(p, ride) {
+    if (!ride || payRecOk(p.final)) return false;
+    if (!p.card || String(p.card.status || "").toUpperCase() !== "SAVED") return false;
+    if (String(ride.status || "").toLowerCase() !== "completed") return false;
+    if (ride.isTest === true || ride.testRide === true) return false;
+    if (String(ride.paymentStatus || "").toLowerCase() === "paid_in_full") return false;
+    return fareDueOf(ride) > 0;
+  }
+
+  /* Same math as the Worker: driver's final fare minus a quote-page deposit already paid. */
+  function fareDueOf(ride) {
+    var fare = Number(ride && ride.fareTotal) || 0;
+    var dep = String(ride && ride.paymentStatus || "").toLowerCase() === "deposit_paid" ? Number(ride.paidCents) || 0 : 0;
+    return Math.max(0, fare - dep);
+  }
+
+  function canChargeCancel(p, ride) {
+    if (!ride || payRecOk(p.cancel)) return false;
+    if (!p.card || String(p.card.status || "").toUpperCase() !== "SAVED") return false;
+    var st = String(ride.status || "").toLowerCase();
+    if (st !== "cancelled" && st !== "canceled") return false;
+    if (String(ride.cancelledBy || "rider").toLowerCase() !== "rider") return false;
+    return !!(ride.acceptedAt || ride.driverId || ride.driverUid);
+  }
+
+  function paymentsPanelHtml() {
+    if (state.paymentsError === "denied") return '<p class="empty">Payments cannot be read (permission denied).</p>';
+    if (state.paymentsError) return '<p class="empty">Could not load payments. Trying again…</p>';
+    var list = payEntries();
+    var notice = state.payNotice ? '<p class="meta" id="pay-notice" style="color:#f0d48a">' + esc(state.payNotice) + "</p>" : "";
+    if (!list.length) return notice + '<p class="empty">No card payments in the last ' + PAY_SHOW_DAYS + " days.</p>";
+    return notice + list.map(function (p) {
+      var code = String(p.code);
+      var test = String(p.env || "").toLowerCase() === "sandbox";
+      var lines = [];
+      var card = p.card;
+      if (card) {
+        lines.push("<strong>Card</strong> " + (String(card.status || "").toUpperCase() === "SAVED" ? "Saved" : esc(card.status || "")) +
+          (card.last4 ? " (" + esc(card.brand || "card") + " •••• " + esc(card.last4) + ")" : ""));
+      }
+      ["deposit", "full"].forEach(function (k) {
+        var d = p[k];
+        if (!d) return;
+        lines.push("<strong>" + (k === "full" ? "Paid in full" : "Deposit") + "</strong> " +
+          (payRecOk(d) ? '<span style="color:#7fe09a">Charged ' + esc(fmtCents(d.amountCents)) + "</span>" + receiptLink(d.receiptUrl)
+            : '<span style="color:#ff8a8a">Failed' + (d.error ? ": " + esc(String(d.error).slice(0, 90)) : "") + "</span>"));
+      });
+      var f = p.final;
+      if (f) {
+        if (payRecOk(f)) {
+          lines.push("<strong>Ride</strong> " + '<span style="color:#7fe09a">Charged ' + esc(fmtCents(f.amountCents)) + "</span>" +
+            " (fare " + esc(fmtCents(f.fareCents)) + " + tip " + esc(fmtCents(f.tipCents)) + ")" + receiptLink(f.receiptUrl));
+        } else {
+          lines.push("<strong>Ride</strong> " + '<span style="color:#ff8a8a">Charge failed' +
+            (f.error ? ": " + esc(String(f.error).slice(0, 90)) : "") + "</span>");
+        }
+      }
+      var rf = p.refund;
+      if (rf) {
+        lines.push("<strong>Refund</strong> " + '<span style="color:#ffc96b">Refunded ' + esc(fmtCents(rf.totalRefundedCents || rf.amountCents)) +
+          "</span> (" + esc(String(rf.status || "PENDING").toLowerCase()) + ")");
+      }
+      var c = p.cancel;
+      if (c) {
+        lines.push("<strong>Cancel fee</strong> " + (payRecOk(c) ? '<span style="color:#7fe09a">Charged ' + esc(fmtCents(c.amountCents)) + "</span>" + receiptLink(c.receiptUrl)
+          : '<span style="color:#ff8a8a">Failed' + (c.error ? ": " + esc(String(c.error).slice(0, 90)) : "") + "</span>"));
+      }
+      var cr = p.cancelRefund;
+      if (cr) lines.push("<strong>Cancel fee refund</strong> " + esc(fmtCents(cr.totalRefundedCents || cr.amountCents)) + " (" + esc(String(cr.status || "").toLowerCase()) + ")");
+      var ride = payRideOf(code);
+      if (ride && !payRecOk(f)) {
+        var st = String(ride.status || "").toLowerCase();
+        if (st === "completed") lines.push("<strong>Ride</strong> Completed · fare " + esc(fmtCents(ride.fareTotal)) + ' · <span style="color:#ffc96b">rider has not paid yet</span>');
+        else if (st) lines.push("<strong>Ride</strong> " + esc(st));
+      }
+
+      var btns = [];
+      var busy = !!state.payBusy[code];
+      var dis = busy ? " disabled" : "";
+      var mainPaid = (payRecOk(f) ? Number(f.amountCents) || 0 : 0) || (payRecOk(p.full) ? Number(p.full.amountCents) || 0 : 0) ||
+        (payRecOk(p.deposit) ? Number(p.deposit.amountCents) || 0 : 0);
+      var mainLeft = mainPaid - refundedOf(p, "refund");
+      if (mainPaid > 0 && mainLeft > 0) {
+        btns.push('<button type="button" class="btn btn-ghost pay-refund-btn" data-code="' + esc(code) + '" data-purpose="' +
+          (payRecOk(f) ? "final" : payRecOk(p.full) ? "full" : "deposit") + '" data-left="' + mainLeft + '"' + dis + ">Refund…</button>");
+      }
+      var cancelPaid = payRecOk(c) ? Number(c.amountCents) || 0 : 0;
+      var cancelLeft = cancelPaid - refundedOf(p, "cancelRefund");
+      if (cancelPaid > 0 && cancelLeft > 0) {
+        btns.push('<button type="button" class="btn btn-ghost pay-refund-btn" data-code="' + esc(code) + '" data-purpose="cancel" data-left="' +
+          cancelLeft + '"' + dis + ">Refund cancel fee…</button>");
+      }
+      if (canChargeFare(p, ride)) {
+        btns.push('<button type="button" class="btn btn-gold pay-charge-btn" data-code="' + esc(code) + '" data-cents="' +
+          fareDueOf(ride) + '"' + dis + ">Charge " + esc(fmtCents(fareDueOf(ride))) + " now (no tip)</button>");
+      }
+      if (canChargeCancel(p, ride)) {
+        btns.push('<button type="button" class="btn btn-ghost pay-cancelfee-btn" data-code="' + esc(code) + '"' + dis + ">Charge cancel fee</button>");
+      }
+      return '<div class="card pay-card" data-code="' + esc(code) + '">' +
+        "<h3>" + esc(p.name || "Rider") + ' <span style="font-weight:500;opacity:.75">' + esc(code) + "</span>" +
+        (test ? ' <span style="background:#c9a227;color:#0b1f3a;border-radius:6px;padding:1px 6px;font-size:12px">TEST</span>' : "") + "</h3>" +
+        '<p class="meta">' + lines.join("<br>") + (p.updatedAt ? '<br><span style="opacity:.7">Updated ' + esc(fmtClock(p.updatedAt)) + "</span>" : "") + "</p>" +
+        (btns.length ? '<div class="pay-actions" style="display:flex;flex-wrap:wrap;gap:8px;margin-top:8px">' + btns.join("") + "</div>" : "") +
+        "</div>";
+    }).join("");
+  }
+
+  function payWorkerPost(path, body) {
+    var ctrl = typeof AbortController === "function" ? new AbortController() : null;
+    var timer = ctrl ? setTimeout(function () { ctrl.abort(); }, 30000) : null;
+    return fetch(PAY_WORKER + path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal: ctrl ? ctrl.signal : undefined
+    }).then(function (res) {
+      return res.json().catch(function () { return {}; }).then(function (data) {
+        if (timer) clearTimeout(timer);
+        if (!res.ok || !data || data.ok === false) {
+          var e = new Error((data && data.error) || ("Payment server error " + res.status));
+          e.status = res.status;
+          throw e;
+        }
+        return data;
+      });
+    }, function (err) {
+      if (timer) clearTimeout(timer);
+      throw new Error(err && err.name === "AbortError" ? "Payment server timed out" : "Payment server unreachable");
+    });
+  }
+
+  function isSandboxPay(code) {
+    var p = (state.payments || {})[code];
+    return !!(p && String(p.env || "").toLowerCase() === "sandbox");
+  }
+
+  function setPayNotice(text) {
+    state.payNotice = text || "";
+    var pl = document.getElementById("payments-list");
+    if (pl) {
+      var html = paymentsPanelHtml();
+      pl.innerHTML = html;
+      pl.setAttribute("data-html-sig", String(html.length) + ":" + hashStr(html));
+      pl.removeAttribute("data-bound");
+      bindPaymentActions();
+    }
+  }
+
+  function afterPayAction(code, msg) {
+    delete state.payBusy[code];
+    delete state.payRides[code];
+    setPayNotice(msg);
+    refresh();
+  }
+
+  function chargeFareNow(code, cents) {
+    if (!code || state.payBusy[code]) return;
+    var p = (state.payments || {})[code] || {};
+    if (!window.confirm("Charge " + (p.name || "the rider") + "'s saved card " + fmtCents(cents) + " now (fare, no tip)?")) return;
+    state.payBusy[code] = true;
+    setPayNotice("Charging " + code + "…");
+    var body = { rideCode: code, tipCents: 0, expectedCents: Number(cents) || 0, by: "god" };
+    if (isSandboxPay(code)) body.sandbox = true;
+    payWorkerPost("/charge", body).then(function (d) {
+      afterPayAction(code, d.already ? code + ": already paid." : code + ": charged " + fmtCents(d.totalCents || d.amountCents || cents) + ".");
+    }).catch(function (err) {
+      afterPayAction(code, code + ": charge failed — " + ((err && err.message) || "error"));
+    });
+  }
+
+  function chargeCancelFeeNow(code) {
+    if (!code || state.payBusy[code]) return;
+    if (!window.confirm("Charge the cancel fee for " + code + " to the saved card?")) return;
+    state.payBusy[code] = true;
+    setPayNotice("Charging cancel fee " + code + "…");
+    var body = { rideCode: code, by: "god" };
+    if (isSandboxPay(code)) body.sandbox = true;
+    payWorkerPost("/cancel-fee", body).then(function (d) {
+      afterPayAction(code, code + ": cancel fee " + (d.already ? "already charged." : "charged " + fmtCents(d.amountCents) + "."));
+    }).catch(function (err) {
+      afterPayAction(code, code + ": cancel fee failed — " + ((err && err.message) || "error"));
+    });
+  }
+
+  function ensurePayPopupStyle() {
+    if (document.getElementById("god-pay-popup-style")) return;
+    var st = document.createElement("style");
+    st.id = "god-pay-popup-style";
+    st.textContent =
+      "#god-pay-popup{position:fixed;inset:0;z-index:12500;background:rgba(5,14,28,.92);display:flex;align-items:center;justify-content:center;padding:16px}" +
+      "#god-pay-popup .pp-card{background:#0b1c33;color:#fff;border:2px solid #f0d48a;border-radius:18px;max-width:440px;width:100%;padding:20px}" +
+      "#god-pay-popup h2{color:#f0d48a;margin:0 0 10px;font-size:22px}" +
+      "#god-pay-popup label{display:block;margin:12px 0 4px;color:#f0d48a;font-size:12px;letter-spacing:.08em;text-transform:uppercase}" +
+      "#god-pay-popup input{width:100%;box-sizing:border-box;font-size:18px;padding:10px;border-radius:10px;border:1px solid #4a5d78;background:#071426;color:#fff}" +
+      "#god-pay-popup .pp-actions{display:flex;gap:10px;margin-top:16px}" +
+      "#god-pay-popup .pp-actions button{flex:1;font-size:17px;font-weight:800;padding:14px 10px;border-radius:12px;border:0;color:#fff;cursor:pointer}" +
+      "#god-pay-popup .pp-go{background:#8a2323}#god-pay-popup .pp-cancel{background:#345}" +
+      "#god-pay-popup .pp-err{color:#ff8a8a;min-height:1.2em;margin:10px 0 0}";
+    document.head.appendChild(st);
+  }
+
+  function closeRefundPopup() {
+    var el = document.getElementById("god-pay-popup");
+    if (el && el.parentNode) el.parentNode.removeChild(el);
+  }
+
+  /* Refund: amount (default = everything not yet refunded) + God password. The Worker hashes the password and
+     compares it with its secret; nothing is saved here. */
+  function openRefundPopup(code, purpose, leftCents) {
+    closeRefundPopup();
+    ensurePayPopupStyle();
+    var p = (state.payments || {})[code] || {};
+    var left = Number(leftCents) || 0;
+    var el = document.createElement("div");
+    el.id = "god-pay-popup";
+    el.innerHTML = '<div class="pp-card" role="dialog" aria-modal="true" aria-labelledby="pp-title">' +
+      '<h2 id="pp-title">Refund ' + esc(purpose === "cancel" ? "cancel fee" : "payment") + " · " + esc(code) + "</h2>" +
+      '<p class="meta">' + esc(p.name || "Rider") + " · up to " + esc(fmtCents(left)) + " can be refunded" +
+      (String(p.env || "") === "sandbox" ? " (TEST)" : "") + ".</p>" +
+      '<label for="pp-amount">Amount ($)</label>' +
+      '<input id="pp-amount" type="text" inputmode="decimal" autocomplete="off" value="' + esc((left / 100).toFixed(2)) + '">' +
+      '<label for="pp-password">God password</label>' +
+      '<input id="pp-password" type="password" autocomplete="off" autocapitalize="off" spellcheck="false">' +
+      '<p class="pp-err" id="pp-err" role="alert"></p>' +
+      '<div class="pp-actions"><button type="button" class="pp-cancel" id="pp-cancel">Cancel</button>' +
+      '<button type="button" class="pp-go" id="pp-go">Refund</button></div></div>';
+    document.body.appendChild(el);
+    var pw = document.getElementById("pp-password");
+    if (pw) pw.focus();
+    document.getElementById("pp-cancel").addEventListener("click", closeRefundPopup);
+    function go() {
+      var errEl = document.getElementById("pp-err");
+      var amtRaw = String((document.getElementById("pp-amount") || {}).value || "").replace(/[$,\s]/g, "");
+      var pwd = String((document.getElementById("pp-password") || {}).value || "");
+      var cents = Math.round(parseFloat(amtRaw) * 100);
+      if (!isFinite(cents) || cents <= 0) { errEl.textContent = "Enter an amount."; return; }
+      if (cents > left) { errEl.textContent = "Most you can refund is " + fmtCents(left) + "."; return; }
+      if (!pwd) { errEl.textContent = "Enter the God password."; return; }
+      var btn = document.getElementById("pp-go");
+      btn.disabled = true;
+      btn.textContent = "Refunding…";
+      errEl.textContent = "";
+      state.payBusy[code] = true;
+      var body = { rideCode: code, purpose: purpose, amountCents: cents, godPassword: pwd, reason: "PCS God mode refund" };
+      if (isSandboxPay(code)) body.sandbox = true;
+      payWorkerPost("/refund", body).then(function (d) {
+        closeRefundPopup();
+        afterPayAction(code, code + ": refunded " + fmtCents(d.amountCents) + " (" + String(d.status || "pending").toLowerCase() + ").");
+      }).catch(function (err) {
+        delete state.payBusy[code];
+        btn.disabled = false;
+        btn.textContent = "Refund";
+        errEl.textContent = err && err.status === 403 ? "Wrong God password." : (err && err.message) || "Refund failed.";
+      });
+    }
+    document.getElementById("pp-go").addEventListener("click", go);
+    pw.addEventListener("keydown", function (e) { if (e.key === "Enter") go(); });
+  }
+
+  function hashStr(t) {
+    var h = 0;
+    for (var i = 0; i < t.length; i += 1) h = (h * 31 + t.charCodeAt(i)) | 0;
+    return h;
+  }
+
+  function bindPaymentActions() {
+    var root = document.getElementById("payments-list");
+    if (!root || root.getAttribute("data-bound") === "1") return;
+    root.setAttribute("data-bound", "1");
+    Array.prototype.forEach.call(root.querySelectorAll(".pay-refund-btn"), function (btn) {
+      btn.addEventListener("click", function () {
+        openRefundPopup(btn.getAttribute("data-code"), btn.getAttribute("data-purpose"), Number(btn.getAttribute("data-left")) || 0);
+      });
+    });
+    Array.prototype.forEach.call(root.querySelectorAll(".pay-charge-btn"), function (btn) {
+      btn.addEventListener("click", function () {
+        chargeFareNow(btn.getAttribute("data-code"), Number(btn.getAttribute("data-cents")) || 0);
+      });
+    });
+    Array.prototype.forEach.call(root.querySelectorAll(".pay-cancelfee-btn"), function (btn) {
+      btn.addEventListener("click", function () { chargeCancelFeeNow(btn.getAttribute("data-code")); });
     });
   }
 
@@ -3048,6 +3472,10 @@
             '<section class="side-section">' +
               "<h2>Riders &amp; trips</h2>" +
               '<div id="rides-list">' + ridesPanelHtml() + "</div>" +
+            "</section>" +
+            '<section class="side-section" id="payments-section">' +
+              "<h2>Payments</h2>" +
+              '<div id="payments-list">' + paymentsPanelHtml() + "</div>" +
             "</section>" +
           "</aside>" +
           '<div class="map-pane">' +
@@ -3279,6 +3707,7 @@
     bindHireForm();
     bindDriverActions();
     bindBookingActions();
+    bindPaymentActions();
     bindSafetyActions();
     bindLocateActions();
     bindDayBoardActions();
@@ -3343,6 +3772,11 @@
     bookingAlertBannerHtml: bookingAlertBannerHtml,
     approveBooking: approveBooking,
     denyBooking: denyBooking,
-    markCardOk: markCardOk
+    markCardOk: markCardOk,
+    paymentsPanelHtml: paymentsPanelHtml,
+    ridePayLineHtml: ridePayLineHtml,
+    openRefundPopup: openRefundPopup,
+    chargeFareNow: chargeFareNow,
+    payState: state
   };
 })();
