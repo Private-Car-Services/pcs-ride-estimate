@@ -1,18 +1,17 @@
 /*
-  Square settings for the quote page and the rider app (public values only. NO access tokens here).
+  Square settings for the quote page and the rider app (PUBLIC values only. NO access tokens here).
+  v58 (Oct 6, 2026): PRODUCTION — real cards, real money.
 
-  LIVE CUSTOMERS: Square stays OFF. No card form appears, and customers see
-  "Booking received, we'll send your secure payment link" (quote page) or the card-link step (rider app).
+  - Rider app: the card is SAVED at booking (Square Customer + Card on file, no charge). After drop-off the rider
+    picks a tip and pays the driver's final fare + tip. Cancel after a driver accepted = cancel fee
+    (cancelPct % of the estimate, cancelMinCents minimum). The pcs-pay Worker re-reads every amount from the ride.
+  - Quote page Book it: 25% deposit (or pay in full) charged at booking.
+  - Payments go through the pcs-pay Cloudflare Worker; the Square access token is a Worker secret.
 
-  TEST MODE (Matthew only): open any page with ?squaretest=1 in the address, for example
-    https://private-car-services.github.io/pcs-ride-estimate/?squaretest=1
-  That turns on the Square SANDBOX for that browser tab only (no real money moves) and shows a gold
-  TEST MODE banner. ?squaretest=0 or closing the tab turns it off again.
-
-  Sandbox card: 4111 1111 1111 1111 · any future expiry · CVV 111 · ZIP 77042.
-
-  Payments go through the pcs-pay Cloudflare Worker, which keeps the Square access token as a secret.
-  To go live later: set Production IDs + a production Worker here and remove the test-mode gate (separate step).
+  TEST MODE (Matthew only, no real money): add ?squaretest=1 to any page, e.g.
+    https://private-car-services.github.io/pcs-ride-estimate/app/?squaretest=1
+  That switches THIS TAB to the Square SANDBOX (gold TEST MODE bar). Card 4111 1111 1111 1111, any future date,
+  CVV 111, ZIP 77042. ?squaretest=0 or closing the tab goes back to production.
 */
 (function () {
   "use strict";
@@ -28,23 +27,32 @@
     on = false;
   }
 
-  window.PCS_SQUARE = on
-    ? {
-        applicationId: "sandbox-sq0idb-yE-VuoAn8z-GvC-85yL7DQ",
-        locationId: "LRZMXRC1JN5VQ",
-        cardOnFileUrl: WORKER + "/card",
-        paymentUrl: WORKER + "/charge",
-        environment: "sandbox",
-        testMode: true
-      }
-    : {
-        applicationId: "",
-        locationId: "",
-        cardOnFileUrl: "",
-        paymentUrl: "",
-        environment: "production",
-        testMode: false
-      };
+  var PRODUCTION = {
+    applicationId: "sq0idp-W9ccaO520ypI0soN9RIlyA",
+    locationId: "L077DQHSNJAG6",
+    environment: "production",
+    sdkUrl: "https://web.squarecdn.com/v1/square.js",
+    testMode: false
+  };
+  var SANDBOX = {
+    applicationId: "sandbox-sq0idb-yE-VuoAn8z-GvC-85yL7DQ",
+    locationId: "LRZMXRC1JN5VQ",
+    environment: "sandbox",
+    sdkUrl: "https://sandbox.web.squarecdn.com/v1/square.js",
+    testMode: true
+  };
+
+  window.PCS_SQUARE = Object.assign({}, on ? SANDBOX : PRODUCTION, {
+    workerUrl: WORKER,
+    cardOnFileUrl: WORKER + "/save-card",   /* rider app: save card at booking (no charge) */
+    chargeUrl: WORKER + "/charge",          /* rider app: after drop-off, final fare + tip */
+    cancelFeeUrl: WORKER + "/cancel-fee",   /* rider app: cancelled after a driver accepted */
+    depositUrl: WORKER + "/deposit",        /* quote page Book it: 25% deposit or pay in full */
+    paymentUrl: "",                         /* old v48 key ("charge at booking" in the rider app). Must stay blank. */
+    cancelPct: 25,
+    cancelMinCents: 1000,
+    depositPct: 25
+  });
 
   if (!on) return;
 

@@ -12,7 +12,10 @@
         resume after app switch; old saved mute cleared once; Navigate opens the Maps app (maps://);
         safety/wait: at 4:30 still → "Are you OK?"; No → police assist Yes/No (tel:911 + location + God alert);
         at 5:00 (if OK) → "Are you at an additional stop?"; Yes → Stop + $0.40/min from confirm;
-        always-visible Alert/SOS on rider + driver (same police-help flow). */
+        always-visible Alert/SOS on rider + driver (same police-help flow).
+   v58: Square PRODUCTION. Card saved at booking (Customer + Card on file via the pcs-pay Worker, no charge), charged
+        after drop-off for the driver's final fare + tip, cancel fee (25% of estimate, $10 min) only after a driver
+        accepted, receipts in History. The PIN still shows as soon as a driver accepts, card or no card. */
 (function () {
   var BUSINESS_PHONE = "936-261-7878";
   var DRIVER_COMMISSION_RATE = 0.7;
@@ -1997,6 +2000,20 @@
     paymentStatus: "",
     paidCents: 0,
     receiptUrl: "",
+    finalFareCents: 0,
+    finalSubCents: 0,
+    finalTaxCents: 0,
+    chargedCents: 0,
+    tipCents: 0,
+    payError: "",
+    cancelFeeStatus: "",
+    hasCardOnFile: false,
+    tipChoice: "20",
+    tipCustom: "",
+    payBusy: false,
+    payNotice: "",
+    payAttempt: 0,
+    payNewCard: false,
     cancelConfirm: false,
     cancelBusy: false,
     cancelError: "",
@@ -3217,11 +3234,21 @@
     };
   }
 
+  /* v58: same rule as the pcs-pay Worker (it recomputes from the ride record; this is only for the screen). */
+  function cancelFeeRule() {
+    var c = window.PCS_SQUARE || {};
+    var pct = Number(c.cancelPct);
+    var min = Number(c.cancelMinCents);
+    return { pct: isFinite(pct) && pct >= 0 ? pct : 25, min: isFinite(min) && min >= 0 ? Math.round(min) : 1000 };
+  }
+
   function cancelFeeCents() {
     var est = estimate();
-    var pct = est.ready ? Math.round(est.total * 0.25) : 0;
-    var floor = 1000; // $10.00
-    return Math.max(pct, floor);
+    var rule = cancelFeeRule();
+    /* The estimate stored on the ride (what the Worker uses) wins; the live estimate is the fallback. */
+    var base = Number(state.estimateCents) > 0 ? Number(state.estimateCents) : (est.ready ? est.total : 0);
+    var pct = base ? Math.round(base * rule.pct / 100) : 0;
+    return Math.max(pct, rule.min);
   }
 
   function testSkipPayEnabled() {
@@ -3247,17 +3274,65 @@
       appId: String(c.applicationId || "").trim(),
       locationId: String(c.locationId || "").trim(),
       endpoint: String(c.cardOnFileUrl || "").trim(),
-      chargeUrl: String(c.paymentUrl || "").trim(),
+      chargeUrl: String(c.chargeUrl || "").trim(),          /* v58: POST /charge = after drop-off (fare + tip) */
+      cancelFeeUrl: String(c.cancelFeeUrl || "").trim(),
       sandbox: String(c.environment || "").toLowerCase() === "sandbox",
       testMode: c.testMode === true
     };
   }
 
-  /* Square TEST MODE (app/square-config.js, ?squaretest=1 only): the card step charges the 25% deposit or the
-     full estimate through the pcs-pay Worker (POST /charge). Off for real customers. */
+  /* v58 (Matthew): the rider app NEVER charges at booking. Card is saved; the charge happens after drop-off.
+     (The old v48 test-mode "pay deposit in the app" path is gone; the quote page keeps its 25% deposit.) */
   function squareChargeOn() {
+    return false;
+  }
+
+  function finalPayOn() {
     var c = squareCfg();
     return squareConfigured() && /^https:\/\//i.test(c.chargeUrl);
+  }
+
+  function workerPost(url, body) {
+    var cfg = squareCfg();
+    var payload = Object.assign({}, body || {});
+    if (cfg.sandbox) payload.sandbox = true;
+    var ctrl = typeof AbortController === "function" ? new AbortController() : null;
+    var timer = ctrl ? setTimeout(function () { ctrl.abort(); }, 30000) : 0;
+    return fetch(url, Object.assign({
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    }, ctrl ? { signal: ctrl.signal } : {})).then(function (res) {
+      if (timer) clearTimeout(timer);
+      return res.json().catch(function () { return {}; }).then(function (data) {
+        data = data || {};
+        data.httpStatus = res.status;
+        if (!res.ok || !data.ok) {
+          var err = new Error(data.error || "The payment didn't go through. Try again or call " + BUSINESS_PHONE + ".");
+          err.data = data;
+          throw err;
+        }
+        return data;
+      });
+    }, function (err) {
+      if (timer) clearTimeout(timer);
+      var e = new Error("No connection to the payment server. Check your signal and try again.");
+      e.network = true;
+      throw e;
+    });
+  }
+
+  /* Fallback copy of what the Worker writes, so God mode sees the payment even if the Worker's write failed. */
+  function paymentIndexPatch(code, purpose, record) {
+    if (!syncOn() || !code) return Promise.resolve();
+    var now = Date.now();
+    var body = { code: code, name: state.name || "", updatedAt: now, env: squareCfg().sandbox ? "sandbox" : "production" };
+    body[purpose] = Object.assign({ at: now }, record || {});
+    return authFetch(databaseURL() + "/rides/PAYMENTS/" + encodeURIComponent(code) + ".json", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body)
+    }).catch(function () {});
   }
 
   function ridePaid() {
@@ -3292,6 +3367,7 @@
       '<div class="card payment-card">' +
       '<p class="tag">Payment</p>' +
       '<p class="lede">After you request, you add your card for this ride on a secure Square form. You are not charged until after drop-off, so you can add a tip.</p>' +
+      '<p class="fine">Free to cancel until a driver accepts. After a driver accepts, cancelling charges a cancel fee (' + cancelFeeRule().pct + '% of the estimate, ' + money(cancelFeeRule().min) + ' minimum).</p>' +
       '<p class="fine">Your pickup PIN shows as soon as a driver accepts your ride. This app never sees or stores your card number.</p>' +
       "</div>"
     );
@@ -3335,7 +3411,7 @@
     else {
       line = "Card on file" +
         (state.cardLast4 ? " (" + (state.cardBrand || "card") + " ending " + state.cardLast4 + ")" : "") +
-        ". You are charged after drop-off, so you can add a tip.";
+        ". Nothing is charged now. You pay the final fare after drop-off, and you can add a tip.";
     }
     return '<div class="card payment-card"><p class="tag">Payment</p><p class="lede">' + esc(line) + "</p></div>";
   }
@@ -3394,44 +3470,13 @@
     var el = cardSheetEl();
     var head = '<p class="tag">' + (code ? "Ride " + esc(code) : "This ride") +
       (est.ready ? " · est. " + money(est.total) : "") + "</p>";
-    if (squareChargeOn() && est.ready && code) {
-      var depCents = Math.round(est.total * 0.25);
-      el.innerHTML =
-        '<div class="sheet" role="dialog" aria-modal="true" aria-labelledby="card-title">' + head +
-        (squareCfg().testMode ? '<p class="fine" style="background:#c9a227;color:#0b1f3a;font-weight:700;padding:4px 8px;border-radius:8px">TEST MODE · card 4111 1111 1111 1111 · CVV 111 · ZIP 77042</p>' : "") +
-        '<h3 id="card-title">Pay for this ride</h3>' +
-        '<label class="check" style="display:flex;align-items:center;gap:10px;margin:10px 0;padding:10px 12px;border:1px solid var(--line);border-radius:12px;color:var(--ink);font-size:15px;letter-spacing:0;text-transform:none;cursor:pointer"><input type="radio" name="sq-pay-choice" value="deposit" checked style="width:20px;height:20px;margin:0;padding:0;flex:0 0 auto;accent-color:#c9a227"> 25% deposit now \u2014 <strong>' + money(depCents) + "</strong></label>" +
-        '<label class="check" style="display:flex;align-items:center;gap:10px;margin:10px 0;padding:10px 12px;border:1px solid var(--line);border-radius:12px;color:var(--ink);font-size:15px;letter-spacing:0;text-transform:none;cursor:pointer"><input type="radio" name="sq-pay-choice" value="full" style="width:20px;height:20px;margin:0;padding:0;flex:0 0 auto;accent-color:#c9a227"> Pay in full \u2014 <strong>' + money(est.total) + "</strong></label>" +
-        '<p class="fine">Square keeps your card; this app never sees the number.</p>' +
-        '<div id="sq-card-container" class="sq-card"><p class="fine">Loading the secure card form\u2026</p></div>' +
-        '<p class="error" id="sq-card-error" role="alert"></p>' +
-        '<button class="btn" type="button" id="sq-pay-btn" disabled>Pay ' + money(depCents) + "</button>" +
-        '<button class="btn secondary" type="button" id="card-sheet-close">Not now</button>' +
-        "</div>";
-      el.classList.add("open");
-      var closeC = document.getElementById("card-sheet-close");
-      if (closeC) closeC.addEventListener("click", closeCardSheet);
-      var payBtn = document.getElementById("sq-pay-btn");
-      var amountFor = function () {
-        var pick = el.querySelector('input[name="sq-pay-choice"]:checked');
-        return pick && pick.value === "full" ? { cents: est.total, choice: "full" } : { cents: depCents, choice: "deposit" };
-      };
-      Array.prototype.forEach.call(el.querySelectorAll('input[name="sq-pay-choice"]'), function (r) {
-        r.addEventListener("change", function () {
-          if (payBtn && payBtn.dataset.busy !== "1") payBtn.textContent = "Pay " + money(amountFor().cents);
-        });
-      });
-      if (payBtn) {
-        payBtn.addEventListener("click", function () { chargeSquareCard(amountFor()); });
-        mountSquareCard("sq-pay-btn");
-      }
-      return;
-    }
     if (squareConfigured()) {
       el.innerHTML =
         '<div class="sheet" role="dialog" aria-modal="true" aria-labelledby="card-title">' + head +
+        (squareCfg().testMode ? '<p class="fine" style="background:#c9a227;color:#0b1f3a;font-weight:700;padding:4px 8px;border-radius:8px">TEST MODE · Square sandbox · card 4111 1111 1111 1111 · CVV 111 · ZIP 77042</p>' : "") +
         '<h3 id="card-title">Add your card</h3>' +
-        '<p class="lede">Square keeps your card; this app never sees the number. You are charged after drop-off (plus any tip you add).</p>' +
+        '<p class="lede">Square keeps your card; this app never sees the number. <strong>Nothing is charged now.</strong> You are charged after drop-off for the final fare, plus any tip you add.</p>' +
+        '<p class="fine">Free to cancel until a driver accepts. After that, cancelling charges ' + esc(money(cancelFeeCents())) + ' (' + cancelFeeRule().pct + '% of the estimate, ' + esc(money(cancelFeeRule().min)) + ' minimum).</p>' +
         '<div id="sq-card-container" class="sq-card"><p class="fine">Loading the secure card form…</p></div>' +
         '<p class="error" id="sq-card-error" role="alert"></p>' +
         '<button class="btn" type="button" id="sq-card-save" disabled>Save card</button>' +
@@ -3501,25 +3546,16 @@
         var first = result && result.errors && result.errors[0];
         throw new Error((first && first.message) || "Check the card details and try again.");
       }
-      return fetch(cfg.endpoint, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          rideCode: code,
-          sourceId: result.token,
-          name: state.name || "",
-          phone: state.phone || "",
-          email: firebaseEmail() || readSession() || "",
-          estimateCents: est.ready ? est.total : null,
-          isTest: !!state.isTest
-        })
-      });
-    }).then(function (res) {
-      return res.json().catch(function () { return {}; }).then(function (data) {
-        if (!res.ok || !data || !data.ok) throw new Error((data && data.error) || "Square did not save the card. Try again.");
-        return data;
+      return workerPost(cfg.endpoint, {
+        rideCode: code,
+        sourceId: result.token,
+        name: state.name || "",
+        phone: state.phone || "",
+        email: firebaseEmail() || readSession() || "",
+        estimateCents: est.ready ? est.total : null
       });
     }).then(function (data) {
+      if (data.written !== true) paymentIndexPatch(code, "card", { status: "SAVED", last4: String(data.last4 || ""), brand: String(data.brand || "") });
       var patch = {
         cardStatus: "on_file",
         cardOnFileAt: Date.now(),
@@ -3532,15 +3568,13 @@
         state.cardStatus = "on_file";
         state.cardLast4 = patch.cardLast4;
         state.cardBrand = patch.cardBrand;
+        state.hasCardOnFile = !!patch.squareCardId;
         saveRide(state.rideStatus || "pending_owner");
         closeCardSheet();
         render();
       }
-      if (syncOn() && code) {
-        return patchRide(code, patch).then(done, function () {
-          throw new Error("Square saved your card, but the ride did not update. Call " + BUSINESS_PHONE + " and we will confirm it.");
-        });
-      }
+      /* The Worker already wrote these fields; this PATCH is the fallback. Saved at Square either way. */
+      if (syncOn() && code && data.written !== true) return patchRide(code, patch).then(done, done);
       done();
     }).catch(function (err) {
       var btn = document.getElementById("sq-card-save");
@@ -3549,94 +3583,6 @@
         btn.textContent = "Save card";
       }
       cardSheetError((err && err.message) || "Could not save the card. Try again.");
-    });
-  }
-
-  var sqChargeAttempt = 0;
-
-  /* TEST MODE charge: Square token -> pcs-pay /charge -> paymentId/paid status on /rides/{code} and the REQUESTS row. */
-  function chargeSquareCard(amount) {
-    var payBtn = document.getElementById("sq-pay-btn");
-    if (!sqCard || !payBtn || payBtn.dataset.busy === "1") return;
-    var cfg = squareCfg();
-    var code = state.code || "";
-    if (!code) {
-      cardSheetError("This ride has no booking code yet. Request the ride first.");
-      return;
-    }
-    payBtn.dataset.busy = "1";
-    payBtn.disabled = true;
-    payBtn.textContent = "Paying\u2026";
-    cardSheetError("");
-    sqChargeAttempt += 1;
-    var idem = ("ra-" + code + "-" + sqChargeAttempt + "-" + makeRideCode()).slice(0, 45);
-    var email = firebaseEmail() || "";
-    sqCard.tokenize().then(function (result) {
-      if (!result || result.status !== "OK" || !result.token) {
-        var first = result && result.errors && result.errors[0];
-        throw new Error((first && first.message) || "Check the card details and try again.");
-      }
-      return fetch(cfg.chargeUrl, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          sourceId: result.token,
-          amountCents: amount.cents,
-          bookingCode: code,
-          buyerEmail: /@/.test(email) ? email : undefined,
-          note: "Rider app \u00b7 " + (amount.choice === "full" ? "paid in full" : "25% deposit") + (cfg.testMode ? " \u00b7 TEST" : ""),
-          idempotencyKey: idem
-        })
-      });
-    }).then(function (res) {
-      return res.json().catch(function () { return {}; }).then(function (data) {
-        if (!res.ok || !data || !data.ok || !data.paymentId) throw new Error((data && data.error) || "The payment didn't go through. Try again.");
-        return data;
-      });
-    }).then(function (data) {
-      var now = Date.now();
-      var patch = {
-        cardStatus: "on_file",
-        cardOnFileAt: now,
-        cardLast4: String(data.last4 || ""),
-        cardBrand: String(data.brand || ""),
-        paymentStatus: amount.choice === "full" ? "paid_in_full" : "deposit_paid",
-        paidCents: Number(data.amountCents) || amount.cents,
-        squarePaymentId: String(data.paymentId),
-        squarePaymentStatus: String(data.status || ""),
-        receiptUrl: /^https:\/\//i.test(data.receiptUrl || "") ? String(data.receiptUrl) : "",
-        paymentEnv: cfg.sandbox ? "sandbox" : "production",
-        paidAt: now,
-        updatedAt: now
-      };
-      function done() {
-        state.cardStatus = "on_file";
-        state.cardLast4 = patch.cardLast4;
-        state.cardBrand = patch.cardBrand;
-        state.paymentStatus = patch.paymentStatus;
-        state.paidCents = patch.paidCents;
-        state.receiptUrl = patch.receiptUrl;
-        saveRide(state.rideStatus || "pending_owner");
-        closeCardSheet();
-        render();
-      }
-      if (!syncOn()) { done(); return; }
-      var rowPatch = authFetch(openIndexUrl(code), {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ cardStatus: patch.cardStatus, paymentStatus: patch.paymentStatus, paidCents: patch.paidCents,
-          squarePaymentId: patch.squarePaymentId, paymentEnv: patch.paymentEnv, updatedAt: now })
-      }).catch(function () {});
-      /* Paid either way: show it even if the ride record update fails (Matthew can match the Square payment by code). */
-      return Promise.all([patchRide(code, patch).catch(function () {}), rowPatch]).then(done);
-    }).catch(function (err) {
-      var btn = document.getElementById("sq-pay-btn");
-      if (btn) {
-        btn.dataset.busy = "";
-        btn.disabled = false;
-        btn.textContent = "Pay " + money(amount.cents);
-      }
-      cardSheetError((err && err.message) || "The payment didn't go through. Try again.");
     });
   }
 
@@ -3668,13 +3614,294 @@
     });
   }
 
+  function driverHasAccepted() {
+    var st = String(state.rideStatus || "").toLowerCase();
+    return st === "accepted" || st === "started";
+  }
+
+
+  /* ================= v58: pay after drop-off (final fare + tip) ================= */
+  var TIP_CHOICES = ["0", "15", "20", "25"];
+
+  function resetPayFields() {
+    state.finalFareCents = 0;
+    state.finalSubCents = 0;
+    state.finalTaxCents = 0;
+    state.chargedCents = 0;
+    state.tipCents = 0;
+    state.payError = "";
+    state.cancelFeeStatus = "";
+    state.hasCardOnFile = false;
+    state.tipChoice = "20";
+    state.tipCustom = "";
+    state.payBusy = false;
+    state.payNotice = "";
+    state.payAttempt = 0;
+    state.payNewCard = false;
+    state.estimateCents = 0;
+  }
+
+  function tipBaseCents() {
+    return state.finalSubCents > 0 ? state.finalSubCents : state.finalFareCents;
+  }
+
+  function tipCentsChosen() {
+    var c = String(state.tipChoice || "0");
+    if (c === "custom") {
+      var raw = String(state.tipCustom || "").trim();
+      if (raw.indexOf("-") !== -1) return 0;
+      var v = parseFloat(raw.replace(/[^0-9.]/g, ""));
+      return isFinite(v) && v > 0 ? Math.round(v * 100) : 0;
+    }
+    var pct = Number(c);
+    return isFinite(pct) && pct > 0 ? Math.round(tipBaseCents() * pct / 100) : 0;
+  }
+
+  /* Same tip ceiling as the pcs-pay Worker: the larger of the fare or $50. */
+  function tipCapCents() {
+    return Math.max(Number(state.finalFareCents) || 0, 5000);
+  }
+
+  function rideFullyPaid() {
+    var ps = String(state.paymentStatus || "");
+    return ps === "charged" || ps === "paid_in_full" || ps === "refunded" || ps === "partially_refunded";
+  }
+
+  function payTotalCents() {
+    var deposit = state.paymentStatus === "deposit_paid" ? (Number(state.paidCents) || 0) : 0;
+    return Math.max(0, state.finalFareCents - deposit) + tipCentsChosen();
+  }
+
+  function payAfterRideHtml() {
+    var testRide = state.isTest || state.cardStatus === "test_skip" || state.paymentSkipped;
+    if (testRide) return '<div class="card payment-card" id="pay-after"><p class="tag">Payment</p><p class="lede">Test ride: no charge.</p></div>';
+    if (rideFullyPaid()) {
+      var refunded = state.paymentStatus === "refunded" || state.paymentStatus === "partially_refunded";
+      return '<div class="card payment-card" id="pay-after"><p class="tag">' + (refunded ? "Refunded" : "Paid \u2014 thank you!") + "</p>" +
+        '<p class="lede"><strong>' + esc(money(state.chargedCents || state.paidCents || 0)) + "</strong>" +
+        (state.tipCents ? " (fare " + esc(money(Math.max(0, (state.chargedCents || 0) - state.tipCents))) + " + tip " + esc(money(state.tipCents)) + ")" : "") +
+        (state.cardLast4 ? " \u00b7 " + esc(state.cardBrand || "card") + " ending " + esc(state.cardLast4) : "") + "</p>" +
+        (refunded ? '<p class="fine">Private Car Services refunded this payment. Your bank shows it in a few days.</p>' : "") +
+        (/^https:\/\//i.test(state.receiptUrl || "") ? '<p><a class="btn ghost" id="rider-receipt-link" href="' + esc(state.receiptUrl) + '" target="_blank" rel="noopener">View receipt</a></p>' : "") +
+        '<p class="fine">Your receipt is also in History.</p></div>';
+    }
+    if (state.cardStatus === "owner_ok" && !state.hasCardOnFile) {
+      return '<div class="card payment-card" id="pay-after"><p class="tag">Payment</p><p class="lede">Payment is handled by Private Car Services. Questions? Call ' + esc(BUSINESS_PHONE) + ".</p></div>";
+    }
+    if (!state.finalFareCents) {
+      return '<div class="card payment-card" id="pay-after"><p class="tag">Pay after the ride</p><p class="lede">Getting the final fare from your driver\u2026</p></div>';
+    }
+    if (!finalPayOn()) {
+      return '<div class="card payment-card" id="pay-after"><p class="tag">Pay after the ride</p><p class="lede">Final fare ' + esc(money(state.finalFareCents)) +
+        ". Private Car Services will text your receipt and a secure payment link.</p></div>";
+    }
+    var useSaved = state.cardStatus === "on_file" && state.hasCardOnFile && !state.payNewCard;
+    var tipBase = tipBaseCents();
+    var chips = TIP_CHOICES.map(function (c) {
+      var on = String(state.tipChoice) === c;
+      var label = c === "0" ? "No tip" : c + "% \u00b7 " + money(Math.round(tipBase * Number(c) / 100));
+      return '<button type="button" class="btn ' + (on ? "" : "ghost ") + 'tip-chip" data-tip="' + c + '" aria-pressed="' + (on ? "true" : "false") + '">' + esc(label) + "</button>";
+    }).join("") + '<button type="button" class="btn ' + (state.tipChoice === "custom" ? "" : "ghost ") + 'tip-chip" data-tip="custom" aria-pressed="' + (state.tipChoice === "custom" ? "true" : "false") + '">Other</button>';
+    var deposit = state.paymentStatus === "deposit_paid" ? (Number(state.paidCents) || 0) : 0;
+    var tip = tipCentsChosen();
+    var total = payTotalCents();
+    var failed = state.paymentStatus === "charge_failed" || !!state.payError;
+    return (
+      '<div class="card payment-card" id="pay-after">' +
+      '<p class="tag">Pay for your ride</p>' +
+      (squareCfg().testMode ? '<p class="fine" style="background:#c9a227;color:#0b1f3a;font-weight:700;padding:4px 8px;border-radius:8px">TEST MODE \u00b7 Square sandbox \u00b7 no real charge</p>' : "") +
+      (state.finalSubCents ? '<div class="money-row"><span>Fare before tax</span><span>' + esc(money(state.finalSubCents)) + "</span></div>" : "") +
+      (state.finalTaxCents ? '<div class="money-row"><span>Texas tax 8.25%</span><span>' + esc(money(state.finalTaxCents)) + "</span></div>" : "") +
+      '<div class="money-row"><span>Final fare</span><span>' + esc(money(state.finalFareCents)) + "</span></div>" +
+      (deposit ? '<div class="money-row"><span>Deposit already paid</span><span>\u2212' + esc(money(deposit)) + "</span></div>" : "") +
+      '<p class="fine" style="margin-top:10px">Add a tip for your driver?</p>' +
+      '<div class="tip-chips" style="display:flex;flex-wrap:wrap;gap:8px;margin:6px 0">' + chips + "</div>" +
+      (state.tipChoice === "custom"
+        ? '<label for="tip-custom">Tip amount ($)</label><input id="tip-custom" type="text" inputmode="decimal" maxlength="7" value="' + esc(state.tipCustom || "") + '" placeholder="5.00">'
+        : "") +
+      '<div class="money-row"><span>Tip</span><span id="pay-tip-amt">' + esc(money(tip)) + "</span></div>" +
+      '<div class="total-row"><span>Total</span><span id="pay-total-amt">' + esc(money(total)) + "</span></div>" +
+      (useSaved
+        ? '<p class="fine">Charged to your ' + esc(state.cardBrand || "card") + (state.cardLast4 ? " ending " + esc(state.cardLast4) : " on file") + '. <a href="#" id="pay-other-card">Use a different card</a></p>'
+        : '<p class="fine">Enter a card. Square keeps it; this app never sees the number.</p><div id="sq-card-container" class="sq-card"><p class="fine">Loading the secure card form\u2026</p></div>') +
+      '<p class="error" id="pay-error" role="alert">' + esc(state.payError || "") + "</p>" +
+      (failed && useSaved ? '<p class="fine">Your saved card didn\u2019t go through. Tap <a href="#" id="pay-other-card2">Use a different card</a>, or try again.</p>' : "") +
+      '<button class="btn" type="button" id="pay-now-btn"' + (state.payBusy ? " disabled" : "") + ">" +
+      (state.payBusy ? "Paying\u2026" : "Pay " + esc(money(total))) + "</button>" +
+      '<p class="fine">Questions about the fare? Call <a href="tel:' + BUSINESS_PHONE + '">' + esc(BUSINESS_PHONE) + "</a> before you pay.</p>" +
+      "</div>"
+    );
+  }
+
+  function refreshPayTotals() {
+    var t = document.getElementById("pay-tip-amt");
+    var tot = document.getElementById("pay-total-amt");
+    var btn = document.getElementById("pay-now-btn");
+    if (t) t.textContent = money(tipCentsChosen());
+    if (tot) tot.textContent = money(payTotalCents());
+    if (btn && !state.payBusy) btn.textContent = "Pay " + money(payTotalCents());
+  }
+
+  var payCardMounted = false;
+
+  function mountPayCard() {
+    var box = document.getElementById("sq-card-container");
+    if (!box || box.dataset.mounted === "1") return;
+    box.dataset.mounted = "1";
+    var cfg = squareCfg();
+    loadSquareSdk(cfg.sandbox).then(function () {
+      return Promise.resolve(window.Square.payments(cfg.appId, cfg.locationId)).then(function (p) { return p.card(); });
+    }).then(function (card) {
+      var b = document.getElementById("sq-card-container");
+      if (!b) { try { card.destroy(); } catch (e) {} return; }
+      if (sqCard && sqCard.destroy) { try { sqCard.destroy(); } catch (e) {} }
+      sqCard = card;
+      b.innerHTML = "";
+      payCardMounted = true;
+      return card.attach("#sq-card-container");
+    }).catch(function () {
+      var e = document.getElementById("pay-error");
+      if (e) e.textContent = "The secure card form did not load. Check your signal and try again, or call " + BUSINESS_PHONE + ".";
+    });
+  }
+
+  function payFinalFare() {
+    if (state.payBusy || ROLE !== "customer") return;
+    var cfg = squareCfg();
+    var code = state.code || "";
+    if (!code || !finalPayOn()) return;
+    var tip = tipCentsChosen();
+    if (state.tipChoice === "custom" && String(state.tipCustom || "").trim() && !tip) {
+      state.payError = "Enter a tip amount like 5.00, or pick No tip.";
+      render();
+      return;
+    }
+    if (tip > tipCapCents()) {
+      state.payError = "The most you can tip in the app is " + money(tipCapCents()) + ". Call " + BUSINESS_PHONE + " for more.";
+      render();
+      return;
+    }
+    var useSaved = state.cardStatus === "on_file" && state.hasCardOnFile && !state.payNewCard;
+    var expected = payTotalCents();
+    state.payBusy = true;
+    state.payError = "";
+    var btn = document.getElementById("pay-now-btn");
+    if (btn) { btn.disabled = true; btn.textContent = "Paying\u2026"; }
+    var tokenP = useSaved ? Promise.resolve(null) : (sqCard ? sqCard.tokenize().then(function (r) {
+      if (!r || r.status !== "OK" || !r.token) {
+        var first = r && r.errors && r.errors[0];
+        throw new Error((first && first.message) || "Check the card details and try again.");
+      }
+      return r.token;
+    }) : Promise.reject(new Error("The card form is still loading. Try again in a moment.")));
+    tokenP.then(function (token) {
+      var body = { rideCode: code, tipCents: tip, expectedCents: expected, attempt: state.payAttempt || 0 };
+      if (token) body.sourceId = token;
+      return workerPost(cfg.chargeUrl, body);
+    }).then(function (data) {
+      var now = Date.now();
+      state.payBusy = false;
+      state.payNewCard = false;
+      state.paymentStatus = "charged";
+      state.chargedCents = Number(data.totalCents) || expected;
+      state.tipCents = data.already ? (state.tipCents || 0) : tip;
+      state.receiptUrl = /^https:\/\//i.test(data.receiptUrl || "") ? data.receiptUrl : state.receiptUrl;
+      if (data.last4) state.cardLast4 = String(data.last4);
+      if (data.brand) state.cardBrand = String(data.brand);
+      var patch = { paymentStatus: "charged", chargedCents: state.chargedCents, tipCents: state.tipCents, squarePaymentId: String(data.paymentId || ""),
+        receiptUrl: state.receiptUrl || "", paidAt: now, paymentEnv: cfg.sandbox ? "sandbox" : "production", updatedAt: now };
+      /* The Worker already wrote the ride + PAYMENTS index (data.written). These PATCHes are only the fallback. */
+      if (!data.already && data.written !== true) {
+        patchRide(code, patch).catch(function () {});
+        paymentIndexPatch(code, "final", { status: "COMPLETED", amountCents: state.chargedCents, tipCents: state.tipCents,
+          fareCents: Number(data.fareCents) || Math.max(0, state.chargedCents - state.tipCents),
+          paymentId: patch.squarePaymentId, receiptUrl: patch.receiptUrl, last4: state.cardLast4 || "", brand: state.cardBrand || "" });
+      }
+      try {
+        rememberRiderHistoryEntry(Object.assign({}, currentRide() || {}, patch, {
+          code: code, status: "completed", fareTotal: state.finalFareCents, fareSub: state.finalSubCents, fareTax: state.finalTaxCents,
+          cardLast4: state.cardLast4, cardBrand: state.cardBrand
+        }));
+      } catch (e) {}
+      if (sqCard && sqCard.destroy) { try { sqCard.destroy(); } catch (e) {} }
+      sqCard = null;
+      saveRide("completed");
+      render();
+    }).catch(function (err) {
+      state.payBusy = false;
+      var d = err && err.data;
+      if (d && d.httpStatus === 409 && d.totalCents != null) {
+        state.payError = (err && err.message) || "The total changed.";
+      } else {
+        state.payError = (err && err.message) || "The payment didn't go through. Try again.";
+        /* Only a card decline (402) moves to a new Square idempotency key; 409 (already submitted) never does. */
+        if (d && d.httpStatus === 402) state.payAttempt = (state.payAttempt || 0) + 1;
+      }
+      render();
+    });
+  }
+
+  function bindPayAfterRide() {
+    var box = document.getElementById("pay-after");
+    if (!box) return;
+    Array.prototype.forEach.call(box.querySelectorAll(".tip-chip"), function (b) {
+      b.addEventListener("click", function () {
+        state.tipChoice = b.getAttribute("data-tip") || "0";
+        state.payError = "";
+        render();
+        if (state.tipChoice === "custom") {
+          var inp = document.getElementById("tip-custom");
+          if (inp) inp.focus();
+        }
+      });
+    });
+    var custom = document.getElementById("tip-custom");
+    if (custom) {
+      custom.addEventListener("input", function () {
+        state.tipCustom = custom.value;
+        refreshPayTotals();
+      });
+    }
+    ["pay-other-card", "pay-other-card2"].forEach(function (id) {
+      var a = document.getElementById(id);
+      if (a) a.addEventListener("click", function (ev) {
+        ev.preventDefault();
+        state.payNewCard = true;
+        state.payError = "";
+        render();
+      });
+    });
+    var pay = document.getElementById("pay-now-btn");
+    if (pay) pay.addEventListener("click", payFinalFare);
+    if (document.getElementById("sq-card-container")) mountPayCard();
+  }
+
   function cancelWarningCopy() {
     var fee = cancelFeeCents();
-    return (
-      "If you cancel before pickup, a cancel fee of " + money(fee) +
-      " may apply (25% of the estimate or $10, whichever is more). " +
-      "Automatic card charges are not live yet — if you cancel, we will follow up about any fee."
-    );
+    var rule = cancelFeeRule();
+    if (!driverHasAccepted()) {
+      return "Free to cancel until a driver accepts your ride. After a driver accepts, the cancel fee is " + money(fee) +
+        " (" + rule.pct + "% of the estimate, " + money(rule.min) + " minimum).";
+    }
+    if (state.isTest || state.cardStatus === "test_skip") return "Test ride: no cancel fee.";
+    return "A driver already accepted, so cancelling charges a cancel fee of " + money(fee) + " (" + rule.pct + "% of the estimate, " +
+      money(rule.min) + " minimum)" + (state.cardStatus === "on_file" && state.cardLast4
+        ? " to your " + (state.cardBrand || "card") + " ending " + state.cardLast4 + "." : ".");
+  }
+
+  /* v58: rider cancelled after a driver accepted -> pcs-pay /cancel-fee (the Worker re-reads the ride and decides). */
+  function chargeCancelFee(code, cardOnFile) {
+    var cfg = squareCfg();
+    if (!cardOnFile || !/^https:\/\//i.test(cfg.cancelFeeUrl)) return Promise.resolve({ skipped: true });
+    return workerPost(cfg.cancelFeeUrl, { rideCode: code }).then(function (data) {
+      if (data && !data.none && !data.already && data.written !== true) {
+        paymentIndexPatch(code, "cancel", { status: "COMPLETED", amountCents: Number(data.amountCents) || 0, paymentId: String(data.paymentId || ""),
+          receiptUrl: String(data.receiptUrl || ""), last4: String(data.last4 || ""), brand: String(data.brand || "") });
+      }
+      return data;
+    }).catch(function (err) {
+      return { failed: true, error: (err && err.message) || "" };
+    });
   }
 
   function completeActiveRide(opts) {
@@ -3697,7 +3924,7 @@
       driving.line = null;
     }
     state.rideStatus = "completed";
-    syncActiveTripFare({ status: "completed" });
+    syncActiveTripFare({ status: "completed", completedAt: Date.now(), fareFinal: true });
     try { appendCompletedRideLog(); } catch (logErr) {}
     var code = state.driverCode || state.code || readDriverCode();
     if (syncOn() && code) deleteOpenRide(code).catch(function () {});
@@ -3753,6 +3980,9 @@
     var fee = cancelFeeCents();
     var code = state.code;
     var now = Date.now();
+    var wasAccepted = st === "accepted";
+    var cardOnFile = state.cardStatus === "on_file" && !state.isTest;
+    var feeResult = null;
     state.cancelBusy = true;
     state.cancelError = "";
     render();
@@ -3764,7 +3994,17 @@
       state.cancelBusy = false;
       state.cancelConfirm = false;
       state.screen = "home";
-      state.notice = "Your ride " + (code ? code + " " : "") + "was cancelled. If a cancel fee applies, Private Car Services will follow up.";
+      var feeNote = "";
+      if (feeResult && feeResult.ok && Number(feeResult.amountCents) > 0 && !feeResult.none) {
+        feeNote = " A cancel fee of " + money(Number(feeResult.amountCents)) + " was charged" +
+          (feeResult.last4 ? " to your " + (feeResult.brand || "card") + " ending " + feeResult.last4 : "") + "." +
+          (feeResult.receiptUrl ? " Your receipt is in History." : "");
+      } else if (feeResult && feeResult.failed) {
+        feeNote = " The cancel fee could not be charged to your card; Private Car Services will follow up.";
+      } else if (wasAccepted && !cardOnFile && !state.isTest) {
+        feeNote = " A driver had accepted, so Private Car Services will follow up about the cancel fee.";
+      }
+      state.notice = "Your ride " + (code ? code + " " : "") + "was cancelled." + feeNote;
       render();
     }
     function fail(err) {
@@ -3786,7 +4026,9 @@
         e.started = true;
         throw e;
       }
-      var patch = { status: "cancelled", cancelledAt: now, cancelledBy: "rider", cancelFeeCents: fee, updatedAt: now };
+      wasAccepted = rst === "accepted" || !!(remote && (remote.acceptedAt || remote.driverId || remote.driverUid) && rst !== "pending_owner" && rst !== "requested");
+      if (remote && remote.cardStatus === "on_file" && remote.squareCardId && !remote.isTest) cardOnFile = true;
+      var patch = { status: "cancelled", cancelledAt: now, cancelledBy: "rider", cancelFeeCents: wasAccepted ? fee : 0, updatedAt: now };
       return patchRide(code, patch).then(function () {
         /* Keep the row on the REQUESTS hub as "cancelled": drivers only list "requested" rows (so it leaves
            their map at once) and God mode shows it as cancelled. */
@@ -3794,7 +4036,7 @@
         summary.status = "cancelled";
         summary.cancelledAt = now;
         summary.cancelledBy = "rider";
-        summary.cancelFeeCents = fee;
+        summary.cancelFeeCents = wasAccepted ? fee : 0;
         return authFetch(openIndexUrl(code), {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
@@ -3803,6 +4045,18 @@
           if (!res.ok) throw new Error("open");
         }).catch(function () {
           return deleteOpenRide(code).catch(function () {});
+        });
+      }).then(function () {
+        if (!wasAccepted || !cardOnFile) return null;
+        return chargeCancelFee(code, true).then(function (r) {
+          feeResult = r;
+          try {
+            rememberRiderHistoryEntry(Object.assign({}, currentRide() || {}, remote || {}, patch, {
+              code: code, cancelFeeStatus: r && r.ok && !r.none ? "charged" : (r && r.failed ? "failed" : ""),
+              cancelFeeCents: r && r.amountCents != null ? Number(r.amountCents) : fee,
+              cancelFeeReceiptUrl: (r && r.receiptUrl) || "", cardLast4: (r && r.last4) || state.cardLast4, cardBrand: (r && r.brand) || state.cardBrand
+            }));
+          } catch (e) {}
         });
       });
     }).then(finish, fail);
@@ -5306,15 +5560,29 @@
       status: st,
       pickup: ride.pickupAddress || [ride.pickupStreet, ride.pickupCity, ride.pickupState].filter(Boolean).join(", "),
       drop: ride.dropAddress || [ride.dropStreet, ride.dropCity, ride.dropState].filter(Boolean).join(", "),
-      amountCents: ride.estimatedTotal != null && isFinite(+ride.estimatedTotal) ? Math.round(+ride.estimatedTotal) : null,
-      fareBeforeTax: ride.fareBeforeTax != null && isFinite(+ride.fareBeforeTax) ? Math.round(+ride.fareBeforeTax) : null,
+      amountCents: historyAmount(ride),
+      fareBeforeTax: ride.fareSub != null && isFinite(+ride.fareSub) ? Math.round(+ride.fareSub)
+        : (ride.fareBeforeTax != null && isFinite(+ride.fareBeforeTax) ? Math.round(+ride.fareBeforeTax) : null),
       when: ride.when || [ride.date, ride.time].filter(Boolean).join(" "),
       name: ride.name || ""
     };
+    /* v58: payment + Square receipt (only fields that exist, so a later write never blanks an earlier one) */
+    var payKeys = { fareTotal: "fareTotal", fareTax: "fareTax", chargedCents: "chargedCents", tipCents: "tipCents", paymentStatus: "paymentStatus",
+      receiptUrl: "receiptUrl", cardLast4: "cardLast4", cardBrand: "cardBrand", cancelFeeStatus: "cancelFeeStatus",
+      cancelFeeReceiptUrl: "cancelFeeReceiptUrl", paidAt: "paidAt" };
+    Object.keys(payKeys).forEach(function (k) {
+      var v = ride[k];
+      if (v === undefined || v === null || v === "") return;
+      if (/Url$/.test(k) && !/^https:\/\//i.test(String(v))) return;
+      entry[payKeys[k]] = v;
+    });
+    if (st === "cancelled" && Number(ride.cancelFeeCents) > 0 && ride.cancelFeeStatus === "charged") entry.cancelFeeCents = Number(ride.cancelFeeCents);
     try {
       var key = "pcs-rider-history";
       var list = JSON.parse(localStorage.getItem(key) || "[]");
       if (!Array.isArray(list)) list = [];
+      var prevEntry = list.filter(function (e) { return e && e.code === entry.code; })[0];
+      if (prevEntry) entry = Object.assign({}, prevEntry, entry);
       list = list.filter(function (e) { return e && e.code !== entry.code; });
       list.unshift(entry);
       if (list.length > 80) list = list.slice(0, 80);
@@ -5322,7 +5590,7 @@
     } catch (e) {}
     if (syncOn() && ROLE === "customer") {
       authFetch(riderHistoryUrl(entry.code), {
-        method: "PUT",
+        method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(entry)
       }).catch(function () {});
@@ -5403,11 +5671,13 @@
     else {
       body = rows.map(function (r) {
         var amt = r.amountCents != null ? money(r.amountCents) : "";
+        var pl = historyPayLine(r);
         return (
           '<button type="button" class="card history-row" data-history-code="' + esc(r.code || "") + '" style="text-align:left;width:100%;cursor:pointer">' +
           '<p class="tag">' + esc(String(r.status || "").toUpperCase()) + (amt ? " · " + esc(amt) : "") + "</p>" +
           '<p class="lede">' + esc(fmtHistoryWhen(r.at) || r.when || "") + "</p>" +
           "<p>" + esc(r.pickup || "—") + " → " + esc(r.drop || "—") + "</p>" +
+          (pl ? '<p class="fine"><strong>' + esc(pl) + "</strong></p>" : "") +
           '<p class="fine">Code ' + esc(r.code || "") + "</p></button>"
         );
       }).join("");
@@ -5421,10 +5691,35 @@
     );
   }
 
+  function historyAmount(ride) {
+    var keys = ["chargedCents", "fareTotal", "estimateCents"];
+    for (var i = 0; i < keys.length; i += 1) {
+      var v = Number(ride && ride[keys[i]]);
+      if (isFinite(v) && v > 0) return Math.round(v);
+    }
+    if (ride && ride.estimatedTotal != null && isFinite(+ride.estimatedTotal)) return Math.round(+ride.estimatedTotal);
+    return null;
+  }
+
+  function historyPayLine(r) {
+    var ps = String(r.paymentStatus || "");
+    var card = r.cardLast4 ? " · " + (r.cardBrand || "card") + " ending " + r.cardLast4 : "";
+    if (ps === "charged") return "Paid " + money(r.chargedCents || r.amountCents || 0) + (Number(r.tipCents) > 0 ? " (includes " + money(r.tipCents) + " tip)" : "") + card;
+    if (ps === "refunded") return "Refunded" + card;
+    if (ps === "partially_refunded") return "Partly refunded" + card;
+    if (ps === "charge_failed") return "Payment not completed — open the ride or call " + BUSINESS_PHONE;
+    if (ps === "deposit_paid") return "Deposit paid " + money(r.paidCents || 0) + card;
+    if (r.status === "cancelled" && r.cancelFeeStatus === "charged") return "Cancel fee " + money(r.cancelFeeCents || 0) + card;
+    if (r.status === "cancelled" && r.cancelFeeStatus === "refunded") return "Cancel fee refunded" + card;
+    return "";
+  }
+
   function customerHistoryReceipt() {
     var r = state.historyReceipt || {};
     var amt = r.amountCents != null ? money(r.amountCents) : "—";
     var fare = r.fareBeforeTax != null ? money(r.fareBeforeTax) : "";
+    var payLine = historyPayLine(r);
+    var sqUrl = /^https:\/\//i.test(r.receiptUrl || "") ? r.receiptUrl : (/^https:\/\//i.test(r.cancelFeeReceiptUrl || "") ? r.cancelFeeReceiptUrl : "");
     return (
       '<div class="app-nav"><button class="btn ghost" type="button" id="receipt-back">← History</button></div>' +
       "<h2>Receipt</h2>" +
@@ -5434,7 +5729,11 @@
       "<p><strong>From</strong><br>" + esc(r.pickup || "—") + "</p>" +
       "<p><strong>To</strong><br>" + esc(r.drop || "—") + "</p>" +
       (fare ? "<p><strong>Fare before tax</strong> " + esc(fare) + "</p>" : "") +
+      (Number(r.fareTax) > 0 ? "<p><strong>Tax</strong> " + esc(money(r.fareTax)) + "</p>" : "") +
+      (Number(r.tipCents) > 0 ? "<p><strong>Tip</strong> " + esc(money(r.tipCents)) + "</p>" : "") +
       "<p><strong>Total</strong> " + esc(amt) + "</p>" +
+      (payLine ? '<p id="receipt-pay-line"><strong>Payment</strong> ' + esc(payLine) + "</p>" : "") +
+      (sqUrl ? '<p><a class="btn ghost" id="receipt-square-link" href="' + esc(sqUrl) + '" target="_blank" rel="noopener">View Square receipt</a></p>' : "") +
       '<p class="fine">Ride code ' + esc(r.code || "") + "</p>" +
       '<p class="fine">Amounts shown are what was stored for this ride. Not a new charge.</p>' +
       "</div>"
@@ -6363,7 +6662,13 @@
     remote.updatedAt = remote.requestedAt;
     remote.isTest = !!state.isTest && testModeAvailable();
     remote.cardStatus = remote.isTest ? "test_skip" : (remote.cardStatus && remote.cardStatus !== "" ? remote.cardStatus : "none");
-    if (squareChargeOn() && squareCfg().testMode) remote.squareSandbox = true; /* Square TEST MODE (?squaretest=1): flags the ride so it is easy to spot and delete */
+    if (squareConfigured() && squareCfg().testMode) remote.squareSandbox = true; /* Square TEST MODE (?squaretest=1): flags the ride so it is easy to spot and delete */
+    var est0 = estimate();
+    if (est0.ready) {
+      remote.estimateCents = est0.total; /* v58: pcs-pay Worker reads this for the cancel fee */
+      state.estimateCents = est0.total;
+      remote.estimateSubCents = est0.sub;
+    }
     var uid = firebaseUid();
     if (uid) remote.riderUid = uid;
     if (firebaseEmail()) remote.riderEmail = firebaseEmail();
@@ -6595,14 +6900,18 @@
       String(ride.driverCarMake || "") !== String(state.driverCarMake || "") ||
       String(ride.driverCarModel || "") !== String(state.driverCarModel || "") ||
       String(ride.driverCarSeats || "") !== String(state.driverCarSeats || "");
-    var cardChanged = (ride.cardStatus || "") !== (state.cardStatus || "");
+    var cardChanged = (ride.cardStatus || "") !== (state.cardStatus || "") ||
+      (Number(ride.fareTotal) || 0) !== (state.finalFareCents || 0) ||
+      (ride.paymentStatus || "") !== (state.paymentStatus || "") ||
+      (ride.receiptUrl || "") !== (state.receiptUrl || "") ||
+      (ride.cancelFeeStatus || "") !== (state.cancelFeeStatus || "");
     if (!statusChanged && !placesChanged && !driverChanged && !codeChanged && !identityChanged && !cardChanged) return;
     var screen = state.screen;
     applyRide(ride);
     if (screen === "waiting" && (ride.status === "accepted" || ride.status === "started" || ride.status === "completed")) state.screen = "trip";
     if ((ride.status === "accepted" || ride.status === "started" || ride.status === "completed") && state.screen !== "trip") state.screen = "trip";
     if (String(ride.status || "").toLowerCase() === "completed" || String(ride.status || "").toLowerCase() === "cancelled" || String(ride.status || "").toLowerCase() === "denied") {
-      rememberRiderHistoryEntry(ride);
+      rememberRiderHistoryEntry(Object.assign({ code: state.code }, ride));
     }
     if (String(ride.status || "").toLowerCase() === "accepted") loadChatMessages();
     var onlyDriver = !statusChanged && !placesChanged && !identityChanged && !cardChanged && driverChanged && state.screen === screen;
@@ -7177,17 +7486,9 @@
       routeLedeHtml() +
       (started || completed ? "" : riderStageNote() + riderPinBanner()) +
       (started || completed ? "" : chatBoxHtml()) +
+      (completed ? payAfterRideHtml() : "") +
       customerMapBlock(caption, driver) +
-      moneyCard() +
-      (completed
-        ? '<div class="card payment-card"><p class="tag">Pay after the ride</p>' +
-          '<p class="lede">' + esc(state.isTest || state.cardStatus === "test_skip" || state.paymentSkipped
-            ? "Test ride: no charge."
-            : (state.cardStatus === "on_file"
-              ? "Your card on file is charged after drop-off, so you can add a tip."
-              : "Private Car Services will text your receipt and a secure payment link.")) + "</p>" +
-          "</div>"
-        : "") +
+      (completed && state.finalFareCents ? "" : moneyCard()) +
       (started || completed ? "" : paymentStatusCard()) +
       cancelBlockHtml() +
       (started
@@ -7265,6 +7566,16 @@
     state.paymentStatus = ride.paymentStatus || "";
     state.paidCents = Number(ride.paidCents) || 0;
     state.receiptUrl = ride.receiptUrl || "";
+    state.finalFareCents = Number(ride.fareTotal) || 0;
+    state.finalSubCents = Number(ride.fareSub) || 0;
+    state.finalTaxCents = Number(ride.fareTax) || 0;
+    state.chargedCents = Number(ride.chargedCents) || 0;
+    state.tipCents = Number(ride.tipCents) || 0;
+    state.payError = ride.paymentStatus === "charge_failed" ? String(ride.payError || "") : "";
+    state.cancelFeeStatus = ride.cancelFeeStatus || "";
+    state.hasCardOnFile = !!(ride.squareCardId || ride.hasCardOnFile);
+    if (Number(ride.estimateCents) > 0) state.estimateCents = Math.round(Number(ride.estimateCents));
+    if (ride.finalAttempts) state.payAttempt = Math.max(state.payAttempt || 0, Number(ride.finalAttempts) || 0);
     if (state.cardStatus === "test_skip") state.paymentSkipped = true;
     state.asap = rideIsAsap(ride);
     if (!state.asap && ride.date && ride.time && isPickupInPast(ride.date, ride.time)) {
@@ -7435,6 +7746,18 @@
       waitMinutes: waitBillableMinutes()
     };
     if (state.code) rideOut.code = state.code;
+    if (ROLE === "customer") {
+      rideOut.hasCardOnFile = !!state.hasCardOnFile;
+      if (state.estimateCents) rideOut.estimateCents = state.estimateCents;
+      if (state.finalFareCents) {
+        rideOut.fareTotal = state.finalFareCents;
+        rideOut.fareSub = state.finalSubCents || 0;
+        rideOut.fareTax = state.finalTaxCents || 0;
+      }
+      if (state.chargedCents) rideOut.chargedCents = state.chargedCents;
+      if (state.tipCents) rideOut.tipCents = state.tipCents;
+      if (state.cancelFeeStatus) rideOut.cancelFeeStatus = state.cancelFeeStatus;
+    }
     var pinOut = normalizeStoredPin(state.pin);
     if (pinOut) {
       state.pin = pinOut;
@@ -7477,6 +7800,7 @@
     state.paymentStatus = "";
     state.paidCents = 0;
     state.receiptUrl = "";
+    resetPayFields();
     state.cancelConfirm = false;
     state.cancelBusy = false;
     state.cancelError = "";
@@ -8419,6 +8743,7 @@
           state.paymentStatus = "";
           state.paidCents = 0;
           state.receiptUrl = "";
+          resetPayFields();
           state.cancelConfirm = false;
           state.cancelBusy = false;
           state.cancelError = "";
@@ -8470,6 +8795,10 @@
               state.remoteLoading = false;
               state.error = "";
               render();
+              /* v58: save the card at booking (secure Square form, no charge). */
+              if (squareConfigured() && !state.isTest && !rideCardReady()) {
+                setTimeout(function () { if (state.code && !rideCardReady()) openCardStep(); }, 400);
+              }
             }).catch(function () {
               state.remoteLoading = false;
               state.screen = "home";
@@ -8723,6 +9052,7 @@
         render();
       });
     }
+    bindPayAfterRide();
     var squareHold = document.getElementById("square-hold-btn");
     if (squareHold) {
       squareHold.addEventListener("click", function () {
@@ -10127,7 +10457,22 @@
     WAIT_STOP_MS: WAIT_STOP_MS,
     WAIT_GRACE_MS: WAIT_GRACE_MS,
     WAIT_CENTS_PER_MIN: WAIT_CENTS_PER_MIN,
-    SAFETY_ALERT_HUB: SAFETY_ALERT_HUB
+    SAFETY_ALERT_HUB: SAFETY_ALERT_HUB,
+    /* v58 pay hooks (tests + support) */
+    squareCfg: squareCfg,
+    squareChargeOn: squareChargeOn,
+    finalPayOn: finalPayOn,
+    cancelFeeRule: cancelFeeRule,
+    cancelFeeCents: cancelFeeCents,
+    payAfterRideHtml: payAfterRideHtml,
+    payTotalCents: payTotalCents,
+    tipCentsChosen: tipCentsChosen,
+    tipCapCents: tipCapCents,
+    historyPayLine: historyPayLine,
+    historyAmount: historyAmount,
+    payFinalFare: payFinalFare,
+    chargeCancelFee: chargeCancelFee,
+    payState: function () { return state; }
   };
 
 })();
