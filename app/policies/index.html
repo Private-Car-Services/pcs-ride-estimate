@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0b1c33">
+  <title>Terms and Policies · Private Car Services</title>
+  <link rel="icon" href="../icon-rider.png">
+  <link rel="apple-touch-icon" href="../icon-rider.png">
+  <style>
+    :root { --navy: #0b1c33; --navy-2: #122843; --navy-3: #183252; --gold: #d4b15a; --gold-2: #f0d48a; --ink: #f4f6fa; --muted: #b9c3d3; }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body { margin: 0; min-height: 100vh; background: var(--navy); color: var(--ink);
+      font: 17px/1.55 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+    .page { max-width: 640px; margin: 0 auto; padding: max(16px, env(safe-area-inset-top)) 18px 40px;
+      background: linear-gradient(180deg, #10243f 0%, var(--navy) 28%); min-height: 100vh; }
+    header { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 6px 0 14px;
+      border-bottom: 1px solid rgba(212, 177, 90, .35); }
+    header h1 { margin: 0; font-size: 20px; color: var(--gold); letter-spacing: .02em; }
+    .back { display: inline-block; color: var(--navy); background: linear-gradient(180deg, var(--gold-2), var(--gold));
+      font-weight: 700; text-decoration: none; border-radius: 12px; padding: 9px 14px; font-size: 15px; white-space: nowrap; }
+    h2 { color: var(--gold-2); font-size: 24px; margin: 26px 0 8px; scroll-margin-top: 16px; }
+    section { background: var(--navy-2); border: 1px solid rgba(212, 177, 90, .3); border-radius: 16px; padding: 4px 18px 16px; margin-top: 18px; }
+    section:target { border-color: var(--gold-2); box-shadow: 0 0 0 2px rgba(240, 212, 138, .25); }
+    ul { padding-left: 20px; margin: 10px 0; }
+    li { margin: 10px 0; }
+    strong { color: var(--gold-2); }
+    a { color: var(--gold-2); }
+    .fine { color: var(--muted); font-size: 14px; margin-top: 22px; }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <header>
+      <h1>Private Car Services</h1>
+      <a class="back" id="policies-back" href="../">← Back to the app</a>
+    </header>
+    <h2>Terms and Policies</h2>
+
+    <section id="cancellation" aria-labelledby="cancellation-title">
+      <h2 id="cancellation-title">Cancellation Policy</h2>
+      <p>At Private Car Services, plans can change. Here's how cancellations work:</p>
+      <ul>
+        <li><strong>Free cancellation:</strong> You can cancel at no charge any time before your driver is within 1 mile of your pickup location.</li>
+        <li><strong>Late cancellation fee:</strong> If you cancel when your driver is within 1 mile of your pickup, a fee of 25% of your estimated fare (minimum $10) is charged to the card on file.</li>
+        <li><strong>If we cancel:</strong> If your driver or Private Car Services cancels your ride, you are never charged.</li>
+        <li><strong>Refunds:</strong> Any refund goes back to your original card and usually shows up within a few business days.</li>
+      </ul>
+      <p>Questions about a charge? Text us at <a href="sms:+19362617878">(936) 261-7878</a>.</p>
+    </section>
+
+    <p class="fine">Private Car Services · Greater Houston</p>
+  </div>
+  <script>
+    /* Back: return to the ride screen the rider came from (same tab); fall back to the app home. */
+    (function () {
+      var a = document.getElementById("policies-back");
+      if (!a) return;
+      a.addEventListener("click", function (ev) {
+        try {
+          var ref = document.referrer ? new URL(document.referrer) : null;
+          if (ref && ref.origin === location.origin && /\/app\/(index\.html)?$/.test(ref.pathname) && history.length > 1) {
+            ev.preventDefault();
+            history.back();
+          }
+        } catch (e) {}
+      });
+    })();
+  </script>
+</body>
+</html>
