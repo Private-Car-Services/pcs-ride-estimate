@@ -11,6 +11,10 @@
  * v18 (Oct 6, 2026): Square LIVE. Book it charges the 25% deposit (or pay in full) through the pcs-pay Worker
  * POST /deposit; the Worker re-reads this booking from Firebase and only charges 25% of its estimate (or the full
  * estimate). Sandbox only with ?squaretest=1.
+ * v19 (PCS v60, Oct 7, 2026): Address line 1 suggestions come from Google Places through the pcs-pay Worker
+ * (POST /places/autocomplete + /places/details; the key is a Worker secret, daily-capped). If the Worker says capped /
+ * fallback or is slow, the v18 search (free map data, then the Maps JS key if loaded) runs as before. Picking a Google
+ * suggestion fills line 1, city, state, ZIP (overwritten) and the exact pin. "Powered by Google" under the list.
  */
 (function () {
   'use strict';
@@ -964,6 +968,77 @@
       })).catch(() => null);
   }
 
+  /* v19: Google Places through the pcs-pay Worker. One session token per address block (autocomplete + details =
+     one billed session). Capped / error -> null, and the v18 search runs. */
+  const placesSessions = new WeakMap();
+  let placesOffUntil = 0;
+  const GOOGLE_ATTRIB = '<p class="suggest-note powered-by-google" style="text-align:right;margin:0;padding:6px 12px;font-size:12px;opacity:.85">Powered by Google</p>';
+
+  function placesBase() {
+    const c = window.PCS_SQUARE || {};
+    return String(c.placesUrl || (c.workerUrl ? String(c.workerUrl).replace(/\/+$/, '') + '/places' : '')).trim().replace(/\/+$/, '');
+  }
+  function newPlacesToken() {
+    try { if (window.crypto && crypto.randomUUID) return crypto.randomUUID(); } catch (e) { /* older browser */ }
+    let h = '';
+    for (let i = 0; i < 32; i++) h += Math.floor(Math.random() * 16).toString(16);
+    return h.slice(0, 8) + '-' + h.slice(8, 12) + '-4' + h.slice(13, 16) + '-a' + h.slice(17, 20) + '-' + h.slice(20, 32);
+  }
+  function workerPlacesToken(block) {
+    let t = placesSessions.get(block);
+    if (!t) { t = newPlacesToken(); placesSessions.set(block, t); }
+    return t;
+  }
+  function placesPost(path, body, ms) {
+    const base = placesBase();
+    if (!base || Date.now() < placesOffUntil) return Promise.resolve(null);
+    return withTimeout(fetch(base + path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+      .then((res) => res.json()), ms || 4000).then((data) => {
+      if (!data || !data.ok) return null;
+      if (data.capped) { placesOffUntil = Date.now() + 30 * 60000; return null; }
+      if (data.fallback) return null;
+      return data;
+    }).catch(() => null);
+  }
+  function isBusinessTypes(t) {
+    t = t || [];
+    return t.indexOf('establishment') !== -1 || t.indexOf('point_of_interest') !== -1 || t.indexOf('airport') !== -1;
+  }
+  async function workerPlaceDetails(block, p) {
+    const data = await placesPost('/details', { placeId: p.placeId, sessionToken: placesSessions.get(block) || '' }, 6000);
+    placesSessions.delete(block);
+    const d = data && data.place;
+    if (!d || !isFinite(d.lat) || !isFinite(d.lng)) return textPlace(p.main, p.sub);
+    const t = p.types || [];
+    const isAirport = t.indexOf('airport') !== -1;
+    const biz = isBusinessTypes(t);
+    const known = isAirport ? (knownAirportInText(p.main) || null) : null;
+    let label = String(p.main || '');
+    if (known && label.indexOf('(' + known.code + ')') === -1) label += ' (' + known.code + ')';
+    const street = String(d.street || '');
+    let line1 = street;
+    if (biz && label && normText(label) !== normText(street)) line1 = street ? label + ', ' + street : label;
+    if (!line1) line1 = label;
+    return {
+      line1, city: d.city || '', state: stateCode(d.state || 'TX'), zip: String(d.zip || '').slice(0, 5), lat: +d.lat, lng: +d.lng,
+      kind: isAirport ? 'airport' : (biz ? 'place' : 'address'), code: known ? known.code : '',
+      unit: /^[A-Za-z]?\d+[A-Za-z]?$/.test(String(d.unit || '').trim()) ? '#' + String(d.unit).trim() : String(d.unit || '').trim(),
+    };
+  }
+  async function workerGoogleSuggest(block, q, origin) {
+    const body = { input: q, sessionToken: workerPlacesToken(block) };
+    if (origin && origin.from && origin.point && isFinite(origin.point.lat)) { body.lat = +origin.point.lat; body.lng = +origin.point.lng; }
+    const data = await placesPost('/autocomplete', body);
+    if (!data || !Array.isArray(data.predictions) || !data.predictions.length) return null;
+    return data.predictions.map((p) => ({
+      main: p.main,
+      sub: p.sub || '',
+      dist: p.miles != null && isFinite(p.miles) ? fmtMiles(+p.miles) : '',
+      google: true,
+      resolve: () => workerPlaceDetails(block, p),
+    }));
+  }
+
   /** Suggestions for Address line 1, nearest first with distance labels. */
   async function placeSuggest(q, origin) {
     const items = await findPlaces(q, origin);
@@ -1010,7 +1085,7 @@
         (it.dist ? '<em class="suggest-dist">' + escapeHtml(it.dist) + '</em>' : '') + '</span>' +
         (it.sub ? '<span class="suggest-sub">' + escapeHtml(it.sub) + '</span>' : '') +
       '</button>'
-    ).join('');
+    ).join('') + (items.some((it) => it.google) ? GOOGLE_ATTRIB : '');
     box.hidden = false;
   }
 
@@ -1032,7 +1107,10 @@
           box.innerHTML = '<p class="suggest-note">Searching…</p>';
           box.hidden = false;
         }
-        if (looksLikeAddress(q)) {
+        const wg = await workerGoogleSuggest(block, q, origin);
+        if (wg && wg.length) {
+          more = wg; // v19: Google (businesses + addresses) via the Worker
+        } else if (looksLikeAddress(q)) {
           // Street addresses: Google (knows exact house numbers), nearest first; the free search as backup.
           more = (await googleSuggest(q, origin)) || [];
           if (!more.length) more = await placeSuggest(q, origin).catch(() => []);
@@ -1112,6 +1190,8 @@
     try {
       const place = await item.resolve();
       applyPlace(block, place);
+      const l2 = partEl(block, 'line2');
+      if (place && place.unit && l2 && !l2.value.trim()) l2.value = place.unit;
     } catch (err) {
       const input = partEl(block, 'line1');
       if (input) input.value = item.main;
