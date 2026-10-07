@@ -3,7 +3,10 @@
    pop-up, soft not-OK notes). No sound in God mode.
    v58: Square LIVE. Payments panel (card saved / charged $X / failed / refunded / deposit / cancel fee + receipts),
    Refund button (God password re-checked by the pcs-pay Worker, never stored), Charge fare now (no tip) for a
-   completed ride the rider didn't pay, Charge cancel fee. Mark card OK stays as the override. */
+   completed ride the rider didn't pay, Charge cancel fee. Mark card OK stays as the override.
+   v59: cancel fee only when the driver was within 1 mile of pickup (the pcs-pay Worker decides). Each cancelled ride
+   shows "cancel fee $X" or "free cancel (driver X.X mi away)"; Charge cancel fee is hidden for free cancels and the
+   Worker refuses it (409 CANCEL_FREE) if the driver was farther than 1 mile or his location wasn't current. */
 (function () {
   "use strict";
 
@@ -672,6 +675,36 @@
   function fmtCents(cents) {
     if (cents === null || cents === undefined || cents === "" || !isFinite(+cents)) return "$0.00";
     return "$" + (Number(cents) / 100).toFixed(2);
+  }
+
+  /* v59: "cancel fee $X" / "free cancel (driver X.X mi away)" for a cancelled ride. Server (Worker) answer wins:
+     ride.cancelPolicy / PAYMENTS cancelPolicy|cancel; the rider app's own reading (cancelDriverMiles) is the fallback. */
+  function cancelFeeText(r, pay) {
+    r = r || {};
+    pay = pay || {};
+    var pol = r.cancelPolicy && typeof r.cancelPolicy === "object" ? r.cancelPolicy : null;
+    var payPol = pay.cancelPolicy && typeof pay.cancelPolicy === "object" ? pay.cancelPolicy : null;
+    var cf = String(r.cancelFeeStatus || "").toLowerCase();
+    var miles = pol && pol.miles != null ? pol.miles : (payPol && payPol.miles != null ? payPol.miles
+      : (pay.cancel && pay.cancel.miles != null ? pay.cancel.miles : r.cancelDriverMiles));
+    var mi = miles != null && miles !== "" && isFinite(+miles) ? (Math.round(+miles * 10) / 10).toFixed(1) : "";
+    var reason = String((pol && pol.reason) || (payPol && payPol.reason) || r.cancelFreeReason || r.cancelClientReason || "");
+    var paid = pay.cancel && String(pay.cancel.status || "").toUpperCase() === "COMPLETED";
+    if (cf === "charged" || paid) {
+      return "cancel fee " + fmtCents(paid ? pay.cancel.amountCents : r.cancelFeeCents) + (mi ? " (driver " + mi + " mi away)" : "");
+    }
+    if (cf === "refunded") return "cancel fee refunded";
+    if (cf === "failed") return "cancel fee failed" + (mi ? " (driver " + mi + " mi away)" : "");
+    var accepted = !!(r.acceptedAt || r.driverId || r.driverUid || r.driverName);
+    if (cf === "free" || (pol && pol.charge === false) || payPol || (accepted && !(Number(r.cancelFeeCents) > 0))) {
+      if (reason === "driver_location_stale" || reason === "driver_location_missing") return "free cancel (driver location not current)";
+      if (reason === "not_accepted") return "free cancel (before a driver accepted)";
+      if (reason === "decision_window_passed") return "free cancel (too late to check distance)";
+      return "free cancel" + (mi ? " (driver " + mi + " mi away)" : "");
+    }
+    if (!accepted) return "free cancel (before a driver accepted)";
+    if (Number(r.cancelFeeCents) > 0) return "cancel fee " + fmtCents(r.cancelFeeCents) + " due" + (mi ? " (driver " + mi + " mi away)" : "");
+    return "";
   }
 
   function fmtClock(ms) {
@@ -2719,6 +2752,7 @@
     if (cf === "charged") bits.push("Cancel fee " + esc(fmtCents(r.cancelFeeCents)));
     else if (cf === "failed") bits.push('<span style="color:#ff8a8a">Cancel fee failed</span>');
     else if (cf === "refunded") bits.push("Cancel fee refunded");
+    else if (cf === "free") bits.push('<span style="color:#7fe09a">No cancel fee</span>');
     if (!bits.length) return "";
     return "<strong>Payment</strong> " + bits.join(" · ");
   }
@@ -2771,9 +2805,10 @@
           okCardBtn +
           "</div>")
         : (okCardBtn ? '<div class="commission-row" style="margin-top:8px">' + okCardBtn + "</div>" : "");
+      var cancelTxt = cancelled ? cancelFeeText(r, (state.payments || {})[r.code] || null) : "";
       var cancelLine = cancelled
         ? "<br><strong>Cancelled</strong> " + esc(fmtClock(r.cancelledAt || r.updatedAt)) +
-          (Number(r.cancelFeeCents) > 0 ? " · cancel fee $" + (Number(r.cancelFeeCents) / 100).toFixed(2) : "")
+          (cancelTxt ? ' · <span class="cancel-fee-line">' + esc(cancelTxt) + "</span>" : "")
         : "";
       return (
         '<article class="card' + (active ? " paired" : "") + (pending ? " pending-booking" : "") + '"' + (cancelled ? ' style="opacity:0.65"' : "") + ">" +
@@ -3008,6 +3043,10 @@
     var st = String(ride.status || "").toLowerCase();
     if (st !== "cancelled" && st !== "canceled") return false;
     if (String(ride.cancelledBy || "rider").toLowerCase() !== "rider") return false;
+    /* v59: a free cancel (driver over 1 mile away / location not current) can't be charged */
+    if (String(ride.cancelFeeStatus || "").toLowerCase() === "free") return false;
+    if (ride.cancelPolicy && typeof ride.cancelPolicy === "object" && ride.cancelPolicy.charge === false) return false;
+    if (p && p.cancelPolicy) return false;
     return !!(ride.acceptedAt || ride.driverId || ride.driverUid);
   }
 
@@ -3052,6 +3091,12 @@
       if (c) {
         lines.push("<strong>Cancel fee</strong> " + (payRecOk(c) ? '<span style="color:#7fe09a">Charged ' + esc(fmtCents(c.amountCents)) + "</span>" + receiptLink(c.receiptUrl)
           : '<span style="color:#ff8a8a">Failed' + (c.error ? ": " + esc(String(c.error).slice(0, 90)) : "") + "</span>"));
+      }
+      if (!c && p.cancelPolicy) {
+        lines.push('<strong>Cancel fee</strong> <span style="color:#7fe09a">' + esc(cancelFeeText(payRideOf(code) || { cancelFeeStatus: "free" }, p)) + "</span>");
+      } else if (c) {
+        var cMi = c.miles != null && isFinite(+c.miles) ? (Math.round(+c.miles * 10) / 10).toFixed(1) : "";
+        if (cMi) lines.push('<span style="opacity:.8">Driver was ' + esc(cMi) + " mi from pickup when the rider cancelled</span>");
       }
       var cr = p.cancelRefund;
       if (cr) lines.push("<strong>Cancel fee refund</strong> " + esc(fmtCents(cr.totalRefundedCents || cr.amountCents)) + " (" + esc(String(cr.status || "").toLowerCase()) + ")");
@@ -3159,15 +3204,16 @@
 
   function chargeCancelFeeNow(code) {
     if (!code || state.payBusy[code]) return;
-    if (!window.confirm("Charge the cancel fee for " + code + " to the saved card?")) return;
+    if (!window.confirm("Charge the cancel fee for " + code + " to the saved card?\n\nOnly allowed if the driver was within 1 mile of the pickup when the rider cancelled. The payment server checks this.")) return;
     state.payBusy[code] = true;
     setPayNotice("Charging cancel fee " + code + "…");
-    var body = { rideCode: code, by: "god" };
+    var body = { rideCode: code, by: "god", requireFee: true };
     if (isSandboxPay(code)) body.sandbox = true;
     payWorkerPost("/cancel-fee", body).then(function (d) {
       afterPayAction(code, code + ": cancel fee " + (d.already ? "already charged." : "charged " + fmtCents(d.amountCents) + "."));
     }).catch(function (err) {
-      afterPayAction(code, code + ": cancel fee failed — " + ((err && err.message) || "error"));
+      var msg = (err && err.message) || "error";
+      afterPayAction(code, code + (/^Free cancel/i.test(msg) ? ": not charged — " : ": cancel fee failed — ") + msg);
     });
   }
 
