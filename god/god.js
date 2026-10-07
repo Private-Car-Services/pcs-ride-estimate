@@ -6,7 +6,8 @@
    completed ride the rider didn't pay, Charge cancel fee. Mark card OK stays as the override.
    v59: cancel fee only when the driver was within 1 mile of pickup (the pcs-pay Worker decides). Each cancelled ride
    shows "cancel fee $X" or "free cancel (driver X.X mi away)"; Charge cancel fee is hidden for free cancels and the
-   Worker refuses it (409 CANCEL_FREE) if the driver was farther than 1 mile or his location wasn't current. */
+   Worker refuses it (409 CANCEL_FREE) if the driver was farther than 1 mile or his location wasn't current.
+   v62: rides with internationalArrival show "International arrival +$15 service fee (taxed, in the fare)". */
 (function () {
   "use strict";
 
@@ -2822,6 +2823,7 @@
           "<strong>Pickup</strong> " + esc(rideAddressText(r, "pickup") || "—") + "<br>" +
           stops.map(function (s, i) { return "<strong>Stop " + (i + 1) + "</strong> " + esc(s) + "<br>"; }).join("") +
           "<strong>Drop-off</strong> " + esc(rideAddressText(r, "drop") || "—") +
+          (r.internationalArrival ? '<br><strong class="intl-arrival-tag">International arrival</strong> +$15 service fee (taxed, in the fare)' : "") +
           (r.phone ? "<br><strong>Phone</strong> " + esc(r.phone) : "") +
           (cardLine ? "<br>" + cardLine : "") +
           cancelLine +
