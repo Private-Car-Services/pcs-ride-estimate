@@ -49,14 +49,26 @@
         <div class="card">
           <p class="note">No card needed to sign up. After you request a ride, you add your card for that ride on a secure Square form inside the app. This page never stores a card number.</p>
         </div>
+        <label for="agree-terms" id="agree-row" style="display:flex;gap:10px;align-items:flex-start;margin:16px 0 6px;font-weight:600;text-transform:none;letter-spacing:normal">
+          <input id="agree-terms" name="agree" type="checkbox" required style="width:22px;height:22px;flex:0 0 auto;margin:2px 0 0">
+          <span>I agree to the <a id="agree-terms-link" href="../policies/#terms" target="_blank" rel="noopener">Terms and Policies</a></span>
+        </label>
         <p class="error" id="form-error" role="alert"></p>
-        <button class="btn" type="submit">Save account</button>
+        <button class="btn" type="submit" id="save-account" disabled>Save account</button>
       </form>
     </main>
   </div>
   <script>
     (function () {
       var form = document.getElementById("signup-form");
+      /* v60: account creation is blocked until "I agree to the Terms and Policies" is ticked. */
+      var POLICY_VERSION = "2026-10-07";
+      var agreeBox = document.getElementById("agree-terms");
+      var saveBtn = document.getElementById("save-account");
+      agreeBox.addEventListener("change", function () {
+        saveBtn.disabled = !agreeBox.checked;
+        if (agreeBox.checked) showError("");
+      });
       var errorEl = document.getElementById("form-error");
       var missionLink = document.getElementById("mission-link");
       var missionCopy = document.getElementById("mission-copy");
@@ -237,6 +249,10 @@
           showError("Password and confirm password must match.");
           return;
         }
+        if (!agreeBox.checked) {
+          showError("Please tick I agree to the Terms and Policies to create your account.");
+          return;
+        }
         if (!window.crypto || !crypto.subtle || !crypto.subtle.digest) {
           showError("This browser cannot save a password safely. Try Safari or Chrome.");
           return;
@@ -251,7 +267,10 @@
             phone: phone,
             email: email,
             passwordHash: hex,
-            photo: photo
+            photo: photo,
+            agreedAt: Date.now(),
+            policyVersion: POLICY_VERSION,
+            agreedVia: "signup"
           };
           localStorage.setItem("pcs-rider-account", JSON.stringify(profile));
           localStorage.setItem("pcs-rider-session", email);
