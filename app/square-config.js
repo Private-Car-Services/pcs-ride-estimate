@@ -1,6 +1,7 @@
 /*
   Square settings for the quote page and the rider app (PUBLIC values only. NO access tokens here).
   v58 (Oct 6, 2026): PRODUCTION — real cards, real money.
+  v60 (Oct 7, 2026): placesUrl = Google Places proxy on the same Worker (no Google key in the browser).
 
   - Rider app: the card is SAVED at booking (Square Customer + Card on file, no charge). After drop-off the rider
     picks a tip and pays the driver's final fare + tip. v59: cancel fee (cancelPct % of the estimate, cancelMinCents
@@ -49,6 +50,7 @@
     chargeUrl: WORKER + "/charge",          /* rider app: after drop-off, final fare + tip */
     cancelFeeUrl: WORKER + "/cancel-fee",   /* rider app: cancelled while the driver was within 1 mile (Worker decides) */
     depositUrl: WORKER + "/deposit",        /* quote page Book it: 25% deposit or pay in full */
+    placesUrl: WORKER + "/places",          /* v60: Google address suggestions (Worker holds the key, daily-capped) */
     paymentUrl: "",                         /* old v48 key ("charge at booking" in the rider app). Must stay blank. */
     cancelPct: 25,
     cancelMinCents: 1000,

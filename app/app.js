@@ -21,6 +21,10 @@
         driver's location is missing / over 2 minutes old). The pcs-pay Worker re-checks this from Firebase and
         decides. Driver app stamps its location (presence gpsAt, ride driverLocAt) and refreshes it every 20 s while
         parked. Rider: Terms and Policies link (policies/#cancellation) + "See cancellation policy" in Cancel.
+   v60 (Oct 7): Address line 1 suggestions from Google Places via the pcs-pay Worker (/places/autocomplete + /details,
+        session token per field, key stays on the Worker, daily-capped; "Powered by Google" under the list). Free v59
+        lookup is the fallback (cap / error / no Google results). Riders must agree to the Terms and Policies
+        (POLICY_VERSION): sign-up checkbox, or a one-time prompt at next login; no booking until agreed.
    v59 Home: the rider app always opens on a rider HOME screen (greeting, Book a ride, My rides / History, Terms and
         Policies, Profile, ALERT SOS). An active ride (requested … in progress, or a drop-off still waiting for Pay)
         shows a "Back to my ride" card on Home; finished rides never auto-open (History only). "Book a ride" and
@@ -1937,6 +1941,7 @@
   }
 
   function startNewBooking() {
+    if (!riderAgreed()) { state.riderView = "home"; render(); return; } /* v60: agree first */
     var r = riderHomeActiveRide();
     state.riderHistoryView = "";
     state.screen = "home";
@@ -2908,7 +2913,7 @@
       '<div class="card vehicle-needed">' +
       '<p class="tag">Car details required</p>' +
       '<p class="lede">Add your car year, make, model, plate, seats, and a front-right photo before going online.</p>' +
-      '<a class="btn" href="signup/?v=24">Complete vehicle profile</a>' +
+      '<a class="btn" href="signup/?v=60">Complete vehicle profile</a>' +
       "</div>"
     );
   }
@@ -5379,6 +5384,124 @@
     box.hidden = false;
   }
 
+  /* ---------- v60: Google Places (via the pcs-pay Worker; the key never reaches the browser) ----------
+     Suggestions as you type (businesses + addresses), one session token per address field so autocomplete +
+     the details lookup are billed as one session. The Worker caps daily use; when it says capped / fallback
+     (or is slow), the v59 free lookup below runs exactly as before. */
+  var gPlaceSessions = {};
+  var gPlacesOffUntil = 0;
+  var GOOGLE_ATTRIB_HTML = '<p class="suggest-note powered-by-google" style="text-align:right;margin:0;padding:6px 12px;font-size:12px;opacity:.85">Powered by Google</p>';
+
+  function placesBase() {
+    var c = window.PCS_SQUARE || {};
+    var u = String(c.placesUrl || (c.workerUrl ? String(c.workerUrl).replace(/\/+$/, "") + "/places" : "")).trim();
+    return u.replace(/\/+$/, "");
+  }
+
+  function newPlacesToken() {
+    try { if (window.crypto && crypto.randomUUID) return crypto.randomUUID(); } catch (e) {}
+    var h = "";
+    for (var i = 0; i < 32; i++) h += Math.floor(Math.random() * 16).toString(16);
+    return h.slice(0, 8) + "-" + h.slice(8, 12) + "-4" + h.slice(13, 16) + "-a" + h.slice(17, 20) + "-" + h.slice(20, 32);
+  }
+
+  function placesSession(prefix) {
+    if (!gPlaceSessions[prefix]) gPlaceSessions[prefix] = newPlacesToken();
+    return gPlaceSessions[prefix];
+  }
+
+  function placesPost(path, body, ms) {
+    var base = placesBase();
+    if (!base || Date.now() < gPlacesOffUntil || typeof fetch !== "function") return Promise.resolve(null);
+    return withTimeout(fetch(base + path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body)
+    }).then(function (res) { return res.json(); }), ms || 4000).then(function (data) {
+      if (!data || !data.ok) return null;
+      if (data.capped) { gPlacesOffUntil = Date.now() + 30 * 60000; return null; } /* daily cap: free lookup for a while */
+      if (data.fallback) return null;
+      return data;
+    }).catch(function () { return null; });
+  }
+
+  /* Bias to the From / rider location when we have one (else the Worker biases to Texas). */
+  function placesBias(prefix) {
+    var o = searchOrigin(prefix);
+    return o && o.from && o.point && isCoord(o.point.lat) && isCoord(o.point.lng) ? { lat: +o.point.lat, lng: +o.point.lng } : null;
+  }
+
+  function cityFromSub(sub) {
+    var parts = String(sub || "").split(",").map(function (x) { return x.trim(); }).filter(function (x) { return x && x !== "USA"; });
+    /* "Walden Road, Montgomery, TX" -> Montgomery; "Montgomery, TX" -> Montgomery */
+    if (parts.length >= 3) return { city: parts[parts.length - 2], state: stateCode(parts[parts.length - 1]) };
+    if (parts.length === 2) return { city: parts[0], state: stateCode(parts[1]) };
+    return { city: parts[0] || "", state: "TX" };
+  }
+
+  function googleSuggest(prefix, q) {
+    var bias = placesBias(prefix);
+    var body = { input: q, sessionToken: placesSession(prefix) };
+    if (bias) { body.lat = bias.lat; body.lng = bias.lng; }
+    return placesPost("/autocomplete", body).then(function (data) {
+      if (!data || !Array.isArray(data.predictions) || !data.predictions.length) return null;
+      return data.predictions.map(function (p) {
+        var cs = cityFromSub(p.sub);
+        return {
+          google: { placeId: p.placeId, main: p.main, sub: p.sub, types: p.types || [] },
+          place: { line1: p.main, city: cs.city, state: cs.state, zip: "", lat: NaN, lng: NaN },
+          dist: p.miles != null && isFinite(p.miles) ? +p.miles : null,
+          tier: 0
+        };
+      });
+    });
+  }
+
+  /* Google subpremise "9" -> "#9" for Address line 2 ("Apt 4" / "Suite 200" stay as they are). */
+  function unitLabel(u) {
+    u = String(u || "").trim();
+    if (!u) return "";
+    return /^[A-Za-z]?\d+[A-Za-z]?$/.test(u) ? "#" + u : u;
+  }
+
+  function googleIsBusiness(types) {
+    var t = types || [];
+    return t.indexOf("establishment") !== -1 || t.indexOf("point_of_interest") !== -1 || t.indexOf("airport") !== -1;
+  }
+
+  /* Picked a Google suggestion -> exact address fields + pin (one Details call; ends the session). */
+  function googlePlaceDetails(prefix, g) {
+    var token = gPlaceSessions[prefix] || "";
+    return placesPost("/details", { placeId: g.placeId, sessionToken: token }, 6000).then(function (data) {
+      delete gPlaceSessions[prefix]; /* next search in this field = new session */
+      var d = data && data.place;
+      if (!d || !isCoord(d.lat) || !isCoord(d.lng)) return null;
+      var street = String(d.street || "").trim();
+      var main = String(g.main || "").trim();
+      var line1 = street;
+      if (googleIsBusiness(g.types) && main && normText(main) !== normText(street)) line1 = street ? main + ", " + street : main;
+      if (!line1) line1 = main;
+      return { line1: line1, city: d.city || cityFromSub(g.sub).city, state: stateCode(d.state || "TX"), zip: String(d.zip || "").slice(0, 5),
+        lat: +d.lat, lng: +d.lng, unit: unitLabel(d.unit), source: "google" };
+    });
+  }
+
+  function renderGoogleSuggestions(box, items, origin) {
+    box._places = items;
+    box._shown = items;
+    box._more = [];
+    box._origin = origin;
+    box._google = true;
+    box.innerHTML = suggestHeadHtml(origin) + items.map(function (it, i) {
+      var sub = it.google.sub || "";
+      return '<button type="button" class="suggest-item" data-i="' + i + '" data-google="1">' +
+        '<span class="suggest-main"><strong>' + esc(it.google.main) + "</strong>" +
+        (it.dist != null ? '<em class="suggest-dist">' + esc(fmtMiles(it.dist)) + "</em>" : "") + "</span>" +
+        "<span>" + esc(sub) + "</span></button>";
+    }).join("") + GOOGLE_ATTRIB_HTML;
+    box.hidden = false;
+  }
+
   function wireSearch(prefix) {
     var input = document.getElementById(prefix + "-street");
     var box = document.getElementById(prefix + "-results");
@@ -5427,7 +5550,14 @@
       timer = setTimeout(function () {
         var origin = suggestOrigin(prefix);
         origin.city = String(addrGet(prefix, "City") || "").trim();
-        suggestPlaces(q, origin).then(function (res) {
+        googleSuggest(prefix, q).then(function (g) {
+          if (mine !== seq || input.value.trim() !== q) return null;
+          if (g && g.length) { box._q = q; renderGoogleSuggestions(box, g, origin); return null; }
+          box._google = false;
+          return freeSuggest();
+        });
+        function freeSuggest() {
+        return suggestPlaces(q, origin).then(function (res) {
           if (mine !== seq || input.value.trim() !== q) return;
           var num = (q.match(/^(\d+[A-Za-z]?)\s+/) || [])[1];
           function keepNum(it) {
@@ -5438,6 +5568,7 @@
           }
           renderSuggestions(box, origin, res.shown.map(keepNum), res.more.map(keepNum), false);
         }).catch(function () { box.hidden = true; });
+        }
       }, 300);
     });
     box.addEventListener("mousedown", function (event) {
@@ -5455,7 +5586,34 @@
       if (!btn || !box._places) return;
       var item = box._places[Number(btn.getAttribute("data-i"))];
       if (!item) return;
-      var place = item.place;
+      if (item.google) {
+        box.hidden = true;
+        var typed = input.value;
+        var gNote = document.getElementById(prefix + "-found");
+        if (gNote) { gNote.textContent = "Getting the address…"; gNote.className = "fine addr-found"; }
+        googlePlaceDetails(prefix, item.google).then(function (gp) {
+          if (input.value !== typed) return; /* rider kept typing */
+          if (gp) {
+            usePlace(gp);
+            var l2 = document.getElementById(prefix + "-line2");
+            if (gp.unit && l2 && !l2.value.trim()) { l2.value = gp.unit; addrSet(prefix, "Line2", gp.unit); }
+            return;
+          }
+          /* Details unavailable (cap / network): fill what we know and let the free lookup find the pin. */
+          var cs = cityFromSub(item.google.sub);
+          var lineGuess = item.google.main;
+          input.value = lineGuess;
+          addrSet(prefix, "Street", lineGuess);
+          var cEl = document.getElementById(prefix + "-city");
+          if (cs.city) { addrSet(prefix, "City", cs.city); if (cEl) cEl.value = cs.city; }
+          autoResolveSeq[prefix] = "";
+          autoResolveField(prefix);
+        });
+        return;
+      }
+      usePlace(item.place);
+    });
+    function usePlace(place) {
       /* House number on a street-only match: the request step finds that exact house
          (instead of pinning the middle of a long road). */
       applyPlace(prefix, place);
@@ -5472,8 +5630,8 @@
       autoResolveSeq[prefix] = "";
       box.hidden = true;
       if (place.approx) autoResolveField(prefix); /* try for the exact house in the background */
-      else if (isCoord(place.lat) && !/\d/.test(String(place.line1 || ""))) addStreetToPlace(prefix, place);
-    });
+      else if (place.source !== "google" && isCoord(place.lat) && !/\d/.test(String(place.line1 || ""))) addStreetToPlace(prefix, place);
+    }
   }
 
   /* v59: a picked place with no street on the map ("Kroger") gets its street address:
@@ -7289,7 +7447,7 @@
   }
 
   function driverProfileLink() {
-    return '<a class="nav-link" href="signup/?v=24">Profile</a>';
+    return '<a class="nav-link" href="signup/?v=60">Profile</a>';
   }
 
   function selectedOpenRide() {
@@ -7756,7 +7914,99 @@
       })() + "</p>" +
       '<button class="btn" type="submit">Log in</button>' +
       "</form>" +
-      '<a class="btn secondary" href="signup/?v=24">Create an account</a>'
+      '<a class="btn secondary" href="signup/?v=60">Create an account</a>'
+    );
+  }
+
+  /* ---------- v60: Terms and Policies agreement (rider) ----------
+     New riders tick "I agree to the Terms and Policies" on the sign-up page (agreedAt + policyVersion saved on the
+     rider profile). Riders without an agreement for POLICY_VERSION see a one-time prompt and cannot book until they
+     agree. A copy is kept at /rides/RDRTERMS/{rider key} so another phone does not ask again. Drivers: never. */
+  var POLICY_VERSION = "2026-10-07";
+  var TERMS_HUB = "RDRTERMS";
+  var termsServerChecked = "";
+  var termsSyncTried = "";
+
+  function riderAccountObj() {
+    try { return JSON.parse(localStorage.getItem("pcs-rider-account") || "null") || {}; } catch (e) { return {}; }
+  }
+
+  function riderWho() { return String(readSession() || firebaseEmail() || "").trim().toLowerCase(); }
+
+  function riderAgreed() {
+    if (ROLE !== "customer") return true;
+    var a = riderAccountObj();
+    var who = riderWho();
+    if (a.email && who && String(a.email).trim().toLowerCase() !== who) return false;
+    return !!(a.agreedAt && a.policyVersion === POLICY_VERSION);
+  }
+
+  function termsUrl() {
+    return databaseURL() + "/rides/" + encodeURIComponent(TERMS_HUB) + "/" + encodeURIComponent(riderHistoryKey()) + ".json";
+  }
+
+  function saveAgreementLocal(agreedAt, version, via, synced) {
+    try {
+      var a = riderAccountObj();
+      var who = riderWho();
+      if (a.email && who && String(a.email).trim().toLowerCase() !== who) a = { email: who };
+      if (!a.email && who) a.email = who;
+      a.agreedAt = Number(agreedAt) || Date.now();
+      a.policyVersion = version || POLICY_VERSION;
+      a.agreedVia = via || a.agreedVia || "app";
+      if (synced) a.agreementSynced = a.policyVersion;
+      localStorage.setItem("pcs-rider-account", JSON.stringify(a));
+    } catch (e) {}
+  }
+
+  function syncAgreementToServer() {
+    if (ROLE !== "customer" || !riderAgreed() || !syncOn()) return Promise.resolve(false);
+    var a = riderAccountObj();
+    if (a.agreementSynced === a.policyVersion) return Promise.resolve(true);
+    var key = riderWho() + "|" + a.policyVersion;
+    if (termsSyncTried === key) return Promise.resolve(false);
+    termsSyncTried = key;
+    var row = { agreedAt: Number(a.agreedAt), policyVersion: a.policyVersion, email: String(a.email || riderWho()), name: String(a.name || ""),
+      via: String(a.agreedVia || "app"), updatedAt: Date.now() };
+    return authFetch(termsUrl(), { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(row) }).then(function (res) {
+      if (!res.ok) throw new Error("terms");
+      saveAgreementLocal(row.agreedAt, row.policyVersion, row.via, true);
+      return true;
+    }).catch(function () { return false; });
+  }
+
+  /* Agreed on another phone? Then do not ask again here. */
+  function checkAgreementOnServer() {
+    if (ROLE !== "customer" || riderAgreed() || !syncOn()) return;
+    var who = riderWho();
+    if (!who || termsServerChecked === who) return;
+    termsServerChecked = who;
+    authFetch(termsUrl(), { headers: { "Accept": "application/json" } }).then(function (res) {
+      return res.ok ? res.json() : null;
+    }).then(function (row) {
+      if (!row || row.policyVersion !== POLICY_VERSION || !row.agreedAt) return;
+      if (row.email && String(row.email).toLowerCase() !== riderWho()) return;
+      saveAgreementLocal(row.agreedAt, row.policyVersion, row.via || "app", true);
+      if (document.getElementById("terms-agree")) render();
+    }).catch(function () {});
+  }
+
+  function riderTermsScreen() {
+    checkAgreementOnServer();
+    var r = riderHomeActiveRide();
+    return (
+      '<section class="card" id="terms-agree">' +
+      "<h2>Terms and Policies</h2>" +
+      '<p class="lede">Please read and agree to our Terms and Policies to keep booking rides with Private Car Services.</p>' +
+      (r ? riderHomeActiveCardHtml(r) : "") +
+      '<p><a id="terms-agree-read" href="policies/#terms" style="color:#f0d48a;text-decoration:underline">Read the Terms and Policies</a></p>' +
+      '<label for="agree-terms" style="display:flex;gap:10px;align-items:flex-start;margin:14px 0 6px;font-weight:600;text-transform:none;letter-spacing:normal">' +
+      '<input id="agree-terms" type="checkbox" style="width:22px;height:22px;flex:0 0 auto;margin:2px 0 0">' +
+      '<span>I agree to the <a href="policies/#terms" style="color:#f0d48a;text-decoration:underline">Terms and Policies</a></span></label>' +
+      '<p class="error" id="agree-error" role="alert"></p>' +
+      '<button class="btn" type="button" id="agree-continue" disabled>Agree and continue</button>' +
+      logoutLine() +
+      "</section>"
     );
   }
 
@@ -8405,7 +8655,7 @@
       '<p class="lede">Keep the map clean. Open today\'s numbers, history, or profile here.</p>' +
       '<button class="btn" type="button" id="hub-today">Today</button>' +
       '<button class="btn secondary" type="button" id="hub-history">Earnings & history</button>' +
-      '<a class="btn secondary" href="signup/?v=24">Profile</a>' +
+      '<a class="btn secondary" href="signup/?v=60">Profile</a>' +
       logoutLine()
     );
   }
@@ -8684,6 +8934,7 @@
     if (!signedIn()) html = accountGate();
     else if (ROLE === "driver" && state.screen === "home") html = driverHome();
     else if (ROLE === "driver") html = driverTrip();
+    else if (ROLE === "customer" && !riderAgreed() && state.screen !== "waiting" && state.screen !== "trip") html = riderTermsScreen();
     else if (ROLE === "customer" && state.riderHistoryView === "receipt") html = customerHistoryReceipt();
     else if (ROLE === "customer" && state.riderHistoryView === "list") html = customerHistoryList();
     else if (ROLE === "customer" && state.riderHistoryView === "profile") html = customerProfileView();
@@ -9234,6 +9485,7 @@
       form.addEventListener("submit", function (event) {
         event.preventDefault();
         if (activeRiderRide()) { render(); return; } /* v52: never a second request while one is open */
+        if (ROLE === "customer" && !riderAgreed()) { render(); return; } /* v60: Terms and Policies first */
         if (!form.dataset.markChecked && checkMarkBeforeRequest(form)) return;
         delete form.dataset.markChecked;
         readForm();
@@ -9404,6 +9656,29 @@
       });
     }
     /* v59 Home */
+    var agreeBox = document.getElementById("agree-terms");
+    var agreeBtn = document.getElementById("agree-continue");
+    if (agreeBox && agreeBtn) {
+      agreeBox.addEventListener("change", function () {
+        agreeBtn.disabled = !agreeBox.checked;
+        var e = document.getElementById("agree-error");
+        if (e && agreeBox.checked) e.textContent = "";
+      });
+      agreeBtn.addEventListener("click", function () {
+        if (!agreeBox.checked) {
+          var e = document.getElementById("agree-error");
+          if (e) e.textContent = "Please tick I agree to the Terms and Policies.";
+          return;
+        }
+        saveAgreementLocal(Date.now(), POLICY_VERSION, "login-prompt", false);
+        termsSyncTried = "";
+        syncAgreementToServer();
+        state.riderView = "home";
+        state.riderHistoryView = "";
+        render();
+      });
+    }
+    if (ROLE === "customer" && signedIn() && riderAgreed()) syncAgreementToServer();
     var homeBook = document.getElementById("home-book");
     if (homeBook) homeBook.addEventListener("click", function () { startNewBooking(); });
     var bookingHome = document.getElementById("booking-home");
@@ -9891,8 +10166,40 @@
     } else {
       chain = viaPhoton().then(function (f) { return f || viaPoi(); });
     }
+    /* v60: Google (Worker, daily-capped) when the free lookups found nothing exact. */
+    function viaGoogle() {
+      if (isAddr) {
+        return placesPost("/geocode", { address: q }, 6000).then(function (data) {
+          var d = data && data.place;
+          if (!d || !isCoord(d.lat) || !isCoord(d.lng) || !d.street) return null;
+          var label = [d.street, d.city, d.state, d.zip].filter(Boolean).join(", ");
+          return geoFeature(d.lat, d.lng, { name: base, source: "google", level: d.exact ? "exact" : "street", postcode: d.zip, city: d.city, label: label });
+        });
+      }
+      if (base.length < 3) return Promise.resolve(null);
+      var bias = (function () { var oo = searchOrigin(prefix || "drop"); return oo && oo.from ? oo.point : null; })();
+      var tokenKey = "resolve-" + (prefix || "drop");
+      var body = { input: city && low.indexOf(String(city).toLowerCase()) === -1 ? base + ", " + city : base, sessionToken: placesSession(tokenKey) };
+      if (bias && isCoord(bias.lat)) { body.lat = +bias.lat; body.lng = +bias.lng; }
+      return placesPost("/autocomplete", body).then(function (data) {
+        var words = searchWords(base);
+        var preds = ((data && data.predictions) || []).filter(function (p) {
+          return words.length && wordStarts(p.main, words[0].slice(0, 3)) && googleIsBusiness(p.types);
+        });
+        if (!preds.length) { delete gPlaceSessions[tokenKey]; return null; }
+        return googlePlaceDetails(tokenKey, { placeId: preds[0].placeId, main: preds[0].main, sub: preds[0].sub, types: preds[0].types }).then(function (gp) {
+          if (!gp) return null;
+          var label = [gp.line1, gp.city, gp.state, gp.zip].filter(Boolean).join(", ");
+          return geoFeature(gp.lat, gp.lng, { name: base, source: "google", level: "exact", postcode: gp.zip, city: gp.city, label: label, poiLine: gp.line1, poiSource: "google" });
+        });
+      });
+    }
+
     return chain.then(function (f) {
       return f || viaStreetName();
+    }).then(function (f) {
+      if (f && f.properties && f.properties.level === "exact") return f;
+      return viaGoogle().then(function (g) { return g || f; }, function () { return f; });
     }).then(function (f) {
       return f || cityCenter();
     }).then(function (f) {
@@ -11016,6 +11323,10 @@
   /* v54 test hooks (no UI). */
   window.__pcsApp = {
     placeNameVariants: placeNameVariants,
+    googleSuggest: googleSuggest,
+    riderAgreed: riderAgreed,
+    POLICY_VERSION: POLICY_VERSION,
+    placesBase: placesBase,
     suggestPlaces: suggestPlaces,
     resolveAddress: resolveAddress,
     openPickList: openPickList,
