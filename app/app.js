@@ -6,7 +6,13 @@
    logout or a roster-password login. Only the opening odometer is asked after login.
    v54: louder looping ride siren, rider↔driver chat (en route to pickup), rider History, God banner actions + pop-ups.
    v56: ride alert plays the approved bell chime (driver/ride-chime.mp3, C6-E6-G6-E6) instead of the siren;
-        waiting rides auto-select so Accept/Deny are on the main board (no pin tap); popup sits above the sound bar. */
+        waiting rides auto-select so Accept/Deny are on the main board (no pin tap); popup sits above the sound bar.
+   v57: iPhone ride-alert sound fix: unlock on every tap, primed <audio> + Web Audio both play the chime,
+        gold bar stays until a chime really played, red "Tap here to hear ride alerts" banner if blocked,
+        resume after app switch; old saved mute cleared once; Navigate opens the Maps app (maps://);
+        safety/wait: at 4:30 still → "Are you OK?"; No → police assist Yes/No (tel:911 + location + God alert);
+        at 5:00 (if OK) → "Are you at an additional stop?"; Yes → Stop + $0.40/min from confirm;
+        always-visible Alert/SOS on rider + driver (same police-help flow). */
 (function () {
   var BUSINESS_PHONE = "936-261-7878";
   var DRIVER_COMMISSION_RATE = 0.7;
@@ -14,6 +20,17 @@
   var BASE_CENTS = 1100;
   var EXTRA_PAX_CENTS = 500;
   var EXTRA_STOP_CENTS = 1100;
+  /* v57 (Matthew FINAL): 4:30 still → Are you OK?; 5:00 → additional stop?; fee only after stop Yes. */
+  var WAIT_CENTS_PER_MIN = 40;
+  var WAIT_OK_MS = 4 * 60 * 1000 + 30 * 1000; /* 4 min 30 sec → "Are you OK?" */
+  var WAIT_ASK_MS = 5 * 60 * 1000; /* 5 min → "Are you at an additional stop?" (only if OK=Yes) */
+  var WAIT_STOP_MS = WAIT_ASK_MS;
+  var WAIT_FEE_MS = 0; /* no silent free window — fee starts when they confirm the stop */
+  var WAIT_GRACE_MS = 0;
+  var WAIT_STILL_MPH = 1.5;
+  var WAIT_MOVE_MI = 0.03;
+  var WAIT_MOVE_MPH = 3;
+  var SAFETY_ALERT_HUB = "SAFETY"; /* /rides/SAFETY/{id} — high-priority God alerts */
   var DAY_MILE_CENTS = 110;
   var NIGHT_MILE_CENTS = 138;
   var LATE_MILE_CENTS = 143;
@@ -86,18 +103,9 @@
   }
 
   var openRideAlertTimer = null;
-  var openRideAudioUnlocked = false;
-  var openRideAudioCtx = null;
-  var openRideSirenNodes = [];
-  /* v56: approved ride chime, fetched + decoded once (after the unlock tap) on openRideAudioCtx. */
+  /* v57: one sound engine for the ride alert (see pcsAlertAudio below). The chime is driver/ride-chime.mp3. */
   var RIDE_CHIME_URL = rideChimeUrl();
-  var RIDE_CHIME_NOTES = [[1046.5, 0], [1318.5, 0.18], [1568, 0.36], [1318.5, 0.58]]; /* C6 E6 G6 E6 (fallback only) */
-  var rideChimeBuf = null;
-  var rideChimeLoad = null;
-  var rideChimeFailedAt = 0;
-  var rideChimeWaiting = false;
-  var rideAlertGen = 0; /* bumps on stop so a burst still waiting on the file never plays late */
-  var rideAlertBuzzing = false; /* vibrate(0) only after an alert buzz (avoids Chrome's pre-tap vibrate warning) */
+  var MUTE_KEY = "pcs-driver-alert-mute";
 
   /* app.js is app/app.js (loaded from /app/ and as ../app.js from /app/driver/), so the chime is driver/ride-chime.mp3
      relative to this script: /pcs-ride-estimate/app/driver/ride-chime.mp3 on GitHub Pages, /app/driver/ride-chime.mp3 locally. */
@@ -113,225 +121,468 @@
     return "ride-chime.mp3";
   }
 
+  /* v57: mute defaults to OFF. A mute saved by an older version is cleared once (it silently killed every alert
+     while the gold-bar test chime, which ignores mute, still played). */
+  (function resetOldMute() {
+    try {
+      if (localStorage.getItem("pcs-driver-alert-mute-v57") !== "1") {
+        localStorage.removeItem(MUTE_KEY);
+        localStorage.setItem("pcs-driver-alert-mute-v57", "1");
+      }
+    } catch (e) {}
+  })();
+
   function openRideAlertMuted() {
-    try { return localStorage.getItem("pcs-driver-alert-mute") === "1"; } catch (err) { return false; }
+    try { return localStorage.getItem(MUTE_KEY) === "1"; } catch (err) { return false; }
   }
 
   function setOpenRideAlertMuted(on) {
-    try { localStorage.setItem("pcs-driver-alert-mute", on ? "1" : "0"); } catch (err) {}
+    try { localStorage.setItem(MUTE_KEY, on ? "1" : "0"); } catch (err) {}
   }
 
-  /* v53/v54: iOS 17+ silent-switch ignore; playback ducks/interrupts other audio when possible. */
+  /* ===== v57 ride-alert sound engine (same code in app.js and driver/ride-alert.js) =====
+     iPhone/iPad home-screen app: sound only works after a real tap, and iOS can silently drop Web Audio after an
+     app switch or screen lock. So, belt and suspenders:
+       - EVERY touch / click / key (not only the gold bar) synchronously creates/resumes the AudioContext, plays a
+         1-sample silent buffer, and primes an HTMLAudioElement (muted play, then pause + rewind) inside the gesture.
+         iOS then lets that same element play later with no tap.
+       - A ride alert plays through BOTH: the decoded chime buffer looping on the AudioContext AND the primed
+         <audio> element (loop, volume 1). Stop both on Accept / Deny / hide.
+       - If play is blocked (NotAllowedError), a big red "Tap here to hear ride alerts" banner shows; tapping it
+         unlocks and plays the chime right away.
+       - The gold "Tap to turn on ride alert sound" bar stays at the top until a chime has really played in THIS
+         page session (AudioContext running AND <audio>.play() resolved). Nothing is saved: iOS forgets the unlock on
+         every reopen. It comes back after an app switch if the AudioContext did not come back.
+     o = { url, muted(), wantBar(), onUi() } */
+  function pcsAlertAudio(o) {
+    var AC = window.AudioContext || window.webkitAudioContext;
+    var ctx = null;
+    var el = null;
+    var elPrimed = false;   /* <audio> was play()-ed inside a gesture without NotAllowedError */
+    var elHeard = false;    /* <audio>.play() of the real (unmuted) chime resolved in this page session */
+    var buf = null;
+    var loading = null;
+    var failedAt = 0;
+    var alerting = false;
+    var alertGen = 0;
+    var loopSrc = null;
+    var loopStartedRunning = false; /* a loop started while suspended/interrupted is restarted once the context runs */
+    var loopNodes = [];
+    var oscNodes = [];
+    var watch = null;
+    var buzzing = false;
+    var blocked = false;
+    var testing = false;
+    var testTimer = null;
+    var stats = { unlocks: 0, elPlays: 0, bufStarts: 0, oscBursts: 0, blocked: 0 };
+    function noop() {}
+    function isMuted() { try { return !!(o.muted && o.muted()); } catch (e) { return false; } }
+    /* audioSession first (before any AudioContext), only if the API exists. Never playAndRecord (earpiece on iPhone). */
+    function setSession() {
+      try {
+        var s = navigator.audioSession;
+        if (s && s.type !== "playback") s.type = "playback";
+      } catch (e) {}
+    }
+    function makeCtx() {
+      if (ctx || !AC) return ctx;
+      setSession();
+      try {
+        ctx = new AC();
+        try { ctx.onstatechange = function () { if (alerting) startCtxLoop(); ui(); }; } catch (e1) {}
+      } catch (e) { ctx = null; }
+      return ctx;
+    }
+    function makeEl() {
+      if (el) return el;
+      if (typeof Audio !== "function") return null;
+      try {
+        el = new Audio();
+        el.preload = "auto";
+        el.setAttribute("playsinline", "");
+        el.setAttribute("webkit-playsinline", "");
+        try { el.playsInline = true; } catch (e1) {}
+        el.src = o.url;
+        try { el.load(); } catch (e2) {}
+      } catch (e) { el = null; }
+      return el;
+    }
+    function ctxRunning() { return !!ctx && ctx.state === "running"; }
+    /* "Really heard": AudioContext running AND the <audio> element's play() resolved. */
+    function ready() { return ctxRunning() && elHeard; }
+    function resumeCtx() {
+      if (!ctx || ctx.state === "running" || ctx.state === "closed" || !ctx.resume) return;
+      try {
+        var p = ctx.resume();
+        if (p && p.then) p.then(function () { ui(); if (alerting) startCtxLoop(); }, noop);
+      } catch (e) {}
+    }
+    function load() {
+      if (buf) return Promise.resolve(buf);
+      if (loading) return loading;
+      if (!ctx || typeof fetch !== "function" || !ctx.decodeAudioData) return Promise.resolve(null);
+      if (failedAt && Date.now() - failedAt < 15000) return Promise.resolve(null);
+      var c = ctx;
+      loading = fetch(o.url).then(function (res) {
+        if (!res || !res.ok) throw new Error("ride-chime " + (res && res.status));
+        return res.arrayBuffer();
+      }).then(function (ab) {
+        return new Promise(function (resolve, reject) {
+          var p = c.decodeAudioData(ab, resolve, reject); /* callback form for older iOS Safari */
+          if (p && p.then) p.then(resolve, reject);
+        });
+      }).then(function (b) {
+        if (!b) throw new Error("ride-chime decode");
+        buf = b;
+        failedAt = 0;
+        loading = null;
+        if (alerting) startCtxLoop();
+        return b;
+      }).catch(function () {
+        failedAt = Date.now();
+        loading = null;
+        return null;
+      });
+      return loading;
+    }
+    function primeEl() {
+      var e = el;
+      if (!e || alerting || testing || !e.paused) return;
+      var p = null;
+      e.muted = true;
+      try { p = e.play(); } catch (x) { p = null; }
+      try { e.pause(); } catch (x2) {}
+      try { e.currentTime = 0; } catch (x3) {}
+      e.muted = false;
+      try { e.volume = 1; } catch (x4) {}
+      if (p && p.then) {
+        p.then(function () {
+          elPrimed = true;
+          if (!alerting && !testing) { try { e.pause(); e.currentTime = 0; } catch (x5) {} }
+        }, function (err) {
+          /* AbortError = our own pause() won the race: the gesture was accepted. NotAllowedError = not a real gesture. */
+          if (err && err.name === "NotAllowedError") return;
+          elPrimed = true;
+        });
+      } else {
+        elPrimed = true;
+      }
+    }
+    /* Runs synchronously inside every user gesture. opts.noPrime: caller plays the element itself right after. */
+    function unlock(opts) {
+      stats.unlocks++;
+      setSession();
+      makeCtx();
+      if (ctx) {
+        resumeCtx();
+        try {
+          var s = ctx.createBufferSource();
+          s.buffer = ctx.createBuffer(1, 1, 22050);
+          s.connect(ctx.destination);
+          s.start(0);
+        } catch (e) {}
+        load();
+      }
+      makeEl();
+      if (alerting) {
+        /* a ride is ringing: this tap makes it audible right now */
+        if (el && (el.paused || blocked)) playEl(false);
+        startCtxLoop();
+      } else if (!(opts && opts.noPrime)) {
+        primeEl();
+      }
+    }
+    function onBlocked() {
+      blocked = true;
+      stats.blocked++;
+      ui();
+    }
+    function playEl(isTest) {
+      var e = makeEl();
+      if (!e) return null;
+      var gen = alertGen;
+      e.loop = !isTest;
+      e.muted = false;
+      try { e.volume = 1; } catch (x0) {}
+      try { e.currentTime = 0; } catch (x1) {}
+      var p = null;
+      try { p = e.play(); } catch (x2) { onBlocked(); return null; }
+      stats.elPlays++;
+      if (p && p.then) {
+        p.then(function () {
+          elPrimed = true;
+          elHeard = true;
+          blocked = false;
+          if (!isTest && (!alerting || gen !== alertGen)) { try { e.pause(); e.currentTime = 0; } catch (x3) {} }
+          ui();
+        }, function (err) {
+          if (err && err.name === "AbortError") return;
+          if (!isTest && (!alerting || gen !== alertGen)) return;
+          onBlocked();
+        });
+      } else {
+        elHeard = true;
+        ui();
+      }
+      return p;
+    }
+    function trackOsc(nodes, last) {
+      nodes.forEach(function (n) { oscNodes.push(n); });
+      try {
+        last.onended = function () {
+          oscNodes = oscNodes.filter(function (n) { return nodes.indexOf(n) === -1; });
+          nodes.forEach(function (n) { try { n.disconnect(); } catch (e) {} });
+        };
+      } catch (e) {}
+    }
+    /* Fallback (file not decoded yet / failed): same four bell notes from oscillators. Never the old sawtooth siren. */
+    function oscBurst(isTest) {
+      if (!ctx) return;
+      try {
+        var notes = [[1046.5, 0], [1318.5, 0.18], [1568, 0.36], [1318.5, 0.58]];
+        var now = ctx.currentTime + 0.01;
+        var master = ctx.createGain();
+        master.gain.value = 0.95;
+        master.connect(ctx.destination);
+        var nodes = [master];
+        var last = null;
+        notes.forEach(function (n, i) {
+          var len = i === notes.length - 1 ? 0.67 : 0.5;
+          [[1, 0.85], [2, 0.12]].forEach(function (pt) {
+            var osc = ctx.createOscillator();
+            var g = ctx.createGain();
+            osc.type = "sine";
+            osc.frequency.value = n[0] * pt[0];
+            g.gain.setValueAtTime(0.0001, now + n[1]);
+            g.gain.exponentialRampToValueAtTime(pt[1], now + n[1] + 0.008);
+            g.gain.exponentialRampToValueAtTime(0.0001, now + n[1] + len);
+            osc.connect(g);
+            g.connect(master);
+            osc.start(now + n[1]);
+            osc.stop(now + n[1] + len + 0.02);
+            nodes.push(osc, g);
+            last = osc;
+          });
+        });
+        stats.oscBursts++;
+        if (!isTest) trackOsc(nodes, last);
+      } catch (e) {}
+    }
+    /* Decoded chime looping on the AudioContext (gain 1.0). Same period as the looping <audio> element. */
+    function startCtxLoop() {
+      if (!alerting || !ctx || !buf) return;
+      if (loopSrc && (loopStartedRunning || ctx.state !== "running")) return;
+      if (loopSrc) { /* started while the context was not running: restart now that it is */
+        loopNodes.forEach(function (n) { try { if (n.stop) n.stop(); } catch (e0) {} try { n.disconnect(); } catch (e1) {} });
+        loopNodes = [];
+        loopSrc = null;
+      }
+      try {
+        var src = ctx.createBufferSource();
+        var g = ctx.createGain();
+        src.buffer = buf;
+        src.loop = true;
+        g.gain.value = 1.0;
+        src.connect(g);
+        g.connect(ctx.destination);
+        src.start(0);
+        loopSrc = src;
+        loopStartedRunning = ctx.state === "running";
+        loopNodes = [src, g];
+        stats.bufStarts++;
+      } catch (e) { loopSrc = null; }
+    }
+    function vibrate(p) {
+      try { if (navigator.vibrate && (navigator.userActivation ? navigator.userActivation.hasBeenActive : true)) navigator.vibrate(p); } catch (e) {}
+    }
+    function tickAlert() {
+      if (!alerting) return;
+      if (isMuted()) { stopAlert(); return; }
+      vibrate([220, 60, 220, 60, 220, 60, 320]);
+      buzzing = true;
+      resumeCtx();
+      if (el && el.paused && !blocked) playEl(false);
+      if (!buf) { load(); oscBurst(false); }
+      else startCtxLoop();
+    }
+    /* Ride arrived: both paths at once, until stopAlert(). Idempotent while ringing. */
+    function startAlert() {
+      if (isMuted()) { stopAlert(); return; }
+      if (alerting) return;
+      alerting = true;
+      alertGen++;
+      testing = false;
+      setSession();
+      makeCtx();
+      makeEl();
+      resumeCtx();
+      playEl(false);
+      startCtxLoop();
+      tickAlert();
+      watch = setInterval(tickAlert, 1400);
+      ui();
+    }
+    function stopAlert() {
+      var was = alerting;
+      alerting = false;
+      alertGen++;
+      if (watch) { clearInterval(watch); watch = null; }
+      loopNodes.concat(oscNodes).forEach(function (n) {
+        try { if (n.stop) n.stop(); } catch (e) {}
+        try { if (n.disconnect) n.disconnect(); } catch (e2) {}
+      });
+      loopNodes = [];
+      oscNodes = [];
+      loopSrc = null;
+      if (el && !testing) {
+        try { el.pause(); } catch (e3) {}
+        try { el.currentTime = 0; } catch (e4) {}
+        el.loop = false;
+      }
+      if (buzzing) { buzzing = false; vibrate(0); }
+      if (blocked || was) { blocked = false; ui(); }
+    }
+    /* Gold-bar test: plays NOW inside the tap via the primed element (works before the buffer is decoded). */
+    function test() {
+      unlock({ noPrime: true });
+      if (alerting) return;
+      testing = true;
+      vibrate(60);
+      var p = playEl(true);
+      if (!el || !p) oscBurst(true); /* no <audio> support: Web Audio only */
+      if (testTimer) clearTimeout(testTimer);
+      testTimer = setTimeout(function () { testing = false; }, 1600);
+      ui();
+    }
+    /* ---- UI: gold bar (until really heard) + red banner (blocked while ringing) ---- */
+    function barStyle(bg, fg, z) {
+      return "position:fixed;top:0;left:0;right:0;z-index:" + z + ";width:100%;margin:0;border:0;border-radius:0;" +
+        "padding:calc(16px + env(safe-area-inset-top)) 14px 16px;background:" + bg + ";color:" + fg + ";font-size:20px;font-weight:800;" +
+        "text-align:center;box-shadow:0 3px 12px rgba(0,0,0,.45);cursor:pointer;font-family:inherit;display:block;" +
+        "-webkit-tap-highlight-color:transparent;touch-action:manipulation";
+    }
+    function addBar(id, text, bg, fg, z, onTap) {
+      var b = document.getElementById(id);
+      if (b) return b;
+      b = document.createElement("button");
+      b.type = "button";
+      b.id = id;
+      b.textContent = text;
+      b.setAttribute("style", barStyle(bg, fg, z));
+      var last = 0;
+      function tap(ev) {
+        if (ev && ev.type === "click") { try { ev.preventDefault(); ev.stopPropagation(); } catch (e) {} }
+        var now = Date.now();
+        if (now - last < 700) return; /* touchend + click of one tap */
+        last = now;
+        onTap();
+      }
+      b.addEventListener("touchend", tap);
+      b.addEventListener("click", tap);
+      document.body.appendChild(b);
+      return b;
+    }
+    function removeEl(id) {
+      var b = document.getElementById(id);
+      if (b && b.parentNode) b.parentNode.removeChild(b);
+    }
+    function wantBar() { try { return o.wantBar ? !!o.wantBar() : true; } catch (e) { return true; } }
+    function ui() {
+      if (!document.body) return;
+      if (!wantBar()) { removeEl("ride-sound-bar"); removeEl("ride-sound-blocked"); return; }
+      if (blocked && alerting) {
+        addBar("ride-sound-blocked", "\uD83D\uDD0A Tap here to hear ride alerts", "#c0161b", "#fff", 11050, function () {
+          unlock({ noPrime: true });
+          if (!alerting) { test(); return; }
+          playEl(false);
+          startCtxLoop();
+        });
+      } else {
+        removeEl("ride-sound-blocked");
+      }
+      if (ready()) removeEl("ride-sound-bar");
+      else addBar("ride-sound-bar", "\uD83D\uDD14 Tap to turn on ride alert sound", "#e3b341", "#0b1c33", 10050, test);
+      try { if (o.onUi) o.onUi(); } catch (e) {}
+    }
+    /* App switch / screen lock: iOS leaves the context suspended or "interrupted". Try to resume; if it does not
+       come back, the gold bar returns so the next tap fixes it. */
+    function onReturn() {
+      if (document.visibilityState && document.visibilityState !== "visible") return;
+      resumeCtx();
+      if (alerting && el && el.paused) playEl(false);
+      ui();
+      setTimeout(ui, 700);
+    }
+    function onGesture(ev) {
+      var t = ev && ev.target;
+      var id = t && t.id;
+      /* bar / banner taps run their own handler (they play right away); still unlock the context here */
+      if (id === "ride-sound-bar" || id === "ride-sound-blocked") { unlock({ noPrime: true }); return; }
+      unlock();
+    }
+    function install() {
+      setSession();
+      ["touchstart", "touchend", "pointerdown", "pointerup", "mousedown", "click", "keydown"].forEach(function (t) {
+        document.addEventListener(t, onGesture, true);
+      });
+      document.addEventListener("visibilitychange", onReturn);
+      window.addEventListener("pageshow", onReturn);
+      window.addEventListener("focus", onReturn);
+      if (document.body) ui(); else document.addEventListener("DOMContentLoaded", ui);
+      setInterval(ui, 2000); /* nothing can quietly remove the bar */
+    }
+    return {
+      install: install,
+      unlock: unlock,
+      test: test,
+      startAlert: startAlert,
+      stopAlert: stopAlert,
+      load: load,
+      ui: ui,
+      ready: ready,
+      onReturn: onReturn,
+      info: function () {
+        return {
+          ctxState: ctx ? ctx.state : "none", elPrimed: elPrimed, elHeard: elHeard, alerting: alerting, blocked: blocked,
+          bufReady: !!buf, elPaused: el ? el.paused : null, elLoop: el ? el.loop : null, elMuted: el ? el.muted : null,
+          elSrc: el ? el.src : "", stats: stats
+        };
+      },
+      url: function () { return o.url; },
+      bufReady: function () { return !!buf; }
+    };
+  }
+  /* ===== end v57 engine ===== */
+
+
+  var rideAudio = pcsAlertAudio({
+    url: RIDE_CHIME_URL,
+    muted: openRideAlertMuted,
+    wantBar: function () { return ROLE === "driver"; } /* v57: always on /app/driver/ until a chime really played */
+  });
+
+  /* v53/v57: playback session (ignores the silent switch on iOS 17+). Set before the AudioContext exists. */
   function setPlaybackAudioSession() {
     try {
-      if (!navigator.audioSession) return;
-      var t = navigator.audioSession.type;
-      if (t === "playback" || t === "playAndRecord") return;
-      try { navigator.audioSession.type = "playback"; } catch (e1) {}
-      try {
-        if (navigator.audioSession.type !== "playback") navigator.audioSession.type = "playAndRecord";
-      } catch (e2) {}
+      var s = navigator.audioSession;
+      if (s && s.type !== "playback") s.type = "playback";
     } catch (err) {}
   }
 
-  /* v53: big gold "Tap to turn on ride alert sound" bar on each fresh open until tapped (iOS needs a tap first). */
-  function rideSoundRunning() {
-    return !!openRideAudioCtx && openRideAudioCtx.state === "running";
-  }
-
-  function hideRideSoundBar() {
-    var bar = document.getElementById("ride-sound-bar");
-    if (bar && bar.parentNode) bar.parentNode.removeChild(bar);
-  }
-
-  function showRideSoundBar() {
-    if (ROLE !== "driver" || rideSoundRunning() || document.getElementById("ride-sound-bar") || !document.body) return;
-    var bar = document.createElement("button");
-    bar.type = "button";
-    bar.id = "ride-sound-bar";
-    bar.textContent = "\uD83D\uDD14 Tap to turn on ride alert sound";
-    bar.setAttribute("style", "position:fixed;top:0;left:0;right:0;z-index:10050;width:100%;margin:0;border:0;border-radius:0;" +
-      "padding:calc(16px + env(safe-area-inset-top)) 14px 16px;background:#e3b341;color:#0b1c33;font-size:20px;font-weight:800;" +
-      "text-align:center;box-shadow:0 3px 12px rgba(0,0,0,.45);cursor:pointer");
-    /* v56: test sound = one burst of the ride chime. touchend as well as click: on phones the bar used to vanish
-       (sound came on during the touch) before its click fired, so the test sound never played. */
-    var done = false;
-    function onTap(ev) {
-      if (ev && ev.type === "click") { ev.preventDefault(); ev.stopPropagation(); }
-      if (done) return;
-      done = true;
-      keepRideAudioAwake();
-      playRideChime(true);
-      hideRideSoundBar();
-    }
-    bar.addEventListener("touchend", onTap);
-    bar.addEventListener("click", onTap);
-    document.body.appendChild(bar);
-  }
-
-  function unlockOpenRideAudio() {
-    keepRideAudioAwake();
-    openRideAudioUnlocked = true;
-    try {
-      var AC = window.AudioContext || window.webkitAudioContext;
-      if (AC && !openRideAudioCtx) openRideAudioCtx = new AC();
-      if (openRideAudioCtx && openRideAudioCtx.state === "suspended") openRideAudioCtx.resume();
-    } catch (err) {}
-    try {
-      if (navigator.vibrate) navigator.vibrate(30);
-    } catch (err2) {}
-  }
-
-  function beepOpenRideOnce() {
-    /* v56: one chime burst; the loop interval keeps it repeating until Accept/Deny. */
-    if (openRideAlertMuted() || !openRideAudioUnlocked) return;
-    playRideAlertSound(false);
-  }
-
-  function stopRideSirenNodes() {
-    rideAlertGen++;
-    openRideSirenNodes.forEach(function (n) {
-      try { if (n.stop) n.stop(); } catch (e) {}
-      try { if (n.disconnect) n.disconnect(); } catch (e2) {}
-    });
-    openRideSirenNodes = [];
-    if (rideAlertBuzzing) {
-      rideAlertBuzzing = false;
-      try { if (navigator.vibrate) navigator.vibrate(0); } catch (e3) {}
-    }
-  }
-
-  /* v56: fetch + decode driver/ride-chime.mp3 once into an AudioBuffer. Resolves null on failure (fallback tones play);
-     a failed load is retried on a later tap, at most every 15 s. */
-  function loadRideChime() {
-    if (rideChimeBuf) return Promise.resolve(rideChimeBuf);
-    if (rideChimeLoad) return rideChimeLoad;
-    var ctx = openRideAudioCtx;
-    if (!ctx || typeof fetch !== "function" || !ctx.decodeAudioData) return Promise.resolve(null);
-    if (rideChimeFailedAt && Date.now() - rideChimeFailedAt < 15000) return Promise.resolve(null);
-    rideChimeLoad = fetch(RIDE_CHIME_URL).then(function (res) {
-      if (!res || !res.ok) throw new Error("ride-chime " + (res && res.status));
-      return res.arrayBuffer();
-    }).then(function (ab) {
-      return new Promise(function (resolve, reject) {
-        var p = ctx.decodeAudioData(ab, resolve, reject); /* callback form for older iOS Safari */
-        if (p && p.then) p.then(resolve, reject);
-      });
-    }).then(function (buf) {
-      if (!buf) throw new Error("ride-chime decode");
-      rideChimeBuf = buf;
-      rideChimeFailedAt = 0;
-      rideChimeLoad = null;
-      return buf;
-    }).catch(function () {
-      rideChimeFailedAt = Date.now();
-      rideChimeLoad = null;
-      return null;
-    });
-    return rideChimeLoad;
-  }
-
-  /* Alert nodes are tracked so Accept/Deny/stop cuts the sound off; they drop out of the list when finished. */
-  function trackRideAlertNodes(nodes, endNode) {
-    nodes.forEach(function (n) { openRideSirenNodes.push(n); });
-    try {
-      endNode.onended = function () {
-        openRideSirenNodes = openRideSirenNodes.filter(function (n) { return nodes.indexOf(n) === -1; });
-        nodes.forEach(function (n) { try { n.disconnect(); } catch (e) {} });
-      };
-    } catch (e) {}
-  }
-
-  /* The approved chime file at full level (GainNode 1.0, no extra quieting). */
-  function rideChimeFromBuffer(ctx, isTest) {
-    var src = ctx.createBufferSource();
-    var g = ctx.createGain();
-    src.buffer = rideChimeBuf;
-    g.gain.value = 1.0;
-    src.connect(g);
-    g.connect(ctx.destination);
-    src.start(0);
-    if (!isTest) trackRideAlertNodes([src, g], src);
-  }
-
-  /* Fallback if the file cannot be fetched/decoded: the same four bell notes from oscillators
-     (sine + quiet 2x partial, master gain 0.95). Never the old sawtooth siren. */
-  function rideChimeFallback(ctx, isTest) {
-    try {
-      var now = ctx.currentTime + 0.01;
-      var master = ctx.createGain();
-      master.gain.value = 0.95;
-      master.connect(ctx.destination);
-      var nodes = [master];
-      var last = null;
-      RIDE_CHIME_NOTES.forEach(function (n, i) {
-        var len = i === RIDE_CHIME_NOTES.length - 1 ? 0.67 : 0.5;
-        [[1, 0.85], [2, 0.12]].forEach(function (pt) {
-          var o = ctx.createOscillator();
-          var g = ctx.createGain();
-          o.type = "sine";
-          o.frequency.value = n[0] * pt[0];
-          g.gain.setValueAtTime(0.0001, now + n[1]);
-          g.gain.exponentialRampToValueAtTime(pt[1], now + n[1] + 0.008);
-          g.gain.exponentialRampToValueAtTime(0.0001, now + n[1] + len);
-          o.connect(g);
-          g.connect(master);
-          o.start(now + n[1]);
-          o.stop(now + n[1] + len + 0.02);
-          nodes.push(o, g);
-          last = o;
-        });
-      });
-      if (!isTest) trackRideAlertNodes(nodes, last);
-    } catch (err) {}
-  }
-
-  /* v56: one burst of the ride chime (~1.25 s). isTest = unlock-bar test (not cut off by stop, ignores mute like before). */
+  function rideSoundRunning() { return rideAudio.ready(); }
+  function hideRideSoundBar() { rideAudio.ui(); } /* v57: the bar only goes away once a chime really played */
+  function showRideSoundBar() { if (ROLE === "driver") rideAudio.ui(); }
+  function unlockOpenRideAudio() { if (ROLE === "driver") rideAudio.unlock(); }
+  function beepOpenRideOnce() { if (!openRideAlertMuted()) rideAudio.startAlert(); }
+  function stopRideSirenNodes() { rideAudio.stopAlert(); }
+  function loadRideChime() { return rideAudio.load(); }
+  /* isTest = gold-bar test chime (plays inside the tap); otherwise the looping ride alert. */
   function playRideAlertSound(isTest) {
-    setPlaybackAudioSession();
-    var ctx;
-    try {
-      var AC = window.AudioContext || window.webkitAudioContext;
-      if (!AC) return;
-      if (!openRideAudioCtx) openRideAudioCtx = new AC();
-      ctx = openRideAudioCtx;
-      if (ctx.state === "suspended") ctx.resume();
-    } catch (err) { return; }
-    try {
-      if (navigator.vibrate) navigator.vibrate(isTest ? 60 : [220, 60, 220, 60, 220, 60, 320]);
-      if (!isTest) rideAlertBuzzing = true;
-    } catch (err2) {}
-    if (rideChimeBuf) {
-      try { rideChimeFromBuffer(ctx, isTest); } catch (err3) { rideChimeFallback(ctx, isTest); }
-      return;
-    }
-    if (rideChimeWaiting) return; /* a burst is already waiting for the file */
-    rideChimeWaiting = true;
-    var gen = rideAlertGen;
-    var done = false;
-    function go() {
-      if (done) return;
-      done = true;
-      rideChimeWaiting = false;
-      if (!isTest && (gen !== rideAlertGen || openRideAlertMuted())) return;
-      if (rideChimeBuf) {
-        try { rideChimeFromBuffer(ctx, isTest); return; } catch (err4) {}
-      }
-      rideChimeFallback(ctx, isTest);
-    }
-    loadRideChime().then(go, go);
-    setTimeout(go, 2500); /* slow network: do not stay silent, play the fallback tones */
+    if (isTest) rideAudio.test();
+    else if (!openRideAlertMuted()) rideAudio.startAlert();
   }
-
-  /* Unlock-bar test sound: one burst of the new chime. */
-  function playRideChime(isTest) {
-    playRideAlertSound(isTest !== false);
-  }
-
-  /* v54 name kept for test hooks; v56 plays the chime (the sawtooth siren is gone). */
-  function playRideSiren(isTest) {
-    playRideAlertSound(!!isTest);
-  }
+  function playRideChime(isTest) { playRideAlertSound(isTest !== false); }
+  function playRideSiren(isTest) { playRideAlertSound(!!isTest); }
 
   function countAlertableOpenRides() {
     /* v51: skips rides this driver denied; TEST rides only reach the owner's login (listOpenRides filters them). */
@@ -347,27 +598,28 @@
   }
 
   function syncOpenRideAlert() {
-    if (ROLE === "driver" && signedIn()) showRideSoundBar(); /* v53: until sound is on */
+    if (ROLE === "driver") showRideSoundBar(); /* v57: always, until a chime really played */
     if (ROLE !== "driver" || !signedIn() || !canGoOnline() || !driverCanTakeNew()) {
       stopOpenRideAlert();
       closeRidePopup();
       return;
     }
-    /* v51/v54/v56: pop-up + looping chime on every driver page until Accept/Deny. */
+    /* v51/v54/v56/v57: pop-up + looping chime on every driver page until Accept/Deny. v57: plays even if no tap
+       happened since the app opened (iOS lets the primed <audio> play; if it is blocked the red banner asks for a tap). */
     syncRidePopup();
     var n = countAlertableOpenRides();
     if (!n || openRideAlertMuted()) {
       stopOpenRideAlert();
       return;
     }
+    rideAudio.startAlert();
     if (openRideAlertTimer) return;
-    beepOpenRideOnce();
     openRideAlertTimer = setInterval(function () {
       if (!countAlertableOpenRides() || openRideAlertMuted() || !driverCanTakeNew()) {
         stopOpenRideAlert();
         return;
       }
-      beepOpenRideOnce();
+      rideAudio.startAlert(); /* idempotent while ringing */
     }, 1400);
   }
 
@@ -383,7 +635,6 @@
   /* ---- 3. Ride alert on every driver page + full-screen "Ride requested" pop-up ---- */
   var DISMISS_KEY = "pcs-driver-dismissed-rides"; /* shared with driver/ride-alert.js (Profile page) */
   var DISMISS_MS = 12 * 3600000;
-  var openRideAudioPrimed = false;
 
   function readDismissed() {
     try {
@@ -425,28 +676,7 @@
   /* iOS: keep Web Audio alive. Any tap resumes it (iOS suspends it after the app is hidden). */
   function keepRideAudioAwake(ev) {
     if (ROLE !== "driver") return;
-    /* a tap on the gold bar itself leaves the bar for its own handler (it plays the test chime, then hides) */
-    var onBar = !!(ev && ev.target && ev.target.id === "ride-sound-bar");
-    openRideAudioUnlocked = true;
-    setPlaybackAudioSession();
-    try {
-      var AC = window.AudioContext || window.webkitAudioContext;
-      if (AC && !openRideAudioCtx) openRideAudioCtx = new AC();
-      var ctx = openRideAudioCtx;
-      if (!ctx) return;
-      if (ctx.state !== "running" && ctx.resume) {
-        var r = ctx.resume();
-        if (r && r.then) r.then(function () { if (rideSoundRunning() && !onBar) hideRideSoundBar(); }).catch(function () {});
-      } else if (ctx.state === "running" && !onBar) hideRideSoundBar();
-      if (!openRideAudioPrimed) {
-        var src = ctx.createBufferSource();
-        src.buffer = ctx.createBuffer(1, 1, 22050);
-        src.connect(ctx.destination);
-        src.start(0);
-        openRideAudioPrimed = true;
-      }
-      loadRideChime(); /* v56: one-time fetch + decode of the chime after the first tap */
-    } catch (err) {}
+    rideAudio.unlock(); /* v57: synchronous AudioContext resume + silent buffer + <audio> prime inside the gesture */
   }
 
   var ridePopupCode = "";
@@ -680,9 +910,16 @@
     var dest = exact ? pt.lat.toFixed(6) + "," + pt.lng.toFixed(6) : text;
     if (!dest && pt) dest = pt.lat.toFixed(6) + "," + pt.lng.toFixed(6);
     if (!dest) return null;
-    var url = isAppleTouchDevice()
-      ? "https://maps.apple.com/?daddr=" + encodeURIComponent(dest) + "&dirflg=d"
-      : "https://www.google.com/maps/dir/?api=1&destination=" + encodeURIComponent(dest) + "&travelmode=driving";
+    /* v57: Apple Maps follow-nav — maps:// only, daddr + dirflg=d, never saddr/ll/z/spn/sll/t.
+       Lat,lng stay unencoded (comma intact); address text is encoded. HTTPS Apple web map URLs
+       often open the zoomed-out overview / PiP that snaps back after pinch. */
+    var url;
+    if (isAppleTouchDevice()) {
+      var daddr = exact ? dest : encodeURIComponent(dest);
+      url = "maps://?daddr=" + daddr + "&dirflg=d";
+    } else {
+      url = "https://www.google.com/maps/dir/?api=1&destination=" + encodeURIComponent(dest) + "&travelmode=driving";
+    }
     return { url: url, label: started ? "drop-off" : "pickup", dest: dest, exact: exact };
   }
 
@@ -693,7 +930,9 @@
       return '<p class="note">Directions are not ready yet: the ' +
         (state.rideStatus === "started" ? "drop-off" : "pickup") + " address is missing.</p>";
     }
-    return '<a class="nav-btn-big" id="open-nav" href="' + esc(t.url) + '" target="_blank" rel="noopener">' +
+    /* v57: maps:// opens the Maps app directly; target=_blank only for the https Google link. */
+    var tgt = /^maps:/.test(t.url) ? "" : ' target="_blank" rel="noopener"';
+    return '<a class="nav-btn-big" id="open-nav" href="' + esc(t.url) + '"' + tgt + ">" +
       "&#10148; Navigate to " + esc(t.label) + "</a>" +
       '<p class="trip-eta" id="trip-eta">' + esc(tripEtaText()) + "</p>";
   }
@@ -917,6 +1156,505 @@
     if (Date.now() - state.speedAt > 20000) return "0 mph";
     return Math.round(state.speedMph || 0) + " mph";
   }
+
+  /* ---- v57: safety check + optional wait stop (Matthew FINAL) ----
+     Root cause of Matthew's miss: nothing watched GPS stillness during a started ride.
+     Flow (continuous still minutes on an in-progress ride):
+       4:30 → "Are you OK?" Yes / No
+         No  → immediately "Do you need police assistance?" Yes / No
+               Yes → tel:911 (dialer ready; web apps cannot auto-dial), big location screen,
+                     high-priority Firebase alert for God mode. Never claim silent 911 dispatch.
+               No  → dismiss; soft God-mode note that the driver said they were not OK.
+         Yes → at 5:00 → "Are you at an additional stop?" Yes / No
+               Yes → add Stop + wait fee $0.40/min starting at confirm time.
+               No  → no stop, no fee (traffic/lights).
+     No silent 3-minute fee. Prefer confirmation over auto-add. */
+  var waitTrack = {
+    stillSince: 0, lat: null, lng: null,
+    open: false, okAsked: false, okYes: false, okNo: false,
+    stopAsked: false, stopDeclined: false, policeAsked: false
+  };
+
+  function resetWaitTrack() {
+    waitTrack = {
+      stillSince: 0, lat: null, lng: null,
+      open: false, okAsked: false, okYes: false, okNo: false,
+      stopAsked: false, stopDeclined: false, policeAsked: false
+    };
+  }
+
+  function waitBillableMs(w, now) {
+    if (!w || !w.startedAt) return 0;
+    /* Fee starts when they confirm the stop (startedAt = confirmedAt). No silent free window. */
+    var end = w.endedAt != null ? w.endedAt : (now || Date.now());
+    var ms = end - w.startedAt;
+    return ms > 0 ? ms : 0;
+  }
+
+  function waitBillableMinutes(now) {
+    var sum = 0;
+    (state.autoWaits || []).forEach(function (w) {
+      sum += Math.ceil(waitBillableMs(w, now) / 60000);
+    });
+    return sum;
+  }
+
+  function waitCentsNow(now) {
+    return waitBillableMinutes(now) * WAIT_CENTS_PER_MIN;
+  }
+
+  function waitLabelText() {
+    var list = state.autoWaits || [];
+    if (!list.length) return "";
+    var open = list.filter(function (w) { return !w.endedAt; })[0];
+    var mins = waitBillableMinutes();
+    var parts = [];
+    if (open) {
+      var elapsed = Math.floor((Date.now() - open.startedAt) / 60000);
+      parts.push("At stop · waiting " + elapsed + " min");
+    }
+    if (mins > 0) parts.push("Wait fee " + money(waitCentsNow()) + " (" + mins + " min × $0.40)");
+    else if (!open && list.length) parts.push(list.length + (list.length === 1 ? " wait stop" : " wait stops"));
+    return parts.join(" · ");
+  }
+
+  function ensureWaitAskStyle() {
+    if (document.getElementById("wait-ask-style")) return;
+    var st = document.createElement("style");
+    st.id = "wait-ask-style";
+    st.textContent =
+      "#wait-ask-popup,#police-assist-screen{position:fixed;inset:0;z-index:11500;background:rgba(5,14,28,.94);display:flex;align-items:center;justify-content:center;padding:16px;font-family:inherit}" +
+      "#wait-ask-popup .wa-card,#police-assist-screen .wa-card{background:#0b1c33;color:#fff;border:2px solid #f0d48a;border-radius:20px;max-width:440px;width:100%;padding:22px}" +
+      "#police-assist-screen .wa-card{border-color:#c0161b;max-width:520px}" +
+      "#wait-ask-popup .wa-title,#police-assist-screen .wa-title{font-size:26px;font-weight:800;color:#f0d48a;margin:0 0 12px;text-align:center}" +
+      "#police-assist-screen .wa-title{color:#ff6b6b}" +
+      "#wait-ask-popup .wa-body,#police-assist-screen .wa-body{font-size:17px;line-height:1.4;margin:0 0 16px;text-align:center;color:#e8eef6}" +
+      "#wait-ask-popup .wa-actions,#police-assist-screen .wa-actions{display:flex;flex-wrap:wrap;gap:12px}" +
+      "#wait-ask-popup .wa-actions button,#police-assist-screen .wa-actions a,#police-assist-screen .wa-actions button{flex:1;min-width:120px;font-size:20px;font-weight:800;padding:18px 10px;border-radius:14px;border:0;color:#fff;cursor:pointer;text-align:center;text-decoration:none}" +
+      "#wait-ask-popup .wa-yes,#police-assist-screen .wa-yes{background:#2e9d4f}" +
+      "#wait-ask-popup .wa-no,#police-assist-screen .wa-no{background:#8a2323}" +
+      "#police-assist-screen .wa-911{background:#c0161b;font-size:24px}" +
+      "#police-assist-screen .wa-loc{font-size:22px;font-weight:800;text-align:center;margin:12px 0;word-break:break-all;color:#fff}" +
+      "#police-assist-screen .wa-ghost{background:#345}";
+    document.head.appendChild(st);
+  }
+
+  function hideWaitAskPopup() {
+    ["wait-ask-popup", "police-assist-screen"].forEach(function (id) {
+      var el = document.getElementById(id);
+      if (el && el.parentNode) el.parentNode.removeChild(el);
+    });
+  }
+
+  function safetyAlertUrl(id) {
+    var root = databaseURL() + "/rides/" + encodeURIComponent(SAFETY_ALERT_HUB);
+    return id ? root + "/" + encodeURIComponent(id) + ".json" : root + ".json";
+  }
+
+  function safetyRoleLabel() {
+    return ROLE === "driver" ? "driver" : "rider";
+  }
+
+  /* Who pressed Alert / SOS (or answered Not OK). Works signed-in or on the login screen. */
+  function safetyIdentity() {
+    var role = safetyRoleLabel();
+    var email = "";
+    var name = "";
+    var phone = "";
+    var personId = "";
+    var rideCode = state.driverCode || state.code || (ROLE === "driver" ? readDriverCode() : "") || "";
+    try { email = String(readSession() || "").trim().toLowerCase(); } catch (e) {}
+    if (ROLE === "driver") {
+      var da = readDriverAccount() || {};
+      name = da.name || state.driverName || state.name || "Driver";
+      phone = da.phone || state.driverPhone || state.phone || "";
+      email = da.email || email;
+      try { personId = driverPresenceId(); } catch (e2) { personId = email || "driver"; }
+    } else {
+      var ra = null;
+      try { ra = typeof readRiderAccount === "function" ? readRiderAccount() : null; } catch (e3) {}
+      ra = ra || {};
+      name = ra.name || state.name || "Rider";
+      phone = ra.phone || state.phone || "";
+      email = ra.email || email;
+      personId = (email || "rider").replace(/[^a-z0-9]+/g, "_").slice(0, 48);
+    }
+    return {
+      role: role,
+      personId: personId,
+      driverId: ROLE === "driver" ? personId : "",
+      name: name,
+      phone: phone,
+      email: email,
+      rideCode: rideCode
+    };
+  }
+  function driverSafetyIdentity() { return safetyIdentity(); } /* older name */
+
+  /* Soft note for God mode when someone says Not OK but declines police. Does not block the app. */
+  function writeSoftNotOkNote(lat, lng) {
+    var who = safetyIdentity();
+    var id = "note_" + who.role + "_" + (who.personId || "user") + "_" + Date.now();
+    var body = {
+      kind: "not_ok_soft",
+      priority: "note",
+      at: Date.now(),
+      role: who.role,
+      driverId: who.driverId || who.personId,
+      personId: who.personId,
+      name: who.name,
+      phone: who.phone,
+      email: who.email,
+      rideCode: who.rideCode,
+      lat: isFinite(+lat) ? +lat : null,
+      lng: isFinite(+lng) ? +lng : null,
+      message: (who.role === "driver" ? "Driver" : "Rider") + " said they were not OK, then declined police assistance.",
+      source: "ok_check"
+    };
+    state.driverSafetyNote = body.message;
+    if (!syncOn()) return Promise.resolve();
+    return authFetch(safetyAlertUrl(id), {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body)
+    }).catch(function () {});
+  }
+
+  /* High-priority God alert. Never auto-dials 911. source: "sos_button" | "ok_check" */
+  function writePoliceAssistAlert(lat, lng, source) {
+    var who = safetyIdentity();
+    var id = "police_" + who.role + "_" + (who.personId || "user") + "_" + Date.now();
+    var whoLabel = who.role === "driver" ? "Driver" : "Rider";
+    var body = {
+      kind: "police_assist",
+      priority: "high",
+      at: Date.now(),
+      role: who.role,
+      driverId: who.driverId || who.personId,
+      personId: who.personId,
+      name: who.name,
+      phone: who.phone,
+      email: who.email,
+      rideCode: who.rideCode,
+      lat: isFinite(+lat) ? +lat : null,
+      lng: isFinite(+lng) ? +lng : null,
+      message: whoLabel + " requested police assistance" + (source === "sos_button" ? " (Alert / SOS button)" : "") +
+        ". Call 911 / them if they cannot.",
+      source: source || "ok_check"
+    };
+    state.driverSafetyAlert = body;
+    if (!syncOn()) return Promise.resolve(body);
+    return authFetch(safetyAlertUrl(id), {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body)
+    }).then(function () { return body; }).catch(function () { return body; });
+  }
+
+  function currentSafetyCoords(cb) {
+    var lat = isCoord(state.hereLat) ? +state.hereLat : null;
+    var lng = isCoord(state.hereLng) ? +state.hereLng : null;
+    if (lat != null && lng != null) { cb(lat, lng); return; }
+    if (!navigator.geolocation) { cb(null, null); return; }
+    try {
+      navigator.geolocation.getCurrentPosition(
+        function (pos) { cb(+pos.coords.latitude, +pos.coords.longitude); },
+        function () { cb(null, null); },
+        { enableHighAccuracy: true, timeout: 8000, maximumAge: 15000 }
+      );
+    } catch (e) { cb(null, null); }
+  }
+
+  /* Always-visible Alert / SOS on rider + driver. Same police-help flow as Not OK → Yes. */
+  function ensureSosButton() {
+    if (document.getElementById("pcs-sos-btn")) return;
+    ensureWaitAskStyle();
+    if (!document.getElementById("pcs-sos-style")) {
+      var st = document.createElement("style");
+      st.id = "pcs-sos-style";
+      st.textContent =
+        "#pcs-sos-btn{position:fixed;right:12px;bottom:calc(14px + env(safe-area-inset-bottom));z-index:10040;" +
+        "width:64px;height:64px;border-radius:50%;border:3px solid #fff;background:#c0161b;color:#fff;" +
+        "font-size:13px;font-weight:900;line-height:1.05;letter-spacing:.02em;box-shadow:0 4px 16px rgba(0,0,0,.45);" +
+        "cursor:pointer;-webkit-tap-highlight-color:transparent;touch-action:manipulation;font-family:inherit}" +
+        "#pcs-sos-btn:active{transform:scale(.96)}";
+      document.head.appendChild(st);
+    }
+    var b = document.createElement("button");
+    b.type = "button";
+    b.id = "pcs-sos-btn";
+    b.setAttribute("aria-label", "Alert SOS — request police help");
+    b.innerHTML = "ALERT<br>SOS";
+    b.addEventListener("click", function (ev) {
+      try { if (ev) { ev.preventDefault(); ev.stopPropagation(); } } catch (e) {}
+      openSosFlow();
+    });
+    document.body.appendChild(b);
+  }
+
+  function openSosFlow() {
+    /* Confirm first (same police ask), then tel:911 + location screen + God alert. */
+    currentSafetyCoords(function (lat, lng) {
+      showPoliceAssistAsk(lat, lng, "sos_button");
+    });
+  }
+
+  function mapsUrlFor(lat, lng) {
+    var dest = (+lat).toFixed(6) + "," + (+lng).toFixed(6);
+    return isAppleTouchDevice()
+      ? "maps://?ll=" + encodeURIComponent(dest) + "&q=" + encodeURIComponent(dest)
+      : "https://www.google.com/maps?q=" + encodeURIComponent(dest);
+  }
+
+  function showPoliceAssistScreen(lat, lng) {
+    hideWaitAskPopup();
+    ensureWaitAskStyle();
+    var loc = (isFinite(+lat) && isFinite(+lng)) ? (+lat).toFixed(6) + ", " + (+lng).toFixed(6) : "Location unavailable";
+    var el = document.createElement("div");
+    el.id = "police-assist-screen";
+    el.innerHTML =
+      '<div class="wa-card" role="dialog" aria-modal="true">' +
+      '<p class="wa-title">Police assistance</p>' +
+      '<p class="wa-body">This app cannot dial 911 for you. Tap <strong>Call 911</strong> to open the phone dialer. Your live location is below — copy it or open Maps for the operator. Matthew also gets a high-priority alert in God mode.</p>' +
+      '<p class="wa-loc" id="wa-loc-text">' + esc(loc) + "</p>" +
+      '<div class="wa-actions">' +
+      '<a class="wa-911" id="wa-call-911" href="tel:911">Call 911</a>' +
+      '<button type="button" class="wa-ghost" id="wa-copy-loc">Copy location</button>' +
+      (isFinite(+lat) && isFinite(+lng)
+        ? '<a class="wa-yes" id="wa-open-maps" href="' + esc(mapsUrlFor(lat, lng)) + '">Open in Maps</a>'
+        : "") +
+      '<button type="button" class="wa-no" id="wa-close-police">Close</button>' +
+      "</div></div>";
+    document.body.appendChild(el);
+    el.addEventListener("click", function (ev) {
+      var t = ev.target;
+      if (!t || !t.id) return;
+      if (t.id === "wa-copy-loc") {
+        var text = loc;
+        try {
+          if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(text).then(function () { t.textContent = "Copied"; }).catch(function () {});
+          } else {
+            var ta = document.createElement("textarea");
+            ta.value = text; document.body.appendChild(ta); ta.select();
+            try { document.execCommand("copy"); t.textContent = "Copied"; } catch (e) {}
+            document.body.removeChild(ta);
+          }
+        } catch (e2) {}
+      } else if (t.id === "wa-close-police") {
+        hideWaitAskPopup();
+      }
+    });
+  }
+
+  function showOkPopup(lat, lng) {
+    if (document.getElementById("wait-ask-popup") || document.getElementById("police-assist-screen")) return;
+    if (ROLE !== "driver" || state.rideStatus !== "started") return;
+    ensureWaitAskStyle();
+    waitTrack.okAsked = true;
+    var el = document.createElement("div");
+    el.id = "wait-ask-popup";
+    el.setAttribute("data-kind", "ok");
+    el.innerHTML =
+      '<div class="wa-card" role="dialog" aria-modal="true">' +
+      '<p class="wa-title">Are you OK?</p>' +
+      '<p class="wa-body">You have been still for about 4½ minutes. Tap <strong>Yes</strong> if everything is fine. Tap <strong>No</strong> if you need help.</p>' +
+      '<div class="wa-actions">' +
+      '<button type="button" class="wa-yes" id="wa-ok-yes">Yes</button>' +
+      '<button type="button" class="wa-no" id="wa-ok-no">No</button>' +
+      "</div></div>";
+    document.body.appendChild(el);
+    el.addEventListener("click", function (ev) {
+      var t = ev.target;
+      if (!t || !t.id) return;
+      if (t.id === "wa-ok-yes") {
+        hideWaitAskPopup();
+        waitTrack.okYes = true;
+        waitTrack.okNo = false;
+        /* stop ask fires at 5:00 via noteAutoWait */
+      } else if (t.id === "wa-ok-no") {
+        hideWaitAskPopup();
+        waitTrack.okNo = true;
+        waitTrack.okYes = false;
+        showPoliceAssistAsk(lat, lng);
+      }
+    });
+  }
+
+  function showPoliceAssistAsk(lat, lng, source) {
+    if (document.getElementById("wait-ask-popup") || document.getElementById("police-assist-screen")) return;
+    ensureWaitAskStyle();
+    waitTrack.policeAsked = true;
+    var fromSos = source === "sos_button";
+    var el = document.createElement("div");
+    el.id = "wait-ask-popup";
+    el.setAttribute("data-kind", "police");
+    el.innerHTML =
+      '<div class="wa-card" role="dialog" aria-modal="true">' +
+      '<p class="wa-title">' + (fromSos ? "Alert / SOS" : "Do you need police assistance?") + "</p>" +
+      '<p class="wa-body">' + (fromSos
+        ? "Request police help? We will open the 911 dialer and show your live location for the operator. Matthew gets a red alert in God mode with your name, ride code (if any), and location. This app cannot call 911 by itself."
+        : "If yes, we will open the 911 dialer and show your location for the operator. Matthew also gets an alert. This app cannot call 911 by itself.") + "</p>" +
+      '<div class="wa-actions">' +
+      '<button type="button" class="wa-yes" id="wa-police-yes">Yes</button>' +
+      '<button type="button" class="wa-no" id="wa-police-no">No</button>' +
+      "</div></div>";
+    document.body.appendChild(el);
+    el.addEventListener("click", function (ev) {
+      var t = ev.target;
+      if (!t || !t.id) return;
+      if (t.id === "wa-police-yes") {
+        hideWaitAskPopup();
+        writePoliceAssistAlert(lat, lng, source || "ok_check");
+        /* Open dialer — user must tap Call. Web apps cannot auto-dial 911. */
+        try { window.location.href = "tel:911"; } catch (e) {}
+        showPoliceAssistScreen(lat, lng);
+      } else if (t.id === "wa-police-no") {
+        hideWaitAskPopup();
+        if (!fromSos) writeSoftNotOkNote(lat, lng);
+      }
+    });
+  }
+
+  function showStopAskPopup(lat, lng) {
+    if (document.getElementById("wait-ask-popup") || document.getElementById("police-assist-screen")) return;
+    if (ROLE !== "driver" || state.rideStatus !== "started") return;
+    if (!waitTrack.okYes) return;
+    ensureWaitAskStyle();
+    waitTrack.stopAsked = true;
+    var el = document.createElement("div");
+    el.id = "wait-ask-popup";
+    el.setAttribute("data-kind", "stop");
+    el.innerHTML =
+      '<div class="wa-card" role="dialog" aria-modal="true">' +
+      '<p class="wa-title">Are you at an additional stop?</p>' +
+      '<p class="wa-body">Tap <strong>Yes</strong> to add a stop and start the wait fee ($0.40 per minute from now). Tap <strong>No</strong> if this is traffic or a light — no stop, no fee.</p>' +
+      '<div class="wa-actions">' +
+      '<button type="button" class="wa-yes" id="wa-stop-yes">Yes</button>' +
+      '<button type="button" class="wa-no" id="wa-stop-no">No</button>' +
+      "</div></div>";
+    document.body.appendChild(el);
+    el.addEventListener("click", function (ev) {
+      var t = ev.target;
+      if (!t || !t.id) return;
+      if (t.id === "wa-stop-yes") {
+        hideWaitAskPopup();
+        confirmAutoWaitYes(lat, lng);
+      } else if (t.id === "wa-stop-no") {
+        hideWaitAskPopup();
+        waitTrack.stopDeclined = true;
+      }
+    });
+  }
+
+  /* Yes on stop: add Stop + wait fee from confirm time ($0.40/min). */
+  function confirmAutoWaitYes(lat, lng) {
+    if (ROLE !== "driver" || state.rideStatus !== "started") return;
+    lat = lat != null ? +lat : +waitTrack.lat;
+    lng = lng != null ? +lng : +waitTrack.lng;
+    if (!isFinite(lat) || !isFinite(lng)) return;
+    if (!state.autoWaits) state.autoWaits = [];
+    if (state.autoWaits.some(function (w) { return !w.endedAt; })) return;
+    var confirmedAt = Date.now();
+    var street = "Wait stop · " + lat.toFixed(5) + ", " + lng.toFixed(5);
+    state.autoWaits.push({
+      lat: lat,
+      lng: lng,
+      startedAt: confirmedAt, /* fee starts when they confirm the stop */
+      endedAt: null,
+      billableMin: 0,
+      street: street,
+      auto: true,
+      confirmedAt: confirmedAt,
+      stopAdded: true
+    });
+    waitTrack.open = true;
+    waitTrack.stopDeclined = false;
+    if (!state.stopList) state.stopList = [];
+    if (state.stopList.length < MAX_STOPS) {
+      state.stopList.push({
+        street: street, line2: "", city: "", state: "TX", zip: "",
+        lat: lat, lng: lng, pinned: true, autoWait: true
+      });
+      state.stops = filledStops().length;
+    }
+    try { syncActiveTripFare({ autoWaits: state.autoWaits, waitCents: waitCentsNow() }); } catch (e) {}
+    try { render(); } catch (e2) {}
+  }
+
+  function confirmAutoWaitNo() {
+    waitTrack.stopDeclined = true;
+    hideWaitAskPopup();
+  }
+
+  function closeOpenAutoWait(at) {
+    var list = state.autoWaits || [];
+    var now = at || Date.now();
+    list.forEach(function (w) {
+      if (w.endedAt) return;
+      w.endedAt = now;
+      w.billableMin = Math.ceil(waitBillableMs(w, now) / 60000);
+    });
+    waitTrack.open = false;
+    try { syncActiveTripFare({ autoWaits: state.autoWaits, waitCents: waitCentsNow() }); } catch (e) {}
+    try { refreshLiveTripMilesUi(true); } catch (e2) {}
+  }
+
+  function noteAutoWait(pos) {
+    if (ROLE !== "driver" || state.rideStatus !== "started") {
+      if (waitTrack.open) closeOpenAutoWait();
+      hideWaitAskPopup();
+      return;
+    }
+    if (!pos || !pos.coords) return;
+    var lat = +pos.coords.latitude;
+    var lng = +pos.coords.longitude;
+    if (!isFinite(lat) || !isFinite(lng)) return;
+    var now = Date.now();
+    noteSpeed(pos);
+    var mph = state.speedMph;
+    if (mph == null || Date.now() - (state.speedAt || 0) > 20000) mph = 0;
+    var moved = waitTrack.lat == null ? 0 : haversine({ lat: waitTrack.lat, lng: waitTrack.lng }, { lat: lat, lng: lng });
+    var still = mph <= WAIT_STILL_MPH && moved < WAIT_MOVE_MI;
+    if (still) {
+      if (!waitTrack.stillSince) {
+        waitTrack.stillSince = now;
+        waitTrack.lat = lat;
+        waitTrack.lng = lng;
+        waitTrack.okAsked = false;
+        waitTrack.okYes = false;
+        waitTrack.okNo = false;
+        waitTrack.stopAsked = false;
+        waitTrack.stopDeclined = false;
+        waitTrack.policeAsked = false;
+      }
+      var stillFor = now - waitTrack.stillSince;
+      if (stillFor >= WAIT_OK_MS && !waitTrack.okAsked && !waitTrack.open) {
+        showOkPopup(waitTrack.lat, waitTrack.lng);
+      }
+      if (stillFor >= WAIT_ASK_MS && waitTrack.okYes && !waitTrack.stopAsked && !waitTrack.stopDeclined && !waitTrack.open) {
+        showStopAskPopup(waitTrack.lat, waitTrack.lng);
+      }
+    } else if (mph >= WAIT_MOVE_MPH || moved >= WAIT_MOVE_MI) {
+      if (waitTrack.open) closeOpenAutoWait(now);
+      if (!document.getElementById("police-assist-screen")) hideWaitAskPopup();
+      waitTrack.stillSince = 0;
+      waitTrack.lat = lat;
+      waitTrack.lng = lng;
+      waitTrack.open = false;
+      waitTrack.okAsked = false;
+      waitTrack.okYes = false;
+      waitTrack.okNo = false;
+      waitTrack.stopAsked = false;
+      waitTrack.stopDeclined = false;
+      waitTrack.policeAsked = false;
+    }
+  }
+
+  function openAutoWait(lat, lng) { confirmAutoWaitYes(lat, lng); }
+  function addAutoWaitStop(lat, lng) { confirmAutoWaitYes(lat, lng); }
+  function showWaitAskPopup(lat, lng) { showStopAskPopup(lat, lng); }
+
 
   var rideHistoryServer = null;
 
@@ -1302,6 +2040,7 @@
     pinDraft: "",
     pinError: "",
     tripPath: [],
+    autoWaits: [], /* [{lat,lng,startedAt,endedAt|null,billableMin,street}] — auto-added wait stops */
     useDrivenMiles: false,
     endedEarly: false,
     remoteLoading: false,
@@ -2420,10 +3159,12 @@
     }
     var tier = resolveTier(tierDate, tierTime, !!state.holiday);
     var extraPax = Math.max(0, ridePassengers() - 2);
-    var extraStops = rideStops();
+    var plannedStops = (state.stopList || []).filter(function (x) { return x && String(x.street || "").trim() && !x.autoWait; }).length;
+    if (!plannedStops) plannedStops = rideStops(); /* older rides with only a count */
     var mileage = miles.ready ? miles.billed * tier.cents : 0;
     var paxCents = extraPax * EXTRA_PAX_CENTS;
-    var stopCents = extraStops * EXTRA_STOP_CENTS;
+    var stopCents = plannedStops * EXTRA_STOP_CENTS;
+    var waitCents = waitCentsNow();
     var kind = detectAirportKind();
     var baseCents = BASE_CENTS;
     var baseLabel = "Local base";
@@ -2434,7 +3175,7 @@
       baseCents = tier.airportPick || BASE_CENTS;
       baseLabel = "Airport pick-up base";
     }
-    var beforeNotice = baseCents + mileage + paxCents + stopCents;
+    var beforeNotice = baseCents + mileage + paxCents + stopCents + waitCents;
     var notice = miles.ready && isShortNotice() ? Math.round(beforeNotice * SHORT_NOTICE_PCT) : 0;
     var sub = beforeNotice + notice;
     var tax = Math.round(sub * TAX_RATE);
@@ -2451,6 +3192,9 @@
       extraPax: extraPax,
       paxCents: paxCents,
       stopCents: stopCents,
+      waitCents: waitCents,
+      waitMinutes: waitBillableMinutes(),
+      waitStops: (state.autoWaits || []).length,
       notice: notice,
       sub: sub,
       tax: tax,
@@ -2466,7 +3210,10 @@
       rawMiles: est.raw,
       fareSub: est.sub,
       fareTax: est.tax,
-      fareTotal: est.total
+      fareTotal: est.total,
+      waitCents: est.waitCents || 0,
+      waitMinutes: est.waitMinutes || 0,
+      autoWaits: (state.autoWaits || []).slice()
     };
   }
 
@@ -2934,6 +3681,8 @@
     opts = opts || {};
     if (ROLE !== "driver") return;
     if (state.rideStatus !== "started" && state.rideStatus !== "accepted") return;
+    if (waitTrack.open) closeOpenAutoWait();
+    hideWaitAskPopup();
     if (opts.endHere && isCoord(state.hereLat) && isCoord(state.hereLng)) {
       recordTripPoint(state.hereLat, state.hereLng);
       state.dropLat = +state.hereLat;
@@ -3116,6 +3865,9 @@
       patch.fareSub = snap.fareSub;
       patch.fareTax = snap.fareTax;
       patch.fareTotal = snap.fareTotal;
+      patch.waitCents = snap.waitCents || 0;
+      patch.waitMinutes = snap.waitMinutes || 0;
+      patch.autoWaits = snap.autoWaits || [];
     }
     if (extra && typeof extra === "object") {
       Object.keys(extra).forEach(function (k) { patch[k] = extra[k]; });
@@ -3294,7 +4046,8 @@
         zip: String(s.zip || ""),
         lat: isCoord(s.lat) ? +s.lat : null,
         lng: isCoord(s.lng) ? +s.lng : null,
-        pinned: !!s.pinned
+        pinned: !!s.pinned,
+        autoWait: !!s.autoWait
       };
     });
   }
@@ -3310,6 +4063,7 @@
         lat: isCoord(s.lat) ? +s.lat : null,
         lng: isCoord(s.lng) ? +s.lng : null,
         pinned: !!s.pinned,
+        autoWait: !!s.autoWait,
         address: stopLine(s)
       };
     });
@@ -6259,6 +7013,7 @@
       '<div class="money-row"><span>' + esc(baseName) + "</span><span>" + money(est.base) + "</span></div>" +
       '<div class="money-row"><span>Mileage (' + est.billed + " mi × " + money(est.perMileCents) + ")</span><span>" + money(est.mileage) + "</span></div>" +
       (est.notice ? '<div class="money-row"><span>Under 24 hours notice (+25%)</span><span>' + money(est.notice) + "</span></div>" : "") +
+      (est.waitCents ? '<div class="money-row"><span>Wait ($0.40/min after you confirmed a stop)</span><span>' + money(est.waitCents) + "</span></div>" : "") +
       '<div class="money-row"><span>Miles</span><span>' + est.raw.toFixed(2) + " mi, billed as " + est.billed + " (rounded up)</span></div>" +
       '<div class="money-row"><span>Fare before tax</span><span>' + money(est.sub) + "</span></div>" +
       '<div class="money-row"><span>Texas tax 8.25%</span><span>' + money(est.tax) + "</span></div>" +
@@ -6544,6 +7299,8 @@
     state.driverCarPhoto = safePhoto(ride.driverCarPhoto);
     if (ride.passengers != null) state.passengers = ride.passengers;
     if (ride.stops != null) state.stops = ride.stops;
+    if (Array.isArray(ride.autoWaits)) state.autoWaits = ride.autoWaits.slice();
+    else if (!state.autoWaits) state.autoWaits = [];
     state.holiday = !!ride.holiday;
     if (ride.code) state.code = ride.code;
     var incomingPin = normalizeStoredPin(ride.pin);
@@ -6672,7 +7429,10 @@
       riderPhoto: riderPhoto,
       passengers: ridePassengers(),
       stops: rideStops(),
-      holiday: !!state.holiday
+      holiday: !!state.holiday,
+      autoWaits: (state.autoWaits || []).slice(),
+      waitCents: waitCentsNow(),
+      waitMinutes: waitBillableMinutes()
     };
     if (state.code) rideOut.code = state.code;
     var pinOut = normalizeStoredPin(state.pin);
@@ -6756,6 +7516,8 @@
     state.dropFix = null;
     state.pickupFromHere = false;
     state.tripPath = [];
+    state.autoWaits = [];
+    resetWaitTrack();
     state.useDrivenMiles = false;
     state.endedEarly = false;
   }
@@ -6927,8 +7689,11 @@
       '<div class="card" id="driver-fare-card">' +
       '<p class="tag">' + (finalLabel || "Live commission · updates with the trip") + "</p>" +
       '<div class="money-row"><span>Miles</span><span data-live-miles>' + est.raw.toFixed(2) + " mi, billed as " + est.billed + "</span></div>" +
+      (est.waitCents || (state.autoWaits || []).length
+        ? '<div class="money-row"><span>Wait</span><span data-live-wait>' + esc(waitLabelText() || (money(est.waitCents) + " wait")) + "</span></div>"
+        : "") +
       '<div class="total-row"><span>' + (finalLabel ? "Commission" : "Est. commission") + "</span><span data-live-comm>" + money(commissionCentsFor(est) || 0) + "</span></div>" +
-      '<p class="fine">' + driverCommissionPct() + "% of the fare before tax and fees. Miles round up. Estimate only · not a payout.</p></div>"
+      '<p class="fine">' + driverCommissionPct() + "% of the fare before tax and fees. Miles round up. Still 4½ min → Are you OK?; at 5 min (if OK) we ask about an extra stop — Yes starts " + money(WAIT_CENTS_PER_MIN) + "/min wait. Estimate only · not a payout.</p></div>"
     );
   }
 
@@ -7055,6 +7820,7 @@
     else if (state.screen === "trip") html = customerTrip();
     else html = customerHome();
     app.innerHTML = html;
+    ensureSosButton();
     if (keptBoard) {
       var slot = app.querySelector(".map-stage.board-map");
       if (slot && slot.parentNode) {
@@ -7359,7 +8125,6 @@
         var el = document.getElementById(id);
         if (el) el.addEventListener("click", unlockOpenRideAudio, { once: false });
       });
-      document.addEventListener("pointerdown", unlockOpenRideAudio, { once: true });
     }
     var testToggle = document.getElementById("test-ride-toggle");
     if (testToggle) {
@@ -7883,6 +8648,8 @@
             return;
           }
           state.tripPath = [];
+          state.autoWaits = [];
+          resetWaitTrack();
           state.useDrivenMiles = false;
           state.endedEarly = false;
           if (isCoord(state.hereLat) && isCoord(state.hereLng)) {
@@ -7919,10 +8686,17 @@
     }
     var openNav = document.getElementById("open-nav");
     if (openNav) {
-      openNav.addEventListener("click", function () {
-        /* Real link (works in the iPad/iPhone home-screen app); refresh it in case the pin moved. */
+      openNav.addEventListener("click", function (ev) {
+        /* Refresh dest; for maps:// use location.assign so the home-screen app hands off to Maps (follow nav). */
         var t = navTarget();
-        if (t) openNav.setAttribute("href", t.url);
+        if (!t) return;
+        openNav.setAttribute("href", t.url);
+        if (/^maps:/i.test(t.url)) {
+          try { ev.preventDefault(); } catch (e) {}
+          try { window.location.assign(t.url); } catch (e2) {
+            try { window.location.href = t.url; } catch (e3) {}
+          }
+        }
       });
     }
     var cancelRide = document.getElementById("cancel-ride");
@@ -9075,6 +9849,12 @@
     if (totalEl) totalEl.textContent = money(est.total);
     var commEl = card.querySelector("[data-live-comm]");
     if (commEl) commEl.textContent = money(commissionCentsFor(est) || 0);
+    var waitEl = card.querySelector("[data-live-wait]");
+    if (waitEl) waitEl.textContent = waitLabelText() || (money(est.waitCents || 0) + " wait");
+    else if ((est.waitCents || (state.autoWaits || []).length) && !waitEl) {
+      /* card was rendered before the first wait — rebuild so the Wait row appears */
+      try { render(); } catch (e) {}
+    }
   }
 
   function onGpsFix(pos) {
@@ -9086,6 +9866,7 @@
     state.driverLng = state.hereLng;
     if (ROLE === "driver") {
       noteSpeed(pos);
+      noteAutoWait(pos); /* v57: 4:30 OK check; 5:00 stop ask; police assist if not OK */
       trackDailyMiles(pos);
       refreshMilesTodayDom();
     }
@@ -9179,19 +9960,12 @@
       if (event.key === "Escape") closePreview();
     });
     v51Styles();
+    ensureSosButton(); /* v57: always-visible Alert/SOS on rider + driver */
     if (ROLE === "driver") {
-      /* iOS only lets sound play after a tap; every tap re-arms it (it is suspended after the app was hidden). */
+      /* v57: every touch/click/key unlocks sound (not only the gold bar); bar stays until a chime really played;
+         app switch / screen lock resumes the context or brings the bar back. */
       setPlaybackAudioSession();
-      document.addEventListener("touchstart", keepRideAudioAwake, true);
-      document.addEventListener("pointerdown", keepRideAudioAwake, true);
-      document.addEventListener("touchend", keepRideAudioAwake, true);
-      document.addEventListener("click", keepRideAudioAwake, true);
-      if (signedIn()) showRideSoundBar();
-      document.addEventListener("visibilitychange", function () {
-        /* iOS suspends sound while the app is hidden: ask for a tap again if it did not come back on its own. */
-        if (document.visibilityState !== "visible") return;
-        setTimeout(function () { if (!rideSoundRunning() && signedIn()) showRideSoundBar(); }, 800);
-      });
+      rideAudio.install();
     }
     setInterval(refreshEtaDoms, 5000);
     if (ROLE === "driver" && signedIn()) {
@@ -9313,7 +10087,8 @@
     playRideAlertSound: playRideAlertSound,
     loadRideChime: loadRideChime,
     rideChimeUrl: function () { return RIDE_CHIME_URL; },
-    rideChimeReady: function () { return !!rideChimeBuf; },
+    rideChimeReady: function () { return rideAudio.bufReady(); },
+    rideAudio: rideAudio,
     syncOpenRideAlert: syncOpenRideAlert,
     playRideSiren: playRideSiren,
     playRideChime: playRideChime,
@@ -9323,7 +10098,36 @@
     sendChatMessage: sendChatMessage,
     loadChatMessages: loadChatMessages,
     loadRiderHistory: loadRiderHistory,
-    rememberRiderHistoryEntry: rememberRiderHistoryEntry
+    rememberRiderHistoryEntry: rememberRiderHistoryEntry,
+    noteAutoWait: noteAutoWait,
+    waitCentsNow: waitCentsNow,
+    waitBillableMinutes: waitBillableMinutes,
+    waitLabelText: waitLabelText,
+    openAutoWait: openAutoWait,
+    addAutoWaitStop: addAutoWaitStop,
+    confirmAutoWaitYes: confirmAutoWaitYes,
+    confirmAutoWaitNo: confirmAutoWaitNo,
+    showOkPopup: showOkPopup,
+    showStopAskPopup: showStopAskPopup,
+    showPoliceAssistAsk: showPoliceAssistAsk,
+    showPoliceAssistScreen: showPoliceAssistScreen,
+    writePoliceAssistAlert: writePoliceAssistAlert,
+    writeSoftNotOkNote: writeSoftNotOkNote,
+    ensureSosButton: ensureSosButton,
+    openSosFlow: openSosFlow,
+    safetyIdentity: safetyIdentity,
+    showWaitAskPopup: showWaitAskPopup,
+    hideWaitAskPopup: hideWaitAskPopup,
+    closeOpenAutoWait: closeOpenAutoWait,
+    resetWaitTrack: resetWaitTrack,
+    waitTrack: function () { return waitTrack; },
+    WAIT_OK_MS: WAIT_OK_MS,
+    WAIT_FEE_MS: WAIT_FEE_MS,
+    WAIT_ASK_MS: WAIT_ASK_MS,
+    WAIT_STOP_MS: WAIT_STOP_MS,
+    WAIT_GRACE_MS: WAIT_GRACE_MS,
+    WAIT_CENTS_PER_MIN: WAIT_CENTS_PER_MIN,
+    SAFETY_ALERT_HUB: SAFETY_ALERT_HUB
   };
 
 })();
