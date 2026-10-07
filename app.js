@@ -8,6 +8,9 @@
  * street / city / ZIP (GPS point kept for routing); driving miles always come from a real route (Google Directions,
  * else OSRM) and are recalculated when From / To / stops change; route map (Leaflet / OpenStreetMap);
  * nearest-first place suggestions with distances (same search as the rider app).
+ * v18 (Oct 6, 2026): Square LIVE. Book it charges the 25% deposit (or pay in full) through the pcs-pay Worker
+ * POST /deposit; the Worker re-reads this booking from Firebase and only charges 25% of its estimate (or the full
+ * estimate). Sandbox only with ?squaretest=1.
  */
 (function () {
   'use strict';
@@ -1774,9 +1777,11 @@
     return {
       appId: String(c.applicationId || '').trim(),
       locationId: String(c.locationId || '').trim(),
-      // Optional paymentUrl (charges now); otherwise the same Worker URL the rider app uses.
-      endpoint: String(c.paymentUrl || c.cardOnFileUrl || '').trim(),
+      // v18: pcs-pay Worker POST /deposit (25% deposit or pay in full, amount checked by the Worker). Blank = Square off.
+      endpoint: String(c.depositUrl || '').trim(),
       sandbox: String(c.environment || '').toLowerCase() === 'sandbox',
+      // Only true when app/square-config.js turned on the sandbox for this tab (?squaretest=1).
+      testMode: c.testMode === true,
     };
   }
 
@@ -1838,7 +1843,8 @@
       status: 'pending_owner',
       source: 'quote-page',
       bookedVia: 'Website quote page — Book it',
-      isTest: false,
+      // Square TEST MODE bookings are flagged so drivers never see them and God mode can tell them apart.
+      isTest: squareConfigured() && squareCfg().testMode,
       name: els.contactName.value.trim(),
       phone: els.contactPhone.value.trim(),
       email: els.contactEmail.value.trim(),
@@ -1927,7 +1933,7 @@
     const s = window.PCS_SYNC || {};
     const hook = String(s.bookingWebhook || '').trim();
     const secret = String(s.webhookSecret || '').trim();
-    if (!/^https:\/\//i.test(hook) || !secret) return;
+    if (!/^https:\/\//i.test(hook) || !secret || ride.isTest) return;
     try {
       fetch(hook, {
         method: 'POST',
@@ -2000,13 +2006,14 @@
         '<p class="book-fine">The payment link comes by text to ' + escapeHtml(ride.phone) + '. Your booking is pending until Matthew or a driver accepts it. Questions? Call <a href="tel:9362617878">936-261-7878</a>.</p>';
       return;
     }
+    const cfg = squareCfg();
     panel.innerHTML = bookedHeadHtml(ride) +
-      '<p class="book-copy" id="booked-message"><strong>Booking received.</strong> Pay ' + due + ' securely below to hold your ride. Square keeps your card; this page never sees the number.</p>' +
+      (cfg.testMode ? '<p class="test-flag">TEST MODE · Square sandbox · card 4111 1111 1111 1111, CVV 111, ZIP 77042</p>' : '') +
+      '<p class="book-copy" id="booked-message"><strong>Booking received.</strong> Pay ' + due + ' securely below to finish booking. Square keeps your card; this page never sees the number.</p>' +
       '<div id="qp-card" class="qp-card"><p class="book-fine">Loading the secure card form…</p></div>' +
       '<p class="field-error" id="qp-card-error" role="alert" hidden></p>' +
       '<button type="button" class="btn btn-primary" id="qp-pay-btn" disabled>Pay ' + due + '</button>' +
       '<p class="book-fine">Your booking is pending until Matthew or a driver accepts it. Questions? Call <a href="tel:9362617878">936-261-7878</a>.</p>';
-    const cfg = squareCfg();
     const errBox = document.getElementById('qp-card-error');
     const showErr = (msg) => { if (errBox) { errBox.textContent = msg || ''; errBox.hidden = !msg; } };
     loadSquareSdk(cfg.sandbox)
@@ -2027,50 +2034,76 @@
         const b = document.getElementById('qp-pay-btn');
         if (b) b.hidden = true;
       });
+    let attempt = 0;
     const payBtn = document.getElementById('qp-pay-btn');
     if (payBtn) payBtn.addEventListener('click', () => {
-      if (!sqCard) return;
+      if (!sqCard || payBtn.dataset.busy === '1') return;
+      payBtn.dataset.busy = '1';
       payBtn.disabled = true;
       payBtn.textContent = 'Paying…';
       showErr('');
+      attempt += 1;
+      // The Worker builds the Square idempotency key from the booking code + attempt; the busy flag stops double taps.
       sqCard.tokenize().then((tok) => {
         if (!tok || tok.status !== 'OK' || !tok.token) {
           const first = tok && tok.errors && tok.errors[0];
-          throw new Error((first && first.message) || 'Check the card details and try again.');
+          const err = new Error((first && first.message) || 'Check the card details and try again.');
+          err.cardForm = true;
+          throw err;
         }
         return fetchWithTimeout(cfg.endpoint, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            source: 'quote-page', rideCode: ride.code, sourceId: tok.token, chargeNow: true,
-            amountCents: ride.amountDueCents, payChoice: ride.payChoice, estimateCents: ride.estimateCents,
-            name: ride.name, phone: ride.phone, email: ride.email, isTest: false,
+            rideCode: ride.code,
+            sourceId: tok.token,
+            choice: ride.payChoice === 'full' ? 'full' : 'deposit',
+            amountCents: ride.amountDueCents,
+            buyerEmail: ride.email || undefined,
+            attempt: attempt - 1,
+            sandbox: cfg.sandbox ? true : undefined,
           }),
         }, 30000);
       }).then((res) => res.json().catch(() => ({})).then((data) => {
-        if (!res.ok || !data || !data.ok) throw new Error((data && data.error) || 'Square didn’t take the payment. Try again.');
+        if (!res.ok || !data || !data.ok || !(data.paymentId || data.already)) throw new Error((data && data.error) || 'The payment didn’t go through. Try again.');
         return data;
       })).then((data) => {
-        const paid = !!data.paymentId;
-        const patch = {
+        const now = Date.now();
+        const paid = {
+          paymentStatus: ride.payChoice === 'full' ? 'paid_in_full' : 'deposit_paid',
+          paidCents: Number(data.amountCents) || ride.amountDueCents,
+          squarePaymentId: String(data.paymentId),
+          squarePaymentStatus: String(data.status || ''),
+          receiptUrl: /^https:\/\//i.test(data.receiptUrl || '') ? String(data.receiptUrl) : '',
+          paymentEnv: cfg.sandbox ? 'sandbox' : 'production',
+          paidAt: now,
           cardStatus: 'on_file',
-          cardOnFileAt: Date.now(),
           cardLast4: String(data.last4 || ''),
           cardBrand: String(data.brand || ''),
-          squareCardId: String(data.cardId || ''),
-          squareCustomerId: String(data.customerId || ''),
-          paymentStatus: paid ? (ride.payChoice === 'full' ? 'paid_in_full' : 'deposit_paid') : 'card_on_file',
-          updatedAt: Date.now(),
+          updatedAt: now,
         };
-        if (paid) { patch.squarePaymentId = String(data.paymentId); patch.paidCents = ride.amountDueCents; }
-        return dbPatch('/rides/' + ride.code, patch).catch(() => {}).then(() => paid);
+        // Same two records the booking wrote: the full ride and the REQUESTS row God mode polls.
+        const row = { paymentStatus: paid.paymentStatus, paidCents: paid.paidCents, squarePaymentId: paid.squarePaymentId,
+          cardStatus: paid.cardStatus, paymentEnv: paid.paymentEnv, updatedAt: now };
+        // v18: the Worker already wrote the full ride (data.written), so that PATCH is only the fallback.
+        // The REQUESTS row (what God mode polls) is always updated here.
+        if (!syncDbUrl()) return Promise.resolve(paid);
+        return Promise.all([
+          data.written === true ? Promise.resolve(true) : dbPatch('/rides/' + ride.code, paid).catch(() => false),
+          dbPatch('/rides/' + OPEN_HUB + '/' + ride.code, row).catch(() => false),
+        ]).then(() => paid);
       }).then((paid) => {
         destroySquareCard();
-        panel.innerHTML = bookedHeadHtml(ride) +
-          '<p class="book-copy book-received" id="booked-message"><strong>' +
-          (paid ? 'Payment received. Thank you! Your booking is in.' : 'Card saved. We’ll charge ' + due + ' when we confirm your booking.') +
-          '</strong></p><p class="book-fine">Your booking is pending until Matthew or a driver accepts it. We’ll text ' + escapeHtml(ride.phone) + ' to confirm.</p>';
+        const what = ride.payChoice === 'full' ? 'paid in full' : '25% deposit';
+        panel.innerHTML = '<p class="book-kicker">You’re booked</p>' +
+          '<p class="book-code">Booking code <strong>' + escapeHtml(ride.code) + '</strong></p>' +
+          (cfg.testMode ? '<p class="test-flag">TEST MODE · Square sandbox · no real charge</p>' : '') +
+          '<p class="book-copy book-received" id="booked-message"><strong>You’re booked, payment received.</strong></p>' +
+          '<div class="deposit-row"><span>Paid (' + what + ')</span><strong>' + money(paid.paidCents / 100) + '</strong></div>' +
+          (paid.receiptUrl ? '<p class="book-fine"><a id="receipt-link" href="' + escapeHtml(paid.receiptUrl) + '" target="_blank" rel="noopener">View your receipt</a></p>' : '') +
+          '<p class="book-fine">Your booking is pending until Matthew or a driver accepts it. We’ll text ' + escapeHtml(ride.phone) + ' to confirm. Questions? Call <a href="tel:9362617878">936-261-7878</a>.</p>';
       }).catch((err) => {
+        payBtn.dataset.busy = '';
         payBtn.disabled = false;
         payBtn.textContent = 'Pay ' + due;
         showErr((err && err.message) || 'The payment didn’t go through. Try again, or call 936-261-7878.');

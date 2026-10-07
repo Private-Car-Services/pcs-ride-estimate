@@ -937,6 +937,16 @@ a {
   color: var(--ok);
 }
 
+.test-flag {
+  margin: 0.4rem 0;
+  padding: 0.35rem 0.6rem;
+  border-radius: 8px;
+  background: var(--accent);
+  color: var(--navy);
+  font-size: 0.82rem;
+  font-weight: 700;
+}
+
 .qp-card {
   margin-top: 0.75rem;
   min-height: 90px;
