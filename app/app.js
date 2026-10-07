@@ -41,7 +41,13 @@
         "International arrival (+$15 service fee for extended wait and parking)". Ticked = its own line
         "International arrivals service fee $15.00" before tax (so it is taxed 8.25%). Saved on the ride
         (internationalArrival, internationalFeeCents, feeLines) and included in estimateCents / fareTotal, so the
-        card hold, cancel fee and the after-drop-off charge all include it. Hidden + cleared for other rides. */
+        card hold, cancel fee and the after-drop-off charge all include it. Hidden + cleared for other rides.
+   v63 (Oct 7): Nearest places first. With your location (or, failing that, the From pin) Google suggestions are
+        searched tightly around you: autocomplete with a 20 km circle + origin, plus (for business / chain names) the
+        Worker's /places/search (Text Search ranked by DISTANCE) so the nearest branches show up ("Mister Car Wash"
+        at Louetta Rd / I-45 for a rider in Spring). Both lists are merged, de-duped and sorted nearest first, and every
+        row shows its distance. Fewer than 3 matches -> one wider (50 km) pass. No location: the v61 Greater Houston
+        area bias is unchanged. Same for From, To and every stop (rider and driver). */
 (function () {
   var BUSINESS_PHONE = "936-261-7878";
   var DRIVER_COMMISSION_RATE = 0.7;
@@ -5433,15 +5439,18 @@
     return gPlaceSessions[prefix];
   }
 
+  var gSearchOffUntil = 0; /* v63: /search has its own daily cap; hitting it must not switch off autocomplete */
   function placesPost(path, body, ms) {
     var base = placesBase();
     if (!base || Date.now() < gPlacesOffUntil || typeof fetch !== "function") return Promise.resolve(null);
+    if (path === "/search" && Date.now() < gSearchOffUntil) return Promise.resolve(null);
     return withTimeout(fetch(base + path, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body)
     }).then(function (res) { return res.json(); }), ms || 4000).then(function (data) {
       if (!data || !data.ok) return null;
+      if (data.capped && path === "/search") { gSearchOffUntil = Date.now() + 30 * 60000; return null; } /* nearest-branch search capped: autocomplete only */
       if (data.capped) { gPlacesOffUntil = Date.now() + 30 * 60000; return null; } /* daily cap: free lookup for a while */
       if (data.fallback) return null;
       return data;
@@ -5474,22 +5483,106 @@
     return { city: parts[0] || "", state: "TX" };
   }
 
-  function googleSuggest(prefix, q) {
-    var bias = placesBias(prefix);
-    var body = { input: q, sessionToken: placesSession(prefix) };
-    if (bias) { body.lat = bias.lat; body.lng = bias.lng; }
-    return placesPost("/autocomplete", body).then(function (data) {
-      if (!data || !Array.isArray(data.predictions) || !data.predictions.length) return null;
-      return rankAreaFirst(data.predictions, bias).map(function (p) {
-        var cs = cityFromSub(p.sub);
+  function googleAutocompleteItem(p, bias) {
+    var cs = cityFromSub(p.sub);
+    return {
+      google: { placeId: p.placeId, main: p.main, sub: p.sub, types: p.types || [] },
+      place: { line1: p.main, city: cs.city, state: cs.state, zip: "", lat: NaN, lng: NaN },
+      dist: !bias.area && p.miles != null && isFinite(p.miles) ? +p.miles : null,
+      tier: 0
+    };
+  }
+
+  /* v63: tight search around you. Before v63 the location bias was the Worker's 80 km default and Google's order was
+     kept, so a chain name listed famous city branches (25, 27, 38, 24 mi) and missed the one 3 mi away. */
+  var PLACES_NEAR_M = 20000;   /* first pass: 20 km circle around you / the From pin */
+  var PLACES_WIDE_M = 50000;   /* fewer than PLACES_NEAR_MIN matches: one wider pass (Google's circle maximum) */
+  var PLACES_NEAR_MIN = 3;
+  var PLACES_LIST_MAX = 8;
+  var gNearbyCache = {};
+  /* Business / chain name ("Mister car was", "Kroger"), not a street address: also ask for the nearest branches. */
+  function placesTextSearchWanted(q, preds) {
+    q = String(q || "").trim();
+    if (q.length < 4 || looksLikeAddress(q)) return false;
+    if (!preds || !preds.length) return true;
+    return preds.some(function (p) { return googleIsBusiness(p.types); });
+  }
+  /* Worker /places/search (Text Search, rankPreference DISTANCE). Results already carry the full address + pin. */
+  function placesNearbySearch(q, bias) {
+    var key = normText(q) + "@" + (+bias.lat).toFixed(3) + "," + (+bias.lng).toFixed(3);
+    if (gNearbyCache[key]) return gNearbyCache[key];
+    var pr = placesPost("/search", { input: q, lat: +bias.lat, lng: +bias.lng, radius: PLACES_NEAR_M }, 6000).then(function (d) {
+      var list = d && Array.isArray(d.results) ? d.results : [];
+      if (!list.length) delete gNearbyCache[key];
+      return list.map(function (r) {
+        var pl = r.place || {};
+        if (!r.placeId || !isCoord(pl.lat) || !isCoord(pl.lng) || r.miles == null || !isFinite(r.miles)) return null;
+        var street = String(pl.street || "").trim();
+        var main = String(r.main || "").trim();
+        var line1 = r.business && main && normText(main) !== normText(street) ? (street ? main + ", " + street : main) : (street || main);
         return {
-          google: { placeId: p.placeId, main: p.main, sub: p.sub, types: p.types || [] },
-          place: { line1: p.main, city: cs.city, state: cs.state, zip: "", lat: NaN, lng: NaN },
-          dist: !bias.area && p.miles != null && isFinite(p.miles) ? +p.miles : null,
+          google: { placeId: r.placeId, main: main, sub: r.sub || "", types: r.business ? ["establishment"] : ["street_address"] },
+          place: { line1: line1, city: pl.city || "", state: stateCode(pl.state || "TX"), zip: String(pl.zip || "").slice(0, 5),
+            lat: +pl.lat, lng: +pl.lng, unit: unitLabel(pl.unit), source: "google" },
+          dist: +r.miles,
+          ready: true, /* full address + pin already: no Details call when picked */
           tier: 0
         };
+      }).filter(Boolean);
+    });
+    gNearbyCache[key] = pr;
+    return pr;
+  }
+  /* Merge (same Google place once; the Text Search copy wins because it has the pin), nearest first, distance on
+     every row (a match Google gave no distance for is dropped when others have one). */
+  function mergeNearest(lists) {
+    var byId = {}, out = [];
+    lists.forEach(function (list) {
+      (list || []).forEach(function (it) {
+        var id = it && it.google && it.google.placeId;
+        if (!id) return;
+        if (byId[id] != null) {
+          if (it.ready && !out[byId[id]].ready) out[byId[id]] = it;
+          return;
+        }
+        byId[id] = out.length;
+        out.push(it);
       });
     });
+    var withDist = out.filter(function (it) { return it.dist != null && isFinite(it.dist); });
+    if (withDist.length) out = withDist;
+    out.sort(function (a, b) { return (+a.dist) - (+b.dist); });
+    return out.slice(0, PLACES_LIST_MAX);
+  }
+
+  function googleSuggest(prefix, q) {
+    var bias = placesBias(prefix);
+    function auto(radius) {
+      var body = { input: q, sessionToken: placesSession(prefix) };
+      if (bias) { body.lat = bias.lat; body.lng = bias.lng; }
+      if (radius) body.radius = radius;
+      return placesPost("/autocomplete", body).then(function (data) {
+        return data && Array.isArray(data.predictions) ? data.predictions : [];
+      });
+    }
+    if (!bias || bias.area) {
+      /* No location / From pin: v61 Greater Houston area bias, unchanged. */
+      return auto(0).then(function (preds) {
+        if (!preds.length) return null;
+        return rankAreaFirst(preds, bias).map(function (p) { return googleAutocompleteItem(p, bias); });
+      });
+    }
+    return auto(PLACES_NEAR_M).then(function (preds) {
+      var near = preds.map(function (p) { return googleAutocompleteItem(p, bias); });
+      var search = placesTextSearchWanted(q, preds) ? placesNearbySearch(q, bias) : Promise.resolve([]);
+      return search.then(function (found) {
+        var list = mergeNearest([found, near]);
+        if (list.length >= PLACES_NEAR_MIN) return list;
+        return auto(PLACES_WIDE_M).then(function (wide) {
+          return mergeNearest([found, near, wide.map(function (p) { return googleAutocompleteItem(p, bias); })]);
+        });
+      });
+    }).then(function (list) { return list && list.length ? list : null; });
   }
 
   /* Google subpremise "9" -> "#9" for Address line 2 ("Apt 4" / "Suite 200" stay as they are). */
@@ -5621,6 +5714,15 @@
       if (!btn || !box._places) return;
       var item = box._places[Number(btn.getAttribute("data-i"))];
       if (!item) return;
+      if (item.ready) {
+        /* v63: nearest-branch result already has the full address + pin */
+        delete gPlaceSessions[prefix];
+        box.hidden = true;
+        usePlace(item.place);
+        var l2r = document.getElementById(prefix + "-line2");
+        if (item.place.unit && l2r && !l2r.value.trim()) { l2r.value = item.place.unit; addrSet(prefix, "Line2", item.place.unit); }
+        return;
+      }
       if (item.google) {
         box.hidden = true;
         var typed = input.value;
@@ -10265,11 +10367,17 @@
       var tokenKey = "resolve-" + (prefix || "drop");
       var body = { input: city && low.indexOf(String(city).toLowerCase()) === -1 ? base + ", " + city : base, sessionToken: placesSession(tokenKey) };
       if (bias && isCoord(bias.lat)) { body.lat = +bias.lat; body.lng = +bias.lng; }
+      if (bias && !bias.area) body.radius = PLACES_NEAR_M; /* v63: tight around you / the From pin */
       return placesPost("/autocomplete", body).then(function (data) {
         var words = searchWords(base);
         var preds = rankAreaFirst((data && data.predictions) || [], bias).filter(function (p) {
           return words.length && wordStarts(p.main, words[0].slice(0, 3)) && googleIsBusiness(p.types);
         });
+        if (bias && !bias.area) {
+          /* v63: nearest branch first (no distance = last) */
+          var mi = function (p) { return p.miles != null && isFinite(p.miles) ? +p.miles : 1e9; };
+          preds = preds.slice().sort(function (a, b) { return mi(a) - mi(b); });
+        }
         if (!preds.length) { delete gPlaceSessions[tokenKey]; return null; }
         return googlePlaceDetails(tokenKey, { placeId: preds[0].placeId, main: preds[0].main, sub: preds[0].sub, types: preds[0].types }).then(function (gp) {
           if (!gp) return null;
@@ -11411,6 +11519,7 @@
     intlArrivalEligible: intlArrivalEligible,
     placeNameVariants: placeNameVariants,
     googleSuggest: googleSuggest,
+    mergeNearest: mergeNearest,
     riderAgreed: riderAgreed,
     POLICY_VERSION: POLICY_VERSION,
     placesBase: placesBase,
