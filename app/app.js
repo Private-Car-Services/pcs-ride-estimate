@@ -47,7 +47,21 @@
         Worker's /places/search (Text Search ranked by DISTANCE) so the nearest branches show up ("Mister Car Wash"
         at Louetta Rd / I-45 for a rider in Spring). Both lists are merged, de-duped and sorted nearest first, and every
         row shows its distance. Fewer than 3 matches -> one wider (50 km) pass. No location: the v61 Greater Houston
-        area bias is unchanged. Same for From, To and every stop (rider and driver). */
+        area bias is unchanged. Same for From, To and every stop (rider and driver).
+   v64 (Oct 7): Driver miles after the app was in the background. iPhone pauses GPS for web apps while another app
+        (Lyft, Uber, Maps) is in front, and may reload the page. The last GPS point + time are now saved in
+        localStorage, so a reload no longer starts the day's miles fresh. On the first good fix after a gap of over
+        60 s the missing miles are filled in once: straight line x 1.25 right away, then replaced (once) by the free
+        OSRM road distance (capped at 2x the straight line). Ignored if accuracy is over 100 m (waits for a better
+        fix) or the jump implies over 90 mph. Filled miles are shown under "Today" and the driver sees a one-time
+        tip. Ride fares / trip miles are NOT changed.
+        Presence (rides/AVLBLDRV/drivers/{id}) also carries the shift state, separate from GPS freshness:
+        shiftOnline, shiftStartedAt, appState (foreground | background | closed), foregroundAt, backgroundedAt,
+        lastLat, lastLng, lastFixAt. Hidden -> PATCH appState background (best effort, keepalive). pagehide -> PATCH
+        appState closed + online:false (was DELETE). Log out still DELETEs the row (= logged out).
+        Log out now REQUIRES the ending odometer (>= starting; soft check vs app-tracked miles) and saves one record
+        per shift at rides/DRVRMLES/{id}/{logout day}/shifts/{shiftStartedAt}: startOdo, endOdo, odoMiles,
+        trackedMiles, filledInMiles, shiftStartedAt, shiftEndedAt, odoWarned, day. */
 (function () {
   var BUSINESS_PHONE = "936-261-7878";
   var DRIVER_COMMISSION_RATE = 0.7;
@@ -1850,6 +1864,25 @@
     return finalPayOn();
   }
 
+  /* v63c: "Card on file: Visa ending 1234" (brand + last 4 only, never a full number). */
+  function cardBrandName(b) {
+    var k = String(b || "").toUpperCase().replace(/[^A-Z_]/g, "");
+    var map = { VISA: "Visa", MASTERCARD: "Mastercard", AMERICAN_EXPRESS: "Amex", AMEX: "Amex", DISCOVER: "Discover", DISCOVER_DINERS: "Diners Club", JCB: "JCB", CHINA_UNIONPAY: "UnionPay", SQUARE_GIFT_CARD: "Square gift card", INTERAC: "Interac", EBT: "EBT" };
+    if (map[k]) return map[k];
+    if (!k || k === "OTHER_BRAND" || k === "UNKNOWN_BRAND") return "Card";
+    return k.charAt(0) + k.slice(1).toLowerCase().replace(/_/g, " ");
+  }
+
+  function rideHasCard(r) {
+    return !!(r && (r.squareCardId || r.hasCardOnFile || String(r.cardStatus || "") === "on_file"));
+  }
+
+  function cardOnFileWords(r) {
+    if (!rideHasCard(r)) return "No card on file yet";
+    var last4 = String((r && r.cardLast4) || "").replace(/\D/g, "").slice(-4);
+    return "Card on file" + (last4.length === 4 ? ": " + cardBrandName(r.cardBrand) + " ending " + last4 : "");
+  }
+
   /* The ride Home must offer "Back to my ride" for: active (pending … started) or dropped off and not paid yet. */
   function riderHomeActiveRide() {
     if (ROLE !== "customer" || !signedIn()) return null;
@@ -1885,9 +1918,27 @@
       '<p class="tag">' + (needsPay ? "Pay for your ride" : "Ride in progress") + "</p>" +
       '<p class="lede">Ride ' + esc(r.code || "") + " · " + esc(needsPay ? "dropped off, add a tip and pay" : rideStatusWords(r.status)) + ".<br>" +
       esc(r.pickupAddress || r.pickupStreet || "") + " → " + esc(r.dropAddress || r.dropStreet || "") + "</p>" +
+      (r.isTest === true || r.isTest === "true" || r.cardStatus === "test_skip" ? "" :
+        '<p class="fine" id="home-card-line">' + esc(cardOnFileWords(r)) + "</p>") +
+      (needsPay && String(r.paymentStatus || "") === "charge_failed"
+        ? '<p class="error" id="home-pay-failed">Payment didn\u2019t go through. ' + esc(payFailWords(r.payError || "", false)) + "</p>" : "") +
       '<button class="btn" type="button" id="back-to-ride">Back to my ride</button>' +
+      (r.isTest === true || r.isTest === "true" || r.cardStatus === "test_skip" || !squareConfigured() ? "" :
+        '<button class="btn secondary" type="button" id="home-update-card">' +
+          (needsPay && String(r.paymentStatus || "") === "charge_failed" ? "Update card" : (rideHasCard(r) ? "Edit / update payment" : "Add a card")) + "</button>") +
       "</div>"
     );
+  }
+
+  /* v63c: Home -> card form. Before drop-off it replaces the ride's saved card (Worker /save-card);
+     after drop-off the Worker no longer saves cards, so the new card is entered on the pay step and charged there. */
+  function homeUpdateCard() {
+    var r = riderHomeActiveRide();
+    if (!goToActiveRide(r)) return;
+    var done = String(r.status || "").toLowerCase() === "completed";
+    if (done) state.payNewCard = true;
+    render();
+    if (!done) openCardStep();
   }
 
   function riderHomeScreen() {
@@ -2256,6 +2307,7 @@
     milesTrackLat: null,
     milesTrackLng: null,
     milesTrackAt: 0,
+    milesSeenAt: 0, /* v64: time of the last GPS fix of any kind (gap detection) */
     code: "",
     driverCode: "",
     codeError: "",
@@ -2779,18 +2831,32 @@
     }
     if (!isFinite(lat) || !isFinite(lng)) return;
     var now = Date.now();
+    /* v64: after a reload (or iOS killing the page) carry on from the last saved point instead of starting fresh. */
+    if (!state.milesTrackAt) restoreMilesAnchor();
     var prevLat = state.milesTrackLat;
     var prevLng = state.milesTrackLng;
     var prevAt = state.milesTrackAt || 0;
+    var lastSeen = state.milesSeenAt || prevAt;
     if (!isFinite(prevLat) || !isFinite(prevLng) || !prevAt) {
       state.milesTrackLat = lat;
       state.milesTrackLng = lng;
       state.milesTrackAt = now;
+      state.milesSeenAt = now;
+      saveMilesAnchor();
       return;
     }
     var dist = haversine({ lat: prevLat, lng: prevLng }, { lat: lat, lng: lng });
+    /* v64: no GPS for over a minute (app in the background) and the car moved: fill in the gap once. */
+    if (now - lastSeen > GAP_FILL_MIN_MS && dist >= GAP_FILL_MIN_MI) {
+      fillMilesGap(pos, lat, lng, dist, now, lastSeen);
+      return;
+    }
+    state.milesSeenAt = now;
     /* ~3 m — same points that already moved the map icon. */
-    if (!(dist >= 0.002)) return;
+    if (!(dist >= 0.002)) {
+      if (now - milesAnchorSavedAt > 15000) saveMilesAnchor();
+      return;
+    }
     var hours = (now - prevAt) / 3600000;
     if (!(hours > 0)) return;
     var mph = dist / hours;
@@ -2802,6 +2868,7 @@
     state.milesTrackLat = lat;
     state.milesTrackLng = lng;
     state.milesTrackAt = now;
+    saveMilesAnchor();
     var row = todayMilesRow() || {
       startOdometer: state.milesStartOdo,
       gpsMiles: 0,
@@ -2818,6 +2885,7 @@
     if (row.endOdometer != null) delete row.endOdometer;
     if (row.shiftClosed) delete row.shiftClosed;
     row.gpsMiles = Math.round(((Number(row.gpsMiles) || 0) + dist) * 100) / 100;
+    addShiftMiles(dist, 0); /* v64 */
     row.lastUpdate = now;
     if (!row.startedAt) row.startedAt = now;
     if (!(Number(row.shiftStartAt) > 0)) row.shiftStartAt = now;
@@ -2825,6 +2893,275 @@
     state.milesToday = Number(row.gpsMiles) || 0;
     refreshMilesTodayDom();
     if (syncOn()) publishDriverPresence();
+  }
+
+  /* ---------- v64: miles driven while the app was in the background ----------
+     iPhone stops GPS (and all JavaScript) for a web app while Lyft / Uber / Maps is in front, and sometimes reloads
+     the page. Nothing is recorded during that time, so when the app is back we fill in the gap from the last saved
+     point to the first good new fix: straight line x 1.25 right away, then (once) the free OSRM road distance.
+     Only the start and end of the gap are known, so a round trip that ends near where it started adds little. */
+  var GAP_FILL_MIN_MS = 60000; /* no fix for over a minute = a gap */
+  var GAP_FILL_MIN_MI = 0.05; /* smaller moves after a gap are just normal tracking */
+  var GAP_FILL_MAX_MPH = 90; /* faster than this between the two points = bad fix, nothing counted */
+  var GAP_FILL_MAX_ACC_M = 100; /* worse accuracy: wait for a better fix before filling */
+  var GAP_ROAD_FACTOR = 1.25; /* straight line -> road until the road distance comes back */
+  var GAP_ROAD_MAX_FACTOR = 2; /* road distance is never more than 2x the straight line */
+  var milesAnchorSavedAt = 0;
+
+  function round2(n) {
+    return Math.round((Number(n) || 0) * 100) / 100;
+  }
+
+  function milesAnchorKey() {
+    return "pcs-driver-miles-anchor-" + driverPresenceId();
+  }
+
+  function saveMilesAnchor() {
+    if (ROLE !== "driver") return;
+    if (!state.milesTrackAt || !isCoord(state.milesTrackLat) || !isCoord(state.milesTrackLng)) return;
+    milesAnchorSavedAt = Date.now();
+    try {
+      localStorage.setItem(milesAnchorKey(), JSON.stringify({
+        lat: +state.milesTrackLat,
+        lng: +state.milesTrackLng,
+        at: state.milesTrackAt,
+        seen: state.milesSeenAt || state.milesTrackAt,
+        day: chicagoToday()
+      }));
+    } catch (err) {}
+  }
+
+  function clearMilesAnchor() {
+    state.milesSeenAt = 0;
+    try { localStorage.removeItem(milesAnchorKey()); } catch (err) {}
+  }
+
+  function restoreMilesAnchor() {
+    if (state.milesTrackAt) return false;
+    var a = null;
+    try { a = JSON.parse(localStorage.getItem(milesAnchorKey()) || "null"); } catch (err) { a = null; }
+    if (!a || typeof a !== "object") return false;
+    var row = todayMilesRow();
+    var at = Number(a.at) || 0;
+    if (a.day !== chicagoToday() || !shiftOpen(row) || !isCoord(a.lat) || !isCoord(a.lng)) return false;
+    if (!(at > 0) || at > Date.now() + 60000) return false;
+    var shiftAt = Number(row.shiftStartAt) || 0;
+    if (shiftAt && at < shiftAt - 1000) return false; /* point from an earlier shift today: miles in between were off the clock */
+    state.milesTrackLat = +a.lat;
+    state.milesTrackLng = +a.lng;
+    state.milesTrackAt = at;
+    state.milesSeenAt = Number(a.seen) || at;
+    return true;
+  }
+
+  function fillMilesGap(pos, lat, lng, dist, now, lastSeen) {
+    var acc = pos && pos.coords ? Number(pos.coords.accuracy) : NaN;
+    if (isFinite(acc) && acc > GAP_FILL_MAX_ACC_M) return; /* keep the old point; the next better fix fills the gap */
+    var from = { lat: +state.milesTrackLat, lng: +state.milesTrackLng };
+    var fromAt = state.milesTrackAt;
+    /* The car was still at the saved point at the last fix, so the trip fits between that fix and now. */
+    var hours = (now - Math.max(fromAt, Number(lastSeen) || 0)) / 3600000;
+    state.milesTrackLat = lat;
+    state.milesTrackLng = lng;
+    state.milesTrackAt = now;
+    state.milesSeenAt = now;
+    saveMilesAnchor();
+    if (!(hours > 0) || dist / hours > GAP_FILL_MAX_MPH) {
+      /* Impossible jump (bad fix or stale saved point): count nothing, start fresh from here. */
+      state.milesGapRejected = { at: now, mi: round2(dist), mph: hours > 0 ? Math.round(dist / hours) : null };
+      return;
+    }
+    var est = round2(Math.min(dist * GAP_ROAD_FACTOR, GAP_FILL_MAX_MPH * hours));
+    var row = todayMilesRow() || {
+      startOdometer: state.milesStartOdo,
+      gpsMiles: 0,
+      startedAt: now,
+      lastUpdate: now
+    };
+    if (row.startOdometer == null || !isFinite(Number(row.startOdometer))) {
+      if (state.milesStartOdo != null && isFinite(Number(state.milesStartOdo))) {
+        row.startOdometer = Number(state.milesStartOdo);
+      } else {
+        return;
+      }
+    }
+    if (row.endOdometer != null) delete row.endOdometer;
+    if (row.shiftClosed) delete row.shiftClosed;
+    var id = fromAt + "-" + now;
+    row.gpsMiles = round2((Number(row.gpsMiles) || 0) + est);
+    row.filledMiles = round2((Number(row.filledMiles) || 0) + est);
+    addShiftMiles(est, est);
+    var fills = Array.isArray(row.gapFills) ? row.gapFills.slice(-19) : [];
+    fills.push({ id: id, from: fromAt, at: now, straight: round2(dist), mi: est, road: false });
+    row.gapFills = fills;
+    row.lastUpdate = now;
+    if (!row.startedAt) row.startedAt = now;
+    if (!(Number(row.shiftStartAt) > 0)) row.shiftStartAt = now;
+    persistMilesRow(row);
+    state.milesToday = Number(row.gpsMiles) || 0;
+    refreshMilesTodayDom();
+    if (syncOn()) publishDriverPresence();
+    roadMilesForGap(id, from, { lat: lat, lng: lng }, dist, hours);
+  }
+
+  /* Swap the x1.25 guess for the free OSRM road distance, once per gap (never counted twice). */
+  function roadMilesForGap(id, a, b, straight, hours) {
+    if (typeof fetch !== "function") return;
+    osrmLeg(a, b).then(function (leg) {
+      if (!leg || !(leg.miles > 0)) return;
+      var road = Math.max(leg.miles, straight);
+      road = round2(Math.min(road, straight * GAP_ROAD_MAX_FACTOR, GAP_FILL_MAX_MPH * hours));
+      var row = todayMilesRow();
+      if (!row || !Array.isArray(row.gapFills)) return;
+      var fill = null;
+      row.gapFills.forEach(function (f) { if (f && f.id === id) fill = f; });
+      if (!fill || fill.road) return;
+      var delta = round2(road - (Number(fill.mi) || 0));
+      fill.mi = road;
+      fill.road = true;
+      row.gpsMiles = Math.max(0, round2((Number(row.gpsMiles) || 0) + delta));
+      row.filledMiles = Math.max(0, round2((Number(row.filledMiles) || 0) + delta));
+      addShiftMiles(delta, delta);
+      row.lastUpdate = Date.now();
+      persistMilesRow(row);
+      state.milesToday = Number(row.gpsMiles) || 0;
+      refreshMilesTodayDom();
+    }).catch(function () {});
+  }
+
+  function milesFilledNote() {
+    var row = todayMilesRow();
+    var f = row ? Number(row.filledMiles) || 0 : 0;
+    if (!(f >= 0.05)) return "";
+    return "Includes " + f.toFixed(1) + " mi filled in after the app was in the background (estimated).";
+  }
+
+  function milesTodayHtml() {
+    var note = milesFilledNote();
+    return '<p class="fine" id="miles-today">' + esc(milesTodayLabel()) + "</p>" +
+      '<p class="fine miles-filled" id="miles-filled"' + (note ? "" : ' style="display:none"') + ">" + esc(note) + "</p>";
+  }
+
+  var BG_GPS_TIP_KEY = "pcs-driver-bg-gps-tip-v64";
+
+  function bgGpsTipCard() {
+    if (ROLE !== "driver" || !signedIn() || state.milesNeedStart) return "";
+    try { if (localStorage.getItem(BG_GPS_TIP_KEY)) return ""; } catch (err) { return ""; }
+    return (
+      '<div class="card notice-card bg-gps-tip" id="bg-gps-tip" role="note">' +
+      '<p class="tag">Tip</p>' +
+      '<p class="lede">iPhone pauses GPS for web apps in the background. Miles are filled in when you come back to this app.</p>' +
+      '<button class="btn ghost" type="button" id="bg-gps-tip-ok">Got it</button></div>'
+    );
+  }
+
+  /* ---------- v64: one record per shift (opening odometer -> ending odometer at Log out) ---------- */
+  function shiftStoreKey() {
+    return "pcs-driver-shift-" + driverPresenceId();
+  }
+
+  function readShift() {
+    try {
+      var sh = JSON.parse(localStorage.getItem(shiftStoreKey()) || "null");
+      return sh && typeof sh === "object" ? sh : null;
+    } catch (err) {
+      return null;
+    }
+  }
+
+  function writeShift(sh) {
+    try {
+      if (sh) localStorage.setItem(shiftStoreKey(), JSON.stringify(sh));
+      else localStorage.removeItem(shiftStoreKey());
+    } catch (err) {}
+  }
+
+  /* Every mile added to today's gpsMiles is also added to the open shift (filled = the filled-in part). */
+  function addShiftMiles(mi, filled) {
+    var sh = readShift();
+    if (!sh || !isFinite(Number(mi)) || !Number(mi)) return;
+    sh.trackedMiles = Math.max(0, round2((Number(sh.trackedMiles) || 0) + Number(mi)));
+    if (filled) sh.filledInMiles = Math.max(0, round2((Number(sh.filledInMiles) || 0) + Number(filled)));
+    writeShift(sh);
+  }
+
+  function currentShiftInfo() {
+    var row = todayMilesRow() || {};
+    var sh = readShift();
+    if (sh && sh.startOdo != null && isFinite(Number(sh.startOdo))) {
+      return {
+        startOdo: Number(sh.startOdo),
+        shiftStartedAt: Number(sh.shiftStartedAt) || null,
+        trackedMiles: round2(sh.trackedMiles),
+        filledInMiles: round2(sh.filledInMiles),
+        legacy: false
+      };
+    }
+    /* Shift opened before v64: today's totals minus shifts already saved today. */
+    var prior = 0;
+    var priorFilled = 0;
+    var shifts = row.shifts && typeof row.shifts === "object" ? row.shifts : {};
+    Object.keys(shifts).forEach(function (k) {
+      prior += Number(shifts[k] && shifts[k].trackedMiles) || 0;
+      priorFilled += Number(shifts[k] && shifts[k].filledInMiles) || 0;
+    });
+    var start = row.startOdometer != null && isFinite(Number(row.startOdometer)) ? Number(row.startOdometer)
+      : (state.milesStartOdo != null && isFinite(Number(state.milesStartOdo)) ? Number(state.milesStartOdo) : null);
+    return {
+      startOdo: start,
+      shiftStartedAt: Number(row.shiftStartAt) || Number(row.startedAt) || null,
+      trackedMiles: Math.max(0, round2((Number(row.gpsMiles) || 0) - prior)),
+      filledInMiles: Math.max(0, round2((Number(row.filledMiles) || 0) - priorFilled)),
+      legacy: true
+    };
+  }
+
+  /* Soft check only: a warning the driver can override by tapping Save again. */
+  function odoCheckWarning(odoMiles, tracked) {
+    if (odoMiles == null) return "";
+    var t = Number(tracked) || 0;
+    var off = odoMiles > 1000 || (t >= 2 && (odoMiles < t * 0.85 - 2 || odoMiles > t * 1.5 + 10));
+    if (!off) return "";
+    return "Please check the number: your odometer shows " + odoMiles.toFixed(1) + " mi this shift and the app tracked " +
+      t.toFixed(1) + " mi. Tap Save and log out again to keep it.";
+  }
+
+  /* ---------- v64: presence carries the shift state, separate from GPS freshness ---------- */
+  var presenceApp = { backgroundedAt: 0, foregroundAt: 0 };
+
+  function presenceShiftFields() {
+    var sh = readShift();
+    var row = todayMilesRow();
+    var hidden = typeof document !== "undefined" && document.visibilityState === "hidden";
+    return {
+      shiftOnline: true,
+      shiftStartedAt: (sh && Number(sh.shiftStartedAt)) || Number(row && row.shiftStartAt) || Number(row && row.startedAt) || null,
+      appState: hidden ? "background" : "foreground",
+      foregroundAt: presenceApp.foregroundAt || null,
+      backgroundedAt: presenceApp.backgroundedAt || null,
+      lastLat: isCoord(state.hereLat) ? +state.hereLat : null,
+      lastLng: isCoord(state.hereLng) ? +state.hereLng : null,
+      lastFixAt: state.gpsAt || null
+    };
+  }
+
+  /* Best effort: iOS may suspend the page right after this. Never touches at / gpsAt / lat / lng. */
+  function markPresenceAway(kind) {
+    if (!syncOn() || ROLE !== "driver" || !signedIn() || state.milesEndPrompt || !canGoOnline()) return;
+    var now = Date.now();
+    presenceApp.backgroundedAt = now;
+    var patch = presenceShiftFields();
+    patch.appState = kind === "closed" ? "closed" : "background";
+    patch.backgroundedAt = now;
+    if (kind === "closed") patch.online = false; /* not dispatchable while the page is gone (was a DELETE) */
+    try {
+      authFetch(driversUrl(driverPresenceId()), {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(patch),
+        keepalive: true
+      }).catch(function () {});
+    } catch (err) {}
   }
 
   /* ---------- Time online today (login/shift open -> logout), stored on the same miles row ---------- */
@@ -2879,6 +3216,11 @@
     var label = milesTodayLabel();
     Array.prototype.forEach.call(document.querySelectorAll("#miles-today"), function (el) {
       if (el.textContent !== label) el.textContent = label;
+    });
+    var note = milesFilledNote();
+    Array.prototype.forEach.call(document.querySelectorAll("#miles-filled"), function (el) {
+      if (el.textContent !== note) el.textContent = note;
+      el.style.display = note ? "" : "none";
     });
     var rides = ridesCountLabel();
     Array.prototype.forEach.call(document.querySelectorAll("#rides-count"), function (el) {
@@ -2969,18 +3311,24 @@
 
   function milesEndCard() {
     if (!state.milesEndPrompt) return "";
+    var endInfo = currentShiftInfo(); /* v64 */
     return (
       '<div class="card miles-gate" id="miles-end-gate">' +
-      '<p class="tag">Ending mileage (optional)</p>' +
-      '<p class="lede">You can save the ending odometer for today, or skip.</p>' +
+      '<p class="tag">Ending odometer</p>' +
+      '<p class="lede">Enter the odometer reading now to end your shift.</p>' +
+      (endInfo.startOdo != null
+        ? '<p class="fine" id="miles-end-info">Starting odometer: ' + esc(endInfo.startOdo.toFixed(1)) +
+          " · App tracked this shift: " + esc((Number(endInfo.trackedMiles) || 0).toFixed(1)) + " mi</p>"
+        : "") +
       '<form id="miles-end-form" autocomplete="off">' +
       '<label for="miles-end-odo">Ending odometer</label>' +
-      '<input id="miles-end-odo" name="odo" type="number" inputmode="decimal" min="0" step="0.1" value="' +
+      '<input id="miles-end-odo" name="odo" type="number" inputmode="decimal" min="0" step="0.1" required value="' +
       esc(state.milesEndDraft || "") + '">' +
       '<p class="error" id="miles-end-error" role="alert">' + esc(state.milesEndError || "") + "</p>" +
       '<div class="row-actions">' +
-      '<button class="btn" type="submit">Save and log out</button>' +
-      '<button class="btn secondary" type="button" id="miles-end-skip">Skip</button>' +
+      '<button class="btn" type="submit"' + (state.milesEndSaving ? " disabled" : "") + ">" +
+      (state.milesEndSaving ? "Saving…" : "Save and log out") + "</button>" +
+      '<button class="btn secondary" type="button" id="miles-end-cancel">Cancel</button>' +
       "</div></form></div>"
     );
   }
@@ -3747,11 +4095,13 @@
     if (state.isTest || st === "test_skip" || state.paymentSkipped) line = "Test ride: no card needed, no charge.";
     else if (st === "owner_ok") line = "Payment confirmed by Private Car Services.";
     else {
-      line = "Card on file" +
-        (state.cardLast4 ? " (" + (state.cardBrand || "card") + " ending " + state.cardLast4 + ")" : "") +
+      line = cardOnFileWords(state) +
         ". Nothing is charged now. You pay the final fare after drop-off, and you can add a tip.";
     }
-    return '<div class="card payment-card"><p class="tag">Payment</p><p class="lede">' + esc(line) + "</p></div>";
+    var canUpdate = st !== "owner_ok" && st !== "test_skip" && squareConfigured() && !state.isTest && !state.paymentSkipped &&
+      String(state.rideStatus || "").toLowerCase() !== "completed";
+    return '<div class="card payment-card"><p class="tag">Payment</p><p class="lede" id="ride-card-line">' + esc(line) + "</p>" +
+      (canUpdate ? '<button class="btn secondary" type="button" id="ride-update-card">' + (rideHasCard(state) ? "Update card" : "Add a card") + "</button>" : "") + "</div>";
   }
 
   var sqCard = null;
@@ -3803,6 +4153,8 @@
 
   function openCardStep() {
     if (ROLE !== "customer") return;
+    var openSheet = document.getElementById("card-sheet");
+    if (openSheet && openSheet.classList.contains("open") && sqCard && document.getElementById("sq-card-save")) return; /* v63c: never reset a card being typed */
     var code = state.code || "";
     var est = estimate();
     var el = cardSheetEl();
@@ -3812,7 +4164,9 @@
       el.innerHTML =
         '<div class="sheet" role="dialog" aria-modal="true" aria-labelledby="card-title">' + head +
         (squareCfg().testMode ? '<p class="fine" style="background:#c9a227;color:#0b1f3a;font-weight:700;padding:4px 8px;border-radius:8px">TEST MODE · Square sandbox · card 4111 1111 1111 1111 · CVV 111 · ZIP 77042</p>' : "") +
-        '<h3 id="card-title">Add your card</h3>' +
+        (rideHasCard(state)
+          ? '<h3 id="card-title">Update your card</h3><p class="fine" id="card-sheet-current">' + esc(cardOnFileWords(state)) + '. A new card you save here replaces it for this ride.</p>'
+          : '<h3 id="card-title">Add your card</h3>') +
         '<p class="lede">Square keeps your card; this app never sees the number. <strong>Nothing is charged now.</strong> You are charged after drop-off for the final fare, plus any tip you add.</p>' +
         '<p class="fine">' + esc(cancelPolicyShort(cancelFeeCents())) + '</p>' +
         '<div id="sq-card-container" class="sq-card"><p class="fine">Loading the secure card form…</p></div>' +
@@ -3920,7 +4274,7 @@
         btn.disabled = false;
         btn.textContent = "Save card";
       }
-      cardSheetError((err && err.message) || "Could not save the card. Try again.");
+      cardSheetError(friendlyCardError((err && err.message) || "Could not save the card. Try again.")); /* v63c */
     });
   }
 
@@ -4043,7 +4397,8 @@
     var deposit = state.paymentStatus === "deposit_paid" ? (Number(state.paidCents) || 0) : 0;
     var tip = tipCentsChosen();
     var total = payTotalCents();
-    var failed = state.paymentStatus === "charge_failed" || !!state.payError;
+    var failed = state.paymentStatus === "charge_failed" ||
+      (!!state.payError && !/tip|total changed|fare changed|still loading/i.test(state.payError)); /* v63c: card problems only */
     return (
       '<div class="card payment-card" id="pay-after">' +
       '<p class="tag">Pay for your ride</p>' +
@@ -4060,15 +4415,38 @@
       '<div class="money-row"><span>Tip</span><span id="pay-tip-amt">' + esc(money(tip)) + "</span></div>" +
       '<div class="total-row"><span>Total</span><span id="pay-total-amt">' + esc(money(total)) + "</span></div>" +
       (useSaved
-        ? '<p class="fine">Charged to your ' + esc(state.cardBrand || "card") + (state.cardLast4 ? " ending " + esc(state.cardLast4) : " on file") + '. <a href="#" id="pay-other-card">Use a different card</a></p>'
-        : '<p class="fine">Enter a card. Square keeps it; this app never sees the number.</p><div id="sq-card-container" class="sq-card"><p class="fine">Loading the secure card form\u2026</p></div>') +
-      '<p class="error" id="pay-error" role="alert">' + esc(state.payError || "") + "</p>" +
-      (failed && useSaved ? '<p class="fine">Your saved card didn\u2019t go through. Tap <a href="#" id="pay-other-card2">Use a different card</a>, or try again.</p>' : "") +
-      '<button class="btn" type="button" id="pay-now-btn"' + (state.payBusy ? " disabled" : "") + ">" +
-      (state.payBusy ? "Paying\u2026" : "Pay " + esc(money(total))) + "</button>" +
+        ? '<p class="fine" id="pay-card-line"><strong>' + esc(cardOnFileWords(state)) + '</strong>. You\u2019ll be charged on this card.</p>' +
+          (failed ? "" : '<button class="btn secondary" type="button" id="pay-other-card">Update card</button>')
+        : (rideHasCard(state) ? '<p class="fine" id="pay-card-line">' + esc(cardOnFileWords(state)) + '. Paying with a new card instead: <a href="#" id="pay-saved-card">use my saved card</a></p>' : "") +
+          '<p class="fine">Enter a card (number, date, CVV and the card\u2019s billing ZIP). Square keeps it; this app never sees the number.</p><div id="sq-card-container" class="sq-card"><p class="fine">Loading the secure card form\u2026</p></div>') +
+      '<p class="error" id="pay-error" role="alert">' + esc(payFailWords(state.payError || (state.paymentStatus === "charge_failed" && useSaved ? "Your saved card didn\u2019t go through." : ""), !useSaved)) + "</p>" +
+      (failed && useSaved ? '<button class="btn" type="button" id="pay-other-card2">Update card to finish paying</button>' : "") +
+      '<button class="btn' + (failed && useSaved ? " secondary" : "") + '" type="button" id="pay-now-btn"' + (state.payBusy ? " disabled" : "") + ">" +
+      (state.payBusy ? "Paying\u2026" : (failed && useSaved ? "Try my saved card again \u00b7 " : "Pay ") + esc(money(total))) + "</button>" +
       '<p class="fine">Questions about the fare? Call <a href="tel:' + BUSINESS_PHONE + '">' + esc(BUSINESS_PHONE) + "</a> before you pay.</p>" +
+      (state.payBusy ? "" : '<button class="btn secondary" type="button" id="pay-later-btn">Pay later · back to Home</button>' +
+        '<p class="fine" id="pay-later-note">' + esc(payLaterNote()) + "</p>") +
       "</div>"
     );
+  }
+
+  /* v63c: the rider can always leave the pay screen. */
+  function payLaterNote() {
+    return riderRideNeedsPay(currentRide() || {})
+      ? "Your ride stays on Home under Back to my ride, so you can pay any time."
+      : "Private Car Services will text you a secure payment link.";
+  }
+
+  function payLater() {
+    var code = state.code || "";
+    var keep = riderRideNeedsPay(currentRide() || {});
+    if (!keep && code && syncOn() && !cardStatusOk(String(state.cardStatus || ""))) {
+      patchRide(code, { cardStatus: "link_requested", cardRequestedAt: Date.now() }).catch(function () {});
+    }
+    dropPayCard();
+    state.payError = "";
+    state.payNewCard = false;
+    goRiderHome();
   }
 
   function refreshPayTotals() {
@@ -4077,7 +4455,7 @@
     var btn = document.getElementById("pay-now-btn");
     if (t) t.textContent = money(tipCentsChosen());
     if (tot) tot.textContent = money(payTotalCents());
-    if (btn && !state.payBusy) btn.textContent = "Pay " + money(payTotalCents());
+    if (btn && !state.payBusy) btn.textContent = (/^Try my saved card again/.test(btn.textContent) ? "Try my saved card again \u00b7 " : "Pay ") + money(payTotalCents());
   }
 
   var payCardMounted = false;
@@ -4092,12 +4470,15 @@
     }).then(function (card) {
       var b = document.getElementById("sq-card-container");
       if (!b) { try { card.destroy(); } catch (e) {} return; }
+      if (b.dataset.mounted !== "1") { try { card.destroy(); } catch (e) {} return; } /* v63c: that box was replaced */
       if (sqCard && sqCard.destroy) { try { sqCard.destroy(); } catch (e) {} }
       sqCard = card;
       b.innerHTML = "";
       payCardMounted = true;
       return card.attach("#sq-card-container");
     }).catch(function () {
+      var bx = document.getElementById("sq-card-container");
+      if (bx) delete bx.dataset.mounted; /* v63c: let the next redraw try again */
       var e = document.getElementById("pay-error");
       if (e) e.textContent = "The secure card form did not load. Check your signal and try again, or call " + BUSINESS_PHONE + ".";
     });
@@ -4161,6 +4542,7 @@
           cardLast4: state.cardLast4, cardBrand: state.cardBrand
         }));
       } catch (e) {}
+      dropPayCard(); /* v63c */
       if (sqCard && sqCard.destroy) { try { sqCard.destroy(); } catch (e) {} }
       sqCard = null;
       saveRide("completed");
@@ -4171,7 +4553,7 @@
       if (d && d.httpStatus === 409 && d.totalCents != null) {
         state.payError = (err && err.message) || "The total changed.";
       } else {
-        state.payError = (err && err.message) || "The payment didn't go through. Try again.";
+        state.payError = (err && err.message) || "The payment didn't go through. Try again."; /* v63c: shown via payFailWords */
         /* Only a card decline (402) moves to a new Square idempotency key; 409 (already submitted) never does. */
         if (d && d.httpStatus === 402) state.payAttempt = (state.payAttempt || 0) + 1;
       }
@@ -4211,6 +4593,15 @@
     });
     var pay = document.getElementById("pay-now-btn");
     if (pay) pay.addEventListener("click", payFinalFare);
+    var savedBack = document.getElementById("pay-saved-card");
+    if (savedBack) savedBack.addEventListener("click", function (ev) {
+      ev.preventDefault();
+      state.payNewCard = false;
+      state.payError = "";
+      render();
+    });
+    var later = document.getElementById("pay-later-btn");
+    if (later) later.addEventListener("click", payLater); /* v63c */
     if (document.getElementById("sq-card-container")) mountPayCard();
   }
 
@@ -7401,6 +7792,7 @@
       speedAt: state.speedAt || null,
       gpsAt: state.gpsAt || null /* v59 */
     };
+    Object.assign(body, presenceShiftFields()); /* v64 */
     return authFetch(driversUrl(driverPresenceId()), {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
@@ -7454,7 +7846,7 @@
       state.onlineStamp = stamp;
       state.onlineDrivers = drivers;
       if (changed && state.cancelConfirm && document.getElementById("cancel-policy-copy")) updateCancelCopyDom(); /* v59: keep typing/scroll */
-      else if (changed) render();
+      else if (changed && String(state.rideStatus || "").toLowerCase() !== "completed") render(); /* v63c: pay screen doesn't show drivers */
       else updateCancelCopyDom();
     }).catch(function () {
       /* presence index may be blocked until rules allow /drivers */
@@ -8936,7 +9328,7 @@
   function driverHome() {
     if (state.milesEndPrompt) {
       return (
-        '<p class="fine" id="miles-today">' + esc(milesTodayLabel()) + "</p>" +
+        milesTodayHtml() +
         milesEndCard()
       );
     }
@@ -8944,8 +9336,9 @@
     var gated = !canGoOnline();
     return (
       accountNav() +
-      '<p class="fine" id="miles-today">' + esc(milesTodayLabel()) + "</p>" +
+      milesTodayHtml() +
       '<p class="fine" id="rides-count">' + esc(ridesCountLabel()) + "</p>" +
+      bgGpsTipCard() +
       (state.driverNotice
         ? '<div class="card notice-card" role="status"><p class="lede">' + esc(state.driverNotice) + "</p>" +
           '<button class="btn ghost" type="button" id="dismiss-driver-notice">OK</button></div>'
@@ -9053,7 +9446,7 @@
     return (
       testTop +
       (completed ? "" : '<button class="btn ghost" type="button" id="back-driver">← Requests</button>') +
-      '<p class="fine" id="miles-today">' + esc(milesTodayLabel()) + "</p>" +
+      milesTodayHtml() +
       '<p class="fine" id="rides-count">' + esc(ridesCountLabel()) + "</p>" +
       '<div class="status"><i></i><span>' + statusLabel + "</span></div>" +
       (completed ? "" : navButtonHtml()) +
@@ -9083,6 +9476,92 @@
       ) : "") +
       doneBlock
     );
+  }
+
+  /* ================= v63c: the Square card form survives screen refreshes =================
+     The rider screen redraws every few seconds (ride status, driver GPS, online drivers). Before v63c each redraw
+     wiped the card form, so a rider typing a card (or fixing the ZIP) was sent back to a blank form.
+     A live card iframe is never moved or removed (moving an iframe reloads it); the rest of the screen is redrawn
+     around it. It is only torn down when the card screen goes away (paid, Home, ride over). */
+  function payCardLiveIn(app) {
+    var box = app.querySelector("#sq-card-container");
+    return box && box.dataset.mounted === "1" ? box : null;
+  }
+
+  function graftKeeping(oldParent, newParent, keep) {
+    var oldHolder = keep;
+    while (oldHolder && oldHolder.parentNode !== oldParent) oldHolder = oldHolder.parentNode;
+    var newHolder = newParent.querySelector("#" + keep.id);
+    while (newHolder && newHolder.parentNode !== newParent) newHolder = newHolder.parentNode;
+    if (!oldHolder || !newHolder) return false;
+    Array.prototype.slice.call(oldParent.childNodes).forEach(function (n) {
+      if (n !== oldHolder) oldParent.removeChild(n);
+    });
+    var before = true;
+    Array.prototype.slice.call(newParent.childNodes).forEach(function (n) {
+      if (n === newHolder) { before = false; return; }
+      if (before) oldParent.insertBefore(n, oldHolder);
+      else oldParent.appendChild(n);
+    });
+    if (oldHolder === keep) return true;
+    Array.prototype.slice.call(newHolder.attributes).forEach(function (a) { oldHolder.setAttribute(a.name, a.value); });
+    Array.prototype.slice.call(oldHolder.attributes).forEach(function (a) {
+      if (!newHolder.hasAttribute(a.name)) oldHolder.removeAttribute(a.name);
+    });
+    return graftKeeping(oldHolder, newHolder, keep);
+  }
+
+  function keepPayCardRender(app, html) {
+    var live = payCardLiveIn(app);
+    if (!live) return false;
+    var tpl = document.createElement("div");
+    tpl.innerHTML = html;
+    if (!tpl.querySelector("#sq-card-container")) {
+      dropPayCard(); /* the card screen is gone (paid, saved card, Home, ride over) */
+      return false;
+    }
+    return graftKeeping(app, tpl, live);
+  }
+
+  function dropPayCard() {
+    if (sqCard && payCardMounted) {
+      try { if (sqCard.destroy) sqCard.destroy(); } catch (e) {}
+      sqCard = null;
+    }
+    payCardMounted = false;
+  }
+
+  function captureAppFocus(app) {
+    var a = document.activeElement;
+    if (!a || !a.id || !app.contains(a) || !/^(INPUT|TEXTAREA)$/.test(a.tagName)) return null;
+    var k = { id: a.id, start: null, end: null };
+    try { k.start = a.selectionStart; k.end = a.selectionEnd; } catch (e) {}
+    return k;
+  }
+
+  function restoreAppFocus(app, k) {
+    if (!k) return;
+    var el = document.getElementById(k.id);
+    if (!el || !app.contains(el) || document.activeElement === el) return;
+    try { el.focus({ preventScroll: true }); } catch (e) { try { el.focus(); } catch (e2) {} }
+    if (k.start != null) { try { el.setSelectionRange(k.start, k.end); } catch (e) {} }
+  }
+
+  /* v63c: plain words for card problems. newCard = the rider is typing a card in the form right now. */
+  function payFailWords(msg, newCard) {
+    var m = String(msg || "");
+    var what = /postal|zip|address_verification|avs/i.test(m) ? "billing ZIP" : (/cvv|cvc|security code/i.test(m) ? "security code (CVV)" : (/expir/i.test(m) ? "expiration date" : ""));
+    if (!what) return m;
+    if (newCard) {
+      return what === "billing ZIP"
+        ? "The billing ZIP didn\u2019t match this card. Fix the ZIP in the card box above (the card\u2019s billing ZIP, not the pickup ZIP), then tap the button again."
+        : "The " + what + " didn\u2019t match this card. Fix it in the card box above, then tap the button again.";
+    }
+    return "Your card\u2019s " + what + " didn\u2019t match. Update your card to finish paying.";
+  }
+
+  function friendlyCardError(msg) {
+    return payFailWords(msg, true);
   }
 
   function render() {
@@ -9120,7 +9599,9 @@
     else if (state.screen === "trip") html = customerTrip();
     else if (state.riderView === "book") html = customerHome();
     else html = riderHomeScreen();
-    app.innerHTML = html;
+    var focusKeep = captureAppFocus(app); /* v63c */
+    if (!keepPayCardRender(app, html)) app.innerHTML = html; /* v63c: never rebuild a live Square card form */
+    restoreAppFocus(app, focusKeep);
     ensureSosButton();
     if (keptBoard) {
       var slot = app.querySelector(".map-stage.board-map");
@@ -9449,11 +9930,13 @@
     var logout = document.getElementById("log-out");
     if (logout) {
       logout.addEventListener("click", function () {
-        if (ROLE === "driver" && !state.milesNeedStart && todayMilesRow() && !state.milesEndPrompt) {
+        if (ROLE === "driver" && !state.milesNeedStart && (todayMilesRow() || readShift()) && !state.milesEndPrompt) {
           clearDriverPresence();
           state.milesEndPrompt = true;
           state.milesEndDraft = "";
           state.milesEndError = "";
+          state.milesEndWarnedFor = "";
+          state.milesEndSaving = false;
           render();
           return;
         }
@@ -9475,6 +9958,10 @@
         state.milesTrackLat = null;
         state.milesTrackLng = null;
         state.milesTrackAt = 0;
+        clearMilesAnchor(); /* v64: miles while logged out stay personal */
+        writeShift(null);
+        state.milesEndSaving = false;
+        state.milesEndWarnedFor = "";
       }
       writeSession("");
       var a = pcsAuth();
@@ -9524,6 +10011,8 @@
         state.milesTrackLat = null;
         state.milesTrackLng = null;
         state.milesTrackAt = 0;
+        clearMilesAnchor(); /* v64 */
+        writeShift({ startOdo: odo, shiftStartedAt: now, startDay: chicagoToday(), trackedMiles: 0, filledInMiles: 0 });
         persistMilesRow(row).then(function () {
           followGps();
           acquireWakeLock();
@@ -9537,36 +10026,80 @@
     if (milesEndForm) {
       milesEndForm.addEventListener("submit", function (event) {
         event.preventDefault();
+        if (state.milesEndSaving) return;
         var raw = document.getElementById("miles-end-odo").value;
-        if (String(raw).trim() !== "") {
-          var odo = Number(raw);
-          if (!isFinite(odo) || odo < 0) {
-            state.milesEndError = "Enter a valid ending odometer, or skip.";
-            state.milesEndDraft = raw;
-            render();
-            return;
-          }
-          var row = todayMilesRow() || {
-            startOdometer: state.milesStartOdo,
-            gpsMiles: Number(state.milesToday) || 0,
-            startedAt: Date.now(),
-            lastUpdate: Date.now()
-          };
-          closeOnlineSegment(row, Date.now());
-          row.endOdometer = odo;
-          row.shiftClosed = true;
-          row.lastUpdate = Date.now();
-          persistMilesRow(row);
-        } else {
-          var closed = todayMilesRow();
-          if (closed) {
-            closeOnlineSegment(closed, Date.now());
-            closed.shiftClosed = true;
-            closed.lastUpdate = Date.now();
-            persistMilesRow(closed);
-          }
+        state.milesEndDraft = raw;
+        /* v64: the ending odometer is required, and can't be below the starting odometer. */
+        if (String(raw).trim() === "") {
+          state.milesEndError = "Enter the ending odometer to log out.";
+          render();
+          return;
         }
-        finishDriverLogout();
+        var odo = Number(raw);
+        if (!isFinite(odo) || odo < 0) {
+          state.milesEndError = "Enter a valid ending odometer.";
+          render();
+          return;
+        }
+        var info = currentShiftInfo();
+        if (info.startOdo != null && odo < info.startOdo) {
+          state.milesEndError = "The ending odometer can't be less than the starting odometer (" + info.startOdo.toFixed(1) + ").";
+          render();
+          return;
+        }
+        var odoMiles = info.startOdo != null ? Math.round((odo - info.startOdo) * 10) / 10 : null;
+        var warn = odoCheckWarning(odoMiles, info.trackedMiles);
+        if (warn && state.milesEndWarnedFor !== String(odo)) {
+          state.milesEndWarnedFor = String(odo);
+          state.milesEndError = warn;
+          render();
+          return;
+        }
+        var now = Date.now();
+        var row = todayMilesRow() || {
+          startOdometer: info.startOdo != null ? info.startOdo : state.milesStartOdo,
+          gpsMiles: 0,
+          startedAt: now,
+          lastUpdate: now
+        };
+        closeOnlineSegment(row, now);
+        row.endOdometer = odo;
+        row.shiftClosed = true;
+        row.lastUpdate = now;
+        var rec = {
+          startOdo: info.startOdo,
+          endOdo: odo,
+          odoMiles: odoMiles,
+          trackedMiles: round2(info.trackedMiles),
+          filledInMiles: round2(info.filledInMiles),
+          shiftStartedAt: info.shiftStartedAt || null,
+          shiftEndedAt: now,
+          odoWarned: !!warn,
+          day: chicagoToday()
+        };
+        if (info.legacy) rec.trackedFrom = "day";
+        var shifts = row.shifts && typeof row.shifts === "object" ? Object.assign({}, row.shifts) : {};
+        shifts[String(info.shiftStartedAt || now)] = rec;
+        row.shifts = shifts;
+        state.milesEndSaving = true;
+        state.milesEndError = "";
+        render();
+        /* Wait for the save (max 5 s) so signing out can't cut it off. */
+        var done = false;
+        var finish = function () { if (done) return; done = true; finishDriverLogout(); };
+        persistMilesRow(row).then(finish, finish);
+        setTimeout(finish, 5000);
+      });
+    }
+    var milesEndCancel = document.getElementById("miles-end-cancel");
+    if (milesEndCancel) {
+      milesEndCancel.addEventListener("click", function () {
+        state.milesEndPrompt = false;
+        state.milesEndError = "";
+        state.milesEndDraft = "";
+        state.milesEndWarnedFor = "";
+        publishDriverPresence();
+        render();
       });
     }
     var milesEndSkip = document.getElementById("miles-end-skip");
@@ -9834,6 +10367,8 @@
       });
     }
 
+    var homeUpd = document.getElementById("home-update-card");
+    if (homeUpd) homeUpd.addEventListener("click", function () { state.notice = ""; homeUpdateCard(); }); /* v63c */
     var backToRide = document.getElementById("back-to-ride");
     if (backToRide) {
       backToRide.addEventListener("click", function () {
@@ -9932,6 +10467,8 @@
         render();
       });
     });
+    var chatInp = document.getElementById("chat-input");
+    if (chatInp) chatInp.addEventListener("input", function () { state.chatDraft = chatInp.value; }); /* v63c */
     var chatForm = document.getElementById("chat-form");
     if (chatForm) {
       chatForm.addEventListener("submit", function (ev) {
@@ -10076,6 +10613,8 @@
       });
     }
     bindPayAfterRide();
+    var rideUpd = document.getElementById("ride-update-card");
+    if (rideUpd) rideUpd.addEventListener("click", function () { openCardStep(); }); /* v63c */
     var squareHold = document.getElementById("square-hold-btn");
     if (squareHold) {
       squareHold.addEventListener("click", function () {
@@ -10092,6 +10631,13 @@
           saveRide(state.rideStatus);
           if (syncOn()) patchRide(state.code, { cardStatus: "test_skip", cardSkippedAt: Date.now() }).catch(function () {});
         }
+        render();
+      });
+    }
+    var bgTipOk = document.getElementById("bg-gps-tip-ok");
+    if (bgTipOk) {
+      bgTipOk.addEventListener("click", function () {
+        try { localStorage.setItem(BG_GPS_TIP_KEY, String(Date.now())); } catch (err) {}
         render();
       });
     }
@@ -11390,6 +11936,7 @@
       rideAudio.install();
     }
     setInterval(refreshEtaDoms, 5000);
+    if (ROLE === "driver" && document.visibilityState !== "hidden") presenceApp.foregroundAt = Date.now(); /* v64 */
     if (ROLE === "driver" && signedIn()) {
       loadRideHistory();
       ensureMilesDayReady();
@@ -11435,10 +11982,37 @@
       if (ROLE === "customer" && signedIn()) refreshOnlineDrivers();
     }, 5000);
     window.addEventListener("pagehide", function () {
-      if (ROLE === "driver" && signedIn()) clearDriverPresence();
+      if (ROLE === "driver" && signedIn()) {
+        saveMilesAnchor(); /* v64 */
+        markPresenceAway("closed"); /* v64: was a DELETE; the shift stays open until Log out */
+      }
     });
+    if (ROLE === "driver") {
+      /* v64: back from Lyft / Uber / Maps: ask for a fix right away so the gap is filled in. */
+      ["pageshow", "focus"].forEach(function (t) {
+        window.addEventListener(t, function () {
+          if (!signedIn() || document.visibilityState === "hidden") return;
+          nudgeGps();
+          refreshMilesTodayDom();
+          if (t === "pageshow") {
+            presenceApp.foregroundAt = Date.now();
+            publishDriverPresence(); /* back from bfcache after a "closed" mark */
+          }
+        });
+      });
+    }
     document.addEventListener("visibilitychange", function () {
-      if (document.visibilityState !== "visible") return;
+      if (document.visibilityState !== "visible") {
+        if (ROLE === "driver" && signedIn()) {
+          saveMilesAnchor(); /* v64: last point + time survive a page kill */
+          markPresenceAway("background");
+        }
+        return;
+      }
+      if (ROLE === "driver" && signedIn()) {
+        presenceApp.foregroundAt = Date.now();
+        publishDriverPresence(); /* v64: appState foreground + fresh at */
+      }
       if (ROLE === "driver" && signedIn()) {
         nudgeGps();
         acquireWakeLock(); /* the browser drops the lock when the app is hidden */
