@@ -3,8 +3,9 @@
   v58 (Oct 6, 2026): PRODUCTION — real cards, real money.
 
   - Rider app: the card is SAVED at booking (Square Customer + Card on file, no charge). After drop-off the rider
-    picks a tip and pays the driver's final fare + tip. Cancel after a driver accepted = cancel fee
-    (cancelPct % of the estimate, cancelMinCents minimum). The pcs-pay Worker re-reads every amount from the ride.
+    picks a tip and pays the driver's final fare + tip. v59: cancel fee (cancelPct % of the estimate, cancelMinCents
+    minimum) ONLY if the assigned driver is within cancelRadiusMiles of the pickup when the rider cancels; otherwise
+    free. The pcs-pay Worker re-reads the ride + driver location from Firebase and decides every amount.
   - Quote page Book it: 25% deposit (or pay in full) charged at booking.
   - Payments go through the pcs-pay Cloudflare Worker; the Square access token is a Worker secret.
 
@@ -46,11 +47,12 @@
     workerUrl: WORKER,
     cardOnFileUrl: WORKER + "/save-card",   /* rider app: save card at booking (no charge) */
     chargeUrl: WORKER + "/charge",          /* rider app: after drop-off, final fare + tip */
-    cancelFeeUrl: WORKER + "/cancel-fee",   /* rider app: cancelled after a driver accepted */
+    cancelFeeUrl: WORKER + "/cancel-fee",   /* rider app: cancelled while the driver was within 1 mile (Worker decides) */
     depositUrl: WORKER + "/deposit",        /* quote page Book it: 25% deposit or pay in full */
     paymentUrl: "",                         /* old v48 key ("charge at booking" in the rider app). Must stay blank. */
     cancelPct: 25,
     cancelMinCents: 1000,
+    cancelRadiusMiles: 1,                   /* v59: display only; the Worker enforces CANCEL_RADIUS_MILES */
     depositPct: 25
   });
 

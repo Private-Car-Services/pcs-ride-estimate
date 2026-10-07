@@ -15,7 +15,20 @@
         always-visible Alert/SOS on rider + driver (same police-help flow).
    v58: Square PRODUCTION. Card saved at booking (Customer + Card on file via the pcs-pay Worker, no charge), charged
         after drop-off for the driver's final fare + tip, cancel fee (25% of estimate, $10 min) only after a driver
-        accepted, receipts in History. The PIN still shows as soon as a driver accepts, card or no card. */
+        accepted, receipts in History. The PIN still shows as soon as a driver accepts, card or no card.
+   v59 (Oct 7): cancel fee (25% of estimate, $10 min) ONLY when the assigned driver is within 1 mile (straight line)
+        of the pickup at the moment the rider cancels; otherwise free (before accept, driver over 1 mi away, or the
+        driver's location is missing / over 2 minutes old). The pcs-pay Worker re-checks this from Firebase and
+        decides. Driver app stamps its location (presence gpsAt, ride driverLocAt) and refreshes it every 20 s while
+        parked. Rider: Terms and Policies link (policies/#cancellation) + "See cancellation policy" in Cancel.
+   v59 Home: the rider app always opens on a rider HOME screen (greeting, Book a ride, My rides / History, Terms and
+        Policies, Profile, ALERT SOS). An active ride (requested … in progress, or a drop-off still waiting for Pay)
+        shows a "Back to my ride" card on Home; finished rides never auto-open (History only). "Book a ride" and
+        "← Home" after a ride start a BLANK booking form. A found/geocoded address overwrites the typed ZIP + city.
+   v59 places: line 1 accepts business names. Spelling variants (and / n / &, plural) + an Esri World Geocoder POI
+        fallback near the From / rider location when OpenStreetMap doesn't know the place ("Jack and jill donut" ->
+        Jack N Jill Donuts, 12820 Walden Rd, Montgomery 77356). City center is the last resort, and then the rider is
+        shown the pick-list and asked to pick a place or type the street address. */
 (function () {
   var BUSINESS_PHONE = "936-261-7878";
   var DRIVER_COMMISSION_RATE = 0.7;
@@ -33,6 +46,9 @@
   var WAIT_STILL_MPH = 1.5;
   var WAIT_MOVE_MI = 0.03;
   var WAIT_MOVE_MPH = 3;
+  var CANCEL_RADIUS_MI = 1;              /* v59: fee only when the driver is within this many miles of pickup */
+  var DRIVER_LOC_MAX_AGE_MS = 120000;    /* v59: older driver location = free cancel (same as the Worker) */
+  var DRIVER_LOC_HEARTBEAT_MS = 20000;   /* v59: driver re-stamps the ride location this often even when parked */
   var SAFETY_ALERT_HUB = "SAFETY"; /* /rides/SAFETY/{id} — high-priority God alerts */
   var DAY_MILE_CENTS = 110;
   var NIGHT_MILE_CENTS = 138;
@@ -1798,8 +1814,166 @@
     state.cancelConfirm = false;
     state.customerGeocodeTried = false;
     var st = String(ride.status || "").toLowerCase();
-    state.screen = (st === "accepted" || st === "started") ? "trip" : "waiting";
+    state.screen = (st === "accepted" || st === "started" || st === "completed") ? "trip" : "waiting";
+    state.riderHistoryView = "";
     return true;
+  }
+
+  /* ================= v59: rider Home screen ================= */
+  function riderRideNeedsPay(r) {
+    if (!r || String(r.status || "").toLowerCase() !== "completed") return false;
+    if (r.isTest === true || r.isTest === "true" || r.cardStatus === "test_skip") return false;
+    var ps = String(r.paymentStatus || "");
+    if (ps === "charged" || ps === "paid_in_full" || ps === "refunded" || ps === "partially_refunded") return false;
+    if (!(r.squareCardId || r.hasCardOnFile || r.cardStatus === "on_file")) return false;
+    return finalPayOn();
+  }
+
+  /* The ride Home must offer "Back to my ride" for: active (pending … started) or dropped off and not paid yet. */
+  function riderHomeActiveRide() {
+    if (ROLE !== "customer" || !signedIn()) return null;
+    var a = activeRiderRide();
+    if (a) return a;
+    var r = currentRide();
+    if (r && r.pickupStreet && rideBelongsToSession(r) && riderRideNeedsPay(r)) return r;
+    return null;
+  }
+
+  function ensureRiderHomeStyle() {
+    if (document.getElementById("pcs-home-style")) return;
+    var st = document.createElement("style");
+    st.id = "pcs-home-style";
+    st.textContent =
+      ".rider-home{padding-bottom:90px}" +
+      ".rh-hello{display:flex;align-items:center;gap:14px;margin:8px 0 18px}" +
+      ".rh-avatar{width:64px;height:64px;border-radius:50%;object-fit:cover;border:2px solid #d4b15a;flex:0 0 auto;background:#183252;" +
+      "display:flex;align-items:center;justify-content:center;font-weight:800;font-size:24px;color:#f0d48a}" +
+      ".rh-hello h2{margin:0;font-size:26px}.rh-hello p{margin:2px 0 0;opacity:.8}" +
+      ".rh-book{display:block;width:100%;font-size:24px;font-weight:800;padding:22px 12px;margin:6px 0 18px;border-radius:16px}" +
+      ".rh-links{display:grid;grid-template-columns:1fr 1fr;gap:10px}" +
+      ".rh-links .btn,.rh-links a.btn{margin:0;text-align:center;text-decoration:none}" +
+      ".rh-active{border:2px solid #f0d48a !important;box-shadow:0 0 0 3px rgba(240,212,138,.18)}" +
+      ".rh-active .btn{font-size:20px;font-weight:800}";
+    document.head.appendChild(st);
+  }
+
+  function riderHomeActiveCardHtml(r) {
+    var needsPay = riderRideNeedsPay(r) && !isActiveStatus(r.status);
+    return (
+      '<div class="card rh-active" id="home-active-ride">' +
+      '<p class="tag">' + (needsPay ? "Pay for your ride" : "Ride in progress") + "</p>" +
+      '<p class="lede">Ride ' + esc(r.code || "") + " · " + esc(needsPay ? "dropped off, add a tip and pay" : rideStatusWords(r.status)) + ".<br>" +
+      esc(r.pickupAddress || r.pickupStreet || "") + " → " + esc(r.dropAddress || r.dropStreet || "") + "</p>" +
+      '<button class="btn" type="button" id="back-to-ride">Back to my ride</button>' +
+      "</div>"
+    );
+  }
+
+  function riderHomeScreen() {
+    ensureRiderHomeStyle();
+    var acct = readRiderAccount() || {};
+    var full = String(acct.name || state.name || "").trim();
+    var first = full.split(/\s+/)[0] || "";
+    var photo = safePhoto(acct.photo);
+    var initials = full.split(/\s+/).filter(Boolean).slice(0, 2).map(function (w) { return w.charAt(0).toUpperCase(); }).join("") || "\u{1F464}";
+    var r = riderHomeActiveRide();
+    if (r) refreshActiveRideStatus(r.code);
+    return (
+      '<div class="rider-home" id="rider-home">' +
+      (r ? riderHomeActiveCardHtml(r) : "") +
+      '<div class="rh-hello">' +
+      (photo ? '<img class="rh-avatar" id="home-photo" alt="" src="' + esc(photo) + '">' : '<div class="rh-avatar" aria-hidden="true">' + esc(initials) + "</div>") +
+      "<div><h2 id=\"home-greeting\">" + esc(first ? "Hi, " + first : "Welcome") + "</h2><p>Where are we going today?</p></div>" +
+      "</div>" +
+      (state.notice ? '<p class="note notice-ok" role="status">' + esc(state.notice) + "</p>" : "") +
+      '<button class="btn rh-book" type="button" id="home-book">Book a ride</button>' +
+      '<div class="rh-links">' +
+      '<button class="btn ghost" type="button" id="open-history">My rides / History</button>' +
+      policiesNavLink() +
+      '<button class="btn ghost" type="button" id="open-profile">Profile</button>' +
+      logoutLine() +
+      "</div>" +
+      "</div>"
+    );
+  }
+
+  function customerProfileView() {
+    var acct = readRiderAccount() || {};
+    var photo = safePhoto(acct.photo);
+    return (
+      '<div class="app-nav"><button class="btn ghost" type="button" id="profile-back">← Home</button></div>' +
+      "<h2>Profile</h2>" +
+      '<div class="card" id="rider-profile">' +
+      (photo ? '<p><img alt="" src="' + esc(photo) + '" style="width:96px;height:96px;border-radius:50%;object-fit:cover;border:2px solid #d4b15a"></p>' : "") +
+      "<p><strong>Name</strong><br>" + esc(acct.name || "—") + "</p>" +
+      "<p><strong>Mobile</strong><br>" + esc(acct.phone || "—") + "</p>" +
+      "<p><strong>Email</strong><br>" + esc(acct.email || readSession() || "—") + "</p>" +
+      '<p class="fine">To change these, text Private Car Services at ' + esc(BUSINESS_PHONE) + ".</p>" +
+      "</div>" +
+      '<p class="fine">' + policyLinkHtml("Terms and Policies") + "</p>" +
+      '<div class="app-nav">' + logoutLine() + "</div>"
+    );
+  }
+
+  /* Start a NEW booking with a blank form (never the last ride's From/To/ZIP/stops). */
+  function resetBookingForm() {
+    discardStoredRide(); /* removes the stored ride (pcs-beta-ride) + owner and clears every ride field */
+    autoResolveSeq = {};
+    state.pickupApprox = "";
+    state.pickupFound = "";
+    state.dropApprox = "";
+    state.dropFound = "";
+    state.pickupState = "TX";
+    state.dropState = "TX";
+    state.stopList = [];
+    state.stops = 0;
+    state.error = "";
+    state.notice = "";
+    state.customerGeocodeTried = false;
+    state.estimateCents = 0;
+    var acct = readRiderAccount() || {};
+    state.name = acct.name || "";
+    state.phone = acct.phone || "";
+  }
+
+  function startNewBooking() {
+    var r = riderHomeActiveRide();
+    state.riderHistoryView = "";
+    state.screen = "home";
+    if (r) {
+      state.riderView = "home";
+      state.notice = riderRideNeedsPay(r) && !isActiveStatus(r.status)
+        ? "Please pay for your last ride first: tap Back to my ride."
+        : "You already have a ride in progress: tap Back to my ride.";
+      render();
+      return;
+    }
+    var stored = currentRide();
+    if (stored && stored.code && rideBelongsToSession(stored)) {
+      try { rememberRiderHistoryEntry(stored); } catch (e) {}
+      clearActiveMark(stored.code);
+    }
+    resetBookingForm();
+    state.riderView = "book";
+    render();
+  }
+
+  /* After a ride is over: back to Home (finished ride goes to History; an unpaid drop-off stays on Home). */
+  function goRiderHome() {
+    var stored = currentRide();
+    var keep = stored && rideBelongsToSession(stored) && (isActiveStatus(stored.status) || riderRideNeedsPay(stored));
+    if (!keep) {
+      if (stored && stored.code && rideBelongsToSession(stored)) {
+        try { rememberRiderHistoryEntry(stored); } catch (e) {}
+        clearActiveMark(stored.code);
+      }
+      resetBookingForm();
+    }
+    state.mode = "customer";
+    state.screen = "home";
+    state.riderView = "home";
+    state.riderHistoryView = "";
+    render();
   }
 
   /* Reload with the ride store gone/overwritten but a remembered active code: pull it back from the server. */
@@ -1818,8 +1992,8 @@
       ride.pin = recalledPin(mark.code) || null;
       try { localStorage.setItem(STORE, JSON.stringify(ride)); } catch (e) {}
       writeRideOwner(readSession());
-      goToActiveRide(ride);
-      render();
+      /* v59: never jump into the ride; Home shows "Back to my ride". */
+      if (state.screen === "home") render();
     }).catch(function () {});
   }
 
@@ -1831,11 +2005,15 @@
       if (!ride) return;
       var local = currentRide();
       if (!local || local.code !== code) return;
-      if (String(ride.status || "") === String(local.status || "")) return;
+      if (String(ride.status || "") === String(local.status || "") &&
+          String(ride.paymentStatus || "") === String(local.paymentStatus || "")) return;
       ride.pin = normalizeStoredPin(local.pin) || recalledPin(code) || null;
       if (!ride.code) ride.code = code;
       try { localStorage.setItem(STORE, JSON.stringify(ride)); } catch (e) {}
-      if (!isActiveStatus(ride.status)) clearActiveMark(code);
+      if (!isActiveStatus(ride.status)) {
+        clearActiveMark(code);
+        try { rememberRiderHistoryEntry(ride); } catch (e2) {}
+      }
       if (state.screen === "home") render();
     }).catch(function () {});
   }
@@ -1886,7 +2064,7 @@
   function activeRideHomeCard(r) {
     refreshActiveRideStatus(r.code);
     return (
-      '<div class="app-nav">' + logoutLine() + "</div>" +
+      '<div class="app-nav">' + policiesNavLink() + logoutLine() + "</div>" +
       '<div class="card active-ride-card" id="active-ride-card">' +
       '<p class="tag">Ride in progress</p>' +
       "<h2>You already have a ride requested</h2>" +
@@ -1902,7 +2080,7 @@
   /* Ride screens: "← Request" only once the ride is over (otherwise it led to a fresh form = duplicate requests). */
   function riderBackButton() {
     if (isActiveStatus(state.rideStatus)) return "";
-    return '<button class="btn ghost" type="button" id="back-home">← Book a new ride</button>';
+    return '<button class="btn ghost" type="button" id="back-home">← Home</button>'; /* v59: Home, then Book a ride = blank form */
   }
 
   /* One plain line that says where things stand and when the PIN appears.
@@ -2017,6 +2195,11 @@
     cancelConfirm: false,
     cancelBusy: false,
     cancelError: "",
+    driverId: "",
+    driverLocAt: 0,
+    driverPresence: null,
+    gpsAt: 0,
+    riderView: "home",
     driverNotice: "",
     date: "",
     time: SAMPLE.time,
@@ -3235,6 +3418,8 @@
   }
 
   /* v58: same rule as the pcs-pay Worker (it recomputes from the ride record; this is only for the screen). */
+  try { window.PCS_CANCEL_RULE = { decide: function (r, p, n) { return cancelDistanceDecision(r, p, n); }, haversineMi: function (a, b, c, d) { return haversineMi(a, b, c, d); }, radiusMi: CANCEL_RADIUS_MI, maxAgeMs: DRIVER_LOC_MAX_AGE_MS }; } catch (hookErr) {}
+
   function cancelFeeRule() {
     var c = window.PCS_SQUARE || {};
     var pct = Number(c.cancelPct);
@@ -3249,6 +3434,126 @@
     var base = Number(state.estimateCents) > 0 ? Number(state.estimateCents) : (est.ready ? est.total : 0);
     var pct = base ? Math.round(base * rule.pct / 100) : 0;
     return Math.max(pct, rule.min);
+  }
+
+  /* v59: one-line policy used on the booking screens. */
+  function cancelPolicyShort(feeCents) {
+    var rule = cancelFeeRule();
+    return "Free to cancel unless your driver is within " + CANCEL_RADIUS_MI + " mile of pickup; then the cancel fee is " +
+      (feeCents ? money(feeCents) + " (" + rule.pct + "% of the estimate, " + money(rule.min) + " minimum)."
+        : rule.pct + "% of the estimate (" + money(rule.min) + " minimum).");
+  }
+
+  function policyLinkHtml(label) {
+    /* same app, same tab: /app/policies/#cancellation */
+    return '<a class="policy-link" href="policies/#cancellation" style="color:#f0d48a;text-decoration:underline">' + esc(label || "See cancellation policy") + "</a>";
+  }
+
+  /* v59: same rule as the pcs-pay Worker (decideCancelFee). The Worker re-checks from Firebase and has the final say. */
+  function cancelCoordOk(lat, lng) {
+    if (lat == null || lat === "" || lng == null || lng === "") return false;
+    var a = +lat, b = +lng;
+    return isFinite(a) && isFinite(b) && Math.abs(a) <= 90 && Math.abs(b) <= 180 && !(a === 0 && b === 0);
+  }
+
+  function haversineMi(lat1, lng1, lat2, lng2) {
+    var r = Math.PI / 180;
+    var dLat = (lat2 - lat1) * r, dLng = (lng2 - lng1) * r;
+    var h = Math.pow(Math.sin(dLat / 2), 2) + Math.cos(lat1 * r) * Math.cos(lat2 * r) * Math.pow(Math.sin(dLng / 2), 2);
+    return 2 * 3958.8 * Math.asin(Math.min(1, Math.sqrt(h)));
+  }
+
+  function cancelDistanceDecision(ride, presence, now) {
+    var out = { fee: false, reason: "", miles: null, ageSec: null, source: "" };
+    ride = ride || {};
+    var st = String(ride.status || "").toLowerCase();
+    var accepted = !!(ride.acceptedAt || ride.driverId || ride.driverUid || st === "accepted" || st === "started") &&
+      st !== "pending_owner" && st !== "pending-owner" && st !== "requested";
+    if (!accepted) { out.reason = "not_accepted"; return out; }
+    if (!cancelCoordOk(ride.pickupLat, ride.pickupLng)) { out.reason = "no_pickup_location"; return out; }
+    var cands = [];
+    if (presence && typeof presence === "object" && presence.online !== false && cancelCoordOk(presence.lat, presence.lng)) {
+      cands.push({ source: "presence", lat: +presence.lat, lng: +presence.lng, at: Number(presence.gpsAt) || Number(presence.at) || 0 });
+    }
+    if (cancelCoordOk(ride.driverLat, ride.driverLng) && Number(ride.driverLocAt) > 0) {
+      cands.push({ source: "ride", lat: +ride.driverLat, lng: +ride.driverLng, at: Number(ride.driverLocAt) });
+    }
+    if (!cands.length) { out.reason = "driver_location_missing"; return out; }
+    var fresh = cands.filter(function (c) { return c.at > 0 && now - c.at <= DRIVER_LOC_MAX_AGE_MS && c.at - now <= 30000; })
+      .sort(function (a, b) { return b.at - a.at; });
+    if (!fresh.length) { out.reason = "driver_location_stale"; return out; }
+    var c = fresh[0];
+    var mi = haversineMi(c.lat, c.lng, +ride.pickupLat, +ride.pickupLng);
+    out.miles = Math.round(mi * 100) / 100;
+    out.ageSec = Math.max(0, Math.round((now - c.at) / 1000));
+    out.source = c.source;
+    out.fee = mi <= CANCEL_RADIUS_MI;
+    out.reason = out.fee ? "driver_near" : "driver_far";
+    return out;
+  }
+
+  function milesOneDecimal(m) {
+    return m == null || !isFinite(+m) ? "" : (Math.round(+m * 10) / 10).toFixed(1);
+  }
+
+  /* The rider's own view of the ride (state) + the driver's live presence row. */
+  function riderCancelDecision() {
+    var accepted = driverHasAccepted();
+    var ride = {
+      status: state.rideStatus,
+      acceptedAt: accepted ? 1 : 0,
+      driverId: state.driverId,
+      pickupLat: state.pickupLat,
+      pickupLng: state.pickupLng,
+      driverLat: state.driverLat,
+      driverLng: state.driverLng,
+      driverLocAt: state.driverLocAt
+    };
+    return cancelDistanceDecision(ride, riderDriverPresence(), Date.now());
+  }
+
+  function riderDriverPresence() {
+    var id = state.driverId;
+    if (!id) return null;
+    var best = state.driverPresence && state.driverPresence.id === id ? state.driverPresence : null;
+    (state.onlineDrivers || []).forEach(function (d) {
+      if (!d || d.id !== id) return;
+      var at = Number(d.gpsAt) || Number(d.at) || 0;
+      var bestAt = best ? (Number(best.gpsAt) || Number(best.at) || 0) : -1;
+      if (at > bestAt) best = d;
+    });
+    return best;
+  }
+
+  function fetchDriverPresence(id) {
+    if (!syncOn() || !id) return Promise.resolve(null);
+    return authFetch(driversUrl(id)).then(function (res) {
+      if (!res.ok) return null;
+      return res.text().then(function (t) {
+        var row = null;
+        try { row = JSON.parse(t || "null"); } catch (e) { row = null; }
+        if (!row || typeof row !== "object") return null;
+        row.id = id;
+        return row;
+      });
+    }).catch(function () { return null; });
+  }
+
+  /* Refresh the driver's location for the Cancel card (on open and every few seconds while it shows). */
+  function refreshCancelLocation() {
+    if (ROLE !== "customer" || !state.driverId || !driverHasAccepted()) return Promise.resolve();
+    return fetchDriverPresence(state.driverId).then(function (row) {
+      if (row) state.driverPresence = row;
+      updateCancelCopyDom();
+    });
+  }
+
+  function updateCancelCopyDom() {
+    if (ROLE !== "customer") return;
+    var el = document.getElementById("cancel-policy-copy");
+    if (!el) return;
+    var txt = cancelWarningCopy();
+    if (el.textContent !== txt) el.textContent = txt;
   }
 
   function testSkipPayEnabled() {
@@ -3367,7 +3672,7 @@
       '<div class="card payment-card">' +
       '<p class="tag">Payment</p>' +
       '<p class="lede">After you request, you add your card for this ride on a secure Square form. You are not charged until after drop-off, so you can add a tip.</p>' +
-      '<p class="fine">Free to cancel until a driver accepts. After a driver accepts, cancelling charges a cancel fee (' + cancelFeeRule().pct + '% of the estimate, ' + money(cancelFeeRule().min) + ' minimum).</p>' +
+      '<p class="fine">' + esc(cancelPolicyShort()) + ' ' + policyLinkHtml("Terms and Policies") + '</p>' +
       '<p class="fine">Your pickup PIN shows as soon as a driver accepts your ride. This app never sees or stores your card number.</p>' +
       "</div>"
     );
@@ -3476,7 +3781,7 @@
         (squareCfg().testMode ? '<p class="fine" style="background:#c9a227;color:#0b1f3a;font-weight:700;padding:4px 8px;border-radius:8px">TEST MODE · Square sandbox · card 4111 1111 1111 1111 · CVV 111 · ZIP 77042</p>' : "") +
         '<h3 id="card-title">Add your card</h3>' +
         '<p class="lede">Square keeps your card; this app never sees the number. <strong>Nothing is charged now.</strong> You are charged after drop-off for the final fare, plus any tip you add.</p>' +
-        '<p class="fine">Free to cancel until a driver accepts. After that, cancelling charges ' + esc(money(cancelFeeCents())) + ' (' + cancelFeeRule().pct + '% of the estimate, ' + esc(money(cancelFeeRule().min)) + ' minimum).</p>' +
+        '<p class="fine">' + esc(cancelPolicyShort(cancelFeeCents())) + '</p>' +
         '<div id="sq-card-container" class="sq-card"><p class="fine">Loading the secure card form…</p></div>' +
         '<p class="error" id="sq-card-error" role="alert"></p>' +
         '<button class="btn" type="button" id="sq-card-save" disabled>Save card</button>' +
@@ -3879,21 +4184,24 @@
   function cancelWarningCopy() {
     var fee = cancelFeeCents();
     var rule = cancelFeeRule();
-    if (!driverHasAccepted()) {
-      return "Free to cancel until a driver accepts your ride. After a driver accepts, the cancel fee is " + money(fee) +
-        " (" + rule.pct + "% of the estimate, " + money(rule.min) + " minimum).";
-    }
+    var later = " A fee of " + rule.pct + "% (" + money(rule.min) + " min) only applies once your driver is within " + CANCEL_RADIUS_MI + " mile of your pickup.";
     if (state.isTest || state.cardStatus === "test_skip") return "Test ride: no cancel fee.";
-    return "A driver already accepted, so cancelling charges a cancel fee of " + money(fee) + " (" + rule.pct + "% of the estimate, " +
-      money(rule.min) + " minimum)" + (state.cardStatus === "on_file" && state.cardLast4
-        ? " to your " + (state.cardBrand || "card") + " ending " + state.cardLast4 + "." : ".");
+    if (!driverHasAccepted()) return "Free to cancel. No driver has accepted yet." + later;
+    var d = riderCancelDecision();
+    if (d.fee) {
+      return "Your driver is almost there. Cancelling now costs " + money(fee) + " (" + rule.pct + "%, " + money(rule.min) + " min)" +
+        (state.cardStatus === "on_file" && state.cardLast4 ? ", charged to your " + (state.cardBrand || "card") + " ending " + state.cardLast4 + "." : ".");
+    }
+    if (d.reason === "driver_far") return "Free to cancel. Your driver is " + milesOneDecimal(d.miles) + " mi away." + later;
+    return "Free to cancel." + later;
   }
 
   /* v58: rider cancelled after a driver accepted -> pcs-pay /cancel-fee (the Worker re-reads the ride and decides). */
-  function chargeCancelFee(code, cardOnFile) {
+  function chargeCancelFee(code, cardOnFile, expectFee) {
     var cfg = squareCfg();
     if (!cardOnFile || !/^https:\/\//i.test(cfg.cancelFeeUrl)) return Promise.resolve({ skipped: true });
-    return workerPost(cfg.cancelFeeUrl, { rideCode: code }).then(function (data) {
+    /* v59: the Worker decides (driver within 1 mile of pickup, location under 2 minutes old); expectFee is only for its log. */
+    return workerPost(cfg.cancelFeeUrl, { rideCode: code, expectFee: !!expectFee }).then(function (data) {
       if (data && !data.none && !data.already && data.written !== true) {
         paymentIndexPatch(code, "cancel", { status: "COMPLETED", amountCents: Number(data.amountCents) || 0, paymentId: String(data.paymentId || ""),
           receiptUrl: String(data.receiptUrl || ""), last4: String(data.last4 || ""), brand: String(data.brand || "") });
@@ -3945,7 +4253,8 @@
       return (
         '<div class="card cancel-card" id="cancel-card">' +
         '<p class="tag">Cancel this ride?</p>' +
-        '<p class="lede">' + esc(cancelWarningCopy()) + "</p>" +
+        '<p class="lede" id="cancel-policy-copy">' + esc(cancelWarningCopy()) + "</p>" +
+        '<p class="fine">' + policyLinkHtml("See cancellation policy") + "</p>" +
         err +
         '<button class="btn danger" type="button" id="cancel-ride-yes"' + (busy ? " disabled" : "") + ">" +
         (busy ? "Cancelling…" : "Yes, cancel this ride") + "</button>" +
@@ -3956,7 +4265,8 @@
     return (
       '<div class="card" id="cancel-card">' +
       '<p class="tag">Cancel before pickup</p>' +
-      '<p class="lede">' + esc(cancelWarningCopy()) + "</p>" +
+      '<p class="lede" id="cancel-policy-copy">' + esc(cancelWarningCopy()) + "</p>" +
+      '<p class="fine">' + policyLinkHtml("See cancellation policy") + "</p>" +
       err +
       '<button class="btn secondary" type="button" id="cancel-ride">Cancel ride</button>' +
       "</div>"
@@ -3983,6 +4293,8 @@
     var wasAccepted = st === "accepted";
     var cardOnFile = state.cardStatus === "on_file" && !state.isTest;
     var feeResult = null;
+    var decision = riderCancelDecision();
+    var feeExpected = false;
     state.cancelBusy = true;
     state.cancelError = "";
     render();
@@ -3996,13 +4308,18 @@
       state.screen = "home";
       var feeNote = "";
       if (feeResult && feeResult.ok && Number(feeResult.amountCents) > 0 && !feeResult.none) {
-        feeNote = " A cancel fee of " + money(Number(feeResult.amountCents)) + " was charged" +
+        feeNote = " Your driver was almost there, so a cancel fee of " + money(Number(feeResult.amountCents)) + " was charged" +
           (feeResult.last4 ? " to your " + (feeResult.brand || "card") + " ending " + feeResult.last4 : "") + "." +
           (feeResult.receiptUrl ? " Your receipt is in History." : "");
-      } else if (feeResult && feeResult.failed) {
+      } else if (feeResult && (feeResult.free || feeResult.none)) {
+        feeNote = " No cancel fee" + (feeResult.miles != null && feeResult.reason === "driver_far"
+          ? " (your driver was " + milesOneDecimal(feeResult.miles) + " mi away)." : ".");
+      } else if (feeExpected && feeResult && feeResult.failed) {
         feeNote = " The cancel fee could not be charged to your card; Private Car Services will follow up.";
-      } else if (wasAccepted && !cardOnFile && !state.isTest) {
-        feeNote = " A driver had accepted, so Private Car Services will follow up about the cancel fee.";
+      } else if (feeExpected) {
+        feeNote = " Your driver was almost there, so Private Car Services will follow up about the cancel fee.";
+      } else {
+        feeNote = " No cancel fee.";
       }
       state.notice = "Your ride " + (code ? code + " " : "") + "was cancelled." + feeNote;
       render();
@@ -4020,6 +4337,10 @@
       return;
     }
     getRide(code).catch(function () { return null; }).then(function (remote) {
+      var did = String((remote && remote.driverId) || state.driverId || "");
+      return fetchDriverPresence(did).then(function (pres) { return { remote: remote, pres: pres }; });
+    }).then(function (pack) {
+      var remote = pack.remote;
       var rst = String((remote && remote.status) || st).toLowerCase();
       if (rst === "started" || rst === "completed") {
         var e = new Error("started");
@@ -4028,7 +4349,23 @@
       }
       wasAccepted = rst === "accepted" || !!(remote && (remote.acceptedAt || remote.driverId || remote.driverUid) && rst !== "pending_owner" && rst !== "requested");
       if (remote && remote.cardStatus === "on_file" && remote.squareCardId && !remote.isTest) cardOnFile = true;
-      var patch = { status: "cancelled", cancelledAt: now, cancelledBy: "rider", cancelFeeCents: wasAccepted ? fee : 0, updatedAt: now };
+      now = Date.now();
+      /* v59: fee only if the driver is within 1 mile of pickup right now (fresh ride + presence read). */
+      if (remote) {
+        decision = cancelDistanceDecision(Object.assign({}, remote, {
+          pickupLat: cancelCoordOk(remote.pickupLat, remote.pickupLng) ? remote.pickupLat : state.pickupLat,
+          pickupLng: cancelCoordOk(remote.pickupLat, remote.pickupLng) ? remote.pickupLng : state.pickupLng
+        }), pack.pres || riderDriverPresence(), now);
+      } else {
+        decision = riderCancelDecision();
+      }
+      if (!wasAccepted) decision = { fee: false, reason: "not_accepted", miles: null };
+      feeExpected = wasAccepted && decision.fee && !state.isTest && !(remote && remote.isTest);
+      if (decision.reason === "driver_location_stale" || decision.reason === "driver_location_missing") {
+        try { console.info("[PCS] free cancel: " + decision.reason + " (" + code + ")"); } catch (logErr) {}
+      }
+      var patch = { status: "cancelled", cancelledAt: now, cancelledBy: "rider", cancelFeeCents: feeExpected ? fee : 0, updatedAt: now,
+        cancelDriverMiles: decision.miles == null ? null : decision.miles, cancelClientReason: decision.reason || "" };
       return patchRide(code, patch).then(function () {
         /* Keep the row on the REQUESTS hub as "cancelled": drivers only list "requested" rows (so it leaves
            their map at once) and God mode shows it as cancelled. */
@@ -4036,7 +4373,10 @@
         summary.status = "cancelled";
         summary.cancelledAt = now;
         summary.cancelledBy = "rider";
-        summary.cancelFeeCents = wasAccepted ? fee : 0;
+        summary.cancelFeeCents = feeExpected ? fee : 0;
+        if (decision.miles != null) summary.cancelDriverMiles = decision.miles;
+        summary.cancelClientReason = decision.reason || "";
+        summary.cancelFeeStatus = wasAccepted && !feeExpected ? "free" : "";
         return authFetch(openIndexUrl(code), {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
@@ -4047,13 +4387,28 @@
           return deleteOpenRide(code).catch(function () {});
         });
       }).then(function () {
-        if (!wasAccepted || !cardOnFile) return null;
-        return chargeCancelFee(code, true).then(function (r) {
-          feeResult = r;
+        if (!wasAccepted || !cardOnFile) {
           try {
             rememberRiderHistoryEntry(Object.assign({}, currentRide() || {}, remote || {}, patch, {
-              code: code, cancelFeeStatus: r && r.ok && !r.none ? "charged" : (r && r.failed ? "failed" : ""),
-              cancelFeeCents: r && r.amountCents != null ? Number(r.amountCents) : fee,
+              code: code, cancelFeeStatus: feeExpected ? "" : "free", cancelFeeCents: feeExpected ? fee : 0 }));
+          } catch (e0) {}
+          return null;
+        }
+        return chargeCancelFee(code, true, feeExpected).then(function (r) {
+          feeResult = r;
+          var charged = !!(r && r.ok && !r.none && Number(r.amountCents) > 0);
+          var free = !!(r && (r.free || r.none));
+          /* God mode's ride card reads the REQUESTS row: put the Worker's answer there too. */
+          if (charged || free) {
+            var upd = { cancelFeeStatus: charged ? "charged" : "free", cancelFeeCents: charged ? Number(r.amountCents) : 0 };
+            if (r.miles != null) upd.cancelDriverMiles = Number(r.miles);
+            if (r.reason) upd.cancelFreeReason = String(r.reason);
+            authFetch(openIndexUrl(code), { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(upd) }).catch(function () {});
+          }
+          try {
+            rememberRiderHistoryEntry(Object.assign({}, currentRide() || {}, remote || {}, patch, {
+              code: code, cancelFeeStatus: charged ? "charged" : (free ? "free" : (r && r.failed && feeExpected ? "failed" : "")),
+              cancelFeeCents: charged ? Number(r.amountCents) : (free ? 0 : (feeExpected ? fee : 0)),
               cancelFeeReceiptUrl: (r && r.receiptUrl) || "", cardLast4: (r && r.last4) || state.cardLast4, cardBrand: (r && r.brand) || state.cardBrand
             }));
           } catch (e) {}
@@ -4859,6 +5214,103 @@
     return { shown: shown.slice(0, SUGGEST_SHOW), more: more.slice(0, SUGGEST_MAX - Math.min(shown.length, SUGGEST_SHOW)) };
   }
 
+  /* v59: "Jack and jill donut" -> ["jack n jill donut", "jack n jill donuts", "jack & jill donut", ...] */
+  function placeNameVariants(q) {
+    var base = String(q || "").replace(/\s+/g, " ").trim();
+    if (!base || looksLikeAddress(base)) return [];
+    var low = base.toLowerCase();
+    /* Swapped joiners first (map data usually spells "Jack N Jill"), then the rider's own words with a plural tweak. */
+    var forms = [];
+    if (/\band\b/.test(low)) { forms.push(low.replace(/\band\b/g, "n")); forms.push(low.replace(/\band\b/g, "&")); }
+    else if (/\s[n&]\s/.test(low)) { forms.push(low.replace(/\s[n&]\s/g, " and ")); forms.push(low.replace(/\s[n&]\s/g, low.indexOf("&") !== -1 ? " n " : " & ")); }
+    if (/'n'|’n’/.test(low)) forms.unshift(low.replace(/'n'|’n’/g, "n"));
+    forms.push(low);
+    var out = [];
+    forms.forEach(function (f) {
+      var words = f.split(" ");
+      var last = words[words.length - 1];
+      var alt = /s$/.test(last) && last.length > 3 ? last.slice(0, -1) : last + "s";
+      [f, words.slice(0, -1).concat(alt).join(" ")].forEach(function (v) {
+        v = v.trim();
+        if (v && out.indexOf(v) === -1) out.push(v);
+      });
+    });
+    return out.filter(function (v) { return v !== low; }).slice(0, 5);
+  }
+
+  /* Types Esri returns for areas, not places: skip (the city-center fallback already covers those). */
+  var ESRI_AREA_TYPES = { city: 1, county: 1, region: 1, "postal": 1, "postal locality": 1, neighborhood: 1, district: 1, country: 1, "state or province": 1, zone: 1 };
+
+  function esriFeatures(q, o, miles) {
+    if (typeof fetch !== "function") return Promise.resolve([]);
+    var dLat = miles / 69, dLon = miles / (69 * Math.cos((o.lat * Math.PI) / 180));
+    var ext = JSON.stringify({ xmin: +(o.lng - dLon).toFixed(4), ymin: +(o.lat - dLat).toFixed(4), xmax: +(o.lng + dLon).toFixed(4), ymax: +(o.lat + dLat).toFixed(4), spatialReference: { wkid: 4326 } });
+    var url = "https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer/findAddressCandidates?f=json&forStorage=false&maxLocations=8" +
+      "&outFields=PlaceName,StAddr,City,Postal,Region,RegionAbbr,Type,Addr_type&countryCode=USA" +
+      "&location=" + o.lng.toFixed(5) + "," + o.lat.toFixed(5) + "&searchExtent=" + encodeURIComponent(ext) + "&singleLine=" + encodeURIComponent(q);
+    return withTimeout(fetch(url).then(function (res) {
+      if (!res.ok) throw new Error("esri");
+      return res.json();
+    }), 8000).then(function (data) {
+      return ((data && data.candidates) || []).map(function (c) {
+        var a = c.attributes || {};
+        var type = String(a.Type || "").toLowerCase();
+        var addrType = String(a.Addr_type || "");
+        if (!c.location || !isCoord(c.location.x) || !isCoord(c.location.y)) return null;
+        if (ESRI_AREA_TYPES[type] || /^(Locality|Postal|PostalExt|PostalLoc)$/.test(addrType)) return null;
+        if (addrType !== "POI" && !a.PlaceName) return null;
+        if (Number(c.score) < 80) return null;
+        var stAddr = String(a.StAddr || "").trim();
+        var m = stAddr.match(/^(\d+[A-Za-z]?)\s+(.*)$/);
+        return geoFeature(c.location.y, c.location.x, {
+          name: String(a.PlaceName || "").trim() || stAddr,
+          housenumber: m ? m[1] : "",
+          street: m ? m[2] : stAddr,
+          city: String(a.City || "").trim(),
+          postcode: String(a.Postal || "").slice(0, 5),
+          state: String(a.RegionAbbr || a.Region || "TX"),
+          countrycode: "US",
+          osm_key: "amenity",
+          osm_value: type.replace(/\s+/g, "_"),
+          osm_type: "esri",
+          osm_id: String(a.PlaceName || "") + "|" + stAddr + "|" + String(a.Postal || ""),
+          source: "esri"
+        });
+      }).filter(Boolean);
+    }).catch(function () { return []; });
+  }
+
+  /* POI fallback: OpenStreetMap (Photon) with spelling variants + Esri for the name and its variants. */
+  function poiFallbackFeatures(q, o, city) {
+    var variants = placeNameVariants(q);
+    var common = "lang=en&lat=" + o.lat.toFixed(5) + "&lon=" + o.lng.toFixed(5) + "&location_bias_scale=0.1&zoom=12&limit=10&bbox=" + bboxAround(o, SUGGEST_LOCAL_MI) + "&q=";
+    var calls = variants.slice(0, 2).map(function (v) { return photonFetch(common + encodeURIComponent(v)); });
+    calls.push(esriFeatures(q, o, SUGGEST_LOCAL_MI));
+    city = String(city || "").trim();
+    /* the field's city (it may be far from the rider): the place name + city, wider area */
+    if (city && city.length >= 3) calls.push(esriFeatures((variants[0] || q) + ", " + city + ", TX", o, 150));
+    return Promise.all(calls).then(function (lists) {
+      var feats = [].concat.apply([], lists);
+      var esriHit = feats.some(function (f) { return f && f.properties && f.properties.source === "esri"; });
+      if (esriHit || !variants.length) return feats;
+      /* nothing yet: Esri with the variants, one by one (stop at the first that finds a place) */
+      var i = 0;
+      function next() {
+        if (i >= Math.min(variants.length, 4)) return Promise.resolve(feats);
+        var v = variants[i++];
+        return esriFeatures(v, o, SUGGEST_LOCAL_MI).then(function (more) {
+          if (more.length) return feats.concat(more);
+          return next();
+        });
+      }
+      return next();
+    });
+  }
+
+  function hasLocalNameMatch(items) {
+    return items.some(function (it) { return it.tier === 0 && it.dist <= SUGGEST_LOCAL_MI && photonIsPoi(suggestProps(it)); });
+  }
+
   function suggestPlaces(q, origin) {
     var o = (origin && origin.point) || HOUSTON_CENTER;
     var bbox = bboxAround(o, SUGGEST_LOCAL_MI);
@@ -4874,10 +5326,37 @@
       calls.push(photonFetch("limit=8&bbox=" + bbox + "&" + common + encodeURIComponent(streetOnly)));
     }
     return Promise.all(calls).then(function (lists) {
-      var merged = rankPlaces([].concat.apply([], lists), q, o);
+      var all = [].concat.apply([], lists);
+      var merged = rankPlaces(all, q, o);
+      if (looksLikeAddress(q) || hasLocalNameMatch(merged) || String(q).trim().length < 4) return merged;
+      /* v59: a business name OpenStreetMap doesn't know nearby -> variants + Esri POI search */
+      return poiFallbackFeatures(q, o, origin && origin.city).then(function (more) { return rankPlaces(all.concat(more), q, o); });
+    }).then(function (merged) {
       merged = dedupeSuggestions(merged); /* final sort: nearest first, whatever source or query it came from */
       return splitSuggestions(merged);
     });
+  }
+
+  /* v59: show the place pick-list under a field (after a city-center-only match). */
+  function openPickList(prefix) {
+    var input = document.getElementById(prefix + "-street");
+    var box = document.getElementById(prefix + "-results");
+    if (!input || !box) return Promise.resolve(false);
+    var q = String(input.value || addrGet(prefix, "Street") || "").trim();
+    if (q.length < 3) return Promise.resolve(false);
+    var origin = suggestOrigin(prefix);
+    origin.city = String(addrGet(prefix, "City") || "").trim();
+    return suggestPlaces(q, origin).then(function (res) {
+      if (String(input.value || "").trim() !== q) return false;
+      var list = res.shown.filter(function (it) { return it.tier <= 1; });
+      var more = res.more.filter(function (it) { return it.tier <= 1; });
+      if (!list.length && !more.length) return false;
+      renderSuggestions(box, origin, list.length ? list : more.slice(0, SUGGEST_SHOW), list.length ? more : more.slice(SUGGEST_SHOW), false);
+      box._keepUntil = Date.now() + 4000;
+      var head = box.querySelector(".suggest-note");
+      if (head) head.textContent = "Did you mean one of these? Tap the right place:";
+      return true;
+    }).catch(function () { return false; });
   }
 
   function suggestHeadHtml(origin) {
@@ -4947,6 +5426,7 @@
       var mine = ++seq;
       timer = setTimeout(function () {
         var origin = suggestOrigin(prefix);
+        origin.city = String(addrGet(prefix, "City") || "").trim();
         suggestPlaces(q, origin).then(function (res) {
           if (mine !== seq || input.value.trim() !== q) return;
           var num = (q.match(/^(\d+[A-Za-z]?)\s+/) || [])[1];
@@ -4992,7 +5472,51 @@
       autoResolveSeq[prefix] = "";
       box.hidden = true;
       if (place.approx) autoResolveField(prefix); /* try for the exact house in the background */
+      else if (isCoord(place.lat) && !/\d/.test(String(place.line1 || ""))) addStreetToPlace(prefix, place);
     });
+  }
+
+  /* v59: a picked place with no street on the map ("Kroger") gets its street address:
+     the same name at that exact pin in Esri's place data, else the road from a reverse lookup. */
+  function addStreetToPlace(prefix, place) {
+    var pt = { lat: +place.lat, lng: +place.lng };
+    var name = String(place.line1 || "").trim();
+    esriFeatures(name, pt, 0.3).then(function (feats) {
+      var best = null;
+      feats.forEach(function (f) {
+        var p = f.properties || {};
+        var c = f.geometry && f.geometry.coordinates;
+        if (!c || !p.housenumber || !p.street) return;
+        var d = haversineMi(pt.lat, pt.lng, c[1], c[0]);
+        if (d <= 0.2 && (!best || d < best.d)) best = { d: d, line: p.housenumber + " " + p.street, zip: p.postcode };
+      });
+      if (best) return best;
+      return withTimeout(fetch("https://nominatim.openstreetmap.org/reverse?format=jsonv2&addressdetails=1&zoom=18&lat=" + pt.lat + "&lon=" + pt.lng).then(function (res) {
+        if (!res.ok) throw new Error("nominatim");
+        return res.json();
+      }), 6000).then(function (data) {
+        var ad = (data && data.address) || {};
+        if (!ad.road) return null;
+        return { line: [ad.house_number, ad.road].filter(Boolean).join(" "), zip: ad.postcode };
+      });
+    }).then(function (st) {
+      if (!st || !st.line) return;
+      if (String(addrGet(prefix, "Street") || "") !== name) return; /* rider changed it meanwhile */
+      if (+addrGet(prefix, "Lat") !== pt.lat) return;
+      var line1 = name ? name + ", " + st.line : st.line;
+      addrSet(prefix, "Street", line1);
+      var el = document.getElementById(prefix + "-street");
+      if (el) el.value = line1;
+      if (st.zip && !addrGet(prefix, "Zip")) {
+        addrSet(prefix, "Zip", String(st.zip).slice(0, 5));
+        var z = document.getElementById(prefix + "-zip");
+        if (z) z.value = String(st.zip).slice(0, 5);
+      }
+      addrSet(prefix, "Found", [line1, addrGet(prefix, "City"), addrGet(prefix, "State"), String(addrGet(prefix, "Zip") || "").slice(0, 5)].filter(Boolean).join(", "));
+      var fEl = document.getElementById(prefix + "-found");
+      if (fEl) fEl.textContent = foundNoteText(prefix);
+      autoResolveSeq[prefix] = "";
+    }).catch(function () {});
   }
 
   /* ---------- Current location -> line 1 / city / state / ZIP ---------- */
@@ -5711,6 +6235,7 @@
     if (ps === "deposit_paid") return "Deposit paid " + money(r.paidCents || 0) + card;
     if (r.status === "cancelled" && r.cancelFeeStatus === "charged") return "Cancel fee " + money(r.cancelFeeCents || 0) + card;
     if (r.status === "cancelled" && r.cancelFeeStatus === "refunded") return "Cancel fee refunded" + card;
+    if (r.status === "cancelled" && r.cancelFeeStatus === "free") return "Cancelled · no cancel fee";
     return "";
   }
 
@@ -6577,7 +7102,8 @@
       onlineMinutesToday: Math.floor(onlineMsToday() / 60000),
       startOdometer: state.milesStartOdo,
       speedMph: speedFresh ? Math.round(state.speedMph || 0) : 0,
-      speedAt: state.speedAt || null
+      speedAt: state.speedAt || null,
+      gpsAt: state.gpsAt || null /* v59 */
     };
     return authFetch(driversUrl(driverPresenceId()), {
       method: "PUT",
@@ -6631,7 +7157,9 @@
       var changed = stamp !== state.onlineStamp;
       state.onlineStamp = stamp;
       state.onlineDrivers = drivers;
-      if (changed) render();
+      if (changed && state.cancelConfirm && document.getElementById("cancel-policy-copy")) updateCancelCopyDom(); /* v59: keep typing/scroll */
+      else if (changed) render();
+      else updateCancelCopyDom();
     }).catch(function () {
       /* presence index may be blocked until rules allow /drivers */
     });
@@ -6732,13 +7260,14 @@
     if (!isCoord(state.hereLat) || !isCoord(state.hereLng)) return;
     var lat = +state.hereLat;
     var lng = +state.hereLng;
-    if (lastDriverPatchLat === lat && lastDriverPatchLng === lng) return;
     var now = Date.now();
+    /* v59: same spot still re-stamps every 20 s (driver parked at pickup must stay "fresh" for the cancel rule). */
+    if (lastDriverPatchLat === lat && lastDriverPatchLng === lng && now - lastDriverPatchAt < DRIVER_LOC_HEARTBEAT_MS) return;
     if (now - lastDriverPatchAt < 3000) return;
     lastDriverPatchAt = now;
     lastDriverPatchLat = lat;
     lastDriverPatchLng = lng;
-    patchRide(code, { driverLat: lat, driverLng: lng }).catch(function () {
+    patchRide(code, { driverLat: lat, driverLng: lng, driverLocAt: state.gpsAt || now }).catch(function () {
       if (lastDriverPatchLat === lat && lastDriverPatchLng === lng) {
         lastDriverPatchLat = null;
         lastDriverPatchLng = null;
@@ -6905,7 +7434,15 @@
       (ride.paymentStatus || "") !== (state.paymentStatus || "") ||
       (ride.receiptUrl || "") !== (state.receiptUrl || "") ||
       (ride.cancelFeeStatus || "") !== (state.cancelFeeStatus || "");
-    if (!statusChanged && !placesChanged && !driverChanged && !codeChanged && !identityChanged && !cardChanged) return;
+    if (ROLE === "customer") {
+      /* v59: a parked driver re-stamps driverLocAt without moving; keep it (and driverId) for the cancel rule. */
+      state.driverLocAt = Number(ride.driverLocAt) || 0;
+      if (ride.driverId) state.driverId = String(ride.driverId);
+    }
+    if (!statusChanged && !placesChanged && !driverChanged && !codeChanged && !identityChanged && !cardChanged) {
+      updateCancelCopyDom();
+      return;
+    }
     var screen = state.screen;
     applyRide(ride);
     if (screen === "waiting" && (ride.status === "accepted" || ride.status === "started" || ride.status === "completed")) state.screen = "trip";
@@ -6918,6 +7455,7 @@
     if (onlyDriver && carMarker && isCoord(state.driverLat) && isCoord(state.driverLng)) {
       carMarker.setLatLng([+state.driverLat, +state.driverLng]);
       refreshDriverEtaDom();
+      updateCancelCopyDom();
       return;
     }
     render();
@@ -7053,25 +7591,23 @@
       discardStoredRide();
       return false;
     }
+    /* v59 (Matthew): open on the rider HOME screen, never on the last ride. Active / unpaid -> "Back to my ride" card. */
+    state.screen = "home";
+    state.riderView = "home";
+    state.riderHistoryView = "";
     if (savedRide.pickupStreet && savedRide.dropStreet &&
-        (savedRide.status === "requested" || savedRide.status === "pending_owner" ||
-         savedRide.status === "denied" || savedRide.status === "accepted" ||
-         savedRide.status === "started" || savedRide.status === "completed")) {
-      if ((savedRide.status === "requested" || savedRide.status === "pending_owner" || savedRide.status === "denied") &&
-          !rideIsAsap(savedRide) && isPickupInPast(savedRide.date, savedRide.time) && !readActiveMark()) {
-        discardStoredRide();
-        state.screen = "home";
-        return false;
-      }
-      applyRide(savedRide);
-      ensureRidePin();
-      if (savedRide.status === "completed" || savedRide.status === "accepted" || savedRide.status === "started") {
-        state.screen = "trip";
-      } else {
-        state.screen = "waiting";
-      }
-      return true;
+        (savedRide.status === "requested" || savedRide.status === "pending_owner") &&
+        !rideIsAsap(savedRide) && isPickupInPast(savedRide.date, savedRide.time) && !readActiveMark()) {
+      discardStoredRide();
+      return false;
     }
+    if (isActiveStatus(savedRide.status) || riderRideNeedsPay(savedRide)) return false; /* Home shows Back to my ride */
+    var st0 = String(savedRide.status || "").toLowerCase();
+    if (st0 === "completed" || st0 === "cancelled" || st0 === "denied") {
+      try { rememberRiderHistoryEntry(savedRide); } catch (e) {}
+      clearActiveMark(savedRide.code);
+    }
+    resetBookingForm(); /* finished ride or an old unsent draft: History only, blank form next time */
     return false;
   }
 
@@ -7224,6 +7760,11 @@
     );
   }
 
+  /* v59: rider Terms and Policies (same tab). */
+  function policiesNavLink() {
+    return '<a class="btn ghost" id="open-policies" href="policies/#cancellation" style="text-decoration:none;text-align:center">Terms and Policies</a>';
+  }
+
   function logoutLine() {
     return '<button class="btn ghost" type="button" id="log-out">Log out</button>';
   }
@@ -7236,7 +7777,7 @@
         "</div>"
       );
     }
-    return '<div class="app-nav">' + logoutLine() + "</div>";
+    return '<div class="app-nav">' + policiesNavLink() + logoutLine() + "</div>";
   }
 
   function customerHome() {
@@ -7256,6 +7797,7 @@
       : "";
     return (
       '<div class="app-nav">' +
+      '<button class="btn ghost" type="button" id="booking-home">← Home</button>' +
       '<button class="btn ghost" type="button" id="open-history">History</button>' +
       logoutLine() + "</div>" +
       (state.notice ? '<p class="note notice-ok" role="status">' + esc(state.notice) + "</p>" : "") +
@@ -7294,7 +7836,6 @@
       "</div>" +
       '<p class="note">Miles round up to the next whole mile. Texas tax is 8.25% and is estimate-only, not a charge.</p>' +
       paymentInfoCopy() +
-      '<p class="fine">Cancel before pickup: a fee of 25% of the estimate or $10 (whichever is more) may apply. Automatic charging is not live yet.</p>' +
       '<p class="error" id="form-error" role="alert">' + esc(state.error) + "</p>" +
       '<button class="btn" type="submit">Request this ride</button>' +
       "</form>" +
@@ -7506,7 +8047,7 @@
     var caption = !both ? "Your route" : (driver ? "Your driver" : "Your route");
     var st = String(state.rideStatus || "").toLowerCase();
     var note = st === "cancelled"
-      ? "This ride was cancelled. Tap ← Book a new ride to request again, or call " + BUSINESS_PHONE + "."
+      ? "This ride was cancelled. Tap ← Home, then Book a ride to request again, or call " + BUSINESS_PHONE + "."
       : st === "pending_owner"
       ? "Your request was saved. Private Car Services must confirm it before drivers can accept."
       : (st === "denied"
@@ -7598,6 +8139,8 @@
     state.dropLng = keptDrop ? keptDrop.lng : ride.dropLng;
     state.driverLat = isCoord(ride.driverLat) ? +ride.driverLat : null;
     state.driverLng = isCoord(ride.driverLng) ? +ride.driverLng : null;
+    state.driverId = String(ride.driverId || "");
+    state.driverLocAt = Number(ride.driverLocAt) || 0;
     state.driverName = ride.driverName || "";
     state.driverPhone = ROLE === "driver" ? (ride.driverPhone || "") : ""; /* v51: never kept on the rider app */
     state.riderPhoto = safePhoto(ride.riderPhoto);
@@ -7815,6 +8358,9 @@
     state.dropLng = null;
     state.driverLat = null;
     state.driverLng = null;
+    state.driverId = "";
+    state.driverLocAt = 0;
+    state.driverPresence = null;
     state.driverName = "";
     state.driverPhone = "";
     state.driverPhoto = "";
@@ -8140,9 +8686,11 @@
     else if (ROLE === "driver") html = driverTrip();
     else if (ROLE === "customer" && state.riderHistoryView === "receipt") html = customerHistoryReceipt();
     else if (ROLE === "customer" && state.riderHistoryView === "list") html = customerHistoryList();
+    else if (ROLE === "customer" && state.riderHistoryView === "profile") html = customerProfileView();
     else if (state.screen === "waiting") html = customerWaiting();
     else if (state.screen === "trip") html = customerTrip();
-    else html = customerHome();
+    else if (state.riderView === "book") html = customerHome();
+    else html = riderHomeScreen();
     app.innerHTML = html;
     ensureSosButton();
     if (keptBoard) {
@@ -8762,9 +9310,10 @@
             }
             if (placeCoords("drop") && state.dropApprox === "city" && state.dropMissingAck !== dropKey) {
               state.dropMissingAck = dropKey;
-              state.error = "We could only place the To address at the " + (state.dropCity || "city") + " city center, so miles and fare are rough. " +
-                "Check the street name (no ZIP needed), or tap Request this ride again to send it anyway.";
+              state.error = "We couldn't find \"" + state.dropStreet + "\" in " + (state.dropCity || "that city") + ". Pick the right place from the list under To, " +
+                "or type the street address. (Last resort: tap Request this ride again to send it with an approximate pin.)";
               render();
+              openPickList("drop"); /* v59 */
               return;
             }
             if (!placeCoords("pickup") && state.pickupMissingAck !== state.pickupStreet) {
@@ -8850,9 +9399,25 @@
     var backToRide = document.getElementById("back-to-ride");
     if (backToRide) {
       backToRide.addEventListener("click", function () {
-        if (goToActiveRide(activeRiderRide())) render();
+        state.notice = "";
+        if (goToActiveRide(riderHomeActiveRide())) render();
       });
     }
+    /* v59 Home */
+    var homeBook = document.getElementById("home-book");
+    if (homeBook) homeBook.addEventListener("click", function () { startNewBooking(); });
+    var bookingHome = document.getElementById("booking-home");
+    if (bookingHome) {
+      bookingHome.addEventListener("click", function () {
+        state.riderView = "home";
+        state.error = "";
+        render();
+      });
+    }
+    var openProfile = document.getElementById("open-profile");
+    if (openProfile) openProfile.addEventListener("click", function () { state.riderHistoryView = "profile"; render(); });
+    var profileBack = document.getElementById("profile-back");
+    if (profileBack) profileBack.addEventListener("click", function () { state.riderHistoryView = ""; render(); });
     var cancelThat = document.getElementById("cancel-that-ride");
     if (cancelThat) {
       cancelThat.addEventListener("click", function () {
@@ -8866,11 +9431,7 @@
     var backHome = document.getElementById("back-home");
     if (backHome) {
       backHome.addEventListener("click", function () {
-        var endedSt = String(state.rideStatus || "").toLowerCase();
-        if (endedSt === "cancelled" || endedSt === "denied") { clearActiveMark(state.code); discardStoredRide(); }
-        state.mode = "customer";
-        state.screen = "home";
-        render();
+        goRiderHome(); /* v59 */
       });
     }
     /* v54: rider History + in-app chat */
@@ -9034,6 +9595,7 @@
         state.cancelConfirm = true;
         state.cancelError = "";
         render();
+        refreshCancelLocation(); /* v59: fresh driver distance for the fee / free copy */
         var card = document.getElementById("cancel-card");
         if (card && card.scrollIntoView) card.scrollIntoView({ block: "center" });
       });
@@ -9293,6 +9855,21 @@
       });
     }
 
+    function viaPoi() {
+      /* v59: business / place names (OSM spelling variants + Esri POI), nearest the From / rider location */
+      if (isAddr || base.length < 4) return Promise.resolve(null);
+      return poiFallbackFeatures(base, o, city).then(function (feats) {
+        var items = rankPlaces(feats, base, o, { city: city || "", zip: "" }).filter(function (it) {
+          return it.tier === 0 && photonIsPoi(suggestProps(it)) && it.dist <= SUGGEST_LOCAL_MI;
+        });
+        if (!items.length) return null;
+        var f = fromPhoton(items[0], "exact");
+        f.properties.poiLine = items[0].place.line1;
+        f.properties.poiSource = String(suggestProps(items[0]).source || "osm");
+        return f;
+      }).catch(function () { return null; });
+    }
+
     var chain;
     if (isAddr) {
       var structured = "street=" + encodeURIComponent(base) + (city ? "&city=" + encodeURIComponent(city) : "") +
@@ -9312,7 +9889,7 @@
         });
       });
     } else {
-      chain = viaPhoton();
+      chain = viaPhoton().then(function (f) { return f || viaPoi(); });
     }
     return chain.then(function (f) {
       return f || viaStreetName();
@@ -9351,8 +9928,16 @@
     var level = props.level || "exact";
     addrSet(prefix, "Approx", level === "exact" ? "" : level);
     addrSet(prefix, "Found", props.label || "");
-    if (level !== "city" && props.postcode && !String(addrGet(prefix, "Zip") || "").trim()) addrSet(prefix, "Zip", props.postcode);
-    if (props.city && !String(addrGet(prefix, "City") || "").trim()) addrSet(prefix, "City", props.city);
+    /* v59 (Matthew): the FOUND address wins: overwrite a typed / prefilled ZIP and city with what was found. */
+    if (level !== "city" && props.postcode) addrSet(prefix, "Zip", String(props.postcode).trim().slice(0, 10));
+    if (level !== "city" && props.city) addrSet(prefix, "City", String(props.city).trim());
+    else if (props.city && !String(addrGet(prefix, "City") || "").trim()) addrSet(prefix, "City", props.city);
+    /* v59: typed a business name and we found it -> line 1 = "Jack N Jill Donuts, 12820 Walden Rd" */
+    if (level === "exact" && props.poiLine && !looksLikeAddress(addrGet(prefix, "Street"))) {
+      addrSet(prefix, "Street", props.poiLine);
+      var stEl = document.getElementById(prefix + "-street");
+      if (stEl) stEl.value = props.poiLine;
+    }
     if (prefix === "drop") state.dropFix = pt;
     resetDrivingRoute();
     return true;
@@ -9442,6 +10027,9 @@
     if (street.length < 3) return;
     if (addrGet(prefix, "Pinned") && isCoord(addrGet(prefix, "Lat")) && !addrGet(prefix, "Approx")) return;
     if (prefix === "pickup" && state.pickupFromHere) return;
+    /* v59: rider is still typing line 1 (city blur fired mid-word): its own blur resolves the finished text */
+    var streetEl = document.getElementById(prefix + "-street");
+    if (streetEl && document.activeElement === streetEl) return;
     var key = street + "|" + city + "|" + (addrGet(prefix, "State") || "") + "|" + (addrGet(prefix, "Zip") || "");
     if (autoResolveSeq[prefix] === key) return;
     autoResolveSeq[prefix] = key;
@@ -9462,13 +10050,16 @@
       var lvl = (feature.properties || {}).level;
       if (lvl === "exact") addrSet(prefix, "Pinned", true);
       var zipEl = document.getElementById(prefix + "-zip");
-      if (zipEl && !zipEl.value.trim() && addrGet(prefix, "Zip")) zipEl.value = addrGet(prefix, "Zip");
+      if (zipEl && addrGet(prefix, "Zip") && zipEl.value.trim() !== addrGet(prefix, "Zip")) zipEl.value = addrGet(prefix, "Zip");
       var cityEl = document.getElementById(prefix + "-city");
-      if (cityEl && !cityEl.value.trim() && addrGet(prefix, "City")) cityEl.value = addrGet(prefix, "City");
+      if (cityEl && addrGet(prefix, "City") && cityEl.value.trim() !== addrGet(prefix, "City")) cityEl.value = addrGet(prefix, "City");
+      autoResolveSeq[prefix] = String(addrGet(prefix, "Street") || "").trim() + "|" + String(addrGet(prefix, "City") || "").trim() + "|" +
+        (addrGet(prefix, "State") || "") + "|" + (addrGet(prefix, "Zip") || ""); /* found values are now the typed ones */
       if (el) {
         el.textContent = foundNoteText(prefix);
-        el.className = (lvl === "exact" ? "fine" : "note") + " addr-found";
+        el.className = (lvl === "exact" ? "fine" : (lvl === "city" ? "error" : "note")) + " addr-found";
       }
+      if (lvl === "city") openPickList(prefix); /* v59: offer the place list instead of a silent city pin */
     });
   }
 
@@ -9476,7 +10067,7 @@
     var found = addrGet(prefix, "Found");
     var lvl = addrGet(prefix, "Approx");
     if (!found) return lvl === "missing" ? "We couldn't find this address yet. Check the street name and city, or pick it from the list." : "";
-    if (lvl === "city") return "Pinned at " + found + ". We couldn't find the exact street, so miles are approximate.";
+    if (lvl === "city") return "We couldn't find that place or street yet. Pick it from the list, or type the street address (like 12820 Walden Rd).";
     if (lvl === "street") return "Pinned near " + String(found).replace(/^near\s+/i, "") + ". Exact house isn't on the map, so miles are close.";
     return "\u2713 Found: " + found;
   }
@@ -10192,6 +10783,7 @@
     var first = !isFinite(state.hereLat);
     state.hereLat = pos.coords.latitude;
     state.hereLng = pos.coords.longitude;
+    state.gpsAt = Date.now(); /* v59: when this location was really seen (cancel-fee distance rule) */
     state.driverLat = state.hereLat;
     state.driverLng = state.hereLng;
     if (ROLE === "driver") {
@@ -10399,6 +10991,15 @@
       render();
       return;
     }
+    if (state.screen === "home" && state.riderView !== "book") {
+      /* v59 Home: show / hide the "Back to my ride" card as the ride starts, ends or gets paid. */
+      if (state.riderHistoryView) return;
+      var openH = riderHomeActiveRide();
+      var showingH = !!document.getElementById("home-active-ride");
+      if (!!openH !== showingH) render();
+      else if (openH) refreshActiveRideStatus(openH.code);
+      return;
+    }
     if (state.screen === "home") {
       /* v52: if a ride is open (another tab, reopened app), swap the request form for "Back to my ride", and back again once it ends. */
       var open = activeRiderRide();
@@ -10414,6 +11015,17 @@
 
   /* v54 test hooks (no UI). */
   window.__pcsApp = {
+    placeNameVariants: placeNameVariants,
+    suggestPlaces: suggestPlaces,
+    resolveAddress: resolveAddress,
+    openPickList: openPickList,
+    riderHomeActiveRide: riderHomeActiveRide,
+    riderRideNeedsPay: riderRideNeedsPay,
+    startNewBooking: startNewBooking,
+    applyResolved: applyResolved,
+    addrGet: addrGet,
+    cancelWarningCopy: cancelWarningCopy,
+    riderCancelDecision: riderCancelDecision,
     playRideAlertSound: playRideAlertSound,
     loadRideChime: loadRideChime,
     rideChimeUrl: function () { return RIDE_CHIME_URL; },
