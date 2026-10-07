@@ -32,7 +32,11 @@
    v59 places: line 1 accepts business names. Spelling variants (and / n / &, plural) + an Esri World Geocoder POI
         fallback near the From / rider location when OpenStreetMap doesn't know the place ("Jack and jill donut" ->
         Jack N Jill Donuts, 12820 Walden Rd, Montgomery 77356). City center is the last resort, and then the rider is
-        shown the pick-list and asked to pick a place or type the street address. */
+        shown the pick-list and asked to pick a place or type the street address.
+   v61 (Oct 7): "Request a ride" form order is From, Stop 1, Stop 2, ..., "+ Add a stop" (+ help text), To.
+        Stop order sent with the ride is unchanged. Google suggestions with no current location / From pin are biased
+        to Greater Houston (29.7604,-95.3698) instead of all of Texas; no distance is shown for that default bias, and
+        matches within 50 mi (~80 km) of Houston are listed first (Google's order kept inside each group). */
 (function () {
   var BUSINESS_PHONE = "936-261-7878";
   var DRIVER_COMMISSION_RATE = 0.7;
@@ -5425,10 +5429,22 @@
     }).catch(function () { return null; });
   }
 
-  /* Bias to the From / rider location when we have one (else the Worker biases to Texas). */
+  /* Bias to the From / rider location when we have one. v61: otherwise bias to the service area (the rider app
+     has no area picker, so Greater Houston) instead of letting the Worker fall back to all of Texas.
+     area: true = default service-area bias (the Worker's distance is from downtown Houston, so it is not shown). */
+  var PLACES_AREA_BIAS = { lat: 29.7604, lng: -95.3698 };
+  var PLACES_AREA_MI = 50; /* about 80 km: Houston + Conroe / The Woodlands / Montgomery */
+  /* v61: with the default area bias, matches inside the area come first (Google's order kept inside each group).
+     p.miles is the Worker's distance from the bias point. Location / From-pin bias keeps Google's order. */
+  function rankAreaFirst(preds, bias) {
+    if (!bias || !bias.area || !Array.isArray(preds)) return preds;
+    var inArea = function (p) { return p && p.miles != null && isFinite(p.miles) && +p.miles <= PLACES_AREA_MI; };
+    return preds.filter(inArea).concat(preds.filter(function (p) { return !inArea(p); }));
+  }
   function placesBias(prefix) {
     var o = searchOrigin(prefix);
-    return o && o.from && o.point && isCoord(o.point.lat) && isCoord(o.point.lng) ? { lat: +o.point.lat, lng: +o.point.lng } : null;
+    if (o && o.from && o.point && isCoord(o.point.lat) && isCoord(o.point.lng)) return { lat: +o.point.lat, lng: +o.point.lng, area: false };
+    return { lat: PLACES_AREA_BIAS.lat, lng: PLACES_AREA_BIAS.lng, area: true };
   }
 
   function cityFromSub(sub) {
@@ -5445,12 +5461,12 @@
     if (bias) { body.lat = bias.lat; body.lng = bias.lng; }
     return placesPost("/autocomplete", body).then(function (data) {
       if (!data || !Array.isArray(data.predictions) || !data.predictions.length) return null;
-      return data.predictions.map(function (p) {
+      return rankAreaFirst(data.predictions, bias).map(function (p) {
         var cs = cityFromSub(p.sub);
         return {
           google: { placeId: p.placeId, main: p.main, sub: p.sub, types: p.types || [] },
           place: { line1: p.main, city: cs.city, state: cs.state, zip: "", lat: NaN, lng: NaN },
-          dist: p.miles != null && isFinite(p.miles) ? +p.miles : null,
+          dist: !bias.area && p.miles != null && isFinite(p.miles) ? +p.miles : null,
           tier: 0
         };
       });
@@ -8060,8 +8076,8 @@
       (state.isTest ? testBannerHtml() : "") +
       "<form id=\"ride-form\" autocomplete=\"off\">" +
       addrBlockHtml("pickup", "From", { locate: true, required: true }) +
+      stopsHtml() + /* v61: stops (and "+ Add a stop") sit BETWEEN From and To, in driving order */
       addrBlockHtml("drop", "To", { required: true }) +
-      stopsHtml() +
       '<div class="group"><p class="group-title">When</p>' +
       '<div class="when-modes" role="tablist" aria-label="Pickup time">' +
       '<button type="button" role="tab" id="when-asap" aria-selected="' + (state.asap ? "true" : "false") + '">ASAP</button>' +
@@ -10177,13 +10193,13 @@
         });
       }
       if (base.length < 3) return Promise.resolve(null);
-      var bias = (function () { var oo = searchOrigin(prefix || "drop"); return oo && oo.from ? oo.point : null; })();
+      var bias = placesBias(prefix || "drop"); /* v61: location / From pin, else Greater Houston */
       var tokenKey = "resolve-" + (prefix || "drop");
       var body = { input: city && low.indexOf(String(city).toLowerCase()) === -1 ? base + ", " + city : base, sessionToken: placesSession(tokenKey) };
       if (bias && isCoord(bias.lat)) { body.lat = +bias.lat; body.lng = +bias.lng; }
       return placesPost("/autocomplete", body).then(function (data) {
         var words = searchWords(base);
-        var preds = ((data && data.predictions) || []).filter(function (p) {
+        var preds = rankAreaFirst((data && data.predictions) || [], bias).filter(function (p) {
           return words.length && wordStarts(p.main, words[0].slice(0, 3)) && googleIsBusiness(p.types);
         });
         if (!preds.length) { delete gPlaceSessions[tokenKey]; return null; }
