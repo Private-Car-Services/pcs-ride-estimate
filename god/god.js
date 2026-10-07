@@ -7,9 +7,13 @@
    v59: cancel fee only when the driver was within 1 mile of pickup (the pcs-pay Worker decides). Each cancelled ride
    shows "cancel fee $X" or "free cancel (driver X.X mi away)"; Charge cancel fee is hidden for free cancels and the
    Worker refuses it (409 CANCEL_FREE) if the driver was farther than 1 mile or his location wasn't current.
-   v62: rides with internationalArrival show "International arrival +$15 service fee (taxed, in the fare)". */
+   v62: rides with internationalArrival show "International arrival +$15 service fee (taxed, in the fare)".
+   v64g: a ride waiting for Matthew's OK pops up AND rings the driver-app bell chime until tapped; live REQUESTS
+   stream (~1 s); waiting rides re-pop on every open / return to the foreground; Home Screen app + phone alerts
+   (Web Push via the pcs-pay Worker) for when God mode is closed. */
 (function () {
   "use strict";
+  var GOD_SCRIPT_SRC = (document.currentScript && document.currentScript.src) || ""; /* v64g: chime URL base */
 
   var DATABASE_URL = "https://pts-maps-rides-default-rtdb.firebaseio.com";
   var PRESENCE_HUB = "AVLBLDRV";
@@ -108,6 +112,11 @@
     pendingBanner: "",
     trackedRideCodes: {},
     shownPendingPopup: {},
+    shownOpenPopup: {},
+    shownWaiting: {},
+    wasPending: {},
+    forceRideCode: "",
+    pushOn: false,
     shownAcceptPopup: {},
     safetyAlerts: {},
     shownSafetyPopup: {},
@@ -831,6 +840,45 @@
     render();
   }
 
+  /* v64g: driver presence. iPhone stops the driver app's GPS + timers while another app (e.g. Lyft) is in front, so
+     /rides/AVLBLDRV/drivers/{id}.at goes stale although the driver is still on shift. The driver app only writes this
+     row while a shift is open (publishDriverPresence needs canGoOnline: start odometer entered) and DELETEs it on
+     Log out / end of shift / page close. So a row that still says online:true (or shiftOnline:true from the newer
+     driver app, or a start odometer) = on shift. v64 driver contract: shiftOnline, appState foreground|background|closed,
+     foregroundAt / backgroundedAt, lastLat/lastLng; pagehide writes appState "closed" + online:false (shift still open). live = update in the last 2 min and not backgrounded;
+     background = on shift but quiet (or backgroundedAt newer than foregroundAt), up to 12 h; then offline. */
+  var BACKGROUND_MAX_MS = 12 * 3600000;
+  function presenceOf(row, now) {
+    now = now || Date.now();
+    var rowAt = Number(row.at) || 0;
+    var bg = Number(row.backgroundedAt) || 0;
+    var fg = Number(row.foregroundAt) || 0;
+    /* last seen = newest of at / gpsAt / foregroundAt / backgroundedAt (v64 driver contract) */
+    var at = Math.max(rowAt, Number(row.gpsAt) || 0, fg, bg, Number(row.heartbeatAt) || 0);
+    var shift = row.shiftOnline === true;
+    if (row.shiftOnline === false) return { state: "offline", lastSeenAt: at };      /* v64: shift ended */
+    if (row.online === false && !shift) return { state: "offline", lastSeenAt: at };   /* v63 / explicit off */
+    var fresh = !!rowAt && now - rowAt <= ONLINE_MS;
+    var app = String(row.appState || "").toLowerCase();
+    var backgrounded = app === "background" || app === "closed" || row.online === false ||
+      (bg > 0 && bg > fg && bg >= rowAt - 5000);
+    var odo = row.startOdometer;
+    var onShift = shift || row.online === true || (odo != null && odo !== "" && isFinite(Number(odo)));
+    if (!onShift) return { state: fresh ? "live" : "offline", lastSeenAt: at };
+    var since = at || Number(row.shiftStartedAt) || 0;
+    if (!since || now - since > BACKGROUND_MAX_MS) return { state: "offline", lastSeenAt: since };
+    return { state: fresh && !backgrounded ? "live" : "background", lastSeenAt: since };
+  }
+  function agoText(ts) {
+    var m = Math.round((Date.now() - (Number(ts) || 0)) / 60000);
+    if (!(Number(ts) > 0)) return "unknown";
+    if (m < 1) return "just now";
+    if (m < 60) return m + " min ago";
+    var h = Math.floor(m / 60);
+    return h + " h " + (m % 60) + " min ago";
+  }
+  function isBackgroundDriver(d) { return !!(d && d.online && d.presence === "background"); }
+
   function listOnlineDrivers() {
     return fetch(driversUrl()).then(function (res) {
       if (res.status === 401 || res.status === 403) {
@@ -844,14 +892,20 @@
         var data;
         try { data = JSON.parse(text); } catch (e) { return []; }
         if (!data || typeof data !== "object") return [];
-        var cutoff = Date.now() - ONLINE_MS;
+        var now = Date.now();
         var out = [];
         Object.keys(data).forEach(function (id) {
           var row = data[id];
           if (!row || typeof row !== "object") return;
-          if (row.online === false) return;
-          if (Number(row.at || 0) < cutoff) return;
+          var pres = presenceOf(row, now); /* v64g: background drivers stay listed */
+          if (pres.state === "offline") return;
           row.id = id;
+          /* v64 driver: last known spot when lat/lng are empty */
+          if (!(isCoord(row.lat) && isCoord(row.lng)) && isCoord(row.lastLat) && isCoord(row.lastLng)) { row.lat = row.lastLat; row.lng = row.lastLng; }
+          row.presence = pres.state;
+          row.lastSeenAt = pres.lastSeenAt;
+          row.rawOnline = row.online;
+          row.online = true; /* listed = on shift (v64 pagehide writes online:false while the shift stays open) */
           out.push(row);
         });
         return out;
@@ -1364,10 +1418,8 @@
       var show = function () {
         try { new Notification(title, { body: body || "", tag: "pcs-booking" }); } catch (e) {}
       };
+      if (document.visibilityState === "visible") return; /* v64g: on screen = pop-up + alarm */
       if (Notification.permission === "granted") show();
-      else if (Notification.permission !== "denied") {
-        Notification.requestPermission().then(function (p) { if (p === "granted") show(); });
-      }
     } catch (err) {}
   }
 
@@ -1425,14 +1477,19 @@
       "#god-ride-popup .gp-more{font-size:13px;color:#c9d3e0;text-align:center;margin-top:10px}" +
       "#god-ride-popup .gp-actions{display:flex;flex-wrap:wrap;gap:10px;margin-top:16px}" +
       "#god-ride-popup .gp-actions button{flex:1;min-width:120px;font-size:18px;font-weight:800;padding:16px 10px;border-radius:12px;border:0;color:#fff;cursor:pointer}" +
+      "#god-ride-popup.gp-waiting .gp-card{border:4px solid #f0d48a;animation:gpPulse 1s ease-in-out infinite}" +
+      "@keyframes gpPulse{0%,100%{box-shadow:0 0 0 0 rgba(240,212,138,.75)}50%{box-shadow:0 0 0 14px rgba(240,212,138,0)}}" +
       "#god-ride-popup .gp-ok{background:#2e9d4f}#god-ride-popup .gp-deny{background:#8a2323}#god-ride-popup .gp-ghost{background:#345}";
     document.head.appendChild(s);
   }
 
-  function hideGodRidePopup() {
+  function hideGodRidePopup(key) {
     var el = document.getElementById("god-ride-popup");
-    if (el && el.parentNode) el.parentNode.removeChild(el);
-    godPopupQueue.shift();
+    var shown = el ? el.getAttribute("data-key") : "";
+    if (!key) key = shown || (godPopupQueue[0] && godPopupQueue[0].key);
+    godPopupQueue = godPopupQueue.filter(function (it) { return it.key !== key; });
+    if (el && el.parentNode && (!shown || shown === key)) el.parentNode.removeChild(el);
+    syncGodAlarm();
     showNextGodPopup();
   }
 
@@ -1441,7 +1498,7 @@
     var key = kind + ":" + String(ride.code);
     for (var i = 0; i < godPopupQueue.length; i += 1) if (godPopupQueue[i].key === key) return;
     godPopupQueue.push({ key: key, kind: kind, ride: ride });
-    if (godPopupQueue.length === 1) showNextGodPopup();
+    if (godPopupQueue.length === 1 || !document.getElementById("god-ride-popup")) showNextGodPopup();
     else {
       var more = document.getElementById("gp-more");
       if (more) more.textContent = (godPopupQueue.length - 1) + " more waiting";
@@ -1459,6 +1516,7 @@
       godPopupQueue.shift();
       showNextGodPopup();
     }
+    syncGodAlarm();
   }
 
   function godPopupShell(cls, inner) {
@@ -1466,6 +1524,7 @@
     var el = document.createElement("div");
     el.id = "god-ride-popup";
     if (cls) el.className = cls;
+    if (godPopupQueue[0]) el.setAttribute("data-key", godPopupQueue[0].key);
     var more = godPopupQueue.length > 1 ? (godPopupQueue.length - 1) + " more waiting" : "";
     el.innerHTML = '<div class="gp-card" role="dialog" aria-modal="true">' + inner +
       '<p class="gp-more" id="gp-more">' + esc(more) + "</p></div>";
@@ -1478,8 +1537,9 @@
     var code = String(ride.code);
     var needsOk = isPendingOwner(ride);
     var when = fmtWhen(ride.date, ride.time, ride);
-    var el = godPopupShell("gp-request",
-      '<p class="gp-title">New ride request</p>' +
+    var key = "request:" + code;
+    var el = godPopupShell(needsOk ? "gp-request gp-waiting" : "gp-request",
+      '<p class="gp-title">' + (needsOk ? "Ride waiting for your OK" : "New ride request") + "</p>" +
       (ride.isTest ? '<p class="gp-row" style="background:#7a1f1f;padding:6px 10px;border-radius:8px;text-align:center">TEST ride</p>' : "") +
       '<div class="gp-row"><b>Rider</b>' + esc(displayName(ride.name, "Rider")) + "</div>" +
       '<div class="gp-row"><b>Pickup</b>' + esc(rideAddressText(ride, "pickup") || "—") + "</div>" +
@@ -1492,26 +1552,39 @@
           '<button type="button" class="gp-deny" id="gp-deny" data-ride-code="' + esc(code) + '">Deny</button>' +
           '<button type="button" class="gp-ghost" id="gp-cardok" data-ride-code="' + esc(code) + '">Mark card OK</button>'
         : "") +
+      '<button type="button" class="gp-deny" id="gp-cancelride" data-ride-code="' + esc(code) + '">Cancel ride</button>' +
       '<button type="button" class="gp-ghost" id="gp-dismiss">' + (needsOk ? "Dismiss" : "OK") + "</button>" +
       "</div>");
     el.addEventListener("click", function (ev) {
       var t = ev.target;
       if (!t || !t.id) return;
       var c = t.getAttribute("data-ride-code") || code;
-      if (t.id === "gp-dismiss") { hideGodRidePopup(); return; }
+      if (t.id === "gp-dismiss") { silenceRide(code); hideGodRidePopup(key); return; }
+      if (t.id === "gp-cancelride") {
+        silenceRide(code);
+        syncGodAlarm();
+        ownerCancelTap(c, t, function (ok) { if (ok) hideGodRidePopup(key); });
+        return;
+      }
       if (t.id === "gp-approve") {
         t.disabled = true;
-        approveBooking(c).then(function () { hideGodRidePopup(); refresh(); });
+        silenceRide(code);
+        syncGodAlarm();
+        approveBooking(c).then(function () { hideGodRidePopup(key); refresh(); });
       } else if (t.id === "gp-deny") {
+        silenceRide(code); /* the alarm stops as soon as he taps Deny, even before he confirms */
+        syncGodAlarm();
         if (!window.confirm("Deny booking " + c + "?")) return;
         t.disabled = true;
-        denyBooking(c).then(function () { hideGodRidePopup(); refresh(); });
+        denyBooking(c).then(function () { hideGodRidePopup(key); refresh(); });
       } else if (t.id === "gp-cardok") {
+        silenceRide(code);
+        syncGodAlarm();
         if (!window.confirm("Mark the card OK for ride " + c + "?")) return;
         t.disabled = true;
         markCardOk(String(c).toUpperCase()).then(function () {
           state.actionNotice = "Card marked OK for " + c + ".";
-          hideGodRidePopup();
+          hideGodRidePopup(key);
           refresh();
         });
       }
@@ -1537,7 +1610,7 @@
       '<div class="gp-row"><b>Ride code</b>' + esc(code) + "</div>" +
       '<div class="gp-actions"><button type="button" class="gp-ok" id="gp-dismiss">OK</button></div>');
     el.addEventListener("click", function (ev) {
-      if (ev.target && ev.target.id === "gp-dismiss") hideGodRidePopup();
+      if (ev.target && ev.target.id === "gp-dismiss") hideGodRidePopup("accept:" + code);
     });
   }
 
@@ -1580,7 +1653,7 @@
         if (!(now - Number(m[k]) < 24 * 3600000)) return;
         var i = k.indexOf(":");
         var kind = k.slice(0, i), code = k.slice(i + 1);
-        if (kind === "request") state.shownPendingPopup[code] = true;
+        if (kind === "request") state.shownOpenPopup[code] = true; /* v64g: open rides only, never waiting ones */
         if (kind === "accept") state.shownAcceptPopup[code] = true;
       });
     } catch (e) {}
@@ -1735,6 +1808,769 @@
   }
 
 
+  /* ===== v64g: ride-waiting ALARM + live ride stream + phone (push) alerts =====
+     Why Matthew got no pop-up (Oct 7): God mode only checks for rides while it is on screen (iPhone/iPad stop a
+     page's timers the moment another app or tab is in front), and v57 made God mode silent. Now:
+       - A ride that needs Matthew's OK (status pending_owner) pops "Ride waiting for your OK" AND rings the driver
+         app's approved bell chime (app/driver/ride-chime.mp3, same v57 sound engine + iOS unlock) on a loop until
+         he taps Approve / Deny / Mark card OK / Dismiss, or the ride stops waiting (cancelled, approved elsewhere).
+       - Live: a Firebase stream (EventSource on /rides/REQUESTS) refreshes the board within ~1 s of any change;
+         the 5 s poll stays as the backup. Coming back to God mode (visibilitychange / focus / pageshow) re-checks
+         at once and re-shows any waiting ride.
+       - A waiting ride pops on every fresh open of God mode until it is handled (no 24 h "already shown" memory
+         for waiting rides). Dismiss only silences it for this open + its alarm for 24 h.
+       - Phone alerts (Web Push) for when God mode is closed: Home Screen app (iOS/iPadOS 16.4+) + "Phone alerts"
+         button. The pcs-pay Worker sends "New ride request - needs your OK". */
+  var GOD_CHIME_URL = (function () {
+    try { if (GOD_SCRIPT_SRC) return new URL("../app/driver/ride-chime.mp3", GOD_SCRIPT_SRC).href; } catch (e) {}
+    return "../app/driver/ride-chime.mp3";
+  })();
+
+  /* ===== v57 ride-alert sound engine (same code in app.js and driver/ride-alert.js) =====
+     iPhone/iPad home-screen app: sound only works after a real tap, and iOS can silently drop Web Audio after an
+     app switch or screen lock. So, belt and suspenders:
+       - EVERY touch / click / key (not only the gold bar) synchronously creates/resumes the AudioContext, plays a
+         1-sample silent buffer, and primes an HTMLAudioElement (muted play, then pause + rewind) inside the gesture.
+         iOS then lets that same element play later with no tap.
+       - A ride alert plays through BOTH: the decoded chime buffer looping on the AudioContext AND the primed
+         <audio> element (loop, volume 1). Stop both on Accept / Deny / hide.
+       - If play is blocked (NotAllowedError), a big red "Tap here to hear ride alerts" banner shows; tapping it
+         unlocks and plays the chime right away.
+       - The gold "Tap to turn on ride alert sound" bar stays at the top until a chime has really played in THIS
+         page session (AudioContext running AND <audio>.play() resolved). Nothing is saved: iOS forgets the unlock on
+         every reopen. It comes back after an app switch if the AudioContext did not come back.
+     o = { url, muted(), wantBar(), onUi() } */
+  function pcsAlertAudio(o) {
+    var AC = window.AudioContext || window.webkitAudioContext;
+    var ctx = null;
+    var el = null;
+    var elPrimed = false;   /* <audio> was play()-ed inside a gesture without NotAllowedError */
+    var elHeard = false;    /* <audio>.play() of the real (unmuted) chime resolved in this page session */
+    var buf = null;
+    var loading = null;
+    var failedAt = 0;
+    var alerting = false;
+    var alertGen = 0;
+    var loopSrc = null;
+    var loopStartedRunning = false; /* a loop started while suspended/interrupted is restarted once the context runs */
+    var loopNodes = [];
+    var oscNodes = [];
+    var watch = null;
+    var buzzing = false;
+    var blocked = false;
+    var testing = false;
+    var testTimer = null;
+    var stats = { unlocks: 0, elPlays: 0, bufStarts: 0, oscBursts: 0, blocked: 0 };
+    function noop() {}
+    function isMuted() { try { return !!(o.muted && o.muted()); } catch (e) { return false; } }
+    /* audioSession first (before any AudioContext), only if the API exists. Never playAndRecord (earpiece on iPhone). */
+    function setSession() {
+      try {
+        var s = navigator.audioSession;
+        if (s && s.type !== "playback") s.type = "playback";
+      } catch (e) {}
+    }
+    function makeCtx() {
+      if (ctx || !AC) return ctx;
+      setSession();
+      try {
+        ctx = new AC();
+        try { ctx.onstatechange = function () { if (alerting) startCtxLoop(); ui(); }; } catch (e1) {}
+      } catch (e) { ctx = null; }
+      return ctx;
+    }
+    function makeEl() {
+      if (el) return el;
+      if (typeof Audio !== "function") return null;
+      try {
+        el = new Audio();
+        el.preload = "auto";
+        el.setAttribute("playsinline", "");
+        el.setAttribute("webkit-playsinline", "");
+        try { el.playsInline = true; } catch (e1) {}
+        el.src = o.url;
+        try { el.load(); } catch (e2) {}
+      } catch (e) { el = null; }
+      return el;
+    }
+    function ctxRunning() { return !!ctx && ctx.state === "running"; }
+    /* "Really heard": AudioContext running AND the <audio> element's play() resolved. */
+    function ready() { return ctxRunning() && elHeard; }
+    function resumeCtx() {
+      if (!ctx || ctx.state === "running" || ctx.state === "closed" || !ctx.resume) return;
+      try {
+        var p = ctx.resume();
+        if (p && p.then) p.then(function () { ui(); if (alerting) startCtxLoop(); }, noop);
+      } catch (e) {}
+    }
+    function load() {
+      if (buf) return Promise.resolve(buf);
+      if (loading) return loading;
+      if (!ctx || typeof fetch !== "function" || !ctx.decodeAudioData) return Promise.resolve(null);
+      if (failedAt && Date.now() - failedAt < 15000) return Promise.resolve(null);
+      var c = ctx;
+      loading = fetch(o.url).then(function (res) {
+        if (!res || !res.ok) throw new Error("ride-chime " + (res && res.status));
+        return res.arrayBuffer();
+      }).then(function (ab) {
+        return new Promise(function (resolve, reject) {
+          var p = c.decodeAudioData(ab, resolve, reject); /* callback form for older iOS Safari */
+          if (p && p.then) p.then(resolve, reject);
+        });
+      }).then(function (b) {
+        if (!b) throw new Error("ride-chime decode");
+        buf = b;
+        failedAt = 0;
+        loading = null;
+        if (alerting) startCtxLoop();
+        return b;
+      }).catch(function () {
+        failedAt = Date.now();
+        loading = null;
+        return null;
+      });
+      return loading;
+    }
+    function primeEl() {
+      var e = el;
+      if (!e || alerting || testing || !e.paused) return;
+      var p = null;
+      e.muted = true;
+      try { p = e.play(); } catch (x) { p = null; }
+      try { e.pause(); } catch (x2) {}
+      try { e.currentTime = 0; } catch (x3) {}
+      e.muted = false;
+      try { e.volume = 1; } catch (x4) {}
+      if (p && p.then) {
+        p.then(function () {
+          elPrimed = true;
+          if (!alerting && !testing) { try { e.pause(); e.currentTime = 0; } catch (x5) {} }
+        }, function (err) {
+          /* AbortError = our own pause() won the race: the gesture was accepted. NotAllowedError = not a real gesture. */
+          if (err && err.name === "NotAllowedError") return;
+          elPrimed = true;
+        });
+      } else {
+        elPrimed = true;
+      }
+    }
+    /* Runs synchronously inside every user gesture. opts.noPrime: caller plays the element itself right after. */
+    function unlock(opts) {
+      stats.unlocks++;
+      setSession();
+      makeCtx();
+      if (ctx) {
+        resumeCtx();
+        try {
+          var s = ctx.createBufferSource();
+          s.buffer = ctx.createBuffer(1, 1, 22050);
+          s.connect(ctx.destination);
+          s.start(0);
+        } catch (e) {}
+        load();
+      }
+      makeEl();
+      if (alerting) {
+        /* a ride is ringing: this tap makes it audible right now */
+        if (el && (el.paused || blocked)) playEl(false);
+        startCtxLoop();
+      } else if (!(opts && opts.noPrime)) {
+        primeEl();
+      }
+    }
+    function onBlocked() {
+      blocked = true;
+      stats.blocked++;
+      ui();
+    }
+    function playEl(isTest) {
+      var e = makeEl();
+      if (!e) return null;
+      var gen = alertGen;
+      e.loop = !isTest;
+      e.muted = false;
+      try { e.volume = 1; } catch (x0) {}
+      try { e.currentTime = 0; } catch (x1) {}
+      var p = null;
+      try { p = e.play(); } catch (x2) { onBlocked(); return null; }
+      stats.elPlays++;
+      if (p && p.then) {
+        p.then(function () {
+          elPrimed = true;
+          elHeard = true;
+          blocked = false;
+          if (!isTest && (!alerting || gen !== alertGen)) { try { e.pause(); e.currentTime = 0; } catch (x3) {} }
+          ui();
+        }, function (err) {
+          if (err && err.name === "AbortError") return;
+          if (!isTest && (!alerting || gen !== alertGen)) return;
+          onBlocked();
+        });
+      } else {
+        elHeard = true;
+        ui();
+      }
+      return p;
+    }
+    function trackOsc(nodes, last) {
+      nodes.forEach(function (n) { oscNodes.push(n); });
+      try {
+        last.onended = function () {
+          oscNodes = oscNodes.filter(function (n) { return nodes.indexOf(n) === -1; });
+          nodes.forEach(function (n) { try { n.disconnect(); } catch (e) {} });
+        };
+      } catch (e) {}
+    }
+    /* Fallback (file not decoded yet / failed): same four bell notes from oscillators. Never the old sawtooth siren. */
+    function oscBurst(isTest) {
+      if (!ctx) return;
+      try {
+        var notes = [[1046.5, 0], [1318.5, 0.18], [1568, 0.36], [1318.5, 0.58]];
+        var now = ctx.currentTime + 0.01;
+        var master = ctx.createGain();
+        master.gain.value = 0.95;
+        master.connect(ctx.destination);
+        var nodes = [master];
+        var last = null;
+        notes.forEach(function (n, i) {
+          var len = i === notes.length - 1 ? 0.67 : 0.5;
+          [[1, 0.85], [2, 0.12]].forEach(function (pt) {
+            var osc = ctx.createOscillator();
+            var g = ctx.createGain();
+            osc.type = "sine";
+            osc.frequency.value = n[0] * pt[0];
+            g.gain.setValueAtTime(0.0001, now + n[1]);
+            g.gain.exponentialRampToValueAtTime(pt[1], now + n[1] + 0.008);
+            g.gain.exponentialRampToValueAtTime(0.0001, now + n[1] + len);
+            osc.connect(g);
+            g.connect(master);
+            osc.start(now + n[1]);
+            osc.stop(now + n[1] + len + 0.02);
+            nodes.push(osc, g);
+            last = osc;
+          });
+        });
+        stats.oscBursts++;
+        if (!isTest) trackOsc(nodes, last);
+      } catch (e) {}
+    }
+    /* Decoded chime looping on the AudioContext (gain 1.0). Same period as the looping <audio> element. */
+    function startCtxLoop() {
+      if (!alerting || !ctx || !buf) return;
+      if (loopSrc && (loopStartedRunning || ctx.state !== "running")) return;
+      if (loopSrc) { /* started while the context was not running: restart now that it is */
+        loopNodes.forEach(function (n) { try { if (n.stop) n.stop(); } catch (e0) {} try { n.disconnect(); } catch (e1) {} });
+        loopNodes = [];
+        loopSrc = null;
+      }
+      try {
+        var src = ctx.createBufferSource();
+        var g = ctx.createGain();
+        src.buffer = buf;
+        src.loop = true;
+        g.gain.value = 1.0;
+        src.connect(g);
+        g.connect(ctx.destination);
+        src.start(0);
+        loopSrc = src;
+        loopStartedRunning = ctx.state === "running";
+        loopNodes = [src, g];
+        stats.bufStarts++;
+      } catch (e) { loopSrc = null; }
+    }
+    function vibrate(p) {
+      try { if (navigator.vibrate && (navigator.userActivation ? navigator.userActivation.hasBeenActive : true)) navigator.vibrate(p); } catch (e) {}
+    }
+    function tickAlert() {
+      if (!alerting) return;
+      if (isMuted()) { stopAlert(); return; }
+      vibrate([220, 60, 220, 60, 220, 60, 320]);
+      buzzing = true;
+      resumeCtx();
+      if (el && el.paused && !blocked) playEl(false);
+      if (!buf) { load(); oscBurst(false); }
+      else startCtxLoop();
+    }
+    /* Ride arrived: both paths at once, until stopAlert(). Idempotent while ringing. */
+    function startAlert() {
+      if (isMuted()) { stopAlert(); return; }
+      if (alerting) return;
+      alerting = true;
+      alertGen++;
+      testing = false;
+      setSession();
+      makeCtx();
+      makeEl();
+      resumeCtx();
+      playEl(false);
+      startCtxLoop();
+      tickAlert();
+      watch = setInterval(tickAlert, 1400);
+      ui();
+    }
+    function stopAlert() {
+      var was = alerting;
+      alerting = false;
+      alertGen++;
+      if (watch) { clearInterval(watch); watch = null; }
+      loopNodes.concat(oscNodes).forEach(function (n) {
+        try { if (n.stop) n.stop(); } catch (e) {}
+        try { if (n.disconnect) n.disconnect(); } catch (e2) {}
+      });
+      loopNodes = [];
+      oscNodes = [];
+      loopSrc = null;
+      if (el && !testing) {
+        try { el.pause(); } catch (e3) {}
+        try { el.currentTime = 0; } catch (e4) {}
+        el.loop = false;
+      }
+      if (buzzing) { buzzing = false; vibrate(0); }
+      if (blocked || was) { blocked = false; ui(); }
+    }
+    /* Gold-bar test: plays NOW inside the tap via the primed element (works before the buffer is decoded). */
+    function test() {
+      unlock({ noPrime: true });
+      if (alerting) return;
+      testing = true;
+      vibrate(60);
+      var p = playEl(true);
+      if (!el || !p) oscBurst(true); /* no <audio> support: Web Audio only */
+      if (testTimer) clearTimeout(testTimer);
+      testTimer = setTimeout(function () { testing = false; }, 1600);
+      ui();
+    }
+    /* ---- UI: gold bar (until really heard) + red banner (blocked while ringing) ---- */
+    function barStyle(bg, fg, z) {
+      return "position:fixed;top:0;left:0;right:0;z-index:" + z + ";width:100%;margin:0;border:0;border-radius:0;" +
+        "padding:calc(16px + env(safe-area-inset-top)) 14px 16px;background:" + bg + ";color:" + fg + ";font-size:20px;font-weight:800;" +
+        "text-align:center;box-shadow:0 3px 12px rgba(0,0,0,.45);cursor:pointer;font-family:inherit;display:block;" +
+        "-webkit-tap-highlight-color:transparent;touch-action:manipulation";
+    }
+    function addBar(id, text, bg, fg, z, onTap) {
+      var b = document.getElementById(id);
+      if (b) return b;
+      b = document.createElement("button");
+      b.type = "button";
+      b.id = id;
+      b.textContent = text;
+      b.setAttribute("style", barStyle(bg, fg, z));
+      var last = 0;
+      function tap(ev) {
+        if (ev && ev.type === "click") { try { ev.preventDefault(); ev.stopPropagation(); } catch (e) {} }
+        var now = Date.now();
+        if (now - last < 700) return; /* touchend + click of one tap */
+        last = now;
+        onTap();
+      }
+      b.addEventListener("touchend", tap);
+      b.addEventListener("click", tap);
+      document.body.appendChild(b);
+      return b;
+    }
+    function removeEl(id) {
+      var b = document.getElementById(id);
+      if (b && b.parentNode) b.parentNode.removeChild(b);
+    }
+    function wantBar() { try { return o.wantBar ? !!o.wantBar() : true; } catch (e) { return true; } }
+    function ui() {
+      if (!document.body) return;
+      if (!wantBar()) { removeEl("ride-sound-bar"); removeEl("ride-sound-blocked"); return; }
+      if (blocked && alerting) {
+        addBar("ride-sound-blocked", "\uD83D\uDD0A Tap here to hear the ride alarm", "#c0161b", "#fff", 12650, function () {
+          unlock({ noPrime: true });
+          if (!alerting) { test(); return; }
+          playEl(false);
+          startCtxLoop();
+        });
+      } else {
+        removeEl("ride-sound-blocked");
+      }
+      if (ready()) removeEl("ride-sound-bar");
+      else addBar("ride-sound-bar", "\uD83D\uDD14 Tap to turn on the God mode ride alarm", "#e3b341", "#0b1c33", 12600, test);
+      try { if (o.onUi) o.onUi(); } catch (e) {}
+    }
+    /* App switch / screen lock: iOS leaves the context suspended or "interrupted". Try to resume; if it does not
+       come back, the gold bar returns so the next tap fixes it. */
+    function onReturn() {
+      if (document.visibilityState && document.visibilityState !== "visible") return;
+      resumeCtx();
+      if (alerting && el && el.paused) playEl(false);
+      ui();
+      setTimeout(ui, 700);
+    }
+    function onGesture(ev) {
+      var t = ev && ev.target;
+      var id = t && t.id;
+      /* bar / banner taps run their own handler (they play right away); still unlock the context here */
+      if (id === "ride-sound-bar" || id === "ride-sound-blocked") { unlock({ noPrime: true }); return; }
+      unlock();
+    }
+    function install() {
+      setSession();
+      ["touchstart", "touchend", "pointerdown", "pointerup", "mousedown", "click", "keydown"].forEach(function (t) {
+        document.addEventListener(t, onGesture, true);
+      });
+      document.addEventListener("visibilitychange", onReturn);
+      window.addEventListener("pageshow", onReturn);
+      window.addEventListener("focus", onReturn);
+      if (document.body) ui(); else document.addEventListener("DOMContentLoaded", ui);
+      setInterval(ui, 2000); /* nothing can quietly remove the bar */
+    }
+    return {
+      install: install,
+      unlock: unlock,
+      test: test,
+      startAlert: startAlert,
+      stopAlert: stopAlert,
+      load: load,
+      ui: ui,
+      ready: ready,
+      onReturn: onReturn,
+      info: function () {
+        return {
+          ctxState: ctx ? ctx.state : "none", elPrimed: elPrimed, elHeard: elHeard, alerting: alerting, blocked: blocked,
+          bufReady: !!buf, elPaused: el ? el.paused : null, elLoop: el ? el.loop : null, elMuted: el ? el.muted : null,
+          elSrc: el ? el.src : "", stats: stats
+        };
+      },
+      url: function () { return o.url; },
+      bufReady: function () { return !!buf; }
+    };
+  }
+  /* ===== end v57 engine ===== */
+
+
+  var godAlarm = pcsAlertAudio({
+    url: GOD_CHIME_URL,
+    muted: function () { return false; },
+    wantBar: function () { return state.screen === "board"; }
+  });
+  var godAlarmInstalled = false;
+  function installGodAlarm() {
+    if (godAlarmInstalled) return;
+    godAlarmInstalled = true;
+    try { godAlarm.install(); } catch (e) {}
+  }
+
+  /* Alarm silenced per ride (24 h) once Matthew taps a button on its pop-up. */
+  var SILENCE_KEY = "pcs-god-alarm-silenced-v64";
+  function silencedMap() {
+    try {
+      var m = JSON.parse(window.localStorage.getItem(SILENCE_KEY) || "{}") || {};
+      var now = Date.now(), out = {};
+      Object.keys(m).forEach(function (k) { if (now - Number(m[k]) < 24 * 3600000) out[k] = m[k]; });
+      return out;
+    } catch (e) { return {}; }
+  }
+  function silenceRide(code) {
+    if (!code) return;
+    try { var m = silencedMap(); m[String(code)] = Date.now(); window.localStorage.setItem(SILENCE_KEY, JSON.stringify(m)); } catch (e) {}
+  }
+  function unsilenceRide(code) {
+    try { var m = silencedMap(); if (m[code]) { delete m[code]; window.localStorage.setItem(SILENCE_KEY, JSON.stringify(m)); } } catch (e) {}
+  }
+  function freshRide(r) {
+    var code = String((r && r.code) || "");
+    var list = state.rides || [];
+    for (var i = 0; i < list.length; i += 1) if (list[i] && String(list[i].code) === code) return list[i];
+    return r;
+  }
+  function alarmWanted() {
+    var sil = silencedMap();
+    for (var i = 0; i < godPopupQueue.length; i += 1) {
+      var it = godPopupQueue[i];
+      if (it.kind === "request" && isPendingOwner(freshRide(it.ride)) && !sil[String(it.ride.code)]) return true;
+    }
+    return false;
+  }
+  function syncGodAlarm() {
+    try {
+      if (alarmWanted()) godAlarm.startAlert();
+      else godAlarm.stopAlert();
+    } catch (e) {}
+  }
+
+  /* Drop request pop-ups whose ride no longer waits (cancelled / approved / taken / gone from REQUESTS). */
+  function pruneGodPopups(merged) {
+    var byCode = {};
+    (merged || []).forEach(function (r) { if (r && r.code) byCode[String(r.code)] = r; });
+    var shownKey = (function () { var el = document.getElementById("god-ride-popup"); return el ? el.getAttribute("data-key") : ""; })();
+    var removedShown = false;
+    godPopupQueue = godPopupQueue.filter(function (it) {
+      if (it.kind !== "request") return true;
+      var code = String(it.ride.code);
+      var r = byCode[code];
+      var st = String((r && r.status) || "").toLowerCase();
+      var keep = !!r && (isPendingOwner(r) || isOpenRequest(r)) && !isActiveTrip(r) && st !== "cancelled" && st !== "denied" && st !== "completed";
+      /* a waiting pop-up whose ride was approved elsewhere (now "requested") is done too */
+      if (keep && isPendingOwner(it.ride) && !isPendingOwner(r)) keep = false;
+      if (!keep) {
+        delete state.shownPendingPopup[code];
+        if (!r || !isPendingOwner(r)) delete state.shownWaiting[code];
+        if (it.key === shownKey) removedShown = true;
+      } else {
+        it.ride = r;
+      }
+      return keep;
+    });
+    if (removedShown) {
+      var el = document.getElementById("god-ride-popup");
+      if (el && el.parentNode) el.parentNode.removeChild(el);
+      showNextGodPopup();
+    } else {
+      var more = document.getElementById("gp-more");
+      if (more) more.textContent = godPopupQueue.length > 1 ? (godPopupQueue.length - 1) + " more waiting" : "";
+    }
+    syncGodAlarm();
+  }
+
+  /* ---- live stream: Firebase REST EventSource on /rides/REQUESTS (public read, same as the poll) ---- */
+  var rideStream = null;
+  var streamKickTimer = null;
+  var streamRetryTimer = null;
+  var lastStreamEventAt = 0;
+  function stopRideStream() {
+    if (rideStream) { try { rideStream.close(); } catch (e) {} }
+    rideStream = null;
+    if (streamRetryTimer) { clearTimeout(streamRetryTimer); streamRetryTimer = null; }
+  }
+  function startRideStream() {
+    stopRideStream();
+    if (typeof window.EventSource !== "function" || state.screen !== "board") return;
+    var es;
+    try { es = new window.EventSource(openUrl()); } catch (e) { return; }
+    rideStream = es;
+    var kick = function () {
+      if (rideStream !== es) return;
+      lastStreamEventAt = Date.now();
+      if (streamKickTimer) return;
+      streamKickTimer = setTimeout(function () {
+        streamKickTimer = null;
+        if (state.screen === "board") refresh();
+      }, 250);
+    };
+    es.addEventListener("put", kick);
+    es.addEventListener("patch", kick);
+    es.addEventListener("cancel", function () { if (rideStream === es) stopRideStream(); });
+    es.onerror = function () {
+      if (es.readyState !== 2) return; /* 0 = the browser is reconnecting by itself */
+      if (rideStream === es) rideStream = null;
+      if (streamRetryTimer) clearTimeout(streamRetryTimer);
+      streamRetryTimer = setTimeout(function () {
+        streamRetryTimer = null;
+        if (state.screen === "board" && !rideStream && document.visibilityState !== "hidden") startRideStream();
+      }, 10000);
+    };
+  }
+
+  /* ---- Phone alerts (Web Push) ---- */
+  var swReg = null;
+  function isIOSDevice() {
+    var ua = navigator.userAgent || "";
+    return /iPad|iPhone|iPod/.test(ua) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+  }
+  function isStandaloneApp() {
+    try { return window.navigator.standalone === true || window.matchMedia("(display-mode: standalone)").matches; } catch (e) { return false; }
+  }
+  function pushSupported() {
+    return "serviceWorker" in navigator && "PushManager" in window && "Notification" in window;
+  }
+  function registerGodSW() {
+    if (!("serviceWorker" in navigator)) return Promise.resolve(null);
+    if (swReg) return Promise.resolve(swReg);
+    return navigator.serviceWorker.register("./sw.js", { scope: "./" }).then(function (r) { swReg = r; return r; }, function () { return null; });
+  }
+  function b64uToBytes(s) {
+    var b = String(s || "").replace(/-/g, "+").replace(/_/g, "/");
+    while (b.length % 4) b += "=";
+    var bin = window.atob(b), out = new Uint8Array(bin.length);
+    for (var i = 0; i < bin.length; i += 1) out[i] = bin.charCodeAt(i);
+    return out;
+  }
+  function sameBytes(a, b) {
+    if (!a || !b) return false;
+    a = new Uint8Array(a); b = new Uint8Array(b);
+    if (a.length !== b.length) return false;
+    for (var i = 0; i < a.length; i += 1) if (a[i] !== b[i]) return false;
+    return true;
+  }
+  function deviceLabel() {
+    var ua = navigator.userAgent || "";
+    if (/iPad/.test(ua) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1)) return "iPad";
+    if (/iPhone/.test(ua)) return "iPhone";
+    if (/Android/.test(ua)) return "Android";
+    return "Computer";
+  }
+  function workerJson(path, body) {
+    return fetch(PAY_WORKER + path, body ? { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) } : {})
+      .then(function (res) {
+        return res.json().catch(function () { return {}; }).then(function (d) {
+          if (!res.ok || !d || d.ok === false) {
+            var e = new Error((d && d.error) || ("Server answered " + res.status));
+            e.status = res.status;
+            throw e;
+          }
+          return d;
+        });
+      });
+  }
+  function checkPushOn() {
+    if (!pushSupported() || Notification.permission !== "granted" || !navigator.serviceWorker) { state.pushOn = false; paintPushBtn(); return Promise.resolve(false); }
+    return navigator.serviceWorker.getRegistration("./").then(function (reg) {
+      if (!reg) return null;
+      swReg = reg;
+      return reg.pushManager.getSubscription();
+    }).then(function (sub) { state.pushOn = !!sub; paintPushBtn(); return !!sub; }, function () { state.pushOn = false; paintPushBtn(); return false; });
+  }
+  function paintPushBtn() {
+    var b = document.getElementById("god-push-btn");
+    if (b) b.textContent = state.pushOn ? "\uD83D\uDD14 Phone alerts: ON" : "\uD83D\uDD14 Turn on phone alerts";
+  }
+  /* Must start inside the tap: iOS only shows the Allow prompt from a user gesture. */
+  function turnOnPush(pw) {
+    var permP;
+    try { permP = Notification.requestPermission(); } catch (e) { permP = null; }
+    if (!permP || typeof permP.then !== "function") permP = Promise.resolve(Notification.permission);
+    return permP.then(function (perm) {
+      if (perm !== "granted") {
+        throw new Error(perm === "denied"
+          ? "Notifications are blocked for PCS God. Open Settings > Notifications > PCS God, turn on Allow Notifications, then try again."
+          : "Notifications were not allowed. Tap the button again and choose Allow.");
+      }
+      return registerGodSW();
+    }).then(function (reg) {
+      if (!reg) throw new Error("This device could not start the alert service.");
+      return navigator.serviceWorker.ready;
+    }).then(function (reg) {
+      return workerJson("/push/key").catch(function (e) {
+        if (e && (e.status === 404 || e.status === 503)) throw new Error("Phone alerts are not switched on at the server yet. The pop-up and alarm in God mode already work.");
+        throw e;
+      }).then(function (k) {
+        if (!k.publicKey) throw new Error("Phone alerts are not set up on the server yet.");
+        var key = b64uToBytes(k.publicKey);
+        return reg.pushManager.getSubscription().then(function (old) {
+          var oldKey = old && old.options && old.options.applicationServerKey;
+          if (old && (!oldKey || sameBytes(oldKey, key))) return old;
+          return (old ? old.unsubscribe().catch(function () {}) : Promise.resolve()).then(function () {
+            return reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: key });
+          });
+        });
+      });
+    }).then(function (sub) {
+      var j = sub.toJSON ? sub.toJSON() : sub;
+      return workerJson("/push/subscribe", { subscription: { endpoint: j.endpoint, keys: j.keys || {} }, godPassword: pw, device: deviceLabel() });
+    }).then(function (d) {
+      state.pushOn = true;
+      paintPushBtn();
+      return d;
+    });
+  }
+  function closePushPopup() {
+    var el = document.getElementById("god-push-popup");
+    if (el && el.parentNode) el.parentNode.removeChild(el);
+  }
+  function ensurePushPopupStyle() {
+    if (document.getElementById("god-push-style")) return;
+    var s = document.createElement("style");
+    s.id = "god-push-style";
+    s.textContent =
+      "#god-push-popup .gp-card{background:#0b1c33;color:#fff;border:2px solid #f0d48a;border-radius:18px;max-width:520px;width:100%;padding:20px;max-height:92vh;overflow:auto;box-sizing:border-box}" +
+      "#god-push-popup .gp-title{font-size:26px;font-weight:800;color:#f0d48a;margin:0 0 12px;text-align:center}" +
+      "#god-push-popup .gp-row{margin:10px 0;font-size:17px;line-height:1.35}" +
+      "#god-push-popup .gp-row>b{display:block;color:#f0d48a;font-size:12px;letter-spacing:.08em;text-transform:uppercase}" +
+      "#god-push-popup .gp-more{font-size:13px;color:#c9d3e0;text-align:center;margin-top:10px}" +
+      "#god-push-popup .gp-actions{display:flex;flex-wrap:wrap;gap:10px;margin-top:16px}" +
+      "#god-push-popup .gp-actions button{flex:1;min-width:120px;font-size:18px;font-weight:800;padding:16px 10px;border-radius:12px;border:0;color:#fff;cursor:pointer}" +
+      "#god-push-popup .gp-ok{background:#2e9d4f}#god-push-popup .gp-ghost{background:#345}" +
+      "#god-push-popup input{box-sizing:border-box;color:#0b1c33;background:#fff}";
+    document.head.appendChild(s);
+  }
+  function openPushPopup() {
+    closePushPopup();
+    ensurePushPopupStyle();
+    var el = document.createElement("div");
+    el.id = "god-push-popup";
+    el.setAttribute("style", "position:fixed;inset:0;z-index:12200;background:rgba(5,14,28,.92);display:flex;align-items:center;justify-content:center;padding:16px");
+    var steps;
+    var canPush = pushSupported() && (!isIOSDevice() || isStandaloneApp());
+    if (!canPush && isIOSDevice()) {
+      steps =
+        '<p class="gp-row">To get an alert when God mode is <b style="display:inline;color:#f0d48a;font-size:inherit;letter-spacing:0;text-transform:none">closed</b>, God mode has to be on your Home Screen:</p>' +
+        '<ol style="font-size:17px;line-height:1.45;padding-left:22px">' +
+        "<li>In Safari, tap the <b style=\"display:inline;color:#f0d48a;font-size:inherit;letter-spacing:0;text-transform:none\">Share</b> button (square with an arrow; on iPad it is at the top right).</li>" +
+        "<li>Tap <b style=\"display:inline;color:#f0d48a;font-size:inherit;letter-spacing:0;text-transform:none\">Add to Home Screen</b>, then <b style=\"display:inline;color:#f0d48a;font-size:inherit;letter-spacing:0;text-transform:none\">Add</b>.</li>" +
+        "<li>Open <b style=\"display:inline;color:#f0d48a;font-size:inherit;letter-spacing:0;text-transform:none\">PCS God</b> from the Home Screen and sign in.</li>" +
+        "<li>Tap <b style=\"display:inline;color:#f0d48a;font-size:inherit;letter-spacing:0;text-transform:none\">Turn on phone alerts</b> again.</li></ol>" +
+        '<p class="gp-more">Needs iOS / iPadOS 16.4 or newer.</p>' +
+        '<div class="gp-actions"><button type="button" class="gp-ghost" id="gpp-close">OK</button></div>';
+    } else if (!canPush) {
+      steps = '<p class="gp-row">This browser cannot receive phone alerts. Use God mode from the Home Screen on your iPhone or iPad.</p>' +
+        '<div class="gp-actions"><button type="button" class="gp-ghost" id="gpp-close">OK</button></div>';
+    } else {
+      steps =
+        '<p class="gp-row">Get "New ride request - needs your OK" on this ' + esc(deviceLabel()) + " even when God mode is closed.</p>" +
+        '<label class="gp-row" style="display:block"><b>God password</b>' +
+        '<input id="gpp-password" type="password" autocomplete="current-password" style="width:100%;font-size:18px;padding:12px;border-radius:10px;border:1px solid #567;margin-top:6px"></label>' +
+        '<p class="gp-row" id="gpp-msg" style="min-height:1.4em;color:#f0d48a"></p>' +
+        '<div class="gp-actions"><button type="button" class="gp-ok" id="gpp-on">Turn on alerts</button>' +
+        '<button type="button" class="gp-ghost" id="gpp-close">Close</button></div>' +
+        '<p class="gp-more">Then tap Allow. A test alert arrives right away. Sound: Settings &gt; Notifications &gt; PCS God &gt; Sounds on.</p>';
+    }
+    el.innerHTML = '<div class="gp-card" role="dialog" aria-modal="true"><p class="gp-title">Phone alerts</p>' + steps + "</div>";
+    document.body.appendChild(el);
+    el.addEventListener("click", function (ev) {
+      var t = ev.target;
+      if (!t || !t.id) return;
+      if (t.id === "gpp-close") { closePushPopup(); return; }
+      if (t.id === "gpp-on") {
+        var pwEl = document.getElementById("gpp-password");
+        var msg = document.getElementById("gpp-msg");
+        var pw = pwEl ? pwEl.value : "";
+        if (!pw) { if (msg) msg.textContent = "Type your God password first."; return; }
+        t.disabled = true;
+        if (msg) msg.textContent = "Turning on…";
+        turnOnPush(pw).then(function (d) {
+          if (pwEl) pwEl.value = "";
+          if (msg) msg.textContent = "Phone alerts are ON for this " + deviceLabel() + "." + (d && d.testSent ? " A test alert is on its way." : "");
+          t.textContent = "Done";
+          t.disabled = false;
+          t.id = "gpp-close";
+        }).catch(function (err) {
+          if (pwEl) pwEl.value = "";
+          t.disabled = false;
+          if (msg) msg.textContent = (err && err.message) || "Could not turn on alerts.";
+        });
+      }
+    });
+  }
+  /* Notification tap (service worker) -> open that ride's pop-up. */
+  function openRideFromAlert(code) {
+    code = String(code || "").toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 12);
+    if (!code) return;
+    state.forceRideCode = code;
+    delete state.shownPendingPopup[code];
+    delete state.shownWaiting[code];
+    if (state.screen === "board") startPoll();
+  }
+  (function readRideParam() {
+    try {
+      var c = new URLSearchParams(window.location.search).get("ride");
+      if (c) state.forceRideCode = String(c).toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 12);
+    } catch (e) {}
+  })();
+  if ("serviceWorker" in navigator) {
+    try {
+      navigator.serviceWorker.addEventListener("message", function (ev) {
+        var d = ev && ev.data;
+        if (!d || typeof d !== "object") return;
+        if (d.type === "pcs-open-ride") openRideFromAlert(d.code);
+        else if (d.type === "pcs-push" && state.screen === "board") startPoll();
+      });
+    } catch (e) {}
+  }
+  /* ===== end v64g ===== */
+
   function maybeShowGodPopups(merged) {
     var list = merged || [];
     var openCodes = {};
@@ -1756,8 +2592,28 @@
           drop: rideAddressText(r, "drop"),
           at: Date.now()
         };
-        if ((isPendingOwner(r) || isOpenRequest(r)) && !isActiveTrip(r) && !state.shownPendingPopup[code]) {
+        /* v64g: a ride waiting for the OK pops on every open of God mode (and after it comes back to waiting,
+           e.g. a driver declined); an already-approved open request pops once per device like before. */
+        var waiting = isPendingOwner(r) && !isActiveTrip(r);
+        if (!waiting && state.wasPending[code]) { delete state.shownWaiting[code]; unsilenceRide(code); }
+        state.wasPending[code] = waiting;
+        if (state.forceRideCode && state.forceRideCode === code) {
+          state.forceRideCode = "";
+          delete state.shownWaiting[code];
+          delete state.shownPendingPopup[code];
+          unsilenceRide(code);
+        }
+        if (waiting && !state.shownWaiting[code]) {
+          state.shownWaiting[code] = true;
           state.shownPendingPopup[code] = true;
+          /* an "open for drivers" pop-up for the same ride is replaced by the waiting one (Approve/Deny) */
+          for (var qi = 0; qi < godPopupQueue.length; qi += 1) {
+            if (godPopupQueue[qi].key === "request:" + code) { hideGodRidePopup("request:" + code); break; }
+          }
+          queueGodPopup("request", r);
+        } else if (!waiting && isOpenRequest(r) && !isActiveTrip(r) && !state.shownPendingPopup[code] && !state.shownOpenPopup[code]) {
+          state.shownPendingPopup[code] = true;
+          state.shownOpenPopup[code] = true;
           rememberShown("request", code);
           queueGodPopup("request", r);
         }
@@ -1954,7 +2810,9 @@
         if (pending.length) {
           state.pendingBanner = pending.length + " booking(s) waiting for your OK";
         }
+        try { pruneGodPopups(merged || []); } catch (pruneErr) {}
         try { maybeShowGodPopups(merged || []); } catch (popupErr) {}
+        syncGodAlarm();
       });
     }).catch(function (err) {
       state.rides = [];
@@ -2055,6 +2913,7 @@
   }
 
   function stopPoll() {
+    stopRideStream();
     if (pollTimer) {
       clearInterval(pollTimer);
       pollTimer = null;
@@ -2065,6 +2924,7 @@
     stopPoll();
     refresh();
     pollTimer = setInterval(refresh, POLL_MS);
+    startRideStream(); /* v64g: live changes within ~1 s */
   }
 
   function tearMap() {
@@ -2277,9 +3137,11 @@
       }
       if (lat != null) {
         var pairedFocused = !!(driver && state.focusDriverId && driver.id === state.focusDriverId);
+        var pairedBg = isBackgroundDriver(driver);
         var pairedMarker = window.L.marker([lat, lng], {
-          icon: markerIcon("paired", label, pairedFocused),
-          zIndexOffset: pairedFocused ? 1000 : 700
+          icon: markerIcon("paired", label + (pairedBg ? " · app in background, seen " + agoText(driver.lastSeenAt) : ""), pairedFocused),
+          zIndexOffset: pairedFocused ? 1000 : 700,
+          opacity: pairedBg ? 0.5 : 1
         }).addTo(markerLayer);
         if (driver && driver.id) {
           driverMarkers[driver.id] = pairedMarker;
@@ -2311,9 +3173,12 @@
       if (freeCar) freeLabel += " · " + freeCar;
       if (driver.carPlate) freeLabel += " · " + String(driver.carPlate);
       var freeFocused = !!(state.focusDriverId && driver.id === state.focusDriverId);
+      var freeBg = isBackgroundDriver(driver);
+      if (freeBg) freeLabel += " · app in background, seen " + agoText(driver.lastSeenAt);
       var freeMarker = window.L.marker(here, {
         icon: markerIcon("car", freeLabel, freeFocused),
-        zIndexOffset: freeFocused ? 1000 : 500
+        zIndexOffset: freeFocused ? 1000 : (freeBg ? 300 : 500),
+        opacity: freeBg ? 0.5 : 1
       }).addTo(markerLayer);
       if (driver.id) {
         driverMarkers[driver.id] = freeMarker;
@@ -2425,6 +3290,8 @@
       if (d.startOdometer != null) prev.startOdometer = d.startOdometer;
       if (d.speedMph != null) prev.speedMph = d.speedMph;
       if (d.speedAt != null) prev.speedAt = d.speedAt;
+      prev.presence = d.presence || "live"; /* v64g */
+      prev.lastSeenAt = d.lastSeenAt || d.at || 0;
       if (!prev.active && prev.fromRoster) {
         /* Fired: do not treat as online in the panel. */
         prev.online = false;
@@ -2442,8 +3309,36 @@
     });
   }
 
+  /* v64g: per-shift odometer vs app miles (driver v64 writes DRVRMLES/{id}/{day}/shifts/{shiftStartedAt}). */
+  function milesNum(v) { return v != null && v !== "" && isFinite(Number(v)) ? Number(v) : null; }
+  function shiftLinesHtml(row) {
+    var sh = row && row.shifts;
+    if (!sh || typeof sh !== "object") return "";
+    var list = Object.keys(sh).map(function (k) { return sh[k]; }).filter(function (x) { return x && typeof x === "object"; });
+    if (!list.length) return "";
+    list.sort(function (a, b) { return (Number(a.shiftStartedAt) || 0) - (Number(b.shiftStartedAt) || 0); });
+    return '<ul class="shift-lines" style="margin:4px 0 6px 14px;padding:0">' + list.map(function (x) {
+      var so = milesNum(x.startOdo), eo = milesNum(x.endOdo);
+      var odoMi = milesNum(x.odoMiles);
+      if (odoMi == null && so != null && eo != null) odoMi = eo - so;
+      var tracked = milesNum(x.trackedMiles), filled = milesNum(x.filledInMiles);
+      var appMi = (tracked || 0) + (filled || 0);
+      var when = (Number(x.shiftStartedAt) ? fmtClock(x.shiftStartedAt) : "?") + "–" + (Number(x.shiftEndedAt) ? fmtClock(x.shiftEndedAt) : "open");
+      var gap = odoMi != null && (tracked != null || filled != null) ? odoMi - appMi : null;
+      var warn = !!x.odoWarned || (gap != null && Math.abs(gap) > Math.max(5, odoMi * 0.15));
+      return '<li style="list-style:disc;' + (warn ? "color:#ffc96b" : "") + '">Shift ' + esc(when) +
+        " · start odo " + esc(so != null ? String(so) : "—") + " · end odo " + esc(eo != null ? String(eo) : "—") +
+        " · odometer " + esc(odoMi != null ? odoMi.toFixed(1) + " mi" : "—") +
+        " vs app " + esc(tracked != null ? tracked.toFixed(1) : "—") + " mi tracked" +
+        (filled ? " + " + esc(filled.toFixed(1)) + " filled in" : "") +
+        (gap != null ? " (" + (gap >= 0 ? "+" : "") + esc(gap.toFixed(1)) + " mi " + (gap >= 0 ? "more on odometer" : "more in app") + ")" : "") +
+        (warn ? " ⚠" : "") + "</li>";
+    }).join("") + "</ul>";
+  }
+
   function driverSpeedLabel(d) {
     if (!d || !d.online) return "—";
+    if (isBackgroundDriver(d)) return "— (app in background)";
     if (d.speedMph == null) return "—";
     if (d.speedAt && (Date.now() - Number(d.speedAt) > 20000)) return "—";
     return Math.round(Number(d.speedMph) || 0) + " mph";
@@ -2583,18 +3478,21 @@
         if (approval === "pending") badge = '<span class="badge pending">Pending</span>';
         else if (approval === "rejected") badge = '<span class="badge fired">Rejected</span>';
         else if (approval === "fired" || !d.active) badge = '<span class="badge fired">Fired</span>';
-        else if (trip) badge = '<span class="badge on-trip">On trip</span>';
+        else if (trip) badge = '<span class="badge on-trip">On trip' + (isBackgroundDriver(d) ? " · app in background" : "") + "</span>";
+        else if (isBackgroundDriver(d)) badge = '<span class="badge bg-app" style="background:#4a3d12;color:#f0d48a;border:1px solid #f0d48a">Online · app in background · seen ' + esc(agoText(d.lastSeenAt)) + "</span>";
         else if (d.online) badge = '<span class="badge">Online · free</span>';
         else badge = '<span class="badge off">Approved · offline</span>';
         var statusShort;
         if (approval === "pending") statusShort = '<span class="badge pending">Pending</span>';
         else if (approval === "rejected") statusShort = '<span class="badge fired">Rejected</span>';
         else if (approval === "fired" || !d.active) statusShort = '<span class="badge fired">Fired</span>';
+        else if (isBackgroundDriver(d)) statusShort = '<span class="badge bg-app" style="background:#4a3d12;color:#f0d48a;border:1px solid #f0d48a">Online · app in background · seen ' + esc(agoText(d.lastSeenAt)) + "</span>";
         else if (d.online) statusShort = '<span class="badge">Online</span>';
         else statusShort = '<span class="badge off">Offline</span>';
         var speedTxt = driverSpeedLabel(d);
         var where = isCoord(d.lat) && isCoord(d.lng)
-          ? (+d.lat).toFixed(4) + ", " + (+d.lng).toFixed(4)
+          ? (isBackgroundDriver(d) ? "Last known spot " : "") + (+d.lat).toFixed(4) + ", " + (+d.lng).toFixed(4) +
+            (isBackgroundDriver(d) ? " (seen " + agoText(d.lastSeenAt) + ")" : "")
           : (d.online ? "Location not shared" : "Not on the map");
         var contact = [];
         if (d.phone) contact.push(esc(d.phone));
@@ -2613,7 +3511,7 @@
           var start = row.startOdometer != null ? String(row.startOdometer) : "—";
           var end = row.endOdometer != null ? String(row.endOdometer) : "—";
           return "<li><strong>" + esc(ymd) + "</strong> start " + esc(start) +
-            " · GPS " + esc(gps) + " mi · end " + esc(end) + "</li>";
+            " · GPS " + esc(gps) + " mi · end " + esc(end) + shiftLinesHtml(row) + "</li>";
         }).filter(Boolean);
         var cardClass = "card";
         if (trip) cardClass += " paired";
@@ -2729,6 +3627,138 @@
   }
 
   /* v58: one-line payment status for a ride (rides panel). */
+
+  /* ===== v64g: owner Cancel ride + Refund on ride cards =====
+     Cancel ride = the same fields the rider app's Cancel writes (status "cancelled", cancelledAt, cancelledBy,
+     cancelFeeCents), cancelledBy "owner", never a cancel fee (cancelFeeStatus "free"). The REQUESTS row stays as
+     "cancelled" (drivers only list "requested" rows, so it leaves their map at once; God mode shows it greyed).
+     A driver who already accepted is released by the driver app's cancel check (it drops the trip and says so).
+     Saved cards have no hold to void (Square card on file only; nothing is charged until drop-off). A quote-page
+     deposit is NOT refunded automatically: the card then shows "Refund…" (pcs-pay /refund, God password). */
+  function openRowUrl(code) {
+    return openUrl().replace(/\.json$/, "/") + encodeURIComponent(code) + ".json";
+  }
+  function rideStatusOf(r) { return String((r && r.status) || "requested").toLowerCase(); }
+  function canOwnerCancel(r) {
+    var st = rideStatusOf(r);
+    return st === "pending_owner" || st === "pending-owner" || st === "requested" || st === "waiting" || st === "accepted";
+  }
+  function paidCentsOf(code) {
+    var p = (state.payments || {})[code];
+    if (!p) return 0;
+    var paid = (payRecOk(p.full) ? Number(p.full.amountCents) || 0 : 0) || (payRecOk(p.deposit) ? Number(p.deposit.amountCents) || 0 : 0) ||
+      (payRecOk(p.final) ? Number(p.final.amountCents) || 0 : 0);
+    return Math.max(0, paid - refundedOf(p, "refund"));
+  }
+  /* Same rules as the Payments panel's Refund… buttons. */
+  function refundChoices(code) {
+    var p = (state.payments || {})[code];
+    if (!p) return [];
+    var out = [];
+    var f = p.final;
+    var mainPaid = (payRecOk(f) ? Number(f.amountCents) || 0 : 0) || (payRecOk(p.full) ? Number(p.full.amountCents) || 0 : 0) ||
+      (payRecOk(p.deposit) ? Number(p.deposit.amountCents) || 0 : 0);
+    var mainLeft = mainPaid - refundedOf(p, "refund");
+    if (mainPaid > 0 && mainLeft > 0) {
+      var purpose = payRecOk(f) ? "final" : payRecOk(p.full) ? "full" : "deposit";
+      out.push({ purpose: purpose, left: mainLeft, label: "Refund " + (purpose === "deposit" ? "deposit" : "payment") + "… (" + fmtCents(mainLeft) + ")" });
+    }
+    var c = p.cancel;
+    var cancelPaid = payRecOk(c) ? Number(c.amountCents) || 0 : 0;
+    var cancelLeft = cancelPaid - refundedOf(p, "cancelRefund");
+    if (cancelPaid > 0 && cancelLeft > 0) out.push({ purpose: "cancel", left: cancelLeft, label: "Refund cancel fee… (" + fmtCents(cancelLeft) + ")" });
+    return out;
+  }
+  function ownerRideButtonsHtml(r) {
+    var code = String((r && r.code) || "");
+    if (!code) return "";
+    var btns = [];
+    if (canOwnerCancel(r)) {
+      btns.push('<button type="button" class="btn btn-fire btn-owner-cancel" data-ride-code="' + esc(code) + '">Cancel ride</button>');
+    } else if (rideStatusOf(r) === "started") {
+      btns.push('<span class="meta" style="opacity:.8">Trip in progress: the driver ends it in the driver app.</span>');
+    }
+    var busy = !!(state.payBusy || {})[code];
+    refundChoices(code).forEach(function (c) {
+      btns.push('<button type="button" class="btn btn-ghost btn-ride-refund" data-ride-code="' + esc(code) + '" data-purpose="' + esc(c.purpose) +
+        '" data-left="' + esc(String(c.left)) + '"' + (busy ? " disabled" : "") + ">" + esc(c.label) + "</button>");
+    });
+    return btns.join("");
+  }
+  function cancelConfirmText(code, ride) {
+    var who = displayName(ride && ride.name, "the rider");
+    var lines = ["Cancel ride " + code + " for " + who + "?", "", "No cancel fee will be charged."];
+    if (ride && rideStatusOf(ride) === "accepted") lines.push((ride.driverName ? ride.driverName : "The driver") + " will be told and released.");
+    var paid = paidCentsOf(code);
+    if (paid > 0) lines.push("", fmtCents(paid) + " was already paid. It is NOT refunded automatically: tap Refund… on this ride after cancelling.");
+    return lines.join("\n");
+  }
+  function cancelRideByOwner(code) {
+    code = String(code || "").toUpperCase();
+    if (!code) return Promise.resolve(false);
+    var full = null, row = null;
+    return Promise.all([
+      getRide(code),
+      fetch(openRowUrl(code)).then(function (res) { return res.ok ? res.json() : null; }).catch(function () { return null; })
+    ]).then(function (got) {
+      full = got[0] && typeof got[0] === "object" ? got[0] : null;
+      row = got[1] && typeof got[1] === "object" ? got[1] : null;
+      var cur = full || row;
+      if (!cur) throw new Error("missing");
+      var st = rideStatusOf(cur);
+      if (st === "cancelled") { state.actionNotice = "Ride " + code + " was already cancelled."; return false; }
+      if (st === "started") { state.actionNotice = "Ride " + code + " is already in progress. The driver ends it in the driver app."; return false; }
+      if (st === "completed" || st === "denied") { state.actionNotice = "Ride " + code + " is already " + st + "."; return false; }
+      var now = Date.now();
+      var patch = { status: "cancelled", cancelledAt: now, cancelledBy: "owner", cancelFeeCents: 0, cancelFeeStatus: "free",
+        cancelClientReason: "owner_cancelled", ownerCancelledAt: now, updatedAt: now };
+      return (full ? patchRide(code, patch) : Promise.resolve()).then(function () {
+        if (!row) return null;
+        return fetch(openRowUrl(code), { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(patch) })
+          .then(function (res) { if (!res.ok) throw new Error("open"); });
+      }).then(function () {
+        silenceRide(code);
+        var paid = paidCentsOf(code);
+        state.actionNotice = "Cancelled ride " + code + ". No cancel fee." + (st === "accepted" ? " The driver was released." : "") +
+          (paid > 0 ? " " + fmtCents(paid) + " was paid: tap Refund… on the ride to give it back." : "");
+        return true;
+      });
+    }).catch(function () {
+      state.actionNotice = "Could not cancel ride " + code + ". Check the connection and try again.";
+      return false;
+    });
+  }
+  function ownerCancelTap(code, btn, after) {
+    var ride = freshRide({ code: code });
+    if (!window.confirm(cancelConfirmText(code, ride))) return;
+    if (btn) btn.disabled = true;
+    cancelRideByOwner(code).then(function (ok) {
+      if (btn) btn.disabled = false;
+      var n = document.getElementById("drivers-action-notice");
+      if (n && state.actionNotice) n.textContent = state.actionNotice;
+      if (!ok && state.actionNotice) window.alert(state.actionNotice);
+      if (after) after(ok);
+      refresh();
+    });
+  }
+  function bindOwnerRideActions() {
+    var root = document.getElementById("rides-list");
+    if (!root) return;
+    Array.prototype.forEach.call(root.querySelectorAll(".btn-owner-cancel"), function (btn) {
+      if (btn.getAttribute("data-bound") === "1") return;
+      btn.setAttribute("data-bound", "1");
+      btn.addEventListener("click", function () { ownerCancelTap(btn.getAttribute("data-ride-code"), btn); });
+    });
+    Array.prototype.forEach.call(root.querySelectorAll(".btn-ride-refund"), function (btn) {
+      if (btn.getAttribute("data-bound") === "1") return;
+      btn.setAttribute("data-bound", "1");
+      btn.addEventListener("click", function () {
+        openRefundPopup(btn.getAttribute("data-ride-code"), btn.getAttribute("data-purpose"), Number(btn.getAttribute("data-left")) || 0);
+      });
+    });
+  }
+  /* ===== end v64g cancel/refund ===== */
+
   function ridePayLineHtml(r) {
     if (!r) return "";
     var ps = String(r.paymentStatus || "").toLowerCase();
@@ -2792,7 +3822,7 @@
         : (pending
           ? '<span class="badge pending">Needs your OK</span>'
           : (cancelled
-            ? '<span class="badge">Cancelled' + (r.cancelledBy === "rider" ? " by rider" : "") + "</span>"
+            ? '<span class="badge">Cancelled' + (r.cancelledBy === "rider" ? " by rider" : (r.cancelledBy === "owner" ? " by PCS" : "")) + "</span>"
             : (denied
               ? '<span class="badge">Denied</span>'
               : '<span class="badge">Open to drivers</span>')));
@@ -2806,6 +3836,8 @@
           okCardBtn +
           "</div>")
         : (okCardBtn ? '<div class="commission-row" style="margin-top:8px">' + okCardBtn + "</div>" : "");
+      var ownerBtns = ownerRideButtonsHtml(r); /* v64g: Cancel ride + Refund… */
+      if (ownerBtns) actions += '<div class="commission-row owner-ride-actions" style="margin-top:8px">' + ownerBtns + "</div>";
       var cancelTxt = cancelled ? cancelFeeText(r, (state.payments || {})[r.code] || null) : "";
       var cancelLine = cancelled
         ? "<br><strong>Cancelled</strong> " + esc(fmtClock(r.cancelledAt || r.updatedAt)) +
@@ -2864,6 +3896,7 @@
     bindSafetyActions();
     bindLocateActions();
     bindDayBoardActions();
+    bindOwnerRideActions();
     setFocusBar();
   }
 
@@ -3506,6 +4539,7 @@
           "</div>" +
           '<div class="top-actions">' +
             '<p class="status-pill" id="refresh-pill">' + esc(statusPillText()) + "</p>" +
+            '<button type="button" class="btn btn-gold" id="god-push-btn">' + (state.pushOn ? "\uD83D\uDD14 Phone alerts: ON" : "\uD83D\uDD14 Turn on phone alerts") + "</button>" +
             '<button type="button" class="btn btn-ghost" id="god-logout">Sign out</button>' +
           "</div>" +
         "</header>" +
@@ -3748,6 +4782,8 @@
     if (out) {
       out.addEventListener("click", function () { logout(); });
     }
+    var pushBtn = document.getElementById("god-push-btn");
+    if (pushBtn) pushBtn.addEventListener("click", function () { openPushPopup(); });
     var showAll = document.getElementById("map-show-all");
     if (showAll) {
       showAll.addEventListener("click", function () { clearFocus(); });
@@ -3759,6 +4795,7 @@
     bindSafetyActions();
     bindLocateActions();
     bindDayBoardActions();
+    bindOwnerRideActions();
   }
 
   function render() {
@@ -3779,6 +4816,8 @@
   }
 
   function boot() {
+    installGodAlarm(); /* v64g: every tap unlocks sound (iOS); gold bar until the alarm really played once */
+    if (isStandaloneApp() || (pushSupported() && Notification.permission === "granted")) registerGodSW().then(checkPushOn);
     clearLegacySession(); /* drop pre-v24 sessionStorage/localStorage authOk junk */
     state.screen = "login";
     restoreSession().then(function (email) {
@@ -3801,6 +4840,16 @@
     window.addEventListener("pageshow", function (ev) {
       if (ev && ev.persisted && state.screen === "board") startPoll();
     });
+    /* v64g: iPad split view / window focus and network back also re-check at once (not more than every 2 s). */
+    var lastKick = 0;
+    function foregroundKick() {
+      if (state.screen !== "board" || document.visibilityState === "hidden") return;
+      if (Date.now() - lastKick < 2000) return;
+      lastKick = Date.now();
+      startPoll();
+    }
+    window.addEventListener("focus", foregroundKick);
+    window.addEventListener("online", foregroundKick);
   }
 
   if (document.readyState === "loading") {
@@ -3813,6 +4862,21 @@
     showGodPendingPopup: showGodPendingPopup,
     showGodAcceptPopup: showGodAcceptPopup,
     maybeShowGodPopups: maybeShowGodPopups,
+    pruneGodPopups: pruneGodPopups,
+    alarmInfo: function () { return godAlarm.info(); },
+    alarmWanted: alarmWanted,
+    popupQueue: function () { return godPopupQueue.map(function (it) { return it.key; }); },
+    streamState: function () { return rideStream ? rideStream.readyState : -1; },
+    lastStreamEventAt: function () { return lastStreamEventAt; },
+    chimeUrl: function () { return GOD_CHIME_URL; },
+    openPushPopup: openPushPopup,
+    turnOnPush: turnOnPush,
+    openRideFromAlert: openRideFromAlert,
+    cancelRideByOwner: cancelRideByOwner,
+    presenceOf: presenceOf,
+    shiftLinesHtml: shiftLinesHtml,
+    drivers: function () { return (state.drivers || []).map(function (d) { return { id: d.id, presence: d.presence, lastSeenAt: d.lastSeenAt }; }); },
+    refundChoices: refundChoices,
     listSafetyAlerts: listSafetyAlerts,
     showSafetyPopup: showSafetyPopup,
     safetyBannerHtml: safetyBannerHtml,
