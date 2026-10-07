@@ -24,6 +24,11 @@
  * arrivals service fee $15.00" after the short-notice % and before tax (taxed 8.25%), so the total, the 25% deposit,
  * the booking (internationalArrival, internationalFeeCents, feeLines, estimateCents) and the request text include it.
  * Hidden + cleared for any other ride. Ticking / unticking re-prices the shown estimate without a new route lookup.
+ * v22 (PCS v63, Oct 7, 2026): Nearest places first. With your location (or, failing that, the From pin) Google
+ * suggestions are searched tightly around you: autocomplete with a 20 km circle + origin, plus (for business / chain
+ * names) the Worker's /places/search (Text Search ranked by DISTANCE) so the nearest branches show up. Merged,
+ * de-duped, sorted nearest first, distance on every row; fewer than 3 matches -> one wider (50 km) pass.
+ * No location: the v20 service-area bias is unchanged. Same for From, To and stops.
  */
 (function () {
   'use strict';
@@ -1013,12 +1018,15 @@
     if (!t) { t = newPlacesToken(); placesSessions.set(block, t); }
     return t;
   }
+  let searchOffUntil = 0; // v63: /search has its own daily cap; hitting it must not switch off autocomplete
   function placesPost(path, body, ms) {
     const base = placesBase();
     if (!base || Date.now() < placesOffUntil) return Promise.resolve(null);
+    if (path === '/search' && Date.now() < searchOffUntil) return Promise.resolve(null);
     return withTimeout(fetch(base + path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
       .then((res) => res.json()), ms || 4000).then((data) => {
       if (!data || !data.ok) return null;
+      if (data.capped && path === '/search') { searchOffUntil = Date.now() + 30 * 60000; return null; }
       if (data.capped) { placesOffUntil = Date.now() + 30 * 60000; return null; }
       if (data.fallback) return null;
       return data;
@@ -1069,19 +1077,105 @@
     const a = GOOGLE_AREA_BIAS[serviceArea()] || GOOGLE_AREA_BIAS['Greater Houston area'];
     return { lat: a.lat, lng: a.lng, area: true };
   }
-  async function workerGoogleSuggest(block, q, origin) {
-    const body = { input: q, sessionToken: workerPlacesToken(block) };
-    const bias = workerPlacesBias(origin);
-    body.lat = bias.lat; body.lng = bias.lng;
-    const data = await placesPost('/autocomplete', body);
-    if (!data || !Array.isArray(data.predictions) || !data.predictions.length) return null;
-    return rankAreaFirst(data.predictions, bias).map((p) => ({
+  function workerAutocompleteItem(block, p, bias) {
+    const miles = !bias.area && p.miles != null && isFinite(p.miles) ? +p.miles : null;
+    return {
       main: p.main,
       sub: p.sub || '',
-      dist: !bias.area && p.miles != null && isFinite(p.miles) ? fmtMiles(+p.miles) : '',
+      dist: miles != null ? fmtMiles(miles) : '',
+      miles,
+      placeId: p.placeId,
       google: true,
       resolve: () => workerPlaceDetails(block, p),
+    };
+  }
+  // v63: tight search around you. Before v63 the location bias was the Worker's 80 km default and Google's order was
+  // kept, so a chain name listed famous city branches (25, 27, 38, 24 mi) and missed the one 3 mi away.
+  const PLACES_NEAR_M = 20000;  // first pass: 20 km circle around you / the From pin
+  const PLACES_WIDE_M = 50000;  // fewer than PLACES_NEAR_MIN matches: one wider pass (Google's circle maximum)
+  const PLACES_NEAR_MIN = 3;
+  const PLACES_LIST_MAX = 8;
+  const nearbyCache = new Map();
+  // Business / chain name ("Mister car was"), not a street address: also ask for the nearest branches.
+  function textSearchWanted(q, preds) {
+    q = String(q || '').trim();
+    if (q.length < 4 || looksLikeAddress(q)) return false;
+    if (!preds || !preds.length) return true;
+    return preds.some((p) => isBusinessTypes(p.types));
+  }
+  // Worker /places/search (Text Search, rankPreference DISTANCE). Results already carry the full address + pin.
+  function workerNearbySearch(block, q, bias) {
+    const key = normText(q) + '@' + bias.lat.toFixed(3) + ',' + bias.lng.toFixed(3);
+    if (nearbyCache.has(key)) return nearbyCache.get(key);
+    const pr = placesPost('/search', { input: q, lat: bias.lat, lng: bias.lng, radius: PLACES_NEAR_M }, 6000).then((d) => {
+      const list = d && Array.isArray(d.results) ? d.results : [];
+      if (!list.length) nearbyCache.delete(key);
+      return list.map((r) => {
+        const pl = r.place || {};
+        if (!r.placeId || !isFinite(pl.lat) || !isFinite(pl.lng) || r.miles == null || !isFinite(r.miles)) return null;
+        const known = knownAirportInText(r.main) || null;
+        let label = String(r.main || '');
+        if (known && label.indexOf('(' + known.code + ')') === -1) label += ' (' + known.code + ')';
+        const street = String(pl.street || '');
+        const line1 = r.business && label && normText(label) !== normText(street) ? (street ? label + ', ' + street : label) : (street || label);
+        const unit = String(pl.unit || '').trim();
+        const place = {
+          line1, city: pl.city || '', state: stateCode(pl.state || 'TX'), zip: String(pl.zip || '').slice(0, 5), lat: +pl.lat, lng: +pl.lng,
+          kind: known ? 'airport' : (r.business ? 'place' : 'address'), code: known ? known.code : '',
+          unit: /^[A-Za-z]?\d+[A-Za-z]?$/.test(unit) ? '#' + unit : unit,
+        };
+        return {
+          main: r.main, sub: r.sub || '', dist: fmtMiles(+r.miles), miles: +r.miles, placeId: r.placeId, google: true, ready: true,
+          resolve: () => { placesSessions.delete(block); return Promise.resolve(place); }, // no Details call needed
+        };
+      }).filter(Boolean);
+    });
+    nearbyCache.set(key, pr);
+    return pr;
+  }
+  // Merge (same Google place once; the Text Search copy wins because it has the pin), nearest first, distance on
+  // every row (a match Google gave no distance for is dropped when others have one).
+  function mergeNearest(lists) {
+    const byId = new Map();
+    let out = [];
+    lists.forEach((list) => (list || []).forEach((it) => {
+      if (!it || !it.placeId) return;
+      if (byId.has(it.placeId)) {
+        const i = byId.get(it.placeId);
+        if (it.ready && !out[i].ready) out[i] = it;
+        return;
+      }
+      byId.set(it.placeId, out.length);
+      out.push(it);
     }));
+    const withDist = out.filter((it) => it.miles != null && isFinite(it.miles));
+    if (withDist.length) out = withDist;
+    out.sort((a, b) => a.miles - b.miles);
+    return out.slice(0, PLACES_LIST_MAX);
+  }
+  async function workerGoogleSuggest(block, q, origin) {
+    const bias = workerPlacesBias(origin);
+    const auto = async (radius) => {
+      const body = { input: q, sessionToken: workerPlacesToken(block), lat: bias.lat, lng: bias.lng };
+      if (radius) body.radius = radius;
+      const data = await placesPost('/autocomplete', body);
+      return data && Array.isArray(data.predictions) ? data.predictions : [];
+    };
+    if (bias.area) {
+      // No location / From pin: v20 service-area bias, unchanged.
+      const preds = await auto(0);
+      if (!preds.length) return null;
+      return rankAreaFirst(preds, bias).map((p) => workerAutocompleteItem(block, p, bias));
+    }
+    const preds = await auto(PLACES_NEAR_M);
+    const near = preds.map((p) => workerAutocompleteItem(block, p, bias));
+    const found = textSearchWanted(q, preds) ? await workerNearbySearch(block, q, bias) : [];
+    let list = mergeNearest([found, near]);
+    if (list.length < PLACES_NEAR_MIN) {
+      const wide = await auto(PLACES_WIDE_M);
+      list = mergeNearest([found, near, wide.map((p) => workerAutocompleteItem(block, p, bias))]);
+    }
+    return list.length ? list : null;
   }
 
   /** Suggestions for Address line 1, nearest first with distance labels. */
@@ -1187,7 +1281,7 @@
       if (seq !== suggestSeq || input.value.trim() !== q || document.activeElement !== input) return;
       const airportNames = airports.map((a) => normText(a.main));
       more = more.filter((m) => !airportNames.some((n) => normText(m.main).indexOf(n.replace(/ [a-z]{3}$/, '')) === 0));
-      const items = airports.concat(more).slice(0, 6);
+      const items = airports.concat(more).slice(0, more.some((m) => m.ready || m.miles != null) ? PLACES_LIST_MAX : 6); // v63: up to 8 nearest
       if (!items.length && q.length >= 3) {
         const box = suggestBox(block);
         if (box) {
