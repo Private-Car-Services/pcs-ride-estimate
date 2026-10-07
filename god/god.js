@@ -1,4 +1,6 @@
-/* Private Car Services — PCS God mode (Matthew only). v25/v45: day board from PCS calendar + assign/commission. */
+/* Private Car Services — PCS God mode (Matthew only). v25/v45: day board from PCS calendar + assign/commission.
+   v57: visual pop-ups for every new ride request and every accept; safety alerts (police assist red banner +
+   pop-up, soft not-OK notes). No sound in God mode. */
 (function () {
   "use strict";
 
@@ -10,6 +12,7 @@
   /* Miles hub: 8-char alphabet (no I/O). DRVRMILZ wrongly contained I — use DRVRMLES. */
   var MILES_HUB = "DRVRMLES";
   var HISTORY_HUB = "DRVRHSTY"; /* completed ride logs; 8-char no I/O */
+  var SAFETY_HUB = "SAFETY"; /* v57: driver safety / police-assist alerts from the driver app */
   var CALENDAR_HUB = "PCSCALND"; /* scheduled PCS calendar rides for day board */
   var DEFAULT_COMMISSION_PCT = 70;
   var SESSION_KEY = "pcs-god-session"; /* legacy pre-v24 key — cleared, never trusted */
@@ -90,6 +93,9 @@
     trackedRideCodes: {},
     shownPendingPopup: {},
     shownAcceptPopup: {},
+    safetyAlerts: {},
+    shownSafetyPopup: {},
+    safetyError: "",
     focusDriverId: "",
     focusNote: "",
     calendar: [],
@@ -133,6 +139,11 @@
 
   function rideUrl(code) {
     return baseUrl() + "/rides/" + encodeURIComponent(code) + ".json";
+  }
+
+  function safetyUrl(id) {
+    var root = baseUrl() + "/rides/" + encodeURIComponent(SAFETY_HUB);
+    return id ? root + "/" + encodeURIComponent(id) + ".json" : root + ".json";
   }
 
   function rosterUrl(id) {
@@ -1350,27 +1361,9 @@
     );
   }
 
-  function softGodChime() {
-    try {
-      var AC = window.AudioContext || window.webkitAudioContext;
-      if (!AC) return;
-      if (!window.__godAudioCtx) window.__godAudioCtx = new AC();
-      var ctx = window.__godAudioCtx;
-      if (ctx.state === "suspended") return; /* do not block / force unlock */
-      var now = ctx.currentTime;
-      var o = ctx.createOscillator();
-      var g = ctx.createGain();
-      o.type = "sine";
-      o.frequency.value = 880;
-      g.gain.value = 0.0001;
-      o.connect(g);
-      g.connect(ctx.destination);
-      g.gain.exponentialRampToValueAtTime(0.2, now + 0.02);
-      g.gain.exponentialRampToValueAtTime(0.0001, now + 0.25);
-      o.start(now);
-      o.stop(now + 0.28);
-    } catch (e) {}
-  }
+  /* v57: God-mode pop-ups are visual only (Matthew: no sound in God mode). The old softGodChime is removed.
+     Pop-ups queue up (one at a time, none replaces another) and stay until dismissed. */
+  var godPopupQueue = [];
 
   function ensureGodPopupStyle() {
     if (document.getElementById("god-popup-style")) return;
@@ -1378,10 +1371,12 @@
     s.id = "god-popup-style";
     s.textContent =
       "#god-ride-popup{position:fixed;inset:0;z-index:12000;background:rgba(5,14,28,.92);display:flex;align-items:center;justify-content:center;padding:16px}" +
-      "#god-ride-popup .gp-card{background:#0b1c33;color:#fff;border:2px solid #f0d48a;border-radius:18px;max-width:520px;width:100%;padding:20px}" +
+      "#god-ride-popup .gp-card{background:#0b1c33;color:#fff;border:2px solid #f0d48a;border-radius:18px;max-width:520px;width:100%;padding:20px;max-height:92vh;overflow:auto}" +
       "#god-ride-popup .gp-title{font-size:28px;font-weight:800;color:#f0d48a;margin:0 0 12px;text-align:center}" +
+      "#god-ride-popup.gp-accepted .gp-card{border-color:#2e9d4f}#god-ride-popup.gp-accepted .gp-title{color:#7fe09a}" +
       "#god-ride-popup .gp-row{margin:10px 0;font-size:17px;line-height:1.35}" +
       "#god-ride-popup .gp-row b{display:block;color:#f0d48a;font-size:12px;letter-spacing:.08em;text-transform:uppercase}" +
+      "#god-ride-popup .gp-more{font-size:13px;color:#c9d3e0;text-align:center;margin-top:10px}" +
       "#god-ride-popup .gp-actions{display:flex;flex-wrap:wrap;gap:10px;margin-top:16px}" +
       "#god-ride-popup .gp-actions button{flex:1;min-width:120px;font-size:18px;font-weight:800;padding:16px 10px;border-radius:12px;border:0;color:#fff;cursor:pointer}" +
       "#god-ride-popup .gp-ok{background:#2e9d4f}#god-ride-popup .gp-deny{background:#8a2323}#god-ride-popup .gp-ghost{background:#345}";
@@ -1391,31 +1386,68 @@
   function hideGodRidePopup() {
     var el = document.getElementById("god-ride-popup");
     if (el && el.parentNode) el.parentNode.removeChild(el);
+    godPopupQueue.shift();
+    showNextGodPopup();
   }
 
-  function showGodPendingPopup(ride) {
+  function queueGodPopup(kind, ride) {
     if (!ride || !ride.code) return;
+    var key = kind + ":" + String(ride.code);
+    for (var i = 0; i < godPopupQueue.length; i += 1) if (godPopupQueue[i].key === key) return;
+    godPopupQueue.push({ key: key, kind: kind, ride: ride });
+    if (godPopupQueue.length === 1) showNextGodPopup();
+    else {
+      var more = document.getElementById("gp-more");
+      if (more) more.textContent = (godPopupQueue.length - 1) + " more waiting";
+    }
+  }
+
+  function showNextGodPopup() {
+    if (document.getElementById("god-ride-popup")) return;
+    var item = godPopupQueue[0];
+    if (!item) return;
+    try {
+      if (item.kind === "accept") renderGodAcceptPopup(item.ride);
+      else renderGodRequestPopup(item.ride);
+    } catch (e) {
+      godPopupQueue.shift();
+      showNextGodPopup();
+    }
+  }
+
+  function godPopupShell(cls, inner) {
     ensureGodPopupStyle();
-    hideGodRidePopup();
-    var code = String(ride.code);
     var el = document.createElement("div");
     el.id = "god-ride-popup";
-    el.innerHTML =
-      '<div class="gp-card" role="dialog" aria-modal="true">' +
-      '<p class="gp-title">New ride needs your OK</p>' +
-      '<div class="gp-row"><b>Rider</b>' + esc(displayName(ride.name, "Rider")) + "</div>" +
-      '<div class="gp-row"><b>When</b>' + esc(fmtWhen(ride.date, ride.time, ride)) + "</div>" +
-      '<div class="gp-row"><b>Pickup</b>' + esc(rideAddressText(ride, "pickup") || "—") + "</div>" +
-      '<div class="gp-row"><b>Drop-off</b>' + esc(rideAddressText(ride, "drop") || "—") + "</div>" +
-      '<div class="gp-row"><b>Code</b>' + esc(code) + "</div>" +
-      '<div class="gp-actions">' +
-      '<button type="button" class="gp-ok" id="gp-approve" data-ride-code="' + esc(code) + '">Approve</button>' +
-      '<button type="button" class="gp-deny" id="gp-deny" data-ride-code="' + esc(code) + '">Deny</button>' +
-      '<button type="button" class="gp-ghost" id="gp-cardok" data-ride-code="' + esc(code) + '">Mark card OK</button>' +
-      '<button type="button" class="gp-ghost" id="gp-dismiss">Dismiss</button>' +
-      "</div></div>";
+    if (cls) el.className = cls;
+    var more = godPopupQueue.length > 1 ? (godPopupQueue.length - 1) + " more waiting" : "";
+    el.innerHTML = '<div class="gp-card" role="dialog" aria-modal="true">' + inner +
+      '<p class="gp-more" id="gp-more">' + esc(more) + "</p></div>";
     document.body.appendChild(el);
-    softGodChime();
+    return el;
+  }
+
+  /* "New ride request": rider, pickup, ASAP or time. Approve/Deny/Card OK only while it still needs Matthew's OK. */
+  function renderGodRequestPopup(ride) {
+    var code = String(ride.code);
+    var needsOk = isPendingOwner(ride);
+    var when = fmtWhen(ride.date, ride.time, ride);
+    var el = godPopupShell("gp-request",
+      '<p class="gp-title">New ride request</p>' +
+      (ride.isTest ? '<p class="gp-row" style="background:#7a1f1f;padding:6px 10px;border-radius:8px;text-align:center">TEST ride</p>' : "") +
+      '<div class="gp-row"><b>Rider</b>' + esc(displayName(ride.name, "Rider")) + "</div>" +
+      '<div class="gp-row"><b>Pickup</b>' + esc(rideAddressText(ride, "pickup") || "—") + "</div>" +
+      '<div class="gp-row"><b>When</b>' + esc(when === "—" ? "Time not set" : when) + "</div>" +
+      '<div class="gp-row"><b>Drop-off</b>' + esc(rideAddressText(ride, "drop") || "—") + "</div>" +
+      '<div class="gp-row"><b>Code</b>' + esc(code) + (needsOk ? " · needs your OK" : " · open for drivers") + "</div>" +
+      '<div class="gp-actions">' +
+      (needsOk
+        ? '<button type="button" class="gp-ok" id="gp-approve" data-ride-code="' + esc(code) + '">Approve</button>' +
+          '<button type="button" class="gp-deny" id="gp-deny" data-ride-code="' + esc(code) + '">Deny</button>' +
+          '<button type="button" class="gp-ghost" id="gp-cardok" data-ride-code="' + esc(code) + '">Mark card OK</button>'
+        : "") +
+      '<button type="button" class="gp-ghost" id="gp-dismiss">' + (needsOk ? "Dismiss" : "OK") + "</button>" +
+      "</div>");
     el.addEventListener("click", function (ev) {
       var t = ev.target;
       if (!t || !t.id) return;
@@ -1440,65 +1472,273 @@
     });
   }
 
-  function showGodAcceptPopup(ride) {
-    if (!ride || !ride.code) return;
-    ensureGodPopupStyle();
-    hideGodRidePopup();
+  function acceptDriverName(ride) {
+    var n = String((ride && ride.driverName) || "").trim();
+    if (n) return n;
+    var e = String((ride && ride.driverEmail) || "").trim();
+    if (e) return e;
+    return "a driver";
+  }
+
+  /* "Accepted by <driver name>" */
+  function renderGodAcceptPopup(ride) {
     var code = String(ride.code);
-    var driver = ride.driverName || "A driver";
-    var rider = displayName(ride.name, "Rider");
-    var el = document.createElement("div");
-    el.id = "god-ride-popup";
-    el.innerHTML =
-      '<div class="gp-card" role="dialog" aria-modal="true">' +
-      '<p class="gp-title">Driver picked up the ride</p>' +
-      '<div class="gp-row"><b>Driver</b>' + esc(driver) + "</div>" +
-      '<div class="gp-row"><b>Rider</b>' + esc(rider) + "</div>" +
+    var el = godPopupShell("gp-accepted",
+      '<p class="gp-title">Accepted by ' + esc(acceptDriverName(ride)) + "</p>" +
+      '<div class="gp-row"><b>Rider</b>' + esc(displayName(ride.name, "Rider")) + "</div>" +
+      '<div class="gp-row"><b>Pickup</b>' + esc(rideAddressText(ride, "pickup") || "—") + "</div>" +
+      '<div class="gp-row"><b>When</b>' + esc(fmtWhen(ride.date, ride.time, ride)) + "</div>" +
       '<div class="gp-row"><b>Ride code</b>' + esc(code) + "</div>" +
-      '<div class="gp-actions"><button type="button" class="gp-ok" id="gp-dismiss">OK</button></div></div>';
-    document.body.appendChild(el);
-    softGodChime();
+      '<div class="gp-actions"><button type="button" class="gp-ok" id="gp-dismiss">OK</button></div>');
     el.addEventListener("click", function (ev) {
       if (ev.target && ev.target.id === "gp-dismiss") hideGodRidePopup();
     });
   }
 
+  /* Old names kept for test hooks. */
+  function showGodPendingPopup(ride) { queueGodPopup("request", ride); }
+  function showGodAcceptPopup(ride) { queueGodPopup("accept", ride); }
+
+  /* v57: why v54-v56 showed nothing on the device:
+     - the request pop-up only fired for status "pending_owner"; anything already "requested" (approved, or approved
+       from the banner before the next 5 s poll) never popped, and
+     - the accept pop-up only fired for codes this page had already tracked while open; it also replaced (hid) any
+       pop-up already on screen.
+     Now: any open request (pending_owner OR requested) pops "New ride request" once per page session; any
+     accepted/started ride (on REQUESTS, or a tracked code that left REQUESTS) pops "Accepted by <driver>" once.
+     Tracked codes are remembered for the browser session so a reload does not lose them. */
+  var TRACK_KEY = "pcs-god-tracked-rides";
+  function loadTracked() {
+    try {
+      var m = JSON.parse(window.sessionStorage.getItem(TRACK_KEY) || "{}");
+      if (m && typeof m === "object") {
+        Object.keys(m).forEach(function (c) { if (!state.trackedRideCodes[c]) state.trackedRideCodes[c] = m[c]; });
+      }
+    } catch (e) {}
+  }
+  function saveTracked() {
+    try { window.sessionStorage.setItem(TRACK_KEY, JSON.stringify(state.trackedRideCodes)); } catch (e) {}
+  }
+
+  /* Each pop-up shows once per ride per device (24 h), so reopening God mode does not replay old ones;
+     a NEW request or accept always pops. */
+  var SHOWN_KEY = "pcs-god-shown-popups";
+  var shownLoaded = false;
+  function loadShown() {
+    if (shownLoaded) return;
+    shownLoaded = true;
+    try {
+      var m = JSON.parse(window.localStorage.getItem(SHOWN_KEY) || "{}") || {};
+      var now = Date.now();
+      Object.keys(m).forEach(function (k) {
+        if (!(now - Number(m[k]) < 24 * 3600000)) return;
+        var i = k.indexOf(":");
+        var kind = k.slice(0, i), code = k.slice(i + 1);
+        if (kind === "request") state.shownPendingPopup[code] = true;
+        if (kind === "accept") state.shownAcceptPopup[code] = true;
+      });
+    } catch (e) {}
+  }
+  function rememberShown(kind, code) {
+    try {
+      var m = JSON.parse(window.localStorage.getItem(SHOWN_KEY) || "{}") || {};
+      var now = Date.now();
+      Object.keys(m).forEach(function (k) { if (!(now - Number(m[k]) < 24 * 3600000)) delete m[k]; });
+      m[kind + ":" + code] = now;
+      window.localStorage.setItem(SHOWN_KEY, JSON.stringify(m));
+    } catch (e) {}
+  }
+
+
+  function listSafetyAlerts() {
+    return fetch(safetyUrl()).then(function (res) {
+      if (!res.ok) return {};
+      return res.text().then(function (text) {
+        if (!text || text === "null") return {};
+        try { return JSON.parse(text) || {}; } catch (e) { return {}; }
+      });
+    }).catch(function () { return {}; });
+  }
+
+  function safetyAlertList() {
+    var raw = state.safetyAlerts || {};
+    var out = [];
+    Object.keys(raw).forEach(function (id) {
+      var a = raw[id];
+      if (!a || typeof a !== "object") return;
+      if (a.dismissed) return;
+      a.id = a.id || id;
+      out.push(a);
+    });
+    out.sort(function (a, b) { return (Number(b.at) || 0) - (Number(a.at) || 0); });
+    return out;
+  }
+
+  function highSafetyAlerts() {
+    return safetyAlertList().filter(function (a) { return a.priority === "high" || a.kind === "police_assist"; });
+  }
+
+  function softSafetyNotes() {
+    return safetyAlertList().filter(function (a) { return a.kind === "not_ok_soft" || a.priority === "note"; });
+  }
+
+  function safetyBannerHtml() {
+    var high = highSafetyAlerts();
+    var soft = softSafetyNotes();
+    if (!high.length && !soft.length) return "";
+    var rows = high.map(function (a) {
+      var role = String(a.role || (a.source === "sos_button" && !a.driverId ? "rider" : "driver")).toLowerCase();
+      var roleLabel = role === "rider" ? "RIDER" : "DRIVER";
+      var who = displayName(a.name, role === "rider" ? "Rider" : "Driver");
+      var phone = a.phone ? esc(a.phone) : "no phone on file";
+      var loc = (isCoord(a.lat) && isCoord(a.lng)) ? (+a.lat).toFixed(5) + ", " + (+a.lng).toFixed(5) : "no location";
+      return (
+        '<div class="banner-ride" style="margin:10px 0;padding:12px;border:2px solid #c0161b;border-radius:12px;background:#3a1010">' +
+        '<p class="lede" style="margin:0 0 6px;color:#ffb4b4"><strong>POLICE ASSIST · ' + roleLabel + "</strong> · " + esc(who) + "</p>" +
+        '<p class="fine" style="margin:0 0 6px">Phone ' + phone + " · " + esc(loc) +
+        (a.rideCode ? " · ride " + esc(a.rideCode) : "") + "</p>" +
+        '<p class="fine" style="margin:0 0 8px">' + esc(a.message || "Driver requested police assistance.") + "</p>" +
+        '<div class="row-actions" style="display:flex;flex-wrap:wrap;gap:8px">' +
+        (a.phone ? '<a class="btn btn-fire" href="tel:' + esc(String(a.phone).replace(/[^\d+]/g, "")) + '">Call driver</a>' : "") +
+        '<a class="btn btn-ghost" href="tel:911">Call 911</a>' +
+        (isCoord(a.lat) && isCoord(a.lng)
+          ? '<a class="btn btn-ghost" target="_blank" rel="noopener" href="https://www.google.com/maps?q=' +
+            encodeURIComponent((+a.lat) + "," + (+a.lng)) + '">Map pin</a>'
+          : "") +
+        '<button type="button" class="btn btn-ghost btn-dismiss-safety" data-safety-id="' + esc(a.id) + '">Dismiss</button>' +
+        "</div></div>"
+      );
+    }).join("");
+    var softRows = soft.slice(0, 3).map(function (a) {
+      return (
+        '<p class="fine" style="margin:6px 0;padding:8px;border:1px solid rgba(240,212,138,.35);border-radius:8px">' +
+        "Note · " + esc(String(a.role || "driver").toUpperCase()) + " · " + esc(displayName(a.name, a.role === "rider" ? "Rider" : "Driver")) + ": " + esc(a.message || "Said not OK, declined police.") +
+        ' <button type="button" class="btn btn-ghost btn-dismiss-safety" data-safety-id="' + esc(a.id) + '" style="padding:4px 8px;font-size:12px">Dismiss</button></p>'
+      );
+    }).join("");
+    return (
+      '<div class="card safety-alert" id="safety-alert" style="border:3px solid #c0161b;margin:0 0 12px;padding:12px;background:#2a0c0c">' +
+      (high.length
+        ? '<p class="tag" style="background:#c0161b;color:#fff">Driver needs help — police assist</p>' +
+          '<p class="lede" style="color:#ffb4b4"><strong>' + esc(String(high.length)) + "</strong> high-priority alert" + (high.length > 1 ? "s" : "") +
+          ". Call police / the driver if they cannot. This app does not auto-dial 911.</p>" + rows
+        : "") +
+      (softRows ? '<p class="tag">Driver wellbeing notes</p>' + softRows : "") +
+      "</div>"
+    );
+  }
+
+  function showSafetyPopup(alert) {
+    if (!alert || !alert.id) return;
+    if (document.getElementById("god-safety-popup")) return;
+    ensureGodPopupStyle();
+    var role = String(alert.role || "driver").toLowerCase();
+    var who = displayName(alert.name, role === "rider" ? "Rider" : "Driver");
+    var el = document.createElement("div");
+    el.id = "god-safety-popup";
+    el.setAttribute("style", "position:fixed;inset:0;z-index:13000;background:rgba(40,0,0,.94);display:flex;align-items:center;justify-content:center;padding:16px");
+    var loc = (isCoord(alert.lat) && isCoord(alert.lng)) ? (+alert.lat).toFixed(6) + ", " + (+alert.lng).toFixed(6) : "—";
+    el.innerHTML =
+      '<div class="gp-card" style="border-color:#c0161b;max-width:520px;background:#1a0505;color:#fff;border:2px solid #c0161b;border-radius:18px;padding:20px;width:100%">' +
+      '<p class="gp-title" style="color:#ff6b6b;font-size:28px;font-weight:800;text-align:center;margin:0 0 12px">Police assist · ' +
+      esc(role === "rider" ? "RIDER" : "DRIVER") + "</p>" +
+      '<div class="gp-row"><b style="color:#f0d48a">' + (role === "rider" ? "Rider" : "Driver") + "</b>" + esc(who) + "</div>" +
+      '<div class="gp-row"><b style="color:#f0d48a">Phone</b>' + esc(alert.phone || "not on file") + "</div>" +
+      '<div class="gp-row"><b style="color:#f0d48a">Location</b>' + esc(loc) + "</div>" +
+      (alert.rideCode ? '<div class="gp-row"><b style="color:#f0d48a">Ride</b>' + esc(alert.rideCode) + "</div>" : "") +
+      '<p style="color:#ffb4b4;margin:12px 0">' + esc(alert.message || "") + "</p>" +
+      (alert.source === "sos_button" ? '<p style="color:#f0d48a;font-size:14px;text-align:center">Pressed from Alert / SOS button</p>' : "") +
+      '<p style="color:#c9d3e0;font-size:14px">God mode cannot auto-dial 911. Call police or the driver yourself if needed.</p>' +
+      '<div class="gp-actions" style="display:flex;flex-wrap:wrap;gap:10px;margin-top:16px">' +
+      (alert.phone ? '<a class="gp-ok" style="flex:1;text-align:center;background:#2e9d4f;color:#fff;padding:16px;border-radius:12px;text-decoration:none;font-weight:800" href="tel:' + esc(String(alert.phone).replace(/[^\d+]/g, "")) + '">Call driver</a>' : "") +
+      '<a class="gp-deny" style="flex:1;text-align:center;background:#c0161b;color:#fff;padding:16px;border-radius:12px;text-decoration:none;font-weight:800" href="tel:911">Call 911</a>' +
+      (isCoord(alert.lat) && isCoord(alert.lng)
+        ? '<a class="gp-ghost" style="flex:1;text-align:center;background:#345;color:#fff;padding:16px;border-radius:12px;text-decoration:none;font-weight:800" target="_blank" rel="noopener" href="https://www.google.com/maps?q=' +
+          encodeURIComponent((+alert.lat) + "," + (+alert.lng)) + '">Open map pin</a>'
+        : "") +
+      '<button type="button" class="gp-ghost" id="gs-dismiss" style="flex:1;background:#345;color:#fff;padding:16px;border-radius:12px;border:0;font-weight:800;font-size:18px">Dismiss</button>' +
+      "</div></div>";
+    document.body.appendChild(el);
+    el.addEventListener("click", function (ev) {
+      if (ev.target && ev.target.id === "gs-dismiss") {
+        dismissSafetyAlert(alert.id);
+        if (el.parentNode) el.parentNode.removeChild(el);
+        maybeShowNextSafetyPopup();
+      }
+    });
+  }
+
+  function dismissSafetyAlert(id) {
+    if (!id) return Promise.resolve();
+    if (state.safetyAlerts[id]) state.safetyAlerts[id].dismissed = true;
+    state.shownSafetyPopup[id] = true;
+    return fetch(safetyUrl(id), {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ dismissed: true, dismissedAt: Date.now() })
+    }).catch(function () {});
+  }
+
+  function maybeShowNextSafetyPopup() {
+    if (document.getElementById("god-safety-popup")) return;
+    var high = highSafetyAlerts().filter(function (a) { return !state.shownSafetyPopup[a.id]; });
+    if (!high.length) return;
+    var a = high[0];
+    state.shownSafetyPopup[a.id] = true;
+    showSafetyPopup(a);
+  }
+
+
   function maybeShowGodPopups(merged) {
     var list = merged || [];
     var openCodes = {};
+    loadShown();
+    loadTracked();
     list.forEach(function (r) {
-      if (!r || !r.code) return;
-      var code = String(r.code);
-      openCodes[code] = true;
-      state.trackedRideCodes[code] = {
-        name: r.name || "",
-        date: r.date,
-        time: r.time,
-        asap: r.asap,
-        pickup: rideAddressText(r, "pickup"),
-        drop: rideAddressText(r, "drop")
-      };
-      if (isPendingOwner(r) && !state.shownPendingPopup[code]) {
-        state.shownPendingPopup[code] = true;
-        showGodPendingPopup(r);
-      }
-      if (isActiveTrip(r) && !state.shownAcceptPopup[code]) {
-        state.shownAcceptPopup[code] = true;
-        showGodAcceptPopup(r);
-      }
+      try {
+        if (!r || !r.code) return;
+        var code = String(r.code);
+        openCodes[code] = true;
+        var st = String(r.status || "requested").toLowerCase();
+        if (st === "cancelled" || st === "denied" || st === "completed") return;
+        state.trackedRideCodes[code] = {
+          name: r.name || "",
+          date: r.date || "",
+          time: r.time || "",
+          asap: r.asap || false,
+          pickup: rideAddressText(r, "pickup"),
+          drop: rideAddressText(r, "drop"),
+          at: Date.now()
+        };
+        if ((isPendingOwner(r) || isOpenRequest(r)) && !isActiveTrip(r) && !state.shownPendingPopup[code]) {
+          state.shownPendingPopup[code] = true;
+          rememberShown("request", code);
+          queueGodPopup("request", r);
+        }
+        if (isActiveTrip(r) && !state.shownAcceptPopup[code]) {
+          state.shownAcceptPopup[code] = true;
+          rememberShown("accept", code);
+          queueGodPopup("accept", r);
+        }
+      } catch (e) {}
     });
+    saveTracked();
     Object.keys(state.trackedRideCodes).forEach(function (code) {
       if (openCodes[code] || state.shownAcceptPopup[code]) return;
+      var t = state.trackedRideCodes[code] || {};
+      if (t.at && Date.now() - t.at > 12 * 3600000) { delete state.trackedRideCodes[code]; saveTracked(); return; }
       getRide(code).then(function (ride) {
         if (!ride) return;
         if (!ride.code) ride.code = code;
         var st = String(ride.status || "").toLowerCase();
         if ((st === "accepted" || st === "started") && !state.shownAcceptPopup[code]) {
           state.shownAcceptPopup[code] = true;
-          showGodAcceptPopup(ride);
+          rememberShown("accept", code);
+          queueGodPopup("accept", ride);
         }
-        if (st === "completed" || st === "cancelled" || st === "denied") {
+        if (st === "accepted" || st === "started" || st === "completed" || st === "cancelled" || st === "denied") {
           delete state.trackedRideCodes[code];
+          saveTracked();
         }
       });
     });
@@ -1608,13 +1848,12 @@
   }
 
   function revenueForDriver(driver, rides) {
-    /* Commission of fare before tax when known. Never invent a fare. */
+    /* Commission of fare before tax when known. Never invent a fare. v57: fareSub may include confirmed wait ($0.40/min). */
     var ride = matchDriverToRide(driver, rides);
     if (!ride) return { label: "No trip revenue recorded yet", amount: null };
-    var fare = ride.fareBeforeTax;
+    var fare = ride.fareSub != null ? ride.fareSub : ride.fareBeforeTax;
     if (fare === null || fare === undefined || fare === "" || !isFinite(+fare)) {
-      /* Fall back to estimatedTotal only for display note — commission still needs before-tax. */
-      var totalOnly = fmtMoney(ride.estimatedTotal);
+      var totalOnly = fmtMoney(ride.estimatedTotal || ride.fareTotal);
       if (totalOnly) {
         return { label: totalOnly + " trip total (no before-tax fare yet)", amount: null };
       }
@@ -1624,8 +1863,11 @@
     var share = Number(fare) * (pct / 100);
     var money = fmtMoney(share);
     if (!money) return { label: "No trip revenue recorded yet", amount: null };
+    var waitNote = "";
+    var wc = Number(ride.waitCents) || 0;
+    if (wc > 0) waitNote = " · wait " + fmtCents(wc);
     return {
-      label: money + " · " + pct + "% of " + fmtMoney(fare) + " before tax",
+      label: money + " · " + pct + "% of " + fmtMoney(fare) + " before tax" + waitNote,
       amount: money,
       pct: pct
     };
@@ -1642,6 +1884,12 @@
       /* Keep prior roster in memory if a poll fails; mark error for UI. */
       state.rosterError = err && err.denied ? "denied" : "error";
     });
+
+    var safetyP = listSafetyAlerts().then(function (rows) {
+      state.safetyError = "";
+      state.safetyAlerts = rows || {};
+      maybeShowNextSafetyPopup();
+    }).catch(function () { state.safetyError = "error"; });
 
     var ridesP = listOpenRides().then(function (rows) {
       state.ridesError = "";
@@ -1660,7 +1908,7 @@
         if (pending.length) {
           state.pendingBanner = pending.length + " booking(s) waiting for your OK";
         }
-        maybeShowGodPopups(merged || []);
+        try { maybeShowGodPopups(merged || []); } catch (popupErr) {}
       });
     }).catch(function (err) {
       state.rides = [];
@@ -1734,7 +1982,7 @@
       state.calendarError = err && err.denied ? "denied" : "error";
     });
 
-    Promise.all([rosterP, driversP, ridesP, milesP, historyP, calendarP]).then(function () {
+    Promise.all([rosterP, driversP, ridesP, milesP, historyP, calendarP, safetyP]).then(function () {
       state.loading = false;
       state.lastRefreshAt = Date.now();
       renderBoardLists();
@@ -2440,7 +2688,7 @@
     }
     var shown = (state.rides || []).filter(showOnRidesPanel);
     if (!shown.length) {
-      return bookingAlertBannerHtml() + '<p class="empty">No riders requesting a ride right now.</p>';
+      return safetyBannerHtml() + bookingAlertBannerHtml() + '<p class="empty">No riders requesting a ride right now.</p>';
     }
     var cards = shown.map(function (r) {
       var active = isActiveTrip(r);
@@ -2497,7 +2745,7 @@
         "</article>"
       );
     }).join("");
-    return bookingAlertBannerHtml() + cards;
+    return safetyBannerHtml() + bookingAlertBannerHtml() + cards;
   }
 
   function renderBoardLists() {
@@ -2514,6 +2762,7 @@
     }
     bindDriverActions();
     bindBookingActions();
+    bindSafetyActions();
     bindLocateActions();
     bindDayBoardActions();
     setFocusBar();
@@ -2573,6 +2822,14 @@
             : "Could not complete / credit that ride.";
           renderBoardLists();
         });
+      });
+    });
+  }
+
+  function bindSafetyActions() {
+    document.querySelectorAll(".btn-dismiss-safety").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        dismissSafetyAlert(btn.getAttribute("data-safety-id")).then(function () { refresh(); });
       });
     });
   }
@@ -3022,6 +3279,7 @@
     bindHireForm();
     bindDriverActions();
     bindBookingActions();
+    bindSafetyActions();
     bindLocateActions();
     bindDayBoardActions();
   }
@@ -3078,6 +3336,10 @@
     showGodPendingPopup: showGodPendingPopup,
     showGodAcceptPopup: showGodAcceptPopup,
     maybeShowGodPopups: maybeShowGodPopups,
+    listSafetyAlerts: listSafetyAlerts,
+    showSafetyPopup: showSafetyPopup,
+    safetyBannerHtml: safetyBannerHtml,
+    highSafetyAlerts: highSafetyAlerts,
     bookingAlertBannerHtml: bookingAlertBannerHtml,
     approveBooking: approveBooking,
     denyBooking: denyBooking,
