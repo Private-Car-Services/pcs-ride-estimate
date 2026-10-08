@@ -30,6 +30,17 @@
         Rider sign-in acknowledgment (BETA_ACK_REQUIRED): a Beta Mode sheet with "I understand" blocks the rider app at
         every login and every fresh launch with a saved session; remembered only in sessionStorage for this app launch
         (pcs-beta-ack), cleared at login and logout. Driver app and God mode: nothing.
+   v70 (Oct 8): DRIVER app "Metered ride" (Home + Home menu): Start with no rider name/phone, live fare from GPS miles
+        (straight-line between fixes, gaps bridged) + stopped/slow-traffic minutes (under 10 mph; first 2 min at the start
+        free), profiles METER_PROFILES (Day Trip $1.10 / Night $1.38 / Late $1.43 per mile, band picked at Start; meter
+        starts at $11 + one mile ($12.10/$12.38/$12.43) incl. the 1st mile, per mile after that, $0.40/min, up in $0.25
+        steps; minimum = the start), + Tax (8.25%) line
+        (METER_TAX_RATE, on the fare after the minimum; tip not taxed; commission excludes tax); screen
+        kept awake; survives reloads (localStorage pcs-meter-v1-{driverId}). End (confirm) -> Pay now = QR code for a
+        Square-hosted checkout (pcs-pay Worker /meter/link, tip optional) that flips to Paid by polling /meter/status;
+        Show link (copy/share), Mark paid another way (flagged in God mode), Rider didn't pay (red in God mode).
+        Saved like other rides: /rides/{code} (rideType "metered"), PAYMENTS index, driver pay week (DRVRHSTY, 70% of
+        the fare before tax; tips 100% to the driver). No "For Hire" sign on screen.
    v69 (Oct 8): the Beta Mode sign-in sheet opens compact (title, contact line, Read more, I understand); Read more
         expands to the full Beta text; one "I understand" button stays visible in both states. Same blocking rules.
    v59 Home: the rider app always opens on a rider HOME screen (greeting, Book a ride, My rides / History, Terms and
@@ -101,6 +112,35 @@
   var LATE_MILE_CENTS = 143;
   var SHORT_NOTICE_PCT = 0.25;
   var TAX_RATE = 0.0825;
+  /* v70: METERED RIDE settings (driver app), Matthew's final pricing (Oct 8). Matthew can edit these.
+     One profile per time band; the band is picked when the driver taps Start and stays for the whole ride.
+       The meter STARTS at METER_START_BASE ($11) + one mile's rate = $12.10 / $12.38 / $12.43, and that start COVERS the
+       first mile (includedMiles). After that it adds perMile for each mile beyond the first, plus perMinute for each slow
+       minute, going up in `step` amounts (rounded up).
+       perMile / perMinute / entry / minimum / step are in DOLLARS.
+       entry   = null -> METER_START_BASE + perMile (put a number to override one band).
+       minimum = null -> same as the start (a safety net: the meter never ends below the start, so it normally never shows).
+       slowMph = per-minute charge only for minutes averaging under this speed. freeWaitSec = free waiting at trip start. */
+  var METER_START_BASE = 11.00;            /* start = $11 + one mile's rate of the band, includes the first mile */
+  var METER_PROFILES = {
+    day:   { name: "Day Trip",   hours: "Mon–Fri 6:00 am–5:59 pm",                   perMile: 1.10, perMinute: 0.40, entry: null, includedMiles: 1, minimum: null, step: 0.25, slowMph: 10, freeWaitSec: 120 },
+    night: { name: "Night Trip", hours: "6:00–9:59 pm, weekends and holidays",       perMile: 1.38, perMinute: 0.40, entry: null, includedMiles: 1, minimum: null, step: 0.25, slowMph: 10, freeWaitSec: 120 },
+    late:  { name: "Late Night", hours: "10:00 pm–5:59 am, every day",               perMile: 1.43, perMinute: 0.40, entry: null, includedMiles: 1, minimum: null, step: 0.25, slowMph: 10, freeWaitSec: 120 }
+  };
+  var METER_TAX_RATE = 0.0825;             /* Texas sales tax 8.25% (Matthew, Oct 8): on the fare after the minimum, its own "Tax (8.25%)"
+                                              line, rounded to the cent. The tip (added on Square's page) is not taxed; the driver's 70% is
+                                              of the fare without tax. 0 = no tax. (Separate constant from TAX_RATE used by booked rides.) */
+  var METER_HOLIDAY_RATE = true;           /* New Year's, Memorial Day, July 4, Labor Day, Thanksgiving, Christmas = night rate */
+  var METER_WORKER = "https://pcs-pay.pcsrides.workers.dev";
+  var METER_POLL_MS = 5000;                /* "Waiting for payment" check */
+  var METER_MAX_ACCURACY_M = 65;           /* GPS fixes worse than this are ignored */
+  var METER_JITTER_MI = 0.006;             /* ~10 m: GPS wobble while stopped is not counted */
+  var METER_MAX_MPH = 110;                 /* faster than this between fixes = bad fix, ignored */
+  var METER_GAP_MS = 45000;                /* a longer gap between fixes is bridged by the straight line */
+  var METER_QR_VERSION = 70;
+  var METER_LIVE_PUSH_MS = 10000;          /* rider live meter: the driver's phone saves the meter numbers every 10 s */
+  var METER_RIDER_QR_SEC = 30;             /* "Watch your meter" QR shows this long at Start / "Show rider meter", then closes */
+  var METER_VIEW_PATH = "../meter/";       /* rider live meter page, relative to app/app.js */
   /* Airport bases = estimator app.js RATES (dollars→cents). Local base remains BASE_CENTS ($11). */
   var AIRPORT = {
     daytime: { drop: 1550, pick: 2500 },
@@ -725,6 +765,7 @@
   /* Free for a new ride: map board, Home menu pages, or a finished trip. Never mid-ride (one ride at a time). */
   function driverCanTakeNew() {
     if (ROLE !== "driver" || !signedIn()) return false;
+    if (meterActive()) return false; /* v70: busy with a metered ride */
     if (state.screen === "home") return true;
     return state.screen === "trip" && state.rideStatus === "completed";
   }
@@ -7790,15 +7831,16 @@
     try {
       var raw = localStorage.getItem(dayStatStorageKey(day));
       var row = raw ? JSON.parse(raw) : null;
-      if (!row || typeof row !== "object") return { requested: 0, completed: 0, commissionCents: 0, rideTotalCents: 0 };
+      if (!row || typeof row !== "object") return { requested: 0, completed: 0, commissionCents: 0, rideTotalCents: 0, tipCents: 0 };
       return {
         requested: Number(row.requested) || 0,
         completed: Number(row.completed) || 0,
         commissionCents: Number(row.commissionCents) || 0,
-        rideTotalCents: Number(row.rideTotalCents) || 0
+        rideTotalCents: Number(row.rideTotalCents) || 0,
+        tipCents: Number(row.tipCents) || 0 /* v70: metered-ride tips (100% to the driver) */
       };
     } catch (err) {
-      return { requested: 0, completed: 0, commissionCents: 0, rideTotalCents: 0 };
+      return { requested: 0, completed: 0, commissionCents: 0, rideTotalCents: 0, tipCents: 0 };
     }
   }
 
@@ -9539,12 +9581,1040 @@
     return incoming;
   }
 
+  /* ================= v70: METERED RIDE (driver app only) =================
+     Last-minute ride with no quote: the driver taps Start (no rider name/phone), the fare runs from GPS miles plus
+     waiting / slow-traffic minutes, End shows the fare, Pay now shows a QR code for a Square-hosted checkout (pcs-pay
+     Worker /meter/link; tip optional; Square collects the rider's email/phone). The screen flips to Paid by polling
+     /meter/status. State is kept in localStorage (pcs-meter-v1-{driverId}) so a reload / app switch resumes. */
+  var meterTimer = 0;
+  var meterPollTimer = 0;
+  var meterTicks = 0;
+  var meterEndWrite = null;
+  var meterQrLoading = null;
+  var meterViewBusy = false;
+  var meterLiveAt = 0;
+  var meterLivePollAt = 0;
+  var APP_SCRIPT_SRC = (document.currentScript && document.currentScript.src) || "";
+
+  function meterKey() { return "pcs-meter-v1-" + driverPresenceId(); }
+  function meterLoad() {
+    try {
+      var m = JSON.parse(localStorage.getItem(meterKey()) || "null");
+      return m && m.v === 1 && m.code ? m : null;
+    } catch (e) { return null; }
+  }
+  function meterSave() {
+    try {
+      if (state.meter) localStorage.setItem(meterKey(), JSON.stringify(state.meter));
+      else localStorage.removeItem(meterKey());
+    } catch (e) {}
+  }
+  function meterActive() {
+    var M = state.meter;
+    return ROLE === "driver" && !!M && (M.status === "running" || M.status === "ended");
+  }
+  function meterEnsureLoaded() {
+    if (ROLE !== "driver" || !signedIn()) return;
+    var id = driverPresenceId();
+    if (state.meterFor === id) return;
+    state.meterFor = id;
+    state.meter = meterLoad();
+    if (state.meter) {
+      state.meterOpen = state.meter.status !== "running"; /* resume after a reload / app switch (running = panel on the map) */
+      meterStartTimers();
+      if (state.meter.status === "running") followGps();
+      if (state.meter.link && state.meter.link.url) meterLoadQr().then(function () { if (state.meterOpen) render(); });
+    }
+  }
+  function meterSandbox() {
+    try {
+      var q = String(window.location.search || "");
+      if (/[?&]squaretest=1(&|#|$)/.test(q)) sessionStorage.setItem("pcs-squaretest", "1");
+      else if (/[?&]squaretest=0(&|#|$)/.test(q)) sessionStorage.removeItem("pcs-squaretest");
+      return sessionStorage.getItem("pcs-squaretest") === "1";
+    } catch (e) { return false; }
+  }
+
+  /* Time band at Start (Chicago time): late 10 pm–5:59 am; nights/weekends/holidays; weekday daytime. */
+  function meterIsHoliday(ymd) {
+    if (!METER_HOLIDAY_RATE) return false;
+    var p = String(ymd || "").split("-");
+    var y = Number(p[0]), m = Number(p[1]), d = Number(p[2]);
+    if (!y || !m || !d) return false;
+    var md = m * 100 + d;
+    if (md === 101 || md === 704 || md === 1225) return true;
+    var wd = new Date(Date.UTC(y, m - 1, d)).getUTCDay();
+    var dim = new Date(Date.UTC(y, m, 0)).getUTCDate();
+    if (m === 5 && wd === 1 && d + 7 > dim) return true;            /* Memorial Day: last Monday in May */
+    if (m === 9 && wd === 1 && d <= 7) return true;                 /* Labor Day: first Monday in September */
+    if (m === 11 && wd === 4 && d >= 22 && d <= 28) return true;    /* Thanksgiving: fourth Thursday in November */
+    return false;
+  }
+  function meterBand(when) {
+    var parts = chicagoParts(when || new Date());
+    var hour = Number(String(parts.time).split(":")[0]);
+    var wd = chicagoWeekday(parts.date);
+    var holiday = meterIsHoliday(parts.date);
+    var key = hour >= 22 || hour < 6 ? "late" : (wd === 0 || wd === 6 || holiday || hour >= 18) ? "night" : "day";
+    var why = key === "late" ? "" : holiday ? " · holiday" : (wd === 0 || wd === 6) ? " · weekend" : "";
+    return meterProfileBand(key, why, holiday);
+  }
+  /* the editable dollar profile -> whole cents used by the meter (saved on the ride at Start) */
+  function meterProfileBand(key, why, holiday) {
+    var P = METER_PROFILES[key] || METER_PROFILES.day;
+    var c = function (d) { var n = Math.round(Number(d) * 100); return isFinite(n) && n > 0 ? n : 0; };
+    var start = P.entry != null && P.entry !== "" ? Number(P.entry) : Number(METER_START_BASE) + Number(P.perMile);
+    return {
+      key: key, name: String(P.name || key), label: String(P.name || key) + (why || ""), hours: String(P.hours || ""), holiday: !!holiday,
+      cents: c(P.perMile), perMinCents: c(P.perMinute), entryCents: c(start),
+      includedMiles: P.includedMiles != null && P.includedMiles !== "" && isFinite(Number(P.includedMiles)) ? Math.max(0, Number(P.includedMiles)) : 1,
+      minCents: c(P.minimum != null && P.minimum !== "" ? P.minimum : start), stepCents: c(P.step),
+      slowMph: Number(P.slowMph) > 0 ? Number(P.slowMph) : 10, freeWaitSec: Math.max(0, Number(P.freeWaitSec) || 0)
+    };
+  }
+
+  /* start ($11 + one mile, covers the first mile), then each mile after the first + slow minutes, added in steps rounded UP
+     ($0.25) = the running meter. When the ride has ended the minimum (= the start, a safety net) applies, then tax. */
+  function meterFare(M) {
+    var miles = Math.max(0, Number(M && M.miles) || 0);
+    var incl = M.includedMiles != null && isFinite(Number(M.includedMiles)) ? Math.max(0, Number(M.includedMiles)) : 0;
+    var afterMiles = Math.max(0, miles - incl);
+    var mileCents = Math.round(afterMiles * (Number(M.perMileCents) || 0));
+    var waitMin = Math.max(0, Math.floor(Number(M.waitMin) || 0));
+    var waitCents = waitMin * (Number(M.waitCentsPerMin) || 0);
+    var base = Number(M.baseCents) || 0;
+    var raw = base + mileCents + waitCents;
+    var step = Math.max(0, Math.round(Number(M.stepCents) || 0));
+    var stepped = base + (step > 0 ? Math.ceil((raw - base) / step) * step : raw - base); /* starts exactly at the start amount */
+    var min = Math.max(0, Math.round(Number(M.minCents) || 0));
+    var final = !!M.status && M.status !== "running";
+    var sub = final ? Math.max(min, stepped) : stepped;
+    var bp = Math.round((Number(M.taxRate) || 0) * 1000000); /* rate in millionths: whole-number math, half-cent rounds up */
+    var tax = bp > 0 ? Math.round(sub * bp / 1000000) : 0;
+    return { base: base, miles: Math.round(miles * 100) / 100, includedMiles: incl, afterMiles: Math.round(afterMiles * 100) / 100,
+      mileCents: mileCents, waitMin: waitMin, waitCents: waitCents, raw: raw,
+      roundCents: stepped - raw, meter: stepped, minAdd: sub - stepped, minApplied: sub > stepped, minCents: min, freeMin: Math.max(0, Number(M.freeUsed) || 0),
+      sub: sub, tax: tax, total: sub + tax };
+  }
+
+  /* GPS (the same watchPosition the driver app already runs): straight-line steps between accepted fixes. A gap
+     (app in the background, tunnel, reload) is bridged by the straight line from the last fix, so it never drops the
+     miles; GPS jitter under ~10 m and impossible jumps are ignored. */
+  function meterOnGps(pos) {
+    var M = state.meter;
+    if (ROLE !== "driver" || !M || M.status !== "running" || !pos || !pos.coords) return;
+    var lat = Number(pos.coords.latitude), lng = Number(pos.coords.longitude);
+    if (!isCoord(lat) || !isCoord(lng)) return;
+    var acc = Number(pos.coords.accuracy);
+    var now = Date.now();
+    if (isFinite(acc) && acc > METER_MAX_ACCURACY_M) { M.gpsWeakAt = now; return; }
+    M.gpsAt = now;
+    if (!M.startPt) { M.startPt = { lat: lat, lng: lng }; meterSyncStartPoint(); }
+    if (!M.lastPt) { M.lastPt = { lat: lat, lng: lng, t: now }; meterEvalMinutes(now, false); meterSave(); return; }
+    var d = haversineMi(M.lastPt.lat, M.lastPt.lng, lat, lng);
+    if (d < METER_JITTER_MI) { meterEvalMinutes(now, false); meterSave(); return; }
+    var hours = Math.max(1000, now - Number(M.lastPt.t || now)) / 3600000;
+    if (d / hours > METER_MAX_MPH) {
+      M.jumps = (M.jumps || 0) + 1;
+      if (M.jumps >= 3) { M.lastPt = { lat: lat, lng: lng, t: now }; M.jumps = 0; } /* the old fix was the bad one */
+      meterSave();
+      return;
+    }
+    M.jumps = 0;
+    if (now - Number(M.lastPt.t || now) > METER_GAP_MS) M.gapFills = (M.gapFills || 0) + 1;
+    M.miles = Math.round(((Number(M.miles) || 0) + d) * 100000) / 100000;
+    M.lastPt = { lat: lat, lng: lng, t: now };
+    meterEvalMinutes(now, false);
+    meterSave();
+  }
+
+  /* Per-minute charge: every completed minute whose average speed was under the profile's slowMph (stopped or heavy traffic).
+     Minutes that pass without GPS (app in the background) are judged together when GPS is back: the distance covered
+     over the gap divided by its minutes. */
+  function meterEvalMinutes(now, force) {
+    var M = state.meter;
+    if (!M || M.status !== "running") return;
+    /* only minutes fully covered by GPS are judged (the miles of a gap arrive with the next fix); End judges the rest */
+    var upTo = force ? now : Math.min(now, Number(M.gpsAt) || 0);
+    var done = Math.floor((upTo - M.startedAt) / 60000);
+    var pending = done - (Number(M.minIdx) || 0);
+    if (pending <= 0) return;
+    var delta = Math.max(0, (Number(M.miles) || 0) - (Number(M.minMiles) || 0));
+    var mph = delta / (pending / 60);
+    if (mph < (Number(M.slowMph) || 10)) {
+      /* free waiting at trip start (before the car first moves): the first freeWaitSec of slow minutes */
+      var freeLeft = M.moved ? 0 : Math.max(0, Math.floor((Number(M.freeWaitSec) || 0) / 60) - (Number(M.freeUsed) || 0));
+      var free = Math.min(freeLeft, pending);
+      M.freeUsed = (Number(M.freeUsed) || 0) + free;
+      M.waitMin = (Number(M.waitMin) || 0) + pending - free;
+    } else {
+      M.moved = true;
+    }
+    M.minIdx = done;
+    M.minMiles = Number(M.miles) || 0;
+  }
+
+  function meterClock(ms) {
+    var s = Math.max(0, Math.floor(ms / 1000));
+    var h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+    return (h ? h + ":" + String(m).padStart(2, "0") : String(m)) + ":" + String(sec).padStart(2, "0");
+  }
+  function meterGpsLine(M) {
+    if (!navigator.geolocation) return "GPS is not available on this phone. Miles can't be counted.";
+    var at = (M && M.gpsAt) || state.gpsAt || 0;
+    if (!at) return "Waiting for GPS… keep this screen open.";
+    var age = Math.round((Date.now() - at) / 1000);
+    return age <= 30 ? "GPS OK" : "GPS last seen " + meterClock(age * 1000) + " ago (miles are filled in when it's back)";
+  }
+
+  function meterTick() {
+    var M = state.meter;
+    if (!M) { meterStopTimers(); return; }
+    meterTicks += 1;
+    if (M.status === "running") {
+      meterEvalMinutes(Date.now(), false);
+      if (meterTicks % 20 === 0 && navigator.geolocation && document.visibilityState === "visible") {
+        try { navigator.geolocation.getCurrentPosition(onGpsFix, function () {}, { enableHighAccuracy: true, maximumAge: 5000, timeout: 15000 }); } catch (e) {}
+      }
+      if (meterTicks % 15 === 0) { meterSave(); acquireWakeLock(); }
+      if (Date.now() - meterLiveAt >= METER_LIVE_PUSH_MS) meterPushLive(M);
+      if (!M.viewToken && meterTicks % 15 === 0) meterFetchView();
+      if (M.viewToken && Date.now() - meterLivePollAt >= 15000) meterPollLive();
+      meterRefreshDom();
+    }
+    meterQrTick();
+  }
+  function meterStartTimers() {
+    if (!meterTimer) meterTimer = setInterval(meterTick, 1000);
+    meterSchedulePoll(1500);
+  }
+  function meterStopTimers() {
+    if (meterTimer) clearInterval(meterTimer);
+    meterTimer = 0;
+    if (meterPollTimer) clearTimeout(meterPollTimer);
+    meterPollTimer = 0;
+  }
+  function meterRefreshDom() {
+    var M = state.meter;
+    if (!M || M.status !== "running") return;
+    var f = meterFare(M);
+    var set = function (id, txt) { var el = document.getElementById(id); if (el && el.textContent !== txt) el.textContent = txt; };
+    set("meter-fare", money(f.sub));
+    set("meter-miles", f.miles.toFixed(2));
+    set("meter-time", meterClock(Date.now() - M.startedAt));
+    set("meter-wait", String(f.waitMin));
+    set("meter-gps", meterGpsLine(M));
+    set("meter-bar-fare", money(f.sub));
+    set("meter-free", meterFreeLine(M));
+  }
+  /* free waiting at the start: counts down until the car first moves (the meter's own rule decides the charge) */
+  function meterFreeLeftSec(M, now) {
+    if (!M || M.moved) return 0;
+    var free = Number(M.freeWaitSec) || 0;
+    return Math.max(0, Math.ceil(free - ((now || Date.now()) - M.startedAt) / 1000));
+  }
+  function meterFreeLine(M) {
+    var left = meterFreeLeftSec(M);
+    return left > 0 ? "Free waiting " + meterClock(left * 1000) + " left" : "";
+  }
+  function meterModeWord(key) {
+    return key === "late" ? "LATE NIGHT" : key === "night" ? "NIGHT · WEEKEND · HOLIDAY" : "DAY";
+  }
+  function meterModeHtml(key, label, id) {
+    var why = /holiday/i.test(label) ? "holiday" : /weekend/i.test(label) ? "weekend" : "";
+    return '<p class="meter-mode meter-mode-' + esc(key || "day") + '" id="' + (id || "meter-mode") + '">' + esc(meterModeWord(key)) + " RATE" +
+      (why ? ' <span class="meter-mode-why">(' + why + ")</span>" : "") + "</p>";
+  }
+
+  /* ---------- v70: rider live meter ("Watch your meter" QR -> public read-only page; no rider info needed) ---------- */
+  function meterLiveSnapshot(M) {
+    var f = meterFare(M);
+    return { miles: f.miles, waitMin: f.waitMin, freeUsed: Number(M.freeUsed) || 0, moved: !!M.moved, fareCents: f.sub, at: Date.now(),
+      gpsOk: !!(M.gpsAt && Date.now() - M.gpsAt <= 30000) };
+  }
+  function meterPushLive(M) {
+    meterLiveAt = Date.now();
+    if (!M || M.status !== "running") return;
+    meterWrite(rideUrl(M.code), "PATCH", { meterLive: meterLiveSnapshot(M), updatedAt: Date.now() });
+  }
+  function meterFetchView() {
+    var M = state.meter;
+    if (!M || M.viewToken || meterViewBusy || (M.status !== "running" && M.status !== "ended")) return Promise.resolve(false);
+    meterViewBusy = true;
+    var code = M.code;
+    return meterPost("/meter/view", { rideCode: code }).then(function (data) {
+      meterViewBusy = false;
+      var cur = state.meter;
+      if (!cur || cur.code !== code || !data.token) return false;
+      cur.viewToken = String(data.token);
+      meterSave();
+      if (meterQrShowing()) render();
+      return true;
+    }, function () { meterViewBusy = false; return false; });
+  }
+  function meterViewUrl(M) {
+    if (!M || !M.viewToken) return "";
+    try { return new URL(METER_VIEW_PATH + "?t=" + encodeURIComponent(M.viewToken), APP_SCRIPT_SRC || window.location.href).href; } catch (e) { return ""; }
+  }
+  function meterQrShowing() { return !!state.meterQrUntil && state.meterQrUntil > Date.now(); }
+  function meterShowRiderQr() {
+    state.meterQrUntil = Date.now() + METER_RIDER_QR_SEC * 1000;
+    meterLoadQr().then(function () { if (meterQrShowing()) render(); });
+    if (state.meter && !state.meter.viewToken) meterFetchView();
+    render();
+  }
+  function meterQrTick() {
+    if (!state.meterQrUntil) return;
+    var left = Math.ceil((state.meterQrUntil - Date.now()) / 1000);
+    if (left <= 0) { state.meterQrUntil = 0; render(); return; }
+    var el = document.getElementById("meter-rqr-count");
+    var txt = "Closes in " + left + " s · tap to close";
+    if (el && el.textContent !== txt) el.textContent = txt;
+  }
+  function meterRiderQrHtml(M) {
+    if (!meterQrShowing()) return "";
+    var url = meterViewUrl(M);
+    var qr = url ? meterQrSvg(url, "QR code: watch your meter", "L") : "";
+    var left = Math.max(1, Math.ceil((state.meterQrUntil - Date.now()) / 1000));
+    return '<div class="meter-rqr" id="meter-rider-qr" role="button" tabindex="0" aria-label="Rider meter QR code. Tap to close.">' +
+      '<div class="meter-rqr-code">' + (qr || '<p class="fine" id="meter-rqr-wait">' + (url ? "Loading the code…" : "Getting the rider meter code…") + "</p>") + "</div>" +
+      '<div class="meter-rqr-text"><b>Rider: scan to watch your meter</b>' +
+      '<span>Live fare, miles and time. Optional: add a card and pay on your phone at the end.</span>' +
+      '<span class="meter-rqr-count" id="meter-rqr-count">Closes in ' + left + " s · tap to close</span></div></div>";
+  }
+  /* what the rider did on their page (card saved? paid?): meter numbers only, never their name / phone / email */
+  function meterPollLive() {
+    var M = state.meter;
+    meterLivePollAt = Date.now();
+    if (!M || !M.viewToken) return;
+    var code = M.code;
+    meterPost("/meter/live", { t: M.viewToken, check: !!(M.pay && M.pay.status === "link_open") }).then(function (d) {
+      var cur = state.meter;
+      if (!cur || cur.code !== code) return;
+      var had = !!cur.riderCard;
+      cur.riderCard = d.card && d.card.onFile ? true : false;
+      if (d.pay && d.pay.paid && !d.pay.other && cur.status === "ended") {
+        meterOnPaid({ totalCents: d.pay.totalCents, tipCents: d.pay.tipCents, receiptUrl: d.pay.receiptUrl, via: d.pay.via });
+        return;
+      }
+      if (had !== cur.riderCard) { meterSave(); render(); }
+    }, function () {});
+  }
+
+  /* ---------- Firebase records (same places as other rides: /rides/{code}, PAYMENTS index, driver history) ---------- */
+  function meterDriverName() {
+    var acct = readDriverAccount() || {};
+    return String(acct.name || state.driverName || readSession() || "Driver").slice(0, 80);
+  }
+  function meterWrite(url, method, body) {
+    if (!syncOn()) return Promise.resolve(false);
+    return authFetch(url, { method: method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) })
+      .then(function (res) { return res.ok; }).catch(function () { return false; });
+  }
+  function meterPayUrl(code) { return databaseURL() + "/rides/PAYMENTS/" + encodeURIComponent(code) + ".json"; }
+  function meterIndexMeter(M, status) {
+    var f = M.fare || meterFare(M);
+    return {
+      status: status, startedAt: M.startedAt, endedAt: M.endedAt || null, driverId: M.driverId, driverName: M.driverName,
+      tierLabel: M.tierLabel, perMileCents: M.perMileCents, miles: f.miles, minutes: M.minutes || null, waitMinutes: f.waitMin,
+      fareSub: f.sub, fareTotal: f.total,
+      pickupLat: M.startPt ? M.startPt.lat : null, pickupLng: M.startPt ? M.startPt.lng : null,
+      dropLat: M.endPt ? M.endPt.lat : null, dropLng: M.endPt ? M.endPt.lng : null,
+      pickupAddress: M.pickupAddress || "", dropAddress: M.dropAddress || ""
+    };
+  }
+  function meterIndexPatch(M, status, extra) {
+    var body = Object.assign({ code: M.code, name: "Metered ride", rideType: "metered", updatedAt: Date.now(),
+      env: M.sandbox ? "sandbox" : "production", meter: meterIndexMeter(M, status) }, extra || {});
+    return meterWrite(meterPayUrl(M.code), "PATCH", body);
+  }
+  function meterPutRide(M) {
+    var body = {
+      code: M.code, rideType: "metered", metered: true, name: "Metered ride", status: "started",
+      requestedAt: M.startedAt, startedAt: M.startedAt, acceptedAt: M.startedAt, updatedAt: Date.now(),
+      driverId: M.driverId, driverUid: firebaseUid() || "", driverName: M.driverName, driverEmail: String(readSession() || "").slice(0, 120),
+      meterTier: M.tier, meterTierLabel: M.tierLabel, meterProfile: M.profileName, perMileCents: M.perMileCents, baseCents: M.baseCents,
+      waitCentsPerMin: M.waitCentsPerMin, includedMiles: M.includedMiles, minimumCents: M.minCents, stepCents: M.stepCents, freeWaitSec: M.freeWaitSec,
+      slowMph: M.slowMph, taxRate: M.taxRate, holiday: !!M.holiday,
+      pickupLat: M.startPt ? M.startPt.lat : null, pickupLng: M.startPt ? M.startPt.lng : null,
+      isTest: false, paymentStatus: "none", paymentEnv: M.sandbox ? "sandbox" : "production", meterLive: meterLiveSnapshot(M)
+    };
+    meterLiveAt = Date.now();
+    meterWrite(rideUrl(M.code), "PUT", body).then(function (ok) { if (ok) meterFetchView(); });
+    meterIndexPatch(M, "running");
+  }
+  function meterPlaceText(p) {
+    if (!p) return "";
+    return [p.line1, p.city].filter(function (x) { return x && String(x).trim(); }).join(", ").slice(0, 160);
+  }
+  function meterSyncStartPoint() {
+    var M = state.meter;
+    if (!M || !M.startPt) return;
+    meterWrite(rideUrl(M.code), "PATCH", { pickupLat: M.startPt.lat, pickupLng: M.startPt.lng, updatedAt: Date.now() });
+    if (M.pickupAddress || M.pickupAsked) return;
+    M.pickupAsked = true;
+    var code = M.code;
+    reverseGeocode(M.startPt.lat, M.startPt.lng).then(function (place) {
+      var cur = state.meter;
+      if (!cur || cur.code !== code) return;
+      cur.pickupAddress = meterPlaceText(place);
+      meterSave();
+      meterWrite(rideUrl(code), "PATCH", { pickupAddress: cur.pickupAddress, pickupStreet: place && place.line1 || "", pickupCity: place && place.city || "", updatedAt: Date.now() });
+      meterIndexPatch(cur, cur.status === "running" ? "running" : meterIndexStatus(cur));
+    });
+  }
+  function meterIndexStatus(M) {
+    var ps = M.pay && M.pay.status;
+    if (ps === "charged") return "paid";
+    if (ps === "paid_other") return "paid_other";
+    if (ps === "unpaid_finished") return "unpaid";
+    return M.status === "running" ? "running" : "ended";
+  }
+
+  function meterStart() {
+    if (state.meter || !canGoOnline() || driverMidRide()) return;
+    var now = Date.now();
+    var band = meterBand(new Date(now));
+    var M = {
+      v: 1, code: makeRideCode(), status: "running", startedAt: now, tier: band.key, tierLabel: band.label, holiday: !!band.holiday,
+      profileName: band.name, perMileCents: band.cents, baseCents: band.entryCents, includedMiles: band.includedMiles, waitCentsPerMin: band.perMinCents, minCents: band.minCents,
+      stepCents: band.stepCents, slowMph: band.slowMph, freeWaitSec: band.freeWaitSec, freeUsed: 0, moved: false,
+      taxRate: Number(METER_TAX_RATE) > 0 && Number(METER_TAX_RATE) < 0.5 ? Number(METER_TAX_RATE) : 0, miles: 0, waitMin: 0, minIdx: 0, minMiles: 0, lastPt: null, startPt: null,
+      gpsAt: 0, gapFills: 0, jumps: 0, sandbox: meterSandbox(), driverId: driverPresenceId(), driverName: meterDriverName(), pay: { status: "none" }
+    };
+    if (isCoord(state.hereLat) && isCoord(state.hereLng) && state.gpsAt && now - state.gpsAt < 60000) {
+      M.startPt = { lat: +state.hereLat, lng: +state.hereLng };
+      M.lastPt = { lat: +state.hereLat, lng: +state.hereLng, t: now };
+      M.gpsAt = state.gpsAt;
+    }
+    state.meter = M;
+    state.meterOpen = false; /* v70: the meter runs in a compact panel above the map */
+    state.meterQrUntil = Date.now() + METER_RIDER_QR_SEC * 1000; /* "Watch your meter" QR for 30 s */
+    state.meterConfirmEnd = false;
+    state.meterError = "";
+    meterSave();
+    meterPutRide(M);
+    if (M.startPt) meterSyncStartPoint();
+    meterStartTimers();
+    followGps();
+    acquireWakeLock();
+    meterLoadQr(); /* cache the QR code drawer while there is signal */
+    render();
+  }
+
+  function meterLogPayWeek(M) {
+    var f = M.fare;
+    var pct = driverCommissionPct();
+    var base = Math.max(0, f.sub - EXTRA_FEE);
+    var day = chicagoParts(new Date(M.endedAt)).date;
+    var entry = {
+      code: M.code, day: day, completedAt: M.endedAt, when: "Metered ride", rideType: "metered",
+      pickup: M.pickupAddress || "Metered ride start", drop: M.dropAddress || "Metered ride end",
+      rawMiles: f.miles, billedMiles: f.miles, waitMinutes: f.waitMin, fareSub: f.sub, fareTax: f.tax, fareTotal: f.total,
+      commissionPct: pct, commissionCents: Math.round(base * (pct / 100)), tipCents: 0, paymentStatus: "unpaid", riderName: "Metered ride"
+    };
+    var list = readRideLog().filter(function (e) { return !e || e.code !== M.code; });
+    list.unshift(entry);
+    writeRideLog(list);
+    var stats = readDayStats(day);
+    stats.completed += 1;
+    stats.commissionCents += entry.commissionCents;
+    stats.rideTotalCents += entry.fareTotal;
+    writeDayStats(day, stats);
+    meterWrite(historyUrl(driverPresenceId(), M.code), "PUT", entry);
+    M.logged = true;
+    M.logDay = day;
+  }
+  function meterUpdatePayWeek(M, patch) {
+    var list = readRideLog();
+    var tipAdd = 0;
+    list.forEach(function (e) {
+      if (e && e.code === M.code) {
+        tipAdd = (Number(patch.tipCents) || 0) - (Number(e.tipCents) || 0);
+        Object.assign(e, patch);
+      }
+    });
+    writeRideLog(list);
+    if (tipAdd && M.logDay) {
+      var stats = readDayStats(M.logDay);
+      stats.tipCents = (Number(stats.tipCents) || 0) + tipAdd;
+      writeDayStats(M.logDay, stats);
+    }
+    meterWrite(historyUrl(driverPresenceId(), M.code), "PATCH", patch);
+  }
+
+  function meterFinishEnd() {
+    var M = state.meter;
+    if (!M || M.status !== "running") return;
+    var now = Date.now();
+    meterEvalMinutes(now, true);
+    M.status = "ended";
+    M.endedAt = now;
+    M.endPt = M.lastPt ? { lat: M.lastPt.lat, lng: M.lastPt.lng } : (M.startPt || null);
+    M.minutes = Math.max(1, Math.ceil((now - M.startedAt) / 60000));
+    M.fare = meterFare(M);
+    M.pay = { status: "unpaid" };
+    state.meterConfirmEnd = false;
+    state.meterBusy = "";
+    state.meterOpen = true;
+    state.meterQrUntil = 0;
+    meterSave();
+    var f = M.fare;
+    meterEndWrite = meterWrite(rideUrl(M.code), "PATCH", {
+      status: "completed", completedAt: now, endedAt: now, updatedAt: now,
+      dropLat: M.endPt ? M.endPt.lat : null, dropLng: M.endPt ? M.endPt.lng : null,
+      pickupLat: M.startPt ? M.startPt.lat : null, pickupLng: M.startPt ? M.startPt.lng : null,
+      meterMiles: f.miles, billedMiles: f.miles, meterMinutes: M.minutes, waitMinutes: f.waitMin, gpsGapFills: M.gapFills || 0,
+      fareBase: f.base, fareMileCents: f.mileCents, fareWaitCents: f.waitCents, fareSub: f.sub, fareTax: f.tax, fareTotal: f.total,
+      estimateCents: f.total, paymentStatus: "unpaid",
+      meterLive: { miles: f.miles, waitMin: f.waitMin, freeUsed: Number(M.freeUsed) || 0, moved: !!M.moved, fareCents: f.sub, at: now, gpsOk: true }
+    });
+    meterIndexPatch(M, "ended", { paymentStatus: "unpaid" });
+    meterLogPayWeek(M);
+    meterSave();
+    meterGeocodeEnds(M);
+    render();
+    meterSchedulePoll(METER_POLL_MS); /* the rider may pay from their meter page (saved card): flip to Paid by itself */
+  }
+  function meterGeocodeEnds(M) {
+    var code = M.code;
+    var jobs = [];
+    if (M.startPt && !M.pickupAddress) jobs.push(reverseGeocode(M.startPt.lat, M.startPt.lng).then(function (p) { return ["pickup", p]; }));
+    if (M.endPt) jobs.push(reverseGeocode(M.endPt.lat, M.endPt.lng).then(function (p) { return ["drop", p]; }));
+    if (!jobs.length) return;
+    Promise.all(jobs).then(function (rows) {
+      var cur = state.meter && state.meter.code === code ? state.meter : M;
+      var patch = { updatedAt: Date.now() };
+      rows.forEach(function (row) {
+        var txt = meterPlaceText(row[1]);
+        if (!txt) return;
+        if (row[0] === "pickup") { cur.pickupAddress = txt; patch.pickupAddress = txt; patch.pickupStreet = row[1].line1 || ""; patch.pickupCity = row[1].city || ""; }
+        else { cur.dropAddress = txt; patch.dropAddress = txt; patch.dropStreet = row[1].line1 || ""; patch.dropCity = row[1].city || ""; }
+      });
+      if (state.meter && state.meter.code === code) meterSave();
+      meterWrite(rideUrl(code), "PATCH", patch);
+      meterIndexPatch(cur, meterIndexStatus(cur));
+      meterUpdatePayWeek(cur, { pickup: cur.pickupAddress || "Metered ride start", drop: cur.dropAddress || "Metered ride end" });
+    });
+  }
+  function meterEnd() {
+    var M = state.meter;
+    if (!M || M.status !== "running" || state.meterBusy) return;
+    state.meterBusy = "Ending the ride…";
+    render();
+    var finished = false;
+    var finish = function () { if (finished) return; finished = true; meterFinishEnd(); };
+    setTimeout(finish, 4000); /* one last GPS fix if it comes fast; never hold the driver longer */
+    if (navigator.geolocation) {
+      try {
+        navigator.geolocation.getCurrentPosition(function (pos) { onGpsFix(pos); finish(); }, finish, { enableHighAccuracy: true, maximumAge: 3000, timeout: 3500 });
+      } catch (e) { finish(); }
+    } else finish();
+  }
+
+  /* ---------- pay ---------- */
+  function meterPost(path, body) {
+    var M = state.meter;
+    var payload = Object.assign({}, body || {});
+    if (M && M.sandbox) payload.sandbox = true;
+    var ctrl = typeof AbortController === "function" ? new AbortController() : null;
+    var timer = ctrl ? setTimeout(function () { ctrl.abort(); }, 25000) : 0;
+    return fetch(METER_WORKER + path, Object.assign({ method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) },
+      ctrl ? { signal: ctrl.signal } : {})).then(function (res) {
+      if (timer) clearTimeout(timer);
+      return res.json().catch(function () { return {}; }).then(function (data) {
+        if (!res.ok || !data || data.ok === false) {
+          var err = new Error((data && data.error) || ("Payment server error " + res.status));
+          err.status = res.status;
+          throw err;
+        }
+        return data;
+      });
+    }, function () {
+      if (timer) clearTimeout(timer);
+      var e = new Error("No connection to the payment server. Check your signal and try again.");
+      e.network = true;
+      throw e;
+    });
+  }
+  function meterEnsureEndSaved(M) {
+    var first = meterEndWrite || Promise.resolve(false);
+    return first.then(function (ok) {
+      if (ok) return true;
+      var f = M.fare;
+      meterEndWrite = meterWrite(rideUrl(M.code), "PATCH", { status: "completed", completedAt: M.endedAt, endedAt: M.endedAt, updatedAt: Date.now(),
+        fareSub: f.sub, fareTax: f.tax, fareTotal: f.total, estimateCents: f.total, meterMiles: f.miles, waitMinutes: f.waitMin, paymentStatus: "unpaid" });
+      return meterEndWrite;
+    });
+  }
+  function meterPayNow() {
+    var M = state.meter;
+    if (!M || M.status !== "ended" || state.meterBusy) return;
+    state.meterBusy = "Making the payment code…";
+    state.meterError = "";
+    render();
+    meterEnsureEndSaved(M).then(function () {
+      return meterPost("/meter/link", { rideCode: M.code, attempt: M.linkAttempt || 0 });
+    }).then(function (data) {
+      state.meterBusy = "";
+      if (data.already || data.paid) { meterOnPaid(data); return; }
+      M.link = { url: String(data.url || ""), id: String(data.linkId || ""), orderId: String(data.orderId || ""), cents: Number(data.amountCents) || M.fare.total };
+      M.pay = { status: "link_open", at: Date.now() };
+      meterSave();
+      meterIndexPatch(M, "ended");
+      meterLoadQr().then(function () { render(); });
+      meterSchedulePoll(METER_POLL_MS);
+      render();
+    }).catch(function (err) {
+      state.meterBusy = "";
+      state.meterError = (err && err.message) || "Couldn't make the payment code. Try again.";
+      render();
+    });
+  }
+  function meterSchedulePoll(ms) {
+    if (meterPollTimer) clearTimeout(meterPollTimer);
+    meterPollTimer = 0;
+    var M = state.meter;
+    if (!meterAwaitingPay(M)) return;
+    meterPollTimer = setTimeout(meterPollStatus, ms || METER_POLL_MS);
+  }
+  function meterAwaitingPay(M) {
+    var ps = M && M.pay && M.pay.status;
+    return !!M && M.status === "ended" && (ps === "link_open" || ps === "unpaid");
+  }
+  function meterPollStatus() {
+    meterPollTimer = 0;
+    var M = state.meter;
+    if (!meterAwaitingPay(M)) return;
+    if (document.visibilityState === "hidden") { meterSchedulePoll(METER_POLL_MS); return; }
+    var code = M.code;
+    if (M.viewToken) meterPollLive();
+    meterPost("/meter/status", { rideCode: code }).then(function (data) {
+      var cur = state.meter;
+      if (!cur || cur.code !== code) return;
+      if (data.paid) { meterOnPaid(data); return; }
+      state.meterPollNote = "";
+      meterSchedulePoll(METER_POLL_MS);
+    }).catch(function (err) {
+      state.meterPollNote = err && err.network ? "No signal. Still waiting…" : "";
+      var el = document.getElementById("meter-pay-note");
+      if (el) el.textContent = state.meterPollNote;
+      meterSchedulePoll(METER_POLL_MS * 2);
+    });
+  }
+  function meterOnPaid(data) {
+    var M = state.meter;
+    if (!M) return;
+    var total = Number(data.totalCents) || (M.link && M.link.cents) || (M.fare && M.fare.total) || 0;
+    var tip = Number(data.tipCents) || 0;
+    M.pay = { status: "charged", totalCents: total, tipCents: tip, fareCents: Number(data.fareCents) || Math.max(0, total - tip),
+      receiptUrl: /^https:\/\//i.test(String(data.receiptUrl || "")) ? String(data.receiptUrl) : "", paymentId: String(data.paymentId || ""), paidAt: Date.now(),
+      via: data.via === "meter_card" ? "meter_card" : M.link && M.link.url ? "square_link" : M.riderCard ? "meter_card" : "square" };
+    M.status = "paid";
+    meterSave();
+    meterStopTimers();
+    meterWrite(rideUrl(M.code), "PATCH", { paymentStatus: "charged", chargedCents: total, tipCents: tip, paidAt: M.pay.paidAt, paidVia: M.pay.via,
+      squarePaymentId: M.pay.paymentId, receiptUrl: M.pay.receiptUrl, updatedAt: Date.now() });
+    meterIndexPatch(M, "paid", { paymentStatus: "charged" });
+    meterUpdatePayWeek(M, { tipCents: tip, paymentStatus: "charged" });
+    render();
+  }
+  function meterMarkOther() {
+    var M = state.meter;
+    if (!M || M.status !== "ended" || state.meterBusy) return;
+    var method = state.meterOtherMethod || "";
+    if (!method) { state.meterError = "Pick how the rider paid."; render(); return; }
+    var amtEl = document.getElementById("meter-other-amount");
+    var tipEl = document.getElementById("meter-other-tip");
+    var amount = Math.round(parseFloat(String(amtEl ? amtEl.value : "").replace(/[^0-9.]/g, "")) * 100);
+    var tip = Math.round(parseFloat(String(tipEl ? tipEl.value : "").replace(/[^0-9.]/g, "") || "0") * 100);
+    if (!isFinite(amount) || amount < 0) { state.meterError = "Enter the amount you collected."; render(); return; }
+    if (!isFinite(tip) || tip < 0) tip = 0;
+    state.meterOtherDraft = { amount: amtEl ? amtEl.value : "", tip: tipEl ? tipEl.value : "" };
+    var save = function () {
+      var now = Date.now();
+      M.pay = { status: "paid_other", method: method, amountCents: amount, tipCents: tip, paidAt: now, via: "other" };
+      M.status = "paid";
+      state.meterBusy = "";
+      state.meterOtherOpen = false;
+      state.meterForceOther = false;
+      meterSave();
+      meterStopTimers();
+      meterWrite(rideUrl(M.code), "PATCH", { paymentStatus: "paid_other", paidVia: method, paidOtherCents: amount, tipCents: tip, paidAt: now,
+        paidOtherBy: M.driverName, paidOtherByDriverId: M.driverId, updatedAt: now });
+      meterIndexPatch(M, "paid_other", { paymentStatus: "paid_other",
+        paidOther: { at: now, method: method, amountCents: amount, tipCents: tip, by: M.driverName, driverId: M.driverId, fareTotal: M.fare.total } });
+      meterUpdatePayWeek(M, { tipCents: tip, paymentStatus: "paid_other", paidVia: method });
+      render();
+    };
+    if (!M.link || !M.link.id || state.meterForceOther) { save(); return; }
+    state.meterBusy = "Closing the QR payment link…";
+    state.meterError = "";
+    render();
+    meterPost("/meter/void", { rideCode: M.code }).then(function (data) {
+      state.meterBusy = "";
+      if (data.paid) { meterOnPaid(data); return; } /* the rider paid by QR meanwhile: never collect twice */
+      save();
+    }).catch(function (err) {
+      state.meterBusy = "";
+      state.meterForceOther = true;
+      state.meterError = ((err && err.message) || "Couldn't close the QR link.") + " The QR link may still be open. Tap Confirm again to mark it paid anyway.";
+      render();
+    });
+  }
+  function meterFinishUnpaid() {
+    var M = state.meter;
+    if (!M || M.status !== "ended") return;
+    var now = Date.now();
+    M.pay = { status: "unpaid_finished", at: now };
+    meterSave();
+    if (M.link && M.link.id) meterPost("/meter/void", { rideCode: M.code }).catch(function () {}); /* best effort */
+    meterWrite(rideUrl(M.code), "PATCH", { paymentStatus: "unpaid", meterUnpaidFinishedAt: now, updatedAt: now });
+    meterIndexPatch(M, "unpaid", { paymentStatus: "unpaid", unpaidFinishedAt: now });
+    state.driverNotice = "Metered ride " + M.code + " was saved as NOT PAID (" + money(M.fare.total) + "). It shows in red in God mode.";
+    meterClear();
+  }
+  function meterClear() {
+    meterStopTimers();
+    var M = state.meter;
+    if (M) { try { localStorage.setItem("pcs-meter-last-" + driverPresenceId(), JSON.stringify(M)); } catch (e) {} }
+    state.meter = null;
+    state.meterOpen = false;
+    state.meterQrUntil = 0;
+    state.meterConfirmEnd = false;
+    state.meterOtherOpen = false;
+    state.meterShowLink = false;
+    state.meterForceOther = false;
+    state.meterOtherMethod = "";
+    state.meterOtherDraft = null;
+    state.meterError = "";
+    state.meterBusy = "";
+    meterSave();
+    render();
+  }
+
+  /* ---------- QR code (qrcode.js, MIT, loaded on demand from the app folder) ---------- */
+  function meterLoadQr() {
+    if (typeof window.qrcode === "function") return Promise.resolve(true);
+    if (meterQrLoading) return meterQrLoading;
+    meterQrLoading = new Promise(function (resolve) {
+      var src;
+      try { src = new URL("qrcode.js?v=" + METER_QR_VERSION, APP_SCRIPT_SRC || window.location.href).href; } catch (e) { src = "../qrcode.js?v=" + METER_QR_VERSION; }
+      var s = document.createElement("script");
+      s.src = src;
+      s.async = true;
+      s.onload = function () { resolve(typeof window.qrcode === "function"); };
+      s.onerror = function () { meterQrLoading = null; resolve(false); };
+      document.head.appendChild(s);
+    });
+    return meterQrLoading;
+  }
+  function meterQrSvg(text, label, ec) {
+    if (typeof window.qrcode !== "function" || !text) return "";
+    try {
+      var qr = window.qrcode(0, ec || "M");
+      qr.addData(text);
+      qr.make();
+      var n = qr.getModuleCount();
+      var q = 4;
+      var d = "";
+      for (var r = 0; r < n; r += 1) {
+        for (var c = 0; c < n; c += 1) if (qr.isDark(r, c)) d += "M" + (c + q) + " " + (r + q) + "h1v1h-1z";
+      }
+      return '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ' + (n + 2 * q) + " " + (n + 2 * q) + '" shape-rendering="crispEdges" role="img" aria-label="' + esc(label || "QR code to pay") + '">' +
+        '<rect width="100%" height="100%" fill="#fff"/><path d="' + d + '" fill="#000"/></svg>';
+    } catch (e) { return ""; }
+  }
+
+  /* ---------- screens ---------- */
+  function ensureMeterStyle() {
+    if (document.getElementById("pcs-meter-style")) return;
+    var st = document.createElement("style");
+    st.id = "pcs-meter-style";
+    st.textContent =
+      ".meter-fare{font-size:56px;line-height:1.05;font-weight:800;color:#f0d48a;text-align:center;margin:8px 0 4px;font-variant-numeric:tabular-nums}" +
+      ".meter-sub{text-align:center;margin:0 0 12px;opacity:.85}" +
+      ".meter-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;text-align:center;margin:0 0 12px}" +
+      ".meter-grid div{background:rgba(255,255,255,.04);border:1px solid rgba(212,177,90,.28);border-radius:12px;padding:10px 4px}" +
+      ".meter-grid b{display:block;font-size:24px;font-variant-numeric:tabular-nums}.meter-grid span{font-size:12px;opacity:.8;text-transform:uppercase;letter-spacing:.06em}" +
+      ".meter-big{display:block;width:100%;font-size:28px;font-weight:800;padding:22px 12px;border-radius:16px;margin:10px 0}" +
+      ".meter-end{background:#7a1f1f !important;color:#fff !important;border:2px solid #ff8a8a !important}" +
+      ".meter-qr{background:#fff;border-radius:16px;padding:10px;margin:10px auto;width:min(80vw,300px)}.meter-qr svg{display:block;width:100%;height:auto}" +
+      ".meter-paid{font-size:44px;font-weight:800;color:#8fd0a8;text-align:center;margin:6px 0}" +
+      ".meter-test{background:#c9a227;color:#0b1f3a;border-radius:8px;padding:4px 8px;font-weight:800;display:inline-block;margin:0 0 8px}" +
+      ".meter-bar{display:block;width:100%;margin:6px 0 10px;background:#4a3d12;color:#f0d48a;border:2px solid #f0d48a;border-radius:14px;padding:12px;font-weight:800;font-size:17px}" +
+      ".meter-methods{display:flex;gap:8px;flex-wrap:wrap;margin:6px 0 10px}.meter-methods button{flex:1 1 30%;margin:0}" +
+      ".meter-methods button[aria-pressed=true]{outline:3px solid #f0d48a}" +
+      ".meter-link{width:100%;font-size:14px;padding:10px;border-radius:10px;border:1px solid rgba(212,177,90,.5);background:#0b1c33;color:#f4efe4}" +
+      ".meter-mode{display:block;text-align:center;font-weight:900;letter-spacing:.08em;font-size:16px;border-radius:12px;padding:5px 10px;margin:0 0 4px;border:2px solid}" +
+      ".meter-mode-day{background:#f0d48a;color:#0b1f3a;border-color:#f0d48a}.meter-mode-night{background:#24346b;color:#e6ecff;border-color:#9fb3ff}" +
+      ".meter-mode-late{background:#3b1d5c;color:#f1e4ff;border-color:#c9a0ff}.meter-mode-why{font-weight:700;letter-spacing:0;opacity:.85;font-size:14px}" +
+      ".meter-panel{background:#0e2442;border:2px solid #f0d48a;border-radius:16px;padding:10px 12px;margin:6px 0 10px}" +
+      ".meter-panel .meter-fare{font-size:40px;margin:0}.meter-panel .meter-sub{margin:0 0 4px;font-size:13px}" +
+      ".meter-panel .meter-grid{margin:0 0 4px;gap:6px}.meter-panel .meter-grid div{padding:3px 2px}.meter-panel .meter-grid b{font-size:18px}.meter-panel .meter-grid span{font-size:11px}" +
+      ".meter-rates{font-size:12.5px;line-height:1.3;text-align:center;margin:0 0 2px;opacity:.9}" +
+      ".meter-status-line{text-align:center;font-size:13px;margin:0 0 2px;opacity:.95}.meter-free{color:#8fd0a8;font-weight:700}.meter-free:empty{display:none}.meter-free:not(:empty)::after{content:\" · \";color:#cfd8e3;font-weight:400}" +
+      ".meter-actions{display:flex;gap:8px;align-items:stretch}.meter-actions .btn{margin:6px 0 0}" +
+      ".meter-actions .meter-big{flex:1 1 60%;font-size:22px;padding:13px 8px}.meter-showrider{flex:0 0 38%;font-size:14px;padding:8px 6px}.meter-actions-qr .meter-big{font-size:19px;padding:9px 8px}" +
+      ".meter-rqr{display:flex;gap:10px;align-items:center;background:#fff;color:#0b1f3a;border-radius:14px;padding:6px;margin:4px 0;cursor:pointer}" +
+      ".meter-rqr-code{flex:0 0 152px;width:152px}.meter-rqr-code svg{display:block;width:152px;height:152px}" +
+      ".meter-rqr-text{display:flex;flex-direction:column;gap:4px;font-size:13px;line-height:1.3}.meter-rqr-text b{font-size:16px}" +
+      ".meter-rqr-count{font-weight:800;color:#7a1f1f}" +
+      ".meter-map .map-caption{margin:4px 0 0}";
+    document.head.appendChild(st);
+  }
+  function meterMilesWord(n) { n = Number(n) || 0; return n === 1 ? "first mile" : n + " mi"; }
+  function meterPct(rate) { return String(Math.round(Number(rate) * 1000000) / 10000) + "%"; } /* 0.0825 -> "8.25%" */
+  function meterTestTag(M) {
+    return M && M.sandbox ? '<p class="meter-test">TEST MODE · Square sandbox · no real money</p>' : "";
+  }
+  function meterRatesHtml(band) {
+    return (
+      '<div class="money-row"><span>Rate now</span><span id="meter-band">' + esc(band.label) + "</span></div>" +
+      '<p class="fine" style="margin:0 0 6px">' + esc(band.hours) + "</p>" +
+      '<div class="money-row"><span>Meter starts at (incl. ' + meterMilesWord(band.includedMiles) + ')</span><span id="meter-entry">' + money(band.entryCents) + "</span></div>" +
+      '<div class="money-row"><span>Per mile after that</span><span id="meter-rate">' + money(band.cents) + "</span></div>" +
+      '<div class="money-row"><span>Stopped / slow traffic</span><span id="meter-permin">' + money(band.perMinCents) + "/min (under " + esc(String(band.slowMph)) + " mph)</span></div>" +
+      (band.freeWaitSec >= 60 ? '<div class="money-row"><span>Free waiting at start</span><span>' + Math.floor(band.freeWaitSec / 60) + " min</span></div>" : "") +
+      '<div class="money-row"><span>Minimum fare</span><span id="meter-min">' + money(band.minCents) + "</span></div>" +
+      (band.stepCents > 1 ? '<div class="money-row"><span>Fare goes up in</span><span>' + money(band.stepCents) + " steps</span></div>" : "") +
+      (Number(METER_TAX_RATE) > 0 ? '<div class="money-row"><span>Tax (' + meterPct(METER_TAX_RATE) + ')</span><span id="meter-tax-note">added at the end</span></div>' : "")
+    );
+  }
+  function meterBreakdownHtml(M) {
+    var f = M.fare || meterFare(M);
+    return (
+      '<div class="card" id="meter-breakdown">' +
+      '<div class="money-row" id="meter-start-row"><span>Start (incl. ' + meterMilesWord(f.includedMiles) + ")</span><span>" + money(f.base) + "</span></div>" +
+      '<div class="money-row" id="meter-miles-row"><span>Miles after ' + (f.includedMiles === 1 ? "first" : "first " + esc(String(f.includedMiles))) + " " + esc(f.afterMiles.toFixed(2)) + " × " + money(M.perMileCents) + "</span><span>" + money(f.mileCents) + "</span></div>" +
+      '<div class="money-row"><span>Stopped / slow ' + esc(String(f.waitMin)) + " min × " + money(M.waitCentsPerMin) + "</span><span>" + money(f.waitCents) + "</span></div>" +
+      (f.freeMin ? '<div class="money-row"><span>Free waiting at start ' + esc(String(f.freeMin)) + " min</span><span>" + money(0) + "</span></div>" : "") +
+      (f.roundCents ? '<div class="money-row"><span>Round up to ' + money(M.stepCents) + " step</span><span>" + money(f.roundCents) + "</span></div>" : "") +
+      (f.minApplied ? '<div class="money-row"><span>Meter</span><span>' + money(f.meter) + "</span></div>" +
+        '<div class="money-row" id="meter-min-applied" style="color:#f0d48a;font-weight:700"><span>Minimum fare ' + money(f.minCents) + " applied</span><span>+" + money(f.minAdd) + "</span></div>" : "") +
+      (M.taxRate ? '<div class="money-row"><span>Fare</span><span id="meter-fare-sub">' + money(f.sub) + "</span></div>" +
+        '<div class="money-row" id="meter-tax"><span>Tax (' + meterPct(M.taxRate) + ")</span><span>" + money(f.tax) + "</span></div>" : "") +
+      '<div class="total-row"><span>Total</span><span id="meter-total">' + money(f.total) + "</span></div>" +
+      '<p class="fine">' + esc(M.tierLabel) + " · " + esc(String(M.minutes || "")) + " min ride · ride " + esc(M.code) + "</p>" +
+      "</div>"
+    );
+  }
+  function meterOtherHtml(M) {
+    var draft = state.meterOtherDraft || {};
+    var methods = [["cash", "Cash"], ["card_machine", "Card machine"], ["other", "Other"]];
+    return (
+      '<div class="card" id="meter-other-card">' +
+      '<p class="tag">Paid another way</p>' +
+      '<div class="meter-methods" role="group" aria-label="How the rider paid">' +
+      methods.map(function (m) {
+        return '<button class="btn secondary meter-method" type="button" data-method="' + m[0] + '" aria-pressed="' + (state.meterOtherMethod === m[0] ? "true" : "false") + '">' + m[1] + "</button>";
+      }).join("") + "</div>" +
+      '<label for="meter-other-amount">Amount collected (fare)</label>' +
+      '<input id="meter-other-amount" inputmode="decimal" value="' + esc(draft.amount != null && draft.amount !== "" ? draft.amount : (M.fare.total / 100).toFixed(2)) + '">' +
+      '<label for="meter-other-tip">Tip (optional)</label>' +
+      '<input id="meter-other-tip" inputmode="decimal" placeholder="0.00" value="' + esc(draft.tip || "") + '">' +
+      '<p class="fine">This is flagged for Matthew in God mode (not checked by Square).</p>' +
+      '<button class="btn" type="button" id="meter-other-yes"' + (state.meterBusy ? " disabled" : "") + ">Confirm paid</button>" +
+      '<button class="btn ghost" type="button" id="meter-other-no">Cancel</button>' +
+      "</div>"
+    );
+  }
+  function meterScreen() {
+    ensureMeterStyle();
+    /* keep what the driver is typing (and the cursor) if the app redraws in the background */
+    var ae = document.activeElement;
+    state.meterRefocus = ae && (ae.id === "meter-other-amount" || ae.id === "meter-other-tip") ? ae.id : "";
+    var a0 = document.getElementById("meter-other-amount"), t0 = document.getElementById("meter-other-tip");
+    if (a0 || t0) state.meterOtherDraft = { amount: a0 ? a0.value : "", tip: t0 ? t0.value : "" };
+    var M = state.meter;
+    var busy = state.meterBusy ? '<p class="note" role="status" id="meter-busy">' + esc(state.meterBusy) + "</p>" : "";
+    var err = state.meterError ? '<p class="error" role="alert" id="meter-error">' + esc(state.meterError) + "</p>" : "";
+    var back = '<div class="app-nav"><button class="btn ghost" type="button" id="meter-back">← Back to map</button></div>';
+    if (!M) {
+      var band = meterBand(new Date(Date.now()));
+      var ready = canGoOnline() && !driverMidRide();
+      return (
+        back + '<section id="meter-ready">' + (meterSandbox() ? meterTestTag({ sandbox: true }) : "") +
+        "<h2>Metered ride</h2>" + meterModeHtml(band.key, band.label, "meter-mode") +
+        '<p class="lede">For a last-minute ride with no quote. Tap Start when the rider is in the car. The fare runs from GPS miles plus stopped / slow-traffic minutes.</p>' +
+        '<div class="card">' + meterRatesHtml(band) + "</div>" +
+        (ready ? "" : '<p class="error" id="meter-gate">Finish the steps on Home (approval, car details and starting odometer) before starting a metered ride.</p>') +
+        '<p class="fine" id="meter-gps">' + esc(meterGpsLine(null)) + "</p>" +
+        '<button class="btn meter-big" type="button" id="meter-start"' + (ready ? "" : " disabled") + ">Start</button>" +
+        "</section>"
+      );
+    }
+    var f = meterFare(M);
+    if (M.status === "running") { state.meterOpen = false; return driverHome(); } /* v70: a running meter lives above the map */
+    var P = M.pay || {};
+    if (M.status === "paid") {
+      var paidOther = P.status === "paid_other";
+      return (
+        '<section id="meter-paid">' + meterTestTag(M) +
+        '<p class="tag">Metered ride ' + esc(M.code) + "</p>" +
+        '<p class="meter-paid" id="meter-paid-amount">Paid ' + money(paidOther ? (P.amountCents || 0) + (P.tipCents || 0) : (P.totalCents || 0)) + "</p>" +
+        '<p class="meter-sub" id="meter-paid-detail">' +
+        (paidOther
+          ? "Paid another way · " + esc(P.method === "card_machine" ? "card machine" : P.method || "other") + (P.tipCents ? " · tip " + money(P.tipCents) : "")
+          : "Fare " + money(P.fareCents || 0) + (P.tipCents ? " + tip " + money(P.tipCents) : " · no tip")) + "</p>" +
+        (P.receiptUrl ? '<p class="fine"><a href="' + esc(P.receiptUrl) + '" target="_blank" rel="noopener" style="color:#f0d48a">Square receipt</a></p>' : "") +
+        meterBreakdownHtml(M) +
+        '<button class="btn meter-big" type="button" id="meter-done">Done</button>' +
+        "</section>"
+      );
+    }
+    /* ended: pay */
+    var linkOpen = P.status === "link_open" && M.link && M.link.url;
+    var qr = linkOpen ? meterQrSvg(M.link.url) : "";
+    return (
+      '<section id="meter-ended">' + meterTestTag(M) +
+      "<h2>Ride ended</h2>" +
+      meterRiderQrHtml(M) +
+      meterBreakdownHtml(M) + busy + err +
+      (M.riderCard && !linkOpen
+        ? '<div class="card" id="meter-rider-pay" style="border:2px solid #8fd0a8"><p class="tag" style="color:#8fd0a8">Rider saved a card</p>' +
+          '<p class="lede">The rider can pay ' + money(f.total) + ' on their phone (meter page, tip optional). This screen flips to Paid by itself.</p>' +
+          '<p class="lede" id="meter-pay-status">Waiting for payment…</p></div>'
+        : "") +
+      (linkOpen
+        ? '<div class="card" id="meter-pay-card" style="text-align:center">' +
+          '<p class="tag">Private Car Services · scan to pay</p>' +
+          '<p class="meter-fare" style="font-size:40px">' + money(M.link.cents || f.total) + "</p>" +
+          (qr ? '<div class="meter-qr" id="meter-qr">' + qr + "</div>" : '<p class="fine" id="meter-qr-missing">The QR code can\u2019t be drawn right now. Tap Show link.</p>') +
+          '<p class="fine">Point your phone camera at the code. Tip is optional on the next screen.</p>' +
+          '<p class="lede" id="meter-pay-status">Waiting for payment…</p>' +
+          '<p class="fine" id="meter-pay-note">' + esc(state.meterPollNote || "") + "</p>" +
+          '<button class="btn ghost" type="button" id="meter-show-link">' + (state.meterShowLink ? "Hide link" : "Show link") + "</button>" +
+          (state.meterShowLink
+            ? '<div id="meter-link-box"><input class="meter-link" id="meter-link-url" readonly value="' + esc(M.link.url) + '">' +
+              '<button class="btn secondary" type="button" id="meter-copy">Copy link</button>' +
+              (navigator.share ? '<button class="btn secondary" type="button" id="meter-share">Share link</button>' : "") + "</div>"
+            : "") +
+          "</div>"
+        : '<button class="btn ' + (M.riderCard ? "secondary" : "meter-big") + '" type="button" id="meter-pay"' + (state.meterBusy ? " disabled" : "") + ">" + (M.riderCard ? "Use the pay QR instead" : "Pay now") + "</button>") +
+      (M.viewToken ? '<button class="btn ghost" type="button" id="meter-show-rider">Show rider meter</button>' : "") +
+      (state.meterOtherOpen ? meterOtherHtml(M)
+        : '<button class="btn secondary" type="button" id="meter-other">Mark paid another way</button>') +
+      (state.meterUnpaidAsk
+        ? '<div class="card" id="meter-unpaid-card"><p class="lede">Finish without payment? The ride is saved as NOT PAID and shows in red in God mode.</p>' +
+          '<button class="btn secondary" type="button" id="meter-unpaid-yes">Yes, finish unpaid</button>' +
+          '<button class="btn ghost" type="button" id="meter-unpaid-no">Go back</button></div>'
+        : '<button class="btn ghost" type="button" id="meter-unpaid">Rider didn\u2019t pay · finish</button>') +
+      "</section>"
+    );
+  }
+  function meterOnMap() {
+    var M = state.meter;
+    return ROLE === "driver" && !!M && M.status === "running";
+  }
+  function meterPanelHtml() {
+    ensureMeterStyle();
+    var M = state.meter;
+    var f = meterFare(M);
+    var busy = state.meterBusy ? '<p class="note" role="status" id="meter-busy">' + esc(state.meterBusy) + "</p>" : "";
+    return (
+      '<section id="meter-running" class="meter-panel">' + meterTestTag(M) +
+      meterModeHtml(M.tier, M.tierLabel, "meter-mode") +
+      '<p class="meter-rates" id="meter-profile">' + esc(M.tierLabel) + " · starts " + money(M.baseCents) + (Number(M.includedMiles) > 0 ? " incl. " + (Number(M.includedMiles) === 1 ? "1st mile" : esc(String(M.includedMiles)) + " mi") : "") +
+        " · " + money(M.perMileCents) + "/mi after · " + money(M.waitCentsPerMin) + "/min under " + esc(String(M.slowMph)) + " mph</p>" +
+      '<p class="meter-fare" id="meter-fare" aria-live="off">' + money(f.sub) + "</p>" +
+      '<p class="meter-sub">Meter' + (M.minCents > M.baseCents ? " · " + money(M.minCents) + " minimum" : "") + (M.taxRate ? " · tax added at the end" : "") + "</p>" +
+      '<div class="meter-grid"><div><b id="meter-miles">' + f.miles.toFixed(2) + "</b><span>Miles</span></div>" +
+      '<div><b id="meter-time">' + meterClock(Date.now() - M.startedAt) + "</b><span>Time</span></div>" +
+      '<div><b id="meter-wait">' + f.waitMin + "</b><span>Slow min</span></div></div>" +
+      '<p class="meter-status-line"><span class="meter-free" id="meter-free">' + esc(meterFreeLine(M)) + '</span><span id="meter-gps">' + esc(meterGpsLine(M)) + "</span></p>" +
+      (M.riderCard ? '<p class="fine" id="meter-rider-card-note" style="color:#8fd0a8;text-align:center;margin:0">✓ Rider saved a card on their meter page</p>' : "") +
+      meterRiderQrHtml(M) + busy +
+      (state.meterConfirmEnd
+        ? '<div id="meter-confirm-end"><p class="lede" style="margin:6px 0">End this ride? Meter ' + money(f.sub) + ".</p>" +
+          '<button class="btn meter-big meter-end" type="button" id="meter-end-yes">Yes, end ride</button>' +
+          '<button class="btn ghost" type="button" id="meter-end-no">Keep the meter running</button></div>'
+        : '<div class="meter-actions' + (meterQrShowing() ? " meter-actions-qr" : "") + '">' + (meterQrShowing() ? "" : '<button class="btn ghost meter-showrider" type="button" id="meter-show-rider">Show rider meter</button>') +
+          '<button class="btn meter-big meter-end" type="button" id="meter-end"' + (state.meterBusy ? " disabled" : "") + ">End ride</button></div>") +
+      "</section>"
+    );
+  }
+  function meterMapHome() {
+    return (
+      accountNav() + meterPanelHtml() +
+      '<div class="map-stage board-map meter-map">' +
+      '<div id="live-map" role="img" aria-label="Map: you during the metered ride"></div>' +
+      '<p class="map-caption">You · metered ride</p>' +
+      "</div>" +
+      (isFinite(state.hereLat) ? "" : '<p class="fine">Allow location so the map can show where you are.</p>') +
+      bgGpsTipCard()
+    );
+  }
+  function meterBarHtml() {
+    var M = state.meter;
+    if (!M || state.meterOpen || M.status === "running") return "";
+    ensureMeterStyle();
+    var f = M.fare || meterFare(M);
+    return '<button class="meter-bar" type="button" id="meter-reopen">' +
+      (M.status === "running" ? 'Metered ride running · <span id="meter-bar-fare">' + money(f.sub) + "</span> · Open" :
+        M.status === "paid" ? "Metered ride paid · Open" : "Metered ride ended · " + money(f.total) + " · Open to get paid") + "</button>";
+  }
+  function bindMeter() {
+    if (ROLE !== "driver") return;
+    var on = function (id, fn) { var el = document.getElementById(id); if (el) el.addEventListener("click", fn); };
+    on("open-meter", function () { state.meterOpen = true; state.hubOpen = false; state.meterError = ""; render(); });
+    on("hub-meter", function () { state.meterOpen = true; state.hubOpen = false; state.hubView = "menu"; state.meterError = ""; render(); });
+    on("meter-reopen", function () { state.meterOpen = !(state.meter && state.meter.status === "running"); render(); });
+    on("meter-show-rider", meterShowRiderQr);
+    var rq = document.getElementById("meter-rider-qr");
+    if (rq) {
+      var closeQr = function () { state.meterQrUntil = 0; render(); };
+      rq.addEventListener("click", closeQr);
+      rq.addEventListener("keydown", function (e) { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); closeQr(); } });
+    }
+    on("meter-back", function () { state.meterOpen = false; state.meterConfirmEnd = false; render(); });
+    on("meter-start", meterStart);
+    on("meter-end", function () { state.meterConfirmEnd = true; render(); });
+    on("meter-end-no", function () { state.meterConfirmEnd = false; render(); });
+    on("meter-end-yes", meterEnd);
+    on("meter-pay", meterPayNow);
+    on("meter-show-link", function () { state.meterShowLink = !state.meterShowLink; render(); });
+    on("meter-copy", function () {
+      var M = state.meter, url = M && M.link ? M.link.url : "";
+      var input = document.getElementById("meter-link-url");
+      var done = function () { var b = document.getElementById("meter-copy"); if (b) b.textContent = "Copied"; };
+      if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(url).then(done, function () { if (input) { input.select(); try { document.execCommand("copy"); done(); } catch (e) {} } });
+      else if (input) { input.select(); try { document.execCommand("copy"); done(); } catch (e) {} }
+    });
+    on("meter-share", function () {
+      var M = state.meter;
+      if (M && M.link && navigator.share) navigator.share({ title: "Private Car Services", text: "Pay for your ride (" + money(M.link.cents) + ")", url: M.link.url }).catch(function () {});
+    });
+    on("meter-other", function () { state.meterOtherOpen = true; state.meterError = ""; state.meterForceOther = false; render(); });
+    on("meter-other-no", function () { state.meterOtherOpen = false; state.meterError = ""; state.meterForceOther = false; render(); });
+    on("meter-other-yes", meterMarkOther);
+    Array.prototype.forEach.call(document.querySelectorAll(".meter-method"), function (b) {
+      b.addEventListener("click", function () {
+        var a = document.getElementById("meter-other-amount"), t = document.getElementById("meter-other-tip");
+        state.meterOtherDraft = { amount: a ? a.value : "", tip: t ? t.value : "" };
+        state.meterOtherMethod = b.getAttribute("data-method") || "";
+        state.meterError = "";
+        render();
+      });
+    });
+    on("meter-unpaid", function () { state.meterUnpaidAsk = true; render(); });
+    on("meter-unpaid-no", function () { state.meterUnpaidAsk = false; render(); });
+    on("meter-unpaid-yes", function () { state.meterUnpaidAsk = false; meterFinishUnpaid(); });
+    on("meter-done", meterClear);
+    if (state.meterRefocus) {
+      var el = document.getElementById(state.meterRefocus);
+      state.meterRefocus = "";
+      if (el) { try { el.focus(); var n = String(el.value || "").length; el.setSelectionRange(n, n); } catch (e) {} }
+    }
+  }
+
   function driverHubMenu() {
     return (
       '<button class="btn ghost" type="button" id="close-hub">← Back to map</button>' +
       "<h2>Home</h2>" +
       '<p class="lede">Keep the map clean. Open today\'s numbers, history, or profile here.</p>' +
       '<button class="btn" type="button" id="hub-today">Today</button>' +
+      '<button class="btn secondary" type="button" id="hub-meter">Metered ride</button>' +
       '<button class="btn secondary" type="button" id="hub-history">Earnings & history</button>' +
       '<a class="btn secondary" href="signup/?v=60">Profile</a>' +
       logoutLine()
@@ -9563,6 +10633,7 @@
       '<div class="money-row"><span>Rides requested</span><span>' + esc(String(stats.requested)) + "</span></div>" +
       '<div class="money-row"><span>Rides completed</span><span>' + esc(String(stats.completed)) + "</span></div>" +
       '<div class="money-row"><span>Daily commission</span><span id="hub-comm-value">' + comm + "</span></div>" +
+      (stats.tipCents ? '<div class="money-row"><span>Tips (100% yours)</span><span id="hub-tips-value">' + (state.commHidden ? "••••" : money(stats.tipCents)) + "</span></div>" : "") +
       '<button class="btn ghost" type="button" id="toggle-comm-hide">' +
       (state.commHidden ? "Show commission" : "Hide commission") +
       "</button>" +
@@ -9579,11 +10650,13 @@
     for (i = 0; i < 7; i += 1) days.push(addDaysYmd(monday, i));
     var weekTotalComm = 0;
     var weekTotalRide = 0;
+    var weekTips = 0;
     var cards = days.map(function (d) {
       var stats = readDayStats(d);
       var rides = ridesForDay(d);
       weekTotalComm += stats.commissionCents;
       weekTotalRide += stats.rideTotalCents;
+      weekTips += stats.tipCents || 0;
       var label = d === today ? d + " · today" : d;
       return (
         '<button class="btn secondary hub-day-btn" type="button" data-hub-day="' + esc(d) + '">' +
@@ -9597,7 +10670,8 @@
       '<p class="lede">Pay week ' + esc(monday) + " → " + esc(addDaysYmd(monday, 6)) + " (Mon–Sun)</p>" +
       '<div class="card">' +
       '<div class="money-row"><span>Week ride total</span><span>' + money(weekTotalRide) + "</span></div>" +
-      '<div class="money-row"><span>Week commission</span><span>' + money(weekTotalComm) + "</span></div>" +
+      '<div class="money-row"><span>Week commission</span><span id="hub-week-comm">' + money(weekTotalComm) + "</span></div>" +
+      (weekTips ? '<div class="money-row"><span>Week tips (100% yours)</span><span id="hub-week-tips">' + money(weekTips) + "</span></div>" : "") +
       "</div>" +
       '<div class="hub-week">' + cards + "</div>" +
       '<div class="row hub-week-nav">' +
@@ -9618,13 +10692,15 @@
       list = rides.map(function (r) {
         return (
           '<article class="card">' +
-          "<p class=\"tag\">" + esc(r.code || "Ride") + "</p>" +
+          "<p class=\"tag\">" + esc(r.code || "Ride") + (r.rideType === "metered" ? " · Metered" : "") + "</p>" +
           "<p><strong>" + esc(r.riderName || "Rider") + "</strong></p>" +
           "<p class=\"fine\">" + esc(r.pickup || "") + " → " + esc(r.drop || "") + "</p>" +
           '<div class="money-row"><span>Ride total</span><span>' + money(r.fareTotal || 0) + "</span></div>" +
           '<div class="money-row"><span>Commission (' + esc(String(r.commissionPct || "")) + "%)</span><span>" +
           money(r.commissionCents || 0) + "</span></div>" +
           (r.billedMiles != null ? '<p class="fine">' + esc(String(r.billedMiles)) + " billed mi</p>" : "") +
+          (Number(r.tipCents) > 0 ? '<div class="money-row"><span>Tip (100% yours)</span><span>' + money(r.tipCents) + "</span></div>" : "") +
+          (r.rideType === "metered" && r.paymentStatus && r.paymentStatus !== "charged" && r.paymentStatus !== "paid_other" ? '<p class="error">Not paid yet</p>' : "") +
           "</article>"
         );
       }).join("");
@@ -9655,9 +10731,11 @@
       );
     }
     if (state.hubOpen) return driverHub();
+    if (meterOnMap()) return meterMapHome(); /* v70: running meter = compact panel above the map (never covers it) */
     var gated = !canGoOnline();
     return (
       accountNav() +
+      meterBarHtml() + /* v70 */
       milesTodayHtml() +
       '<p class="fine" id="rides-count">' + esc(ridesCountLabel()) + "</p>" +
       bgGpsTipCard() +
@@ -9668,6 +10746,7 @@
       approvalGateCard() +
       vehicleNeededCard() +
       milesStartCard() +
+      (state.meter ? "" : '<button class="btn secondary" type="button" id="open-meter">Metered ride</button>') + /* v70 */
       (gated
         ? '<p class="lede">Finish the steps above to go online and see open requests.</p>'
         : (
@@ -9890,7 +10969,8 @@
   }
 
   function render() {
-    var stayOnBoard = ROLE === "driver" && state.screen === "home" && signedIn() && !state.hubOpen;
+    meterEnsureLoaded(); /* v70 */
+    var stayOnBoard = ROLE === "driver" && state.screen === "home" && signedIn() && !state.hubOpen && !state.meterOpen;
     var keptBoard = null;
     if (stayOnBoard && boardMapStillMounted()) {
       keptBoard = document.querySelector(".map-stage.board-map");
@@ -9914,6 +10994,7 @@
     var app = document.getElementById("app");
     var html = "";
     if (!signedIn()) html = accountGate();
+    else if (ROLE === "driver" && state.screen === "home" && state.meterOpen) html = meterScreen(); /* v70 */
     else if (ROLE === "driver" && state.screen === "home") html = driverHome();
     else if (ROLE === "driver") html = driverTrip();
     else if (ROLE === "customer" && !riderAgreed() && state.screen !== "waiting" && state.screen !== "trip") html = riderTermsScreen();
@@ -9966,6 +11047,7 @@
       }
     }
     bind();
+    bindMeter(); /* v70 */
     var customerRide = signedIn() && ROLE === "customer" && (state.screen === "waiting" || state.screen === "trip");
     if (!signedIn()) {
       /* stay on the login page */
@@ -9973,7 +11055,7 @@
       startCustomerMap();
       ensureCustomerCoords();
       refreshOnlineDrivers();
-    } else if (ROLE === "driver" && state.screen === "home" && !state.hubOpen) {
+    } else if (ROLE === "driver" && state.screen === "home" && !state.hubOpen && !state.meterOpen) {
       startDriverBoardMap();
     } else if (ROLE === "driver" && state.screen === "trip") {
       startMap();
@@ -12182,6 +13264,7 @@
       noteAutoWait(pos); /* v57: 4:30 OK check; 5:00 stop ask; police assist if not OK */
       trackDailyMiles(pos);
       refreshMilesTodayDom();
+      meterOnGps(pos); /* v70 */
     }
     var ride = currentRide();
     if (syncOn()) {
@@ -12274,6 +13357,14 @@
     });
     v51Styles();
     ensureSosButton(); /* v57: always-visible Alert/SOS on rider + driver */
+    if (ROLE === "driver") {
+      /* v70: metered ride: back from the background -> fresh GPS, catch up the minutes, check the payment now */
+      document.addEventListener("visibilitychange", function () {
+        if (document.visibilityState !== "visible" || !state.meter) return;
+        if (state.meter.status === "running") { followGps(); meterEvalMinutes(Date.now(), false); meterRefreshDom(); acquireWakeLock(); }
+        if (state.meter.status === "ended") meterSchedulePoll(300);
+      });
+    }
     if (ROLE === "driver") {
       /* v57: every touch/click/key unlocks sound (not only the gold bar); bar stays until a chime really played;
          app switch / screen lock resumes the context or brings the bar back. */
