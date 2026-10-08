@@ -25,11 +25,13 @@
         session token per field, key stays on the Worker, daily-capped; "Powered by Google" under the list). Free v59
         lookup is the fallback (cap / error / no Google results). Riders must agree to the Terms and Policies
         (POLICY_VERSION): sign-up checkbox, or a one-time prompt at next login; no booking until agreed.
-   v68 (Oct 8): riders only (never the driver app): a small "Beta Service" banner (contact line with mailto + tel links,
+   v68 (Oct 8): riders only (never the driver app): a small "Beta Mode" banner (contact line with mailto + tel links,
         full Beta text under "Read more") at the top of the rider Home screen and the Request a ride form.
-        Rider sign-in acknowledgment (BETA_ACK_REQUIRED): a Beta Service sheet with "I understand" blocks the rider app at
+        Rider sign-in acknowledgment (BETA_ACK_REQUIRED): a Beta Mode sheet with "I understand" blocks the rider app at
         every login and every fresh launch with a saved session; remembered only in sessionStorage for this app launch
         (pcs-beta-ack), cleared at login and logout. Driver app and God mode: nothing.
+   v69 (Oct 8): the Beta Mode sign-in sheet opens compact (title, contact line, Read more, I understand); Read more
+        expands to the full Beta text; one "I understand" button stays visible in both states. Same blocking rules.
    v59 Home: the rider app always opens on a rider HOME screen (greeting, Book a ride, My rides / History, Terms and
         Policies, Profile, ALERT SOS). An active ride (requested … in progress, or a drop-off still waiting for Pay)
         shows a "Back to my ride" card on Home; finished rides never auto-open (History only). "Book a ride" and
@@ -68,8 +70,8 @@
         per shift at rides/DRVRMLES/{id}/{logout day}/shifts/{shiftStartedAt}: startOdo, endOdo, odoMiles,
         trackedMiles, filledInMiles, shiftStartedAt, shiftEndedAt, odoWarned, day. */
 (function () {
-  /* v68: Beta Service acknowledgment. true = every rider sign-in (each login, and each fresh app launch with a saved
-     session) shows the Beta Service sheet with one "I understand" button before the rider can continue. Riders only.
+  /* v68: Beta Mode acknowledgment. true = every rider sign-in (each login, and each fresh app launch with a saved
+     session) shows the Beta Mode sheet with one "I understand" button before the rider can continue. Riders only.
      Set to false to turn the sheet off (the small Beta banner on Home and the booking form stays). */
   var BETA_ACK_REQUIRED = true;
   var BUSINESS_PHONE = "936-261-7878";
@@ -1987,8 +1989,8 @@
       }, true);
     }
     return (
-      '<aside class="pcs-beta" id="beta-notice" role="note" aria-label="Beta Service">' +
-      '<p class="pcs-beta-title">Beta Service</p>' +
+      '<aside class="pcs-beta" id="beta-notice" role="note" aria-label="Beta Mode">' +
+      '<p class="pcs-beta-title">Beta Mode</p>' +
       '<p class="pcs-beta-short">Spot a problem or have a suggestion? Email ' +
       '<a id="beta-email" href="mailto:mwragge@pcsrides.com">mwragge@pcsrides.com</a> or call ' +
       '<a id="beta-phone" href="tel:+19362617878">936-261-7878</a>.</p>' +
@@ -2025,12 +2027,17 @@
       ".pcs-beta-ack{position:fixed;inset:0;z-index:30000;display:flex;align-items:flex-end;justify-content:center;" +
       "background:rgba(3,10,20,.78);padding:16px 12px calc(16px + env(safe-area-inset-bottom));overflow-y:auto;-webkit-overflow-scrolling:touch}" +
       ".pcs-beta-ack-sheet{width:100%;max-width:430px;margin:auto 0 0;background:linear-gradient(180deg,#10243f 0%,#0b1c33 100%);" +
-      "border:1px solid rgba(240,212,138,.6);border-top:4px solid #f0d48a;border-radius:18px;padding:20px 18px 18px;color:#f4efe4;" +
-      "box-shadow:0 -10px 40px rgba(0,0,0,.5)}" +
-      ".pcs-beta-ack-sheet h2{margin:0 0 10px;font-size:24px;color:#f0d48a}" +
-      ".pcs-beta-ack-sheet p{margin:0 0 18px;font-size:16px;line-height:1.5}" +
+      "border:1px solid rgba(240,212,138,.6);border-top:4px solid #f0d48a;border-radius:18px;padding:16px 16px 0;color:#f4efe4;" +
+      "box-shadow:0 -10px 40px rgba(0,0,0,.5);max-height:calc(100dvh - 32px);overflow-y:auto;-webkit-overflow-scrolling:touch}" +
+      ".pcs-beta-ack-sheet h2{margin:0 0 6px;font-size:22px;color:#f0d48a}" +
+      ".pcs-beta-ack-sheet p{margin:0 0 8px;font-size:16px;line-height:1.45}" +
       ".pcs-beta-ack-sheet a{color:#8fd0a8;font-weight:700;text-decoration:underline;white-space:nowrap}" +
-      ".pcs-beta-ack-sheet .btn{display:block;width:100%;margin:0;font-size:20px;font-weight:800;padding:16px 12px;border-radius:14px}";
+      ".pcs-beta-ack-more{display:inline-block;background:none;border:0;padding:4px 0 6px;margin:0;color:#f0d48a;font-weight:700;" +
+      "font-size:15px;text-decoration:underline;cursor:pointer}" +
+      ".pcs-beta-ack-full{margin:6px 0 4px;padding-top:10px;border-top:1px solid rgba(240,212,138,.25)}" +
+      ".pcs-beta-ack-full[hidden]{display:none}" +
+      ".pcs-beta-ack-foot{position:sticky;bottom:0;background:#0b1c33;padding:10px 0 16px;margin-top:4px}" +
+      ".pcs-beta-ack-sheet .btn{display:block;width:100%;margin:0;font-size:20px;font-weight:800;padding:14px 12px;border-radius:14px}";
     document.head.appendChild(st);
   }
   function syncBetaAck() {
@@ -2047,13 +2054,28 @@
     el.setAttribute("role", "dialog");
     el.setAttribute("aria-modal", "true");
     el.setAttribute("aria-labelledby", "beta-ack-title");
+    /* v69: opens compact (title + contact line + Read more + I understand); Read more shows the full Beta text.
+       One "I understand" button stays visible (sticky at the bottom of the sheet) in both states. */
     el.innerHTML =
-      '<div class="pcs-beta-ack-sheet">' +
-      '<h2 id="beta-ack-title">Beta Service</h2>' +
-      '<p id="beta-ack-body">' + betaBodyHtml("beta-ack") + "</p>" +
-      '<button class="btn" type="button" id="beta-ack-ok">I understand</button>' +
+      '<div class="pcs-beta-ack-sheet" id="beta-ack-sheet" data-expanded="false">' +
+      '<h2 id="beta-ack-title">Beta Mode</h2>' +
+      '<p id="beta-ack-short">Spot a problem or have a suggestion? Email ' +
+      '<a id="beta-ack-email" href="mailto:mwragge@pcsrides.com">mwragge@pcsrides.com</a> or call ' +
+      '<a id="beta-ack-phone" href="tel:+19362617878">936-261-7878</a>.</p>' +
+      '<button class="pcs-beta-ack-more" type="button" id="beta-ack-more" aria-expanded="false" aria-controls="beta-ack-full">Read more</button>' +
+      '<div class="pcs-beta-ack-full" id="beta-ack-full" hidden><p id="beta-ack-body">' + betaBodyHtml("beta-ack-full") + "</p></div>" +
+      '<div class="pcs-beta-ack-foot"><button class="btn" type="button" id="beta-ack-ok">I understand</button></div>' +
       "</div>";
     document.body.appendChild(el);
+    el.querySelector("#beta-ack-more").addEventListener("click", function () {
+      var full = document.getElementById("beta-ack-full");
+      var sheet = document.getElementById("beta-ack-sheet");
+      var open = !!(full && full.hidden);
+      if (full) full.hidden = !open;
+      if (sheet) sheet.setAttribute("data-expanded", open ? "true" : "false");
+      this.setAttribute("aria-expanded", open ? "true" : "false");
+      this.textContent = open ? "Show less" : "Read more";
+    });
     el.querySelector("#beta-ack-ok").addEventListener("click", function () {
       setBetaAck(betaAckWho());
       var box = document.getElementById("beta-ack");
