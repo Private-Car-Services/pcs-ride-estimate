@@ -10,7 +10,12 @@
    v62: rides with internationalArrival show "International arrival +$15 service fee (taxed, in the fare)".
    v64g: a ride waiting for Matthew's OK pops up AND rings the driver-app bell chime until tapped; live REQUESTS
    stream (~1 s); waiting rides re-pop on every open / return to the foreground; Home Screen app + phone alerts
-   (Web Push via the pcs-pay Worker) for when God mode is closed. */
+   (Web Push via the pcs-pay Worker) for when God mode is closed.
+   v70: METERED rides from the driver app (PAYMENTS rows with rideType "metered"): a red "Unpaid metered rides" flag at the
+   top of Payments (time ended + pickup spot + fare + driver) until paid by the Square QR link or marked paid another way;
+   "Paid another way" (cash / card machine / other, driver-reported) is shown in gold as not checked by Square. Metered
+   refunds are done in the Square Dashboard (the Worker's /refund matches card-on-file payments only). Driver history
+   shows metered rides and tips (100% to the driver). */
 (function () {
   "use strict";
   var GOD_SCRIPT_SRC = (document.currentScript && document.currentScript.src) || ""; /* v64g: chime URL base */
@@ -557,11 +562,13 @@
     var entries = historyEntries(driverId);
     var rideTotal = 0;
     var commissionTotal = 0;
+    var tipTotal = 0;
     entries.forEach(function (e) {
       rideTotal += Number(e.fareTotal) || 0;
       commissionTotal += Number(e.commissionCents) || 0;
+      tipTotal += Number(e.tipCents) || 0; /* v70: tips go 100% to the driver */
     });
-    return { rideTotal: rideTotal, commissionTotal: commissionTotal, count: entries.length };
+    return { rideTotal: rideTotal, commissionTotal: commissionTotal, tipTotal: tipTotal, count: entries.length };
   }
 
   function mondayOfWeek(ymd) {
@@ -3400,9 +3407,11 @@
     var entries = historyEntries(driverId).filter(function (e) { return e.day === day; });
     var dayRide = 0;
     var dayComm = 0;
+    var dayTips = 0;
     entries.forEach(function (e) {
       dayRide += Number(e.fareTotal) || 0;
       dayComm += Number(e.commissionCents) || 0;
+      dayTips += Number(e.tipCents) || 0;
     });
     var cal = weekDays.map(function (ymd) {
       var count = historyEntries(driverId).filter(function (e) { return e.day === ymd; }).length;
@@ -3417,7 +3426,7 @@
       list = entries.map(function (e) {
         return (
           '<article class="card">' +
-          "<h3>" + esc(e.code || "Ride") + "</h3>" +
+          "<h3>" + esc(e.code || "Ride") + (String(e.rideType || "") === "metered" ? ' <span class="badge" style="background:#4a3d12;color:#f0d48a;border:1px solid #f0d48a">Metered</span>' : "") + "</h3>" +
           '<p class="meta">' +
           "<strong>Rider</strong> " + esc(e.riderName || "—") + "<br>" +
           "<strong>Route</strong> " + esc(e.pickup || "") + " → " + esc(e.drop || "") + "<br>" +
@@ -3425,6 +3434,8 @@
           "<strong>Commission</strong> " + esc(fmtCents(e.commissionCents)) +
           " (" + esc(String(e.commissionPct || "")) + "%)" +
           (e.billedMiles != null ? "<br><strong>Miles</strong> " + esc(String(e.billedMiles)) : "") +
+          (Number(e.tipCents) > 0 ? "<br><strong>Tip</strong> " + esc(fmtCents(e.tipCents)) + " (100% to driver)" : "") +
+          (String(e.rideType || "") === "metered" && e.paymentStatus ? "<br><strong>Payment</strong> " + esc(meterPayWord(e.paymentStatus, e.paidVia)) : "") +
           "</p></article>"
         );
       }).join("");
@@ -3435,6 +3446,7 @@
       '<p class="meta">' +
       "<strong>All-time ride total</strong> " + esc(fmtCents(totals.rideTotal)) + "<br>" +
       "<strong>All-time commission total</strong> " + esc(fmtCents(totals.commissionTotal)) + "<br>" +
+      (totals.tipTotal ? "<strong>All-time tips (100% to driver)</strong> " + esc(fmtCents(totals.tipTotal)) + "<br>" : "") +
       "<strong>Pay week</strong> Mon–Sun · " + esc(monday) + " → " + esc(addDaysYmd(monday, 6)) +
       "</p>" +
       '<div class="cal-week">' +
@@ -3443,7 +3455,7 @@
       '<button type="button" class="btn btn-ghost" id="detail-week-next">→</button>' +
       "</div>" +
       '<p class="meta"><strong>' + esc(day) + "</strong> · ride " + esc(fmtCents(dayRide)) +
-      " · commission " + esc(fmtCents(dayComm)) + "</p>" +
+      " · commission " + esc(fmtCents(dayComm)) + (dayTips ? " · tips " + esc(fmtCents(dayTips)) : "") + "</p>" +
       list
     );
   }
@@ -4024,12 +4036,13 @@
   function refreshPayRides() {
     var now = Date.now();
     var want = payEntries().filter(function (p) {
-      if (payRecOk(p.final) || payRecOk(p.cancel)) return false;
-      if (!p.card) return false;
+      var metered = isMeteredPay(p); /* v70: metered rides: the rider's optional info lives on the ride (God mode only) */
+      if (!metered && (payRecOk(p.final) || payRecOk(p.cancel))) return false;
+      if (!metered && !p.card) return false;
       if (now - (Number(p.updatedAt) || 0) > 3 * 86400000) return false;
       var c = state.payRides[p.code];
-      return !c || now - c.at > 30000;
-    }).slice(0, 12);
+      return !c || now - c.at > (metered && payRecOk(p.final) ? 300000 : 30000);
+    }).slice(0, 20);
     return Promise.all(want.map(function (p) {
       return fetch(rideUrl(p.code), { cache: "no-store" }).then(function (res) {
         if (!res.ok) return null;
@@ -4085,11 +4098,83 @@
     return !!(ride.acceptedAt || ride.driverId || ride.driverUid);
   }
 
+  /* ---------------- v70: metered rides (driver app) ---------------- */
+  function isMeteredPay(p) {
+    return !!p && (String(p.rideType || "").toLowerCase() === "metered" || !!(p.meter && typeof p.meter === "object"));
+  }
+  function meterStatusOf(p) {
+    var m = (p && p.meter) || {};
+    var ms = String(m.status || "").toLowerCase();
+    if (payRecOk(p.final)) return "paid";
+    if (p.paidOther || ms === "paid_other") return "paid_other";
+    if (ms === "paid") return "paid";
+    if (ms === "running") return "running";
+    return "unpaid"; /* ended (waiting for the QR payment) or finished unpaid */
+  }
+  function meterPayWord(ps, via) {
+    ps = String(ps || "").toLowerCase();
+    if (ps === "charged") return "Paid (Square)";
+    if (ps === "paid_other") return "Paid another way" + (via ? " (" + String(via).replace("_", " ") + ")" : "");
+    return "NOT PAID";
+  }
+  function meterSpotHtml(m, which) {
+    var addr = String(m[which + "Address"] || "");
+    var lat = m[which + "Lat"], lng = m[which + "Lng"];
+    var coords = isCoord(lat) && isCoord(lng) ? (+lat).toFixed(5) + ", " + (+lng).toFixed(5) : "";
+    var link = coords ? ' <a href="https://maps.apple.com/?q=' + encodeURIComponent(coords) + '" target="_blank" rel="noopener" style="color:#f0d48a">map</a>' : "";
+    return esc(addr || coords || "spot not recorded") + link;
+  }
+  function meterUnpaidFlagHtml(list) {
+    var rows = list.filter(function (p) { return isMeteredPay(p) && meterStatusOf(p) === "unpaid"; });
+    if (!rows.length) return "";
+    return '<div class="card" id="meter-unpaid-flag" style="border:2px solid #ff6b6b;background:#3a1212">' +
+      '<h3 style="color:#ff8a8a;margin-top:0"><span class="badge" style="background:#c62828;color:#fff">' + rows.length + "</span> Unpaid metered ride" + (rows.length === 1 ? "" : "s") + "</h3>" +
+      rows.map(function (p) {
+        var m = p.meter || {};
+        var finished = String(m.status || "").toLowerCase() === "unpaid" || !!p.unpaidFinishedAt;
+        return '<p class="meta meter-unpaid-row" data-code="' + esc(p.code) + '" style="margin:6px 0;border-top:1px solid rgba(255,138,138,.35);padding-top:6px">' +
+          "<strong>" + esc(p.code) + "</strong> · " + esc(fmtCents(m.fareTotal)) + " · ended " + esc(m.endedAt ? fmtClock(m.endedAt) : "—") +
+          " · " + esc(m.driverName || "driver") + "<br>" +
+          "<strong>Pickup</strong> " + meterSpotHtml(m, "pickup") + "<br>" +
+          '<span style="color:#ff8a8a">' + (finished ? "Driver finished without payment" : "Waiting for the rider to pay (QR)") + "</span></p>";
+      }).join("") + "</div>";
+  }
+  function meterPayLines(p) {
+    var m = p.meter || {};
+    var st = meterStatusOf(p);
+    var lines = [];
+    lines.push("<strong>Metered</strong> " + esc(m.miles != null ? Number(m.miles).toFixed(2) + " mi" : "—") +
+      (m.minutes ? " · " + esc(String(m.minutes)) + " min" : "") + (m.waitMinutes ? " (" + esc(String(m.waitMinutes)) + " slow)" : "") +
+      " · " + esc(m.tierLabel || "") + " · driver " + esc(m.driverName || "—"));
+    lines.push("<strong>Pickup</strong> " + meterSpotHtml(m, "pickup") + (m.startedAt ? " · " + esc(fmtClock(m.startedAt)) : ""));
+    if (m.endedAt) lines.push("<strong>Drop-off</strong> " + meterSpotHtml(m, "drop") + " · " + esc(fmtClock(m.endedAt)));
+    if (m.fareTotal != null) lines.push("<strong>Fare</strong> " + esc(fmtCents(m.fareTotal)));
+    if (st === "running") lines.push('<span style="color:#f0d48a">Ride in progress</span>');
+    else if (st === "paid_other") {
+      var o = p.paidOther || {};
+      lines.push('<span style="color:#ffc96b">Paid another way · ' + esc(String(o.method || "other").replace("_", " ")) + " · " + esc(fmtCents(o.amountCents)) +
+        (Number(o.tipCents) > 0 ? " + tip " + esc(fmtCents(o.tipCents)) : "") + " · reported by " + esc(o.by || m.driverName || "driver") + " · not checked by Square</span>");
+    } else if (st === "unpaid") lines.push('<span style="color:#ff8a8a"><strong>NOT PAID</strong></span>');
+    if (p.meterLink && !payRecOk(p.final)) lines.push('<span style="opacity:.8">QR link ' + esc(String(p.meterLink.status || "").toLowerCase()) + "</span>");
+    var rr = payRideOf(p.code) || {};
+    var who = rr.meterRider && typeof rr.meterRider === "object" ? rr.meterRider : null;
+    if (who && (who.name || who.phone || who.email)) {
+      var tel = String(who.phone || "").replace(/[^0-9+]/g, "");
+      lines.push('<span class="meter-rider-info"><strong>Rider (optional, from the meter page)</strong> ' + esc(who.name || "\u2014") +
+        (who.phone ? ' · <a href="tel:' + esc(tel) + '" style="color:#f0d48a">' + esc(who.phone) + "</a>" : "") +
+        (who.email ? ' · <a href="mailto:' + esc(who.email) + '" style="color:#f0d48a">' + esc(who.email) + "</a>" : "") + "</span>");
+    }
+    if (rr.cardStatus === "on_file" && !payRecOk(p.final)) lines.push('<span style="color:#8fd0a8">Rider saved a card on the meter page' + (rr.cardLast4 ? " (" + esc(rr.cardBrand || "card") + " " + esc(rr.cardLast4) + ")" : "") + "</span>");
+    if (rr.paidVia === "meter_card" || (p.final && p.final.via === "meter_card")) lines.push('<span style="color:#8fd0a8">Paid on the rider\u2019s meter page (saved card)</span>');
+    return lines;
+  }
+
   function paymentsPanelHtml() {
     if (state.paymentsError === "denied") return '<p class="empty">Payments cannot be read (permission denied).</p>';
     if (state.paymentsError) return '<p class="empty">Could not load payments. Trying again…</p>';
     var list = payEntries();
     var notice = state.payNotice ? '<p class="meta" id="pay-notice" style="color:#f0d48a">' + esc(state.payNotice) + "</p>" : "";
+    notice = meterUnpaidFlagHtml(list) + notice; /* v70 */
     if (!list.length) return notice + '<p class="empty">No card payments in the last ' + PAY_SHOW_DAYS + " days.</p>";
     return notice + list.map(function (p) {
       var code = String(p.code);
@@ -4122,6 +4207,8 @@
         lines.push("<strong>Refund</strong> " + '<span style="color:#ffc96b">Refunded ' + esc(fmtCents(rf.totalRefundedCents || rf.amountCents)) +
           "</span> (" + esc(String(rf.status || "PENDING").toLowerCase()) + ")");
       }
+      var metered = isMeteredPay(p); /* v70 */
+      if (metered) lines = lines.concat(meterPayLines(p));
       var c = p.cancel;
       if (c) {
         lines.push("<strong>Cancel fee</strong> " + (payRecOk(c) ? '<span style="color:#7fe09a">Charged ' + esc(fmtCents(c.amountCents)) + "</span>" + receiptLink(c.receiptUrl)
@@ -4148,7 +4235,8 @@
       var mainPaid = (payRecOk(f) ? Number(f.amountCents) || 0 : 0) || (payRecOk(p.full) ? Number(p.full.amountCents) || 0 : 0) ||
         (payRecOk(p.deposit) ? Number(p.deposit.amountCents) || 0 : 0);
       var mainLeft = mainPaid - refundedOf(p, "refund");
-      if (mainPaid > 0 && mainLeft > 0) {
+      if (metered && mainPaid > 0) lines.push('<span style="opacity:.8">Refunds for metered rides: Square Dashboard</span>');
+      if (!metered && mainPaid > 0 && mainLeft > 0) {
         btns.push('<button type="button" class="btn btn-ghost pay-refund-btn" data-code="' + esc(code) + '" data-purpose="' +
           (payRecOk(f) ? "final" : payRecOk(p.full) ? "full" : "deposit") + '" data-left="' + mainLeft + '"' + dis + ">Refund…</button>");
       }
@@ -4165,8 +4253,10 @@
       if (canChargeCancel(p, ride)) {
         btns.push('<button type="button" class="btn btn-ghost pay-cancelfee-btn" data-code="' + esc(code) + '"' + dis + ">Charge cancel fee</button>");
       }
-      return '<div class="card pay-card" data-code="' + esc(code) + '">' +
+      return '<div class="card pay-card' + (metered ? " meter-pay-card" : "") + '" data-code="' + esc(code) + '">' +
         "<h3>" + esc(p.name || "Rider") + ' <span style="font-weight:500;opacity:.75">' + esc(code) + "</span>" +
+        (metered ? ' <span class="badge" style="background:#4a3d12;color:#f0d48a;border:1px solid #f0d48a">METERED</span>' : "") +
+        (metered && meterStatusOf(p) === "unpaid" ? ' <span class="badge" style="background:#c62828;color:#fff">UNPAID</span>' : "") +
         (test ? ' <span style="background:#c9a227;color:#0b1f3a;border-radius:6px;padding:1px 6px;font-size:12px">TEST</span>' : "") + "</h3>" +
         '<p class="meta">' + lines.join("<br>") + (p.updatedAt ? '<br><span style="opacity:.7">Updated ' + esc(fmtClock(p.updatedAt)) + "</span>" : "") + "</p>" +
         (btns.length ? '<div class="pay-actions" style="display:flex;flex-wrap:wrap;gap:8px;margin-top:8px">' + btns.join("") + "</div>" : "") +
