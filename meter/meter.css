@@ -1,0 +1,25 @@
+/* v70 rider live meter (public, read-only; no login) */
+.rm-mode{display:block;text-align:center;font-weight:900;letter-spacing:.08em;font-size:18px;border-radius:12px;padding:9px 10px;margin:4px 0 8px;border:2px solid}
+.rm-mode-day{background:#f0d48a;color:#0b1f3a;border-color:#f0d48a}
+.rm-mode-night{background:#24346b;color:#e6ecff;border-color:#9fb3ff}
+.rm-mode-late{background:#3b1d5c;color:#f1e4ff;border-color:#c9a0ff}
+.rm-mode small{font-weight:700;letter-spacing:0;opacity:.85;font-size:14px}
+.rm-fare{font-size:58px;line-height:1.05;font-weight:800;color:#f0d48a;text-align:center;margin:6px 0 2px;font-variant-numeric:tabular-nums}
+.rm-sub{text-align:center;margin:0 0 10px;opacity:.85}
+.rm-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;text-align:center;margin:0 0 10px}
+.rm-grid div{background:rgba(255,255,255,.04);border:1px solid rgba(212,177,90,.28);border-radius:12px;padding:10px 4px}
+.rm-grid b{display:block;font-size:24px;font-variant-numeric:tabular-nums}
+.rm-grid span{font-size:12px;opacity:.8;text-transform:uppercase;letter-spacing:.06em}
+.rm-free{color:#8fd0a8;font-weight:800;text-align:center;margin:0 0 8px;font-size:16px}
+.rm-free:empty{display:none}
+.rm-updated{text-align:center;font-size:13px;opacity:.75;margin:0 0 10px}
+.rm-test{background:#c9a227;color:#0b1f3a;border-radius:8px;padding:4px 8px;font-weight:800;display:inline-block;margin:0 0 8px}
+.rm-ok{color:#8fd0a8;font-weight:700}
+.rm-big{display:block;width:100%;font-size:26px;font-weight:800;padding:20px 12px;border-radius:16px;margin:10px 0}
+.rm-tips{display:flex;flex-wrap:wrap;gap:8px;margin:6px 0 10px}
+.rm-tips button{flex:1 1 30%;margin:0}
+.rm-tips button[aria-pressed=true]{outline:3px solid #f0d48a}
+.rm-paid{font-size:44px;font-weight:800;color:#8fd0a8;text-align:center;margin:6px 0}
+.rm-card-box{background:#fff;border-radius:12px;padding:10px;margin:6px 0;min-height:56px;color:#0b1f3a}
+#app label{display:block;margin:8px 0 4px}
+#app input{width:100%;box-sizing:border-box}
