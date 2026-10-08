@@ -25,6 +25,11 @@
         session token per field, key stays on the Worker, daily-capped; "Powered by Google" under the list). Free v59
         lookup is the fallback (cap / error / no Google results). Riders must agree to the Terms and Policies
         (POLICY_VERSION): sign-up checkbox, or a one-time prompt at next login; no booking until agreed.
+   v68 (Oct 8): riders only (never the driver app): a small "Beta Service" banner (contact line with mailto + tel links,
+        full Beta text under "Read more") at the top of the rider Home screen and the Request a ride form.
+        Rider sign-in acknowledgment (BETA_ACK_REQUIRED): a Beta Service sheet with "I understand" blocks the rider app at
+        every login and every fresh launch with a saved session; remembered only in sessionStorage for this app launch
+        (pcs-beta-ack), cleared at login and logout. Driver app and God mode: nothing.
    v59 Home: the rider app always opens on a rider HOME screen (greeting, Book a ride, My rides / History, Terms and
         Policies, Profile, ALERT SOS). An active ride (requested … in progress, or a drop-off still waiting for Pay)
         shows a "Back to my ride" card on Home; finished rides never auto-open (History only). "Book a ride" and
@@ -63,6 +68,10 @@
         per shift at rides/DRVRMLES/{id}/{logout day}/shifts/{shiftStartedAt}: startOdo, endOdo, odoMiles,
         trackedMiles, filledInMiles, shiftStartedAt, shiftEndedAt, odoWarned, day. */
 (function () {
+  /* v68: Beta Service acknowledgment. true = every rider sign-in (each login, and each fresh app launch with a saved
+     session) shows the Beta Service sheet with one "I understand" button before the rider can continue. Riders only.
+     Set to false to turn the sheet off (the small Beta banner on Home and the booking form stays). */
+  var BETA_ACK_REQUIRED = true;
   var BUSINESS_PHONE = "936-261-7878";
   var DRIVER_COMMISSION_RATE = 0.7;
   var EXTRA_FEE = 0;
@@ -1941,6 +1950,119 @@
     if (!done) openCardStep();
   }
 
+  /* v68: rider-only Beta notice (Home + booking form). Never drawn in the driver app. */
+  function ensureBetaNoticeStyle() {
+    if (document.getElementById("pcs-beta-style")) return;
+    var st = document.createElement("style");
+    st.id = "pcs-beta-style";
+    st.textContent =
+      ".pcs-beta{margin:4px 0 14px;padding:10px 12px;border-radius:12px;border:1px solid rgba(240,212,138,.55);" +
+      "border-left:4px solid #f0d48a;background:rgba(240,212,138,.10);color:#f4efe4;font-size:14px;line-height:1.4}" +
+      ".pcs-beta-title{margin:0 0 2px;font-weight:800;font-size:15px;color:#f0d48a;letter-spacing:.02em}" +
+      ".pcs-beta-short{margin:0}.pcs-beta-body{margin:6px 0 0}" +
+      ".pcs-beta-more summary{margin-top:4px;color:#f0d48a;font-weight:700;cursor:pointer;font-size:13px}" +
+      ".pcs-beta a{color:#8fd0a8;font-weight:700;text-decoration:underline;white-space:nowrap}";
+    document.head.appendChild(st);
+  }
+
+  function betaBodyHtml(idPrefix) {
+    return (
+      'Private Car Services is currently in beta, and your feedback helps us improve. ' +
+      "If you notice anything that doesn\u2019t look right, such as a payment or overcharge, an incorrect address, date, " +
+      "or pickup time, or any issue with the app, please contact Matthew Wragge directly. We also welcome suggestions, " +
+      'both positive and constructive. Email <a id="' + idPrefix + '-email" href="mailto:mwragge@pcsrides.com">mwragge@pcsrides.com</a> ' +
+      'or call <a id="' + idPrefix + '-phone" href="tel:+19362617878">936-261-7878</a>.'
+    );
+  }
+
+  /* Small banner: title + contact line; the full Beta text is one tap away (Read more). Open/closed survives redraws. */
+  var betaMoreOpen = false;
+  function betaNoticeHtml() {
+    if (ROLE !== "customer") return "";
+    ensureBetaNoticeStyle();
+    if (!betaNoticeHtml.bound) {
+      betaNoticeHtml.bound = true;
+      document.addEventListener("toggle", function (ev) {
+        if (ev.target && ev.target.id === "beta-more") betaMoreOpen = !!ev.target.open;
+      }, true);
+    }
+    return (
+      '<aside class="pcs-beta" id="beta-notice" role="note" aria-label="Beta Service">' +
+      '<p class="pcs-beta-title">Beta Service</p>' +
+      '<p class="pcs-beta-short">Spot a problem or have a suggestion? Email ' +
+      '<a id="beta-email" href="mailto:mwragge@pcsrides.com">mwragge@pcsrides.com</a> or call ' +
+      '<a id="beta-phone" href="tel:+19362617878">936-261-7878</a>.</p>' +
+      '<details class="pcs-beta-more" id="beta-more"' + (betaMoreOpen ? " open" : "") + '><summary>Read more</summary>' +
+      '<p class="pcs-beta-body">' + betaBodyHtml("beta-full") + "</p></details>" +
+      "</aside>"
+    );
+  }
+
+  /* v68: sign-in acknowledgment sheet (riders only). Kept outside #app so render() never rebuilds it mid-tap. */
+  var BETA_ACK_KEY = "pcs-beta-ack";
+  var betaAckMem = "";
+  function betaAckWho() { return String(readSession() || firebaseEmail() || "rider").trim().toLowerCase(); }
+  function betaAcked() {
+    var v = betaAckMem;
+    try { v = sessionStorage.getItem(BETA_ACK_KEY) || ""; } catch (e) {}
+    return !!v && v === betaAckWho();
+  }
+  function setBetaAck(who) {
+    betaAckMem = who || "";
+    try {
+      if (who) sessionStorage.setItem(BETA_ACK_KEY, who);
+      else sessionStorage.removeItem(BETA_ACK_KEY);
+    } catch (e) {}
+  }
+  function betaAckNeeded() {
+    return BETA_ACK_REQUIRED === true && ROLE === "customer" && signedIn() && !betaAcked();
+  }
+  function ensureBetaAckStyle() {
+    if (document.getElementById("pcs-beta-ack-style")) return;
+    var st = document.createElement("style");
+    st.id = "pcs-beta-ack-style";
+    st.textContent =
+      ".pcs-beta-ack{position:fixed;inset:0;z-index:30000;display:flex;align-items:flex-end;justify-content:center;" +
+      "background:rgba(3,10,20,.78);padding:16px 12px calc(16px + env(safe-area-inset-bottom));overflow-y:auto;-webkit-overflow-scrolling:touch}" +
+      ".pcs-beta-ack-sheet{width:100%;max-width:430px;margin:auto 0 0;background:linear-gradient(180deg,#10243f 0%,#0b1c33 100%);" +
+      "border:1px solid rgba(240,212,138,.6);border-top:4px solid #f0d48a;border-radius:18px;padding:20px 18px 18px;color:#f4efe4;" +
+      "box-shadow:0 -10px 40px rgba(0,0,0,.5)}" +
+      ".pcs-beta-ack-sheet h2{margin:0 0 10px;font-size:24px;color:#f0d48a}" +
+      ".pcs-beta-ack-sheet p{margin:0 0 18px;font-size:16px;line-height:1.5}" +
+      ".pcs-beta-ack-sheet a{color:#8fd0a8;font-weight:700;text-decoration:underline;white-space:nowrap}" +
+      ".pcs-beta-ack-sheet .btn{display:block;width:100%;margin:0;font-size:20px;font-weight:800;padding:16px 12px;border-radius:14px}";
+    document.head.appendChild(st);
+  }
+  function syncBetaAck() {
+    var el = document.getElementById("beta-ack");
+    if (!betaAckNeeded()) {
+      if (el && el.parentNode) el.parentNode.removeChild(el);
+      return;
+    }
+    if (el) return;
+    ensureBetaAckStyle();
+    el = document.createElement("div");
+    el.className = "pcs-beta-ack";
+    el.id = "beta-ack";
+    el.setAttribute("role", "dialog");
+    el.setAttribute("aria-modal", "true");
+    el.setAttribute("aria-labelledby", "beta-ack-title");
+    el.innerHTML =
+      '<div class="pcs-beta-ack-sheet">' +
+      '<h2 id="beta-ack-title">Beta Service</h2>' +
+      '<p id="beta-ack-body">' + betaBodyHtml("beta-ack") + "</p>" +
+      '<button class="btn" type="button" id="beta-ack-ok">I understand</button>' +
+      "</div>";
+    document.body.appendChild(el);
+    el.querySelector("#beta-ack-ok").addEventListener("click", function () {
+      setBetaAck(betaAckWho());
+      var box = document.getElementById("beta-ack");
+      if (box && box.parentNode) box.parentNode.removeChild(box);
+      render();
+    });
+    setTimeout(function () { var b = document.getElementById("beta-ack-ok"); if (b) try { b.focus({ preventScroll: true }); } catch (e) {} }, 30);
+  }
+
   function riderHomeScreen() {
     ensureRiderHomeStyle();
     var acct = readRiderAccount() || {};
@@ -1952,7 +2074,8 @@
     if (r) refreshActiveRideStatus(r.code);
     return (
       '<div class="rider-home" id="rider-home">' +
-      (r ? riderHomeActiveCardHtml(r) : "") +
+      (r ? riderHomeActiveCardHtml(r) : "") + /* "Back to my ride" stays the first thing on Home */
+      betaNoticeHtml() + /* v68 */
       '<div class="rh-hello">' +
       (photo ? '<img class="rh-avatar" id="home-photo" alt="" src="' + esc(photo) + '">' : '<div class="rh-avatar" aria-hidden="true">' + esc(initials) + "</div>") +
       "<div><h2 id=\"home-greeting\">" + esc(first ? "Hi, " + first : "Welcome") + "</h2><p>Where are we going today?</p></div>" +
@@ -8407,6 +8530,7 @@
       if (username) localStorage.setItem(sessionKey(), username);
       else localStorage.removeItem(sessionKey());
     } catch (err) {}
+    if (ROLE === "customer") setBetaAck(""); /* v68: every login (and logout) asks for the Beta acknowledgment again */
   }
 
   function signedIn() {
@@ -8753,6 +8877,7 @@
       '<button class="btn ghost" type="button" id="booking-home">← Home</button>' +
       '<button class="btn ghost" type="button" id="open-history">History</button>' +
       logoutLine() + "</div>" +
+      betaNoticeHtml() + /* v68 */
       (state.notice ? '<p class="note notice-ok" role="status">' + esc(state.notice) + "</p>" : "") +
       "<h2>Request a ride</h2>" +
       "<p class=\"lede\">Request goes to Private Car Services for confirmation. Card charges are not taken on this screen.</p>" +
@@ -9800,6 +9925,7 @@
     if (placedPay) placedPay.__pcsSig = paySig;
     restoreAppFocus(app, focusKeep);
     ensureSosButton();
+    syncBetaAck(); /* v68: riders only; blocks until "I understand" */
     if (keptBoard) {
       var slot = app.querySelector(".map-stage.board-map");
       if (slot && slot.parentNode) {
