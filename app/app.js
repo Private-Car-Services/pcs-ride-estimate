@@ -16,7 +16,8 @@
    v58: Square PRODUCTION. Card saved at booking (Customer + Card on file via the pcs-pay Worker, no charge), charged
         after drop-off for the driver's final fare + tip, cancel fee (25% of estimate, $10 min) only after a driver
         accepted, receipts in History. The PIN still shows as soon as a driver accepts, card or no card.
-   v59 (Oct 7): cancel fee (25% of estimate, $10 min) ONLY when the assigned driver is within 1 mile (straight line)
+   v72c (Oct 9): REPLACES the v59 rule below: once booked, ANY rider cancel = max(25% of fare, $10); ***WARNING*** modal on Cancel.
+   v59 (Oct 7, superseded): cancel fee (25% of estimate, $10 min) ONLY when the assigned driver is within 1 mile (straight line)
         of the pickup at the moment the rider cancels; otherwise free (before accept, driver over 1 mi away, or the
         driver's location is missing / over 2 minutes old). The pcs-pay Worker re-checks this from Firebase and
         decides. Driver app stamps its location (presence gpsAt, ride driverLocAt) and refreshes it every 20 s while
@@ -107,7 +108,7 @@
   var WAIT_STILL_MPH = 1.5;
   var WAIT_MOVE_MI = 0.03;
   var WAIT_MOVE_MPH = 3;
-  var CANCEL_RADIUS_MI = 1;              /* v59: fee only when the driver is within this many miles of pickup */
+  var CANCEL_RADIUS_MI = 1;              /* v72c: no longer decides the fee (distance is only recorded for God mode) */
   var DRIVER_LOC_MAX_AGE_MS = 120000;    /* v59: older driver location = free cancel (same as the Worker) */
   var DRIVER_LOC_HEARTBEAT_MS = 20000;   /* v59: driver re-stamps the ride location this often even when parked */
   var SAFETY_ALERT_HUB = "SAFETY"; /* /rides/SAFETY/{id} — high-priority God alerts */
@@ -1493,7 +1494,8 @@
         "width:64px;height:64px;border-radius:50%;border:3px solid #fff;background:#c0161b;color:#fff;" +
         "font-size:13px;font-weight:900;line-height:1.05;letter-spacing:.02em;box-shadow:0 4px 16px rgba(0,0,0,.45);" +
         "cursor:pointer;-webkit-tap-highlight-color:transparent;touch-action:manipulation;font-family:inherit}" +
-        "#pcs-sos-btn:active{transform:scale(.96)}";
+        "#pcs-sos-btn:active{transform:scale(.96)}" +
+        "body.pcs-cancel-modal-open #pcs-sos-btn{display:none!important}"; /* v72c: hidden behind the cancel WARNING */
       document.head.appendChild(st);
     }
     var b = document.createElement("button");
@@ -4022,6 +4024,13 @@
     return { pct: isFinite(pct) && pct >= 0 ? pct : 25, min: isFinite(min) && min >= 0 ? Math.round(min) : 1000 };
   }
 
+  /* v72c: the fare the cancel fee is figured on (cents): the estimate stored on the ride, else the live estimate. */
+  function cancelBaseCents() {
+    var est = estimate();
+    return Number(state.estimateCents) > 0 ? Number(state.estimateCents) : (est.ready ? est.total : 0);
+  }
+
+  /* v72c (Oct 9): once booked, ANY rider cancel = max(25% of the fare, $10). No 1-mile rule. */
   function cancelFeeCents() {
     var est = estimate();
     var rule = cancelFeeRule();
@@ -4034,9 +4043,8 @@
   /* v59: one-line policy used on the booking screens. */
   function cancelPolicyShort(feeCents) {
     var rule = cancelFeeRule();
-    return "Free to cancel unless your driver is within " + CANCEL_RADIUS_MI + " mile of pickup; then the cancel fee is " +
-      (feeCents ? money(feeCents) + " (" + rule.pct + "% of the estimate, " + money(rule.min) + " minimum)."
-        : rule.pct + "% of the estimate (" + money(rule.min) + " minimum).");
+    return "Once booked, cancelling costs " + rule.pct + "% of the fare or " + money(rule.min) + ", whichever is higher" +
+      (feeCents ? " (" + money(feeCents) + " for this ride)." : ".");
   }
 
   function policyLinkHtml(label) {
@@ -4104,7 +4112,9 @@
       driverLng: state.driverLng,
       driverLocAt: state.driverLocAt
     };
-    return cancelDistanceDecision(ride, riderDriverPresence(), Date.now());
+    var d = cancelDistanceDecision(ride, riderDriverPresence(), Date.now());
+    /* v72c: distance is only shown in God mode now; a booked ride always has the fee (test rides excepted). */
+    return { fee: !state.isTest, reason: state.isTest ? "test_ride" : "booked", miles: d.miles, ageSec: d.ageSec, source: d.source };
   }
 
   function riderDriverPresence() {
@@ -4990,25 +5000,19 @@
   }
 
   function cancelWarningCopy() {
-    var fee = cancelFeeCents();
-    var rule = cancelFeeRule();
-    var later = " A fee of " + rule.pct + "% (" + money(rule.min) + " min) only applies once your driver is within " + CANCEL_RADIUS_MI + " mile of your pickup.";
     if (state.isTest || state.cardStatus === "test_skip") return "Test ride: no cancel fee.";
-    if (!driverHasAccepted()) return "Free to cancel. No driver has accepted yet." + later;
-    var d = riderCancelDecision();
-    if (d.fee) {
-      return "Your driver is almost there. Cancelling now costs " + money(fee) + " (" + rule.pct + "%, " + money(rule.min) + " min)" +
-        (state.cardStatus === "on_file" && state.cardLast4 ? ", charged to your " + (state.cardBrand || "card") + " ending " + state.cardLast4 + "." : ".");
-    }
-    if (d.reason === "driver_far") return "Free to cancel. Your driver is " + milesOneDecimal(d.miles) + " mi away." + later;
-    return "Free to cancel." + later;
+    var fee = cancelFeeCents();
+    var base = cancelBaseCents();
+    return "WARNING: Canceling now will charge " + money(fee) + " (25% of your " + (base ? money(base) + " " : "") +
+      "fare or $10, whichever is higher)." +
+      (state.cardStatus === "on_file" && state.cardLast4 ? " It is charged to your " + (state.cardBrand || "card") + " ending " + state.cardLast4 + "." : "");
   }
 
   /* v58: rider cancelled after a driver accepted -> pcs-pay /cancel-fee (the Worker re-reads the ride and decides). */
   function chargeCancelFee(code, cardOnFile, expectFee) {
     var cfg = squareCfg();
     if (!cardOnFile || !/^https:\/\//i.test(cfg.cancelFeeUrl)) return Promise.resolve({ skipped: true });
-    /* v59: the Worker decides (driver within 1 mile of pickup, location under 2 minutes old); expectFee is only for its log. */
+    /* v72c: the Worker decides (booked = max(25%, $10)); expectFee is only for its log. */
     return workerPost(cfg.cancelFeeUrl, { rideCode: code, expectFee: !!expectFee }).then(function (data) {
       if (data && !data.none && !data.already && data.written !== true) {
         paymentIndexPatch(code, "cancel", { status: "COMPLETED", amountCents: Number(data.amountCents) || 0, paymentId: String(data.paymentId || ""),
@@ -5053,21 +5057,35 @@
     return st === "pending_owner" || st === "pending-owner" || st === "requested" || st === "accepted";
   }
 
+  /* v72c: hide the ALERT SOS button while the cancel WARNING modal is up (checked after every DOM change) */
+  try {
+    var cmSync = function () { var on = !!document.getElementById("cancel-modal"); if (document.body && document.body.classList.contains("pcs-cancel-modal-open") !== on) document.body.classList.toggle("pcs-cancel-modal-open", on); };
+    var cmStart = function () { new MutationObserver(cmSync).observe(document.body, { childList: true, subtree: true }); cmSync(); };
+    if (window.MutationObserver) { if (document.body) cmStart(); else document.addEventListener("DOMContentLoaded", cmStart); }
+  } catch (cmErr) {}
+
   function cancelBlockHtml() {
     if (!riderCanCancel(state.rideStatus)) return "";
     var err = '<p class="error" role="alert">' + esc(state.cancelError || "") + "</p>";
     if (state.cancelConfirm) {
       var busy = !!state.cancelBusy;
+      var feeTxt = (state.isTest || state.cardStatus === "test_skip") ? "" : " " + money(cancelFeeCents());
+      /* v72c: prominent ***WARNING*** modal before a rider cancel */
       return (
-        '<div class="card cancel-card" id="cancel-card">' +
-        '<p class="tag">Cancel this ride?</p>' +
-        '<p class="lede" id="cancel-policy-copy">' + esc(cancelWarningCopy()) + "</p>" +
-        '<p class="fine">' + policyLinkHtml("See cancellation policy") + "</p>" +
+        '<div class="card cancel-card" id="cancel-card"><p class="tag">Cancel this ride?</p></div>' +
+        '<div class="pcs-cancel-modal" id="cancel-modal" role="alertdialog" aria-modal="true" aria-labelledby="cancel-modal-title" aria-describedby="cancel-policy-copy"' +
+        ' style="position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,.78);display:flex;align-items:center;justify-content:center;padding:18px">' +
+        '<div style="background:#1a1a1a;border:3px solid #e03b3b;border-radius:18px;max-width:420px;width:100%;padding:22px 20px;box-shadow:0 10px 40px rgba(0,0,0,.6);color:#fff;text-align:center">' +
+        '<div id="cancel-modal-title" style="font-size:26px;font-weight:900;letter-spacing:1px;color:#ff4d4d;margin:0 0 12px">&#9888;&#65039; ***WARNING***</div>' +
+        '<p class="lede" id="cancel-policy-copy" style="font-size:18px;font-weight:700;line-height:1.4;margin:0 0 12px;color:#fff">' + esc(cancelWarningCopy()) + "</p>" +
+        '<p class="fine" style="margin:0 0 14px">' + policyLinkHtml("See cancellation policy") + "</p>" +
         err +
-        '<button class="btn danger" type="button" id="cancel-ride-yes"' + (busy ? " disabled" : "") + ">" +
-        (busy ? "Cancelling…" : "Yes, cancel this ride") + "</button>" +
-        '<button class="btn secondary" type="button" id="cancel-ride-no"' + (busy ? " disabled" : "") + ">Keep my ride</button>" +
-        "</div>"
+        '<button class="btn" type="button" id="cancel-ride-no"' + (busy ? " disabled" : "") +
+        ' style="display:block;width:100%;margin:0 0 10px;font-size:20px;font-weight:800;padding:15px 12px;min-height:56px;border-radius:14px;background:#2e9d4f;border-color:#2e9d4f;color:#fff">Keep my ride</button>' +
+        '<button class="btn danger" type="button" id="cancel-ride-yes"' + (busy ? " disabled" : "") +
+        ' style="display:block;width:100%;margin:0;font-size:17px;font-weight:700;padding:13px 12px;min-height:50px;border-radius:14px;background:#8a2323;border-color:#8a2323;color:#fff">' +
+        (busy ? "Cancelling…" : (feeTxt ? "Cancel and pay" + esc(feeTxt) : "Cancel ride")) + "</button>" +
+        "</div></div>"
       );
     }
     return (
@@ -5116,16 +5134,15 @@
       state.screen = "home";
       var feeNote = "";
       if (feeResult && feeResult.ok && Number(feeResult.amountCents) > 0 && !feeResult.none) {
-        feeNote = " Your driver was almost there, so a cancel fee of " + money(Number(feeResult.amountCents)) + " was charged" +
+        feeNote = " A cancel fee of " + money(Number(feeResult.amountCents)) + " was charged" +
           (feeResult.last4 ? " to your " + (feeResult.brand || "card") + " ending " + feeResult.last4 : "") + "." +
           (feeResult.receiptUrl ? " Your receipt is in History." : "");
       } else if (feeResult && (feeResult.free || feeResult.none)) {
-        feeNote = " No cancel fee" + (feeResult.miles != null && feeResult.reason === "driver_far"
-          ? " (your driver was " + milesOneDecimal(feeResult.miles) + " mi away)." : ".");
+        feeNote = " No cancel fee.";
       } else if (feeExpected && feeResult && feeResult.failed) {
         feeNote = " The cancel fee could not be charged to your card; Private Car Services will follow up.";
       } else if (feeExpected) {
-        feeNote = " Your driver was almost there, so Private Car Services will follow up about the cancel fee.";
+        feeNote = " A cancel fee of " + money(fee) + " applies; Private Car Services will follow up about it.";
       } else {
         feeNote = " No cancel fee.";
       }
@@ -5158,7 +5175,7 @@
       wasAccepted = rst === "accepted" || !!(remote && (remote.acceptedAt || remote.driverId || remote.driverUid) && rst !== "pending_owner" && rst !== "requested");
       if (remote && remote.cardStatus === "on_file" && remote.squareCardId && !remote.isTest) cardOnFile = true;
       now = Date.now();
-      /* v59: fee only if the driver is within 1 mile of pickup right now (fresh ride + presence read). */
+      /* v72c: driver distance read only to record it for God mode (no longer decides the fee). */
       if (remote) {
         decision = cancelDistanceDecision(Object.assign({}, remote, {
           pickupLat: cancelCoordOk(remote.pickupLat, remote.pickupLng) ? remote.pickupLat : state.pickupLat,
@@ -5167,8 +5184,9 @@
       } else {
         decision = riderCancelDecision();
       }
-      if (!wasAccepted) decision = { fee: false, reason: "not_accepted", miles: null };
-      feeExpected = wasAccepted && decision.fee && !state.isTest && !(remote && remote.isTest);
+      /* v72c: booked = fee, accepted or not, wherever the driver is (distance kept for God mode only). */
+      decision = { fee: true, reason: "booked", miles: decision.miles == null ? null : decision.miles };
+      feeExpected = !state.isTest && !(remote && remote.isTest) && state.cardStatus !== "test_skip";
       if (decision.reason === "driver_location_stale" || decision.reason === "driver_location_missing") {
         try { console.info("[PCS] free cancel: " + decision.reason + " (" + code + ")"); } catch (logErr) {}
       }
@@ -5184,7 +5202,7 @@
         summary.cancelFeeCents = feeExpected ? fee : 0;
         if (decision.miles != null) summary.cancelDriverMiles = decision.miles;
         summary.cancelClientReason = decision.reason || "";
-        summary.cancelFeeStatus = wasAccepted && !feeExpected ? "free" : "";
+        summary.cancelFeeStatus = !feeExpected ? "free" : "";
         return authFetch(openIndexUrl(code), {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
@@ -5195,7 +5213,7 @@
           return deleteOpenRide(code).catch(function () {});
         });
       }).then(function () {
-        if (!wasAccepted || !cardOnFile) {
+        if (!cardOnFile) {
           try {
             rememberRiderHistoryEntry(Object.assign({}, currentRide() || {}, remote || {}, patch, {
               code: code, cancelFeeStatus: feeExpected ? "" : "free", cancelFeeCents: feeExpected ? fee : 0 }));
@@ -7396,7 +7414,11 @@
       code: String(raw.code || ""),
       fareBeforeTax: raw.fareBeforeTax != null ? Number(raw.fareBeforeTax) : null,
       commissionCents: raw.commissionCents != null ? Number(raw.commissionCents) : null,
-      completedAt: raw.completedAt || null
+      completedAt: raw.completedAt || null,
+      payMethod: String(raw.payMethod || ""), taxFees: raw.taxFees != null ? Number(raw.taxFees) : 0, /* v72d */
+      manual: String(raw.source || "") === "manual", commissionDollars: raw.commissionDollars != null ? Number(raw.commissionDollars) : null,
+      balance: raw.balance != null ? Number(raw.balance) : null,
+      riderPhone: String(raw.riderPhone || ""), notes: String(raw.notes || "")
     };
   }
 
@@ -7428,7 +7450,7 @@
     var me = driverPresenceId();
     if (!me) return [];
     return (state.scheduledRides || []).filter(function (r) {
-      if (!r || r.status === "completed" || r.status === "cancelled") return false;
+      if (!r || r.status === "completed" || r.status === "cancelled" || r.status === "deleted") return false;
       return String(r.assignedDriverId || "") === me;
     }).sort(function (a, b) {
       return String(a.start || "").localeCompare(String(b.start || ""));
@@ -7465,6 +7487,8 @@
         '<p class="lede">' + esc(prettyScheduleWhen(r.start)) + "</p>" +
         "<p><strong>Pickup</strong><br>" + esc(r.pickup || "—") + "</p>" +
         "<p><strong>Drop-off</strong><br>" + esc(r.dropoff || "—") + "</p>" +
+        (r.payMethod === "cash" ? '<p style="color:#ffb35c"><strong>CASH ride:</strong> you collect the fare' + (r.fareBeforeTax != null ? " ($" + (Number(r.fareBeforeTax) + (Number(r.taxFees) || 0)).toFixed(2) + ")" : "") + "; the PCS share is taken from your weekly balance.</p>" : "") +
+        (r.notes ? '<p class="fine">' + esc(r.notes) + "</p>" : "") +
         '<div class="row-actions">' +
         '<button class="btn" type="button" data-complete-schedule="' + esc(r.id) + '">Mark complete</button>' +
         "</div>" +
@@ -7490,7 +7514,11 @@
     var fareBefore = row.fareBeforeTax != null && isFinite(Number(row.fareBeforeTax))
       ? Number(row.fareBeforeTax)
       : 0;
-    var commissionCents = Math.round(fareBefore * (pct / 100));
+    var fareCentsV72d = Math.round(fareBefore * 100); /* v72d: fareBeforeTax is dollars; history is cents */
+    var taxCentsV72d = Math.round((Number(row.taxFees) || 0) * 100);
+    var commissionCents = Math.round(fareCentsV72d * (pct / 100));
+    if (row.manual && row.commissionDollars != null && isFinite(Number(row.commissionDollars))) commissionCents = Math.round(Number(row.commissionDollars) * 100); /* v72d: God override */
+    var cashV72d = String(row.payMethod || "") === "cash";
     var day = chicagoToday();
     var code = row.code || ("PCS" + String(eventId).replace(/[^A-Za-z0-9]/g, "").toUpperCase().slice(0, 5));
     if (code.length < 8) {
@@ -7506,9 +7534,12 @@
       drop: row.dropoff || "",
       rawMiles: null,
       billedMiles: null,
-      fareSub: fareBefore,
-      fareTax: 0,
-      fareTotal: fareBefore,
+      fareSub: fareCentsV72d,
+      fareTax: taxCentsV72d,
+      fareTotal: fareCentsV72d + taxCentsV72d,
+      payMethod: String(row.payMethod || ""),
+      cashCollected: cashV72d,
+      driverOwesCents: cashV72d ? (row.manual && row.balance != null && isFinite(Number(row.balance)) ? Math.round(Number(row.balance) * 100) : fareCentsV72d + taxCentsV72d - commissionCents) : 0,
       commissionPct: pct,
       commissionCents: commissionCents,
       riderName: row.rider || "",
@@ -7520,7 +7551,7 @@
     var stats = readDayStats(day);
     stats.completed += 1;
     stats.commissionCents += commissionCents;
-    stats.rideTotalCents += Math.round(fareBefore);
+    stats.rideTotalCents += fareCentsV72d + taxCentsV72d;
     writeDayStats(day, stats);
     var next = Object.assign({}, row, {
       status: "completed",
@@ -8811,7 +8842,7 @@
 
   function accountGate() {
     return (
-      '<img class="welcome-logo" alt="Private Car Services" src="' + welcomeSrc(ROLE === "driver" ? "welcome-logo-driver.png" : "welcome-logo.png") + '">' +
+      (ROLE === "driver" ? '<svg class="welcome-logo pcs-wm" viewBox="0 0 390 96" role="img" aria-label="Private Car Services driver" style="display:block;width:100%;max-width:420px;height:auto;max-height:120px;border-radius:8px" xmlns="http://www.w3.org/2000/svg"><defs><pattern id="wmg-ld" width="16" height="16" patternUnits="userSpaceOnUse"><path d="M16 0H0V16" fill="none" stroke="#2c4a2a" stroke-width=".6"/></pattern></defs><rect width="390" height="96" fill="#20371d"/><rect width="390" height="96" fill="url(#wmg-ld)"/><text x="195" y="44" text-anchor="middle" font-family="Poppins,Montserrat,Helvetica,Arial,sans-serif" font-style="italic" font-size="21" letter-spacing="1.5" font-weight="300" fill="#cdeccd">PRIVATE CAR SERVICES</text><path d="M28 54H350" stroke="#cdeccd" stroke-width="3"/><path d="M348 48L362 54L348 60Z" fill="#cdeccd"/><text x="195" y="76" text-anchor="middle" font-family="Poppins,Helvetica,Arial,sans-serif" font-style="italic" font-size="14" letter-spacing="1" fill="#a9c9a9">driver</text></svg>' : '<svg class="welcome-logo pcs-wm" viewBox="0 0 390 96" role="img" aria-label="Private Car Services rider" style="display:block;width:100%;max-width:420px;height:auto;max-height:120px;border-radius:8px" xmlns="http://www.w3.org/2000/svg"><defs><pattern id="wmg-lr" width="16" height="16" patternUnits="userSpaceOnUse"><path d="M16 0H0V16" fill="none" stroke="#2c4a2a" stroke-width=".6"/></pattern></defs><rect width="390" height="96" fill="#20371d"/><rect width="390" height="96" fill="url(#wmg-lr)"/><text x="195" y="44" text-anchor="middle" font-family="Poppins,Montserrat,Helvetica,Arial,sans-serif" font-style="italic" font-size="21" letter-spacing="1.5" font-weight="300" fill="#cdeccd">PRIVATE CAR SERVICES</text><path d="M28 54H350" stroke="#cdeccd" stroke-width="3"/><path d="M348 48L362 54L348 60Z" fill="#cdeccd"/><text x="195" y="76" text-anchor="middle" font-family="Poppins,Helvetica,Arial,sans-serif" font-style="italic" font-size="14" letter-spacing="1" fill="#a9c9a9">rider</text></svg>') + /* v72e: slim wordmark (SVG) */
       '<form id="login-form" autocomplete="off" novalidate>' +
       '<label for="login-email">Email</label>' +
       '<input id="login-email" name="email" type="email" autocapitalize="none" autocomplete="email" spellcheck="false" required value="' + esc(state.loginSetupDraft || "") + '">' +
@@ -11765,6 +11796,22 @@
           shiftStartAt: now
         };
         if (prev.endOdometer != null) row.priorEndOdometer = prev.endOdometer;
+        /* v71m keep shifts: never drop earlier shifts / the day's first opening odometer on a same-day re-login. */
+        var keptShifts = prev.shifts && typeof prev.shifts === "object" ? Object.assign({}, prev.shifts) : {};
+        if (prev.startOdometer != null && isFinite(Number(prev.startOdometer)) && shiftClosed(prev)) {
+          var hasPrev = Object.keys(keptShifts).some(function (k) { return keptShifts[k] && Number(keptShifts[k].startOdo) === Number(prev.startOdometer); });
+          if (!hasPrev) {
+            var pk = String(Number(prev.shiftStartAt) || Number(prev.startedAt) || (now - 1));
+            keptShifts[pk] = { startOdo: Number(prev.startOdometer), endOdo: prev.endOdometer != null ? Number(prev.endOdometer) : null,
+              odoMiles: prev.endOdometer != null ? Math.round((Number(prev.endOdometer) - Number(prev.startOdometer)) * 10) / 10 : null,
+              shiftStartedAt: Number(pk), shiftEndedAt: Number(prev.lastUpdate) || null, day: chicagoToday(), trackedFrom: "day", skippedEnd: prev.endOdometer == null };
+          }
+        }
+        if (Object.keys(keptShifts).length) row.shifts = keptShifts;
+        if (prev.filledMiles != null) row.filledMiles = prev.filledMiles;
+        if (Array.isArray(prev.gapFills)) row.gapFills = prev.gapFills;
+        var firstOdo = prev.firstStartOdometer != null ? prev.firstStartOdometer : prev.startOdometer;
+        if (firstOdo != null && isFinite(Number(firstOdo))) row.firstStartOdometer = Number(firstOdo);
         /* Explicitly reopen: no endOdometer / shiftClosed on the new shift row. */
         state.milesOdoError = "";
         state.milesOdoDraft = "";
