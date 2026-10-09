@@ -116,6 +116,7 @@
       '<label for="rm-name">Name</label><input id="rm-name" autocomplete="name" maxlength="80">' +
       '<label for="rm-phone">Phone</label><input id="rm-phone" type="tel" autocomplete="tel" inputmode="tel" maxlength="30">' +
       '<label for="rm-email">Email (for your receipt)</label><input id="rm-email" type="email" autocomplete="email" inputmode="email" maxlength="160">' +
+      '<p class="fine" id="rm-invite-note">We\u2019ll also send you a one-time welcome note from Private Car Services with a link to book your next ride. Texts: reply STOP to opt out.</p>' + /* v71 */
       '<p class="fine rm-ok" id="rm-info-msg">' + esc(S.infoMsg || (d.contactSaved ? "\u2713 Your info is saved for the receipt." : "")) + "</p>" +
       '<p class="error" id="rm-info-err" role="alert">' + esc(S.infoErr) + "</p>" +
       '<button class="btn secondary" type="button" id="rm-save-info">Save my info</button>' +
@@ -132,14 +133,40 @@
             '<button class="btn" type="button" id="rm-add-card">Add a card</button>')) +
       "</div>";
   }
+  /* v71 live MPH: the speed the driver's phone saw (whole mph). "--" when there is no fresh reading (no GPS in the car,
+     or the last update is over 30 s old). Under the slow speed (10 mph) the box turns amber with "MPH · slow". */
+  function mphNow(d) {
+    var l = d && d.live;
+    if (!l || l.mph === null || l.mph === undefined || !isFinite(Number(l.mph))) return null;
+    var at = Number(l.mphAt) || Number(l.at) || 0;
+    if (!at || now() - at > 30000) return null;
+    return Math.max(0, Math.round(Number(l.mph)));
+  }
+  /* v71: "To your destination: about 12 min · 4.2 mi · arrive about 4:32 PM" (arrival = this phone's clock + minutes) */
+  function etaText(d) {
+    var e = d && d.live && d.live.eta;
+    if (!e || !isFinite(Number(e.min)) || !isFinite(Number(e.miles))) return "";
+    var age = d.live.at ? now() - d.live.at : 0;
+    if (age > 120000) return "";
+    if (Number(e.miles) <= 0.1 && Number(e.min) <= 0) return "Arriving at your destination";
+    var at = "";
+    try { at = new Date(Date.now() + Number(e.min) * 60000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }); } catch (x) {}
+    return "To your destination: about " + Math.max(1, Math.round(Number(e.min))) + " min \u00b7 " + Number(e.miles).toFixed(1) + " mi" + (at ? " \u00b7 arrive about " + at : "");
+  }
+  function mphText(m) { return m === null ? "--" : String(m); }
+  function mphSlow(d, m) { return m !== null && m < (Number(d.rates && d.rates.slowMph) || 10); }
+  function mphLabel(d, m) { return mphSlow(d, m) ? "MPH \u00b7 slow" : "MPH"; }
+  function mphClass(d, m) { return "rm-mph" + (m === null ? " is-none" : mphSlow(d, m) ? " is-slow" : ""); }
   function runningHtml(d) {
     return testTag(d) + '<p class="tag">Your meter · live</p>' + modeHtml(d) +
       '<p class="rm-fare" id="rm-fare" aria-live="off">' + money(d.live.fareCents) + "</p>" +
       '<p class="rm-sub">Meter' + (d.rates.taxRate > 0 ? " · tax " + pct(d.rates.taxRate) + " added at the end" : "") + "</p>" +
       '<div class="rm-grid"><div><b id="rm-miles">' + Number(d.live.miles || 0).toFixed(2) + "</b><span>Miles</span></div>" +
       '<div><b id="rm-time">0:00</b><span>Time</span></div>' +
-      '<div><b id="rm-wait">' + (d.live.waitMin || 0) + "</b><span>Slow min</span></div></div>" +
+      '<div><b id="rm-wait">' + (d.live.waitMin || 0) + "</b><span>Slow min</span></div>" +
+      '<div id="rm-mph-box" class="' + mphClass(d, mphNow(d)) + '"><b id="rm-mph">' + mphText(mphNow(d)) + '</b><span id="rm-mph-label">' + esc(mphLabel(d, mphNow(d))) + "</span></div></div>" +
       '<p class="rm-free" id="rm-free"></p>' +
+      '<p class="rm-eta" id="rm-eta"></p>' + /* v71: minutes + miles to the destination (if the driver set one) */
       '<p class="rm-updated" id="rm-updated"></p>' +
       '<p class="error" id="rm-net" role="status"></p>' +
       ratesHtml(d) + formHtml(d);
@@ -249,9 +276,15 @@
       setText("rm-fare", money(d.live.fareCents));
       setText("rm-miles", Number(d.live.miles || 0).toFixed(2));
       setText("rm-wait", String(d.live.waitMin || 0));
+      var mph = mphNow(d);
+      setText("rm-mph", mphText(mph));
+      setText("rm-mph-label", mphLabel(d, mph));
+      var mb = $("rm-mph-box");
+      if (mb && mb.className !== mphClass(d, mph)) mb.className = mphClass(d, mph);
       setText("rm-time", clock(now() - d.startedAt));
       var left = d.live.moved ? 0 : Math.ceil((Number(d.rates.freeWaitSec) || 0) - (now() - d.startedAt) / 1000);
       setText("rm-free", left > 0 ? "Free waiting " + clock(left * 1000) + " left" : "");
+      setText("rm-eta", etaText(d));
       var age = d.live.at ? Math.max(0, Math.round((now() - d.live.at) / 1000)) : -1;
       setText("rm-updated", age < 0 ? "Waiting for the first update from the car…" : age <= 12 ? "Live · updated just now" : age < 60 ? "Live · updated " + age + " s ago" :
         "Waiting for the driver\u2019s phone (last update " + Math.floor(age / 60) + " min ago). The meter keeps running in the car.");
@@ -289,8 +322,10 @@
     if (!v.name.trim() && !v.phone.trim() && !v.email.trim()) { S.infoErr = "Type your name, phone or email first (all optional)."; setText("rm-info-err", S.infoErr); return; }
     var btn = $("rm-save-info");
     if (btn) { btn.disabled = true; btn.textContent = "Saving…"; }
-    post("/meter/rider", { t: token, name: v.name.trim(), phone: v.phone.trim(), email: v.email.trim() }).then(function () {
-      S.infoMsg = "\u2713 Saved. Your receipt goes to " + (v.email.trim() || "your phone number if Square has it") + ".";
+    post("/meter/rider", { t: token, name: v.name.trim(), phone: v.phone.trim(), email: v.email.trim() }).then(function (data) {
+      var inv = (data && data.invited) || {};
+      S.infoMsg = "\u2713 Saved. Your receipt goes to " + (v.email.trim() || "your phone number if Square has it") + "." +
+        (inv.email ? " We sent a welcome note to your email." : inv.sms ? " We sent a welcome text." : ""); /* v71 */
       if (S.d) S.d.contactSaved = true;
       setText("rm-info-msg", S.infoMsg); setText("rm-info-err", "");
       if (btn) { btn.disabled = false; btn.textContent = "Save my info"; }

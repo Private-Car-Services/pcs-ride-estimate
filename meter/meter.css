@@ -6,10 +6,17 @@
 .rm-mode small{font-weight:700;letter-spacing:0;opacity:.85;font-size:14px}
 .rm-fare{font-size:58px;line-height:1.05;font-weight:800;color:#f0d48a;text-align:center;margin:6px 0 2px;font-variant-numeric:tabular-nums}
 .rm-sub{text-align:center;margin:0 0 10px;opacity:.85}
-.rm-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;text-align:center;margin:0 0 10px}
+.rm-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;text-align:center;margin:0 0 10px}
 .rm-grid div{background:rgba(255,255,255,.04);border:1px solid rgba(212,177,90,.28);border-radius:12px;padding:10px 4px}
-.rm-grid b{display:block;font-size:24px;font-variant-numeric:tabular-nums}
-.rm-grid span{font-size:12px;opacity:.8;text-transform:uppercase;letter-spacing:.06em}
+.rm-grid b{display:block;font-size:22px;font-variant-numeric:tabular-nums}
+.rm-grid span{font-size:11px;opacity:.8;text-transform:uppercase;letter-spacing:.03em;white-space:nowrap}
+/* v71 live MPH: subtle amber when under the slow speed */
+.rm-grid .rm-mph.is-slow{background:rgba(240,180,80,.13);border-color:rgba(240,180,80,.75)}
+.rm-mph.is-slow span{color:#f3c77a;opacity:1}
+.rm-mph.is-none b{opacity:.55}
+/* v71 destination ETA */
+.rm-eta{text-align:center;font-weight:700;color:#f0d48a;margin:0 0 4px}
+.rm-eta:empty{display:none}
 .rm-free{color:#8fd0a8;font-weight:800;text-align:center;margin:0 0 8px;font-size:16px}
 .rm-free:empty{display:none}
 .rm-updated{text-align:center;font-size:13px;opacity:.75;margin:0 0 10px}
