@@ -3902,6 +3902,7 @@
       var next = wrap.firstChild;
       if (next) b.replaceWith(next);
     }
+    refreshDailyMiles(); /* v71m */
     bindDriverActions();
     bindBookingActions();
     bindPaymentActions();
@@ -4621,6 +4622,193 @@
     );
   }
 
+  /* ---------- v71m (Oct 9): Daily miles — per driver / vehicle / Chicago day ----------
+     Source: rides/DRVRMLES/{driverId}/{YYYY-MM-DD} written by the driver app (v64+):
+       day row: startOdometer (opening odo of the LATEST shift that day), endOdometer + shiftClosed (set at Log out),
+                priorEndOdometer (ending odo of an earlier shift the same day), gpsMiles (app-tracked incl. filled-in),
+                filledMiles, onlineMs (closed online time) + shiftStartAt (open segment start), lastUpdate
+       shifts/{shiftStartedAt}: startOdo, endOdo, odoMiles, trackedMiles, filledInMiles, shiftStartedAt, shiftEndedAt
+     Odometer miles = sum of (end - start) for each shift with both readings (miles between shifts = personal, excluded).
+     Same logic as /workspace/pcs-mileage/export_daily_miles.py (Penny's CSV). */
+  var DAILY_MILES_DAYS = 30;
+  var DAILY_MILES_SKIP = { test_test_com: true }; /* test login, not a real vehicle */
+
+  function dmNum(v) { return v != null && v !== "" && isFinite(Number(v)) ? Number(v) : null; }
+  function dmRound1(n) { return Math.round(n * 10) / 10; }
+
+  function dailyMilesCompute(milesByDriver, roster, drivers, nowMs, todayYmd) {
+    var out = [];
+    var presence = {};
+    (drivers || []).forEach(function (d) { if (d && d.id) presence[d.id] = d; });
+    Object.keys(milesByDriver || {}).forEach(function (id) {
+      if (DAILY_MILES_SKIP[id]) return;
+      var days = milesByDriver[id] || {};
+      var r = (roster && roster[id]) || {};
+      var p = presence[id] || {};
+      var name = String(r.name || p.name || id);
+      var carSrc = (r.carMake || r.carModel) ? r : p;
+      var vehicle = [carSrc.carYear, carSrc.carMake, carSrc.carModel].filter(Boolean).join(" ");
+      if (carSrc.carPlate) vehicle += (vehicle ? " · " : "") + String(carSrc.carPlate);
+      var ymds = Object.keys(days).filter(function (k) { return /^\d{4}-\d{2}-\d{2}$/.test(k) && days[k] && typeof days[k] === "object"; }).sort();
+      ymds.forEach(function (ymd, idx) {
+        var row = days[ymd];
+        var segs = [];
+        var sh = row.shifts && typeof row.shifts === "object" ? row.shifts : {};
+        Object.keys(sh).forEach(function (k) {
+          var x = sh[k];
+          if (!x || typeof x !== "object") return;
+          segs.push({ start: dmNum(x.startOdo), end: dmNum(x.endOdo), at: dmNum(x.shiftStartedAt) || dmNum(k) || 0, open: false });
+        });
+        var rs = dmNum(row.startOdometer), re = dmNum(row.endOdometer);
+        var closed = !!row.shiftClosed || re != null;
+        var matchLast = segs.some(function (s) { return rs != null && s.start === rs; });
+        if (rs != null && !matchLast) {
+          segs.push({ start: rs, end: closed ? re : null, at: dmNum(row.shiftStartAt) || dmNum(row.startedAt) || 9e15, open: !closed });
+        }
+        var pe = dmNum(row.priorEndOdometer);
+        var lost = false;
+        if (pe != null && !segs.some(function (s) { return s.end === pe; })) {
+          segs.push({ start: null, end: pe, at: 0, open: false, lost: true });
+          lost = true;
+        }
+        segs.sort(function (a, b) { return a.at - b.at; });
+        var starts = segs.map(function (s) { return s.start; }).filter(function (v) { return v != null; });
+        var ends = segs.map(function (s) { return s.end; }).filter(function (v) { return v != null; });
+        var last = segs.length ? segs[segs.length - 1] : null;
+        var startOdo = starts.length ? Math.min.apply(null, starts) : null;
+        var endOdo = last && last.end != null ? Math.max.apply(null, ends) : null;
+        var odo = 0, odoCount = 0;
+        segs.forEach(function (s) { if (s.start != null && s.end != null && s.end >= s.start) { odo += s.end - s.start; odoCount += 1; } });
+        var odoMiles = odoCount ? dmRound1(odo) : null;
+        var tracked = dmNum(row.gpsMiles);
+        var filled = dmNum(row.filledMiles);
+        var online = dmNum(row.onlineMs);
+        var openStart = dmNum(row.shiftStartAt);
+        var isToday = ymd === todayYmd;
+        if (openStart && openStart > 0) {
+          var until = isToday ? nowMs : (dmNum(row.lastUpdate) || openStart);
+          online = (online || 0) + Math.max(0, until - openStart);
+        }
+        var flags = [];
+        var missingEnd = !last || last.end == null;
+        var nextStart = null, nextDay = "";
+        if (missingEnd) {
+          for (var j = idx + 1; j < ymds.length; j += 1) {
+            var nr = days[ymds[j]] || {};
+            var cand = [];
+            var nsh = nr.shifts && typeof nr.shifts === "object" ? nr.shifts : {};
+            Object.keys(nsh).forEach(function (k) { var v = dmNum(nsh[k] && nsh[k].startOdo); if (v != null) cand.push(v); });
+            if (dmNum(nr.startOdometer) != null) cand.push(dmNum(nr.startOdometer));
+            if (cand.length) { nextStart = Math.min.apply(null, cand); nextDay = ymds[j]; break; }
+          }
+          if (isToday && last && last.open) flags.push("On shift now (no ending odometer yet)");
+          else flags.push("MISSING ending odometer" + (nextStart != null ? " · next opening odometer " + nextStart + " (" + nextDay + ")" : ""));
+        }
+        if (lost) flags.push("Earlier shift's opening odometer was overwritten by the app (it ended at " + pe + "); odometer total covers later shift(s) only");
+        if (odoMiles != null && tracked != null && !lost && !missingEnd) {
+          var gap = odoMiles - tracked;
+          if (Math.abs(gap) > Math.max(5, odoMiles * 0.15)) flags.push("Odometer vs tracked differ by " + (gap >= 0 ? "+" : "") + dmRound1(gap) + " mi");
+        }
+        out.push({
+          date: ymd, driverId: id, driver: name, vehicle: vehicle,
+          startOdo: startOdo, endOdo: endOdo, odoMiles: odoMiles,
+          trackedMiles: tracked != null ? Math.round(tracked * 100) / 100 : null,
+          filledMiles: filled, onlineMs: online, shifts: segs.length,
+          missingEnd: missingEnd && !(isToday && last && last.open),
+          openNow: !!(isToday && last && last.open),
+          incomplete: lost || missingEnd,
+          nextStart: nextStart, nextDay: nextDay,
+          flags: flags
+        });
+      });
+    });
+    out.sort(function (a, b) { return a.date < b.date ? 1 : (a.date > b.date ? -1 : a.driver.localeCompare(b.driver)); });
+    return out;
+  }
+
+  function dmFmtOnline(ms) {
+    if (ms == null) return "—";
+    var m = Math.round(ms / 60000);
+    return Math.floor(m / 60) + "h " + (m % 60 < 10 ? "0" : "") + (m % 60) + "m";
+  }
+
+  function dailyMilesRowsNow() {
+    var all = dailyMilesCompute(state.miles || {}, state.roster || {}, state.drivers || [], Date.now(), chicagoToday());
+    var keep = {};
+    last14Days().forEach(function (d) { keep[d] = true; });
+    var cutoff = new Date(Date.now() - DAILY_MILES_DAYS * 86400000).toISOString().slice(0, 10);
+    return all.filter(function (r) { return r.date >= cutoff || keep[r.date]; });
+  }
+
+  function dailyMilesCsv(rows) {
+    var q = function (v) { var s = v == null ? "" : String(v); return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; };
+    var lines = ["date,driver,vehicle,start_odo,end_odo,odometer_miles,tracked_miles,online_hours,status,notes"];
+    rows.slice().reverse().forEach(function (r) {
+      lines.push([r.date, r.driver, r.vehicle, r.startOdo, r.endOdo, r.odoMiles, r.trackedMiles,
+        r.onlineMs != null ? (Math.round(r.onlineMs / 36000) / 100).toFixed(2) : "",
+        r.openNow ? "open" : (r.incomplete ? "incomplete" : "complete"), r.flags.join("; ")].map(q).join(","));
+    });
+    return lines.join("\n") + "\n";
+  }
+
+  function dailyMilesPanelHtml() {
+    if (state.milesError === "denied") return '<p class="fine">Mileage data: access denied by Firebase rules.</p>';
+    var rows = dailyMilesRowsNow();
+    if (!rows.length) return '<p class="fine">No mileage days saved yet.</p>';
+    var missing = rows.filter(function (r) { return r.missingEnd; }).length;
+    var head = '<p class="fine">Opening and ending odometer per driver and day (Chicago), last ' + DAILY_MILES_DAYS + " days. " +
+      "Odometer miles = ending − opening for each shift. Tracked = the app's GPS miles (incl. filled-in). " +
+      (missing ? '<strong style="color:#ff8a80">' + missing + " day(s) missing an ending odometer.</strong> " : "") +
+      '<button type="button" class="btn btn-ghost" id="daily-miles-csv">Download CSV</button></p>';
+    var byDate = {};
+    var order = [];
+    rows.forEach(function (r) { if (!byDate[r.date]) { byDate[r.date] = []; order.push(r.date); } byDate[r.date].push(r); });
+    var n1 = function (v) { return v == null ? "—" : esc(Number(v).toLocaleString("en-US")); };
+    var body = order.map(function (ymd) {
+      return '<p class="dm-date" style="margin:10px 0 4px;color:#f0d48a;font-weight:700">' + esc(ymd) + "</p>" +
+        byDate[ymd].map(function (r) {
+          var border = r.missingEnd ? "#ff8a80" : (r.openNow ? "#9fd39f" : (r.flags.length ? "#ffc96b" : "rgba(240,212,138,.35)"));
+          var endTxt = r.endOdo != null ? n1(r.endOdo)
+            : '<strong style="color:' + (r.openNow ? "#9fd39f" : "#ff8a80") + '">' + (r.openNow ? "open" : "MISSING") + "</strong>";
+          return '<div class="dm-row' + (r.missingEnd ? " dm-missing" : "") + '" data-date="' + esc(r.date) + '" data-driver-id="' + esc(r.driverId) + '"' +
+            ' style="border-left:4px solid ' + border + ';padding:6px 8px;margin:0 0 6px;background:rgba(0,0,0,.18);border-radius:6px;font-size:13px;line-height:1.4">' +
+            "<strong>" + esc(r.driver) + "</strong>" + (r.vehicle ? ' <span class="fine">· ' + esc(r.vehicle) + "</span>" : "") + "<br>" +
+            "Start odo " + n1(r.startOdo) + " → End odo " + endTxt + "<br>" +
+            "<strong>Odometer " + (r.odoMiles == null ? "—" : esc(r.odoMiles.toFixed(1)) + " mi") + "</strong>" +
+            " · Tracked " + (r.trackedMiles == null ? "—" : esc(r.trackedMiles.toFixed(1)) + " mi") +
+            " · Online " + esc(dmFmtOnline(r.onlineMs)) +
+            (r.flags.length ? '<br><span style="color:' + (r.missingEnd ? "#ff8a80" : (r.openNow ? "#9fd39f" : "#ffc96b")) + '">' + (r.openNow ? "" : "⚠ ") + esc(r.flags.join(" · ")) + "</span>" : "") +
+            "</div>";
+        }).join("");
+    }).join("");
+    return head + '<div class="dm-list">' + body + "</div>";
+  }
+
+  function refreshDailyMiles() {
+    var el = document.getElementById("daily-miles-list");
+    if (!el) return;
+    var html = dailyMilesPanelHtml();
+    var sig = String(html.length) + ":" + hashStr(html);
+    if (el.getAttribute("data-html-sig") === sig) return;
+    el.innerHTML = html;
+    el.setAttribute("data-html-sig", sig);
+    var btn = document.getElementById("daily-miles-csv");
+    if (btn) btn.addEventListener("click", function () {
+      var csv = dailyMilesCsv(dailyMilesRowsNow());
+      try {
+        var blob = new Blob([csv], { type: "text/csv" });
+        var a = document.createElement("a");
+        a.href = URL.createObjectURL(blob);
+        a.download = "pcs-daily-miles-" + chicagoToday() + ".csv";
+        document.body.appendChild(a);
+        a.click();
+        setTimeout(function () { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+      } catch (e) {}
+    });
+  }
+
+  window.__pcsGodDailyMiles = { compute: dailyMilesCompute, csv: dailyMilesCsv };
+
   function renderBoard() {
     return (
       '<div class="shell">' +
@@ -4651,6 +4839,10 @@
             '<section class="side-section" id="payments-section">' +
               "<h2>Payments</h2>" +
               '<div id="payments-list">' + paymentsPanelHtml() + "</div>" +
+            "</section>" +
+            '<section class="side-section" id="daily-miles-section">' +
+              "<h2>Daily miles</h2>" +
+              '<div id="daily-miles-list"></div>' +
             "</section>" +
           "</aside>" +
           '<div class="map-pane">' +
@@ -4882,6 +5074,7 @@
       showAll.addEventListener("click", function () { clearFocus(); });
     }
     bindHireForm();
+    refreshDailyMiles(); /* v71m */
     bindDriverActions();
     bindBookingActions();
     bindPaymentActions();
