@@ -4162,7 +4162,10 @@
       var tel = String(who.phone || "").replace(/[^0-9+]/g, "");
       lines.push('<span class="meter-rider-info"><strong>Rider (optional, from the meter page)</strong> ' + esc(who.name || "\u2014") +
         (who.phone ? ' · <a href="tel:' + esc(tel) + '" style="color:#f0d48a">' + esc(who.phone) + "</a>" : "") +
-        (who.email ? ' · <a href="mailto:' + esc(who.email) + '" style="color:#f0d48a">' + esc(who.email) + "</a>" : "") + "</span>");
+        (who.email ? ' · <a href="mailto:' + esc(who.email) + '" style="color:#f0d48a">' + esc(who.email) + "</a>" : "") + "</span>");      var inv = who.invite && typeof who.invite === "object" ? who.invite : null; /* v71: welcome invite status */
+      var invWord = function (st) { return ({ sent: "sent", already_sent: "already invited before", not_configured: "not sent (sender not set up yet)", sms_not_wired: "not sent (texting not set up yet)", skipped_test: "not sent (test ride)", failed: "send failed" })[st] || ""; };
+      if (inv && (invWord(inv.email) || invWord(inv.sms))) lines.push('<span class="meter-rider-invite" style="opacity:.85">Welcome note: ' +
+        [inv.email && invWord(inv.email) ? "email " + invWord(inv.email) : "", inv.sms && invWord(inv.sms) ? "text " + invWord(inv.sms) : ""].filter(Boolean).join(" · ") + "</span>");
     }
     if (rr.cardStatus === "on_file" && !payRecOk(p.final)) lines.push('<span style="color:#8fd0a8">Rider saved a card on the meter page' + (rr.cardLast4 ? " (" + esc(rr.cardBrand || "card") + " " + esc(rr.cardLast4) + ")" : "") + "</span>");
     if (rr.paidVia === "meter_card" || (p.final && p.final.via === "meter_card")) lines.push('<span style="color:#8fd0a8">Paid on the rider\u2019s meter page (saved card)</span>');
