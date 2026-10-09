@@ -4,7 +4,8 @@
    v58: Square LIVE. Payments panel (card saved / charged $X / failed / refunded / deposit / cancel fee + receipts),
    Refund button (God password re-checked by the pcs-pay Worker, never stored), Charge fare now (no tip) for a
    completed ride the rider didn't pay, Charge cancel fee. Mark card OK stays as the override.
-   v59: cancel fee only when the driver was within 1 mile of pickup (the pcs-pay Worker decides). Each cancelled ride
+   v72c (Oct 9): replaces v59 below: any rider cancel of a booked ride = max(25% of fare, $10); distance shown for info only.
+   v59 (superseded): cancel fee only when the driver was within 1 mile of pickup (the pcs-pay Worker decides). Each cancelled ride
    shows "cancel fee $X" or "free cancel (driver X.X mi away)"; Charge cancel fee is hidden for free cancels and the
    Worker refuses it (409 CANCEL_FREE) if the driver was farther than 1 mile or his location wasn't current.
    v62: rides with internationalArrival show "International arrival +$15 service fee (taxed, in the fare)".
@@ -234,7 +235,9 @@
       code: String(raw.code || ""),
       fareBeforeTax: raw.fareBeforeTax != null ? Number(raw.fareBeforeTax) : null,
       commissionCents: raw.commissionCents != null ? Number(raw.commissionCents) : null,
-      completedAt: raw.completedAt || null
+      completedAt: raw.completedAt || null,
+      source: String(raw.source || ""), payMethod: String(raw.payMethod || ""), stops: Array.isArray(raw.stops) ? raw.stops : [], /* v72d */
+      riderPhone: String(raw.riderPhone || ""), balance: raw.balance != null ? Number(raw.balance) : null
     };
   }
 
@@ -313,7 +316,7 @@
     var today = chicagoToday();
     return (state.calendar || []).filter(function (r) {
       if (!r) return false;
-      if (r.status === "cancelled") return false;
+      if (r.status === "cancelled" || r.status === "deleted") return false;
       var day = boardDayKey(r.start) || today;
       return day >= today;
     }).sort(function (a, b) {
@@ -378,7 +381,8 @@
     var fare = Number(fareBeforeTax);
     if (!isFinite(fare) || fare < 0) fare = Number(row.fareBeforeTax) || 0;
     var pct = commissionPctFor(row.assignedDriverId);
-    var commissionCents = Math.round(fare * (pct / 100));
+    var fareCentsV72d = Math.round(fare * 100); /* v72d: fare box is dollars; history is cents */
+    var commissionCents = Math.round(fareCentsV72d * (pct / 100));
     var day = boardDayKey(row.start) || chicagoToday();
     var code = row.code || makeScheduleCode(eventId);
     var entry = {
@@ -390,13 +394,13 @@
       drop: row.dropoff || "",
       rawMiles: null,
       billedMiles: null,
-      fareSub: fare,
+      fareSub: fareCentsV72d,
       fareTax: 0,
-      fareTotal: fare,
+      fareTotal: fareCentsV72d,
       commissionPct: pct,
       commissionCents: commissionCents,
       riderName: row.rider || "",
-      source: "calendar"
+      source: row.source === "manual" ? "manual" : "calendar"
     };
     var next = Object.assign({}, row, {
       status: "completed",
@@ -713,10 +717,16 @@
     if (cf === "refunded") return "cancel fee refunded";
     if (cf === "failed") return "cancel fee failed" + (mi ? " (driver " + mi + " mi away)" : "");
     var accepted = !!(r.acceptedAt || r.driverId || r.driverUid || r.driverName);
+    if (r.cancelledBy === "rider" && cf !== "free" && Number(r.cancelFeeCents) > 0 && !(pol && pol.charge === false)) {
+      return "cancel fee " + fmtCents(r.cancelFeeCents) + " due (25% / $10 min)" + (mi ? " (driver " + mi + " mi away)" : ""); /* v72c */
+    }
     if (cf === "free" || (pol && pol.charge === false) || payPol || (accepted && !(Number(r.cancelFeeCents) > 0))) {
       if (reason === "driver_location_stale" || reason === "driver_location_missing") return "free cancel (driver location not current)";
       if (reason === "not_accepted") return "free cancel (before a driver accepted)";
       if (reason === "decision_window_passed") return "free cancel (too late to check distance)";
+      if (reason === "test_ride") return "free cancel (test ride)";
+      if (reason === "fee_below_minimum") return "free cancel (no fare on file)";
+      if (reason === "kept_from_deposit") { var kd = (pol && pol.keptFromDepositCents) || (payPol && payPol.keptFromDepositCents) || 0; return "cancel fee " + (kd ? fmtCents(kd) + " " : "") + "kept from deposit (quote ride, 25%)"; }
       return "free cancel" + (mi ? " (driver " + mi + " mi away)" : "");
     }
     if (!accepted) return "free cancel (before a driver accepted)";
@@ -3433,6 +3443,10 @@
           "<strong>Ride total</strong> " + esc(fmtCents(e.fareTotal)) + "<br>" +
           "<strong>Commission</strong> " + esc(fmtCents(e.commissionCents)) +
           " (" + esc(String(e.commissionPct || "")) + "%)" +
+          (isCashEntry(e) ? '<br><strong style="color:#ffb35c">' + (isCardFailedCollect(e) ? "Card failed - collect - driver owes " : "cash - driver owes ") + esc(fmtCents(cashDriverOwesCents(e))) + "</strong>" : "") + /* v72d */
+          (String(e.payMethod || "") !== "cash" && String(e.paidVia || "") !== "cash" && e.cashCollected !== true
+            ? '<br><button type="button" class="btn btn-ghost" data-cardfail-toggle="' + esc(e.code || "") + '" data-driver="' + esc(driverId) + '" data-on="' + (isCardFailedCollect(e) ? "1" : "0") + '">' +
+              (isCardFailedCollect(e) ? "Undo Card failed - collect" : "Mark Card failed - collect") + "</button>" : "") +
           (e.billedMiles != null ? "<br><strong>Miles</strong> " + esc(String(e.billedMiles)) : "") +
           (Number(e.tipCents) > 0 ? "<br><strong>Tip</strong> " + esc(fmtCents(e.tipCents)) + " (100% to driver)" : "") +
           (String(e.rideType || "") === "metered" && e.paymentStatus ? "<br><strong>Payment</strong> " + esc(meterPayWord(e.paymentStatus, e.paidVia)) : "") +
@@ -3443,11 +3457,18 @@
     return (
       '<button type="button" class="btn btn-ghost" id="close-driver-detail">← Drivers</button>' +
       "<h3>" + esc(displayName(d.name, "Driver")) + " · history</h3>" +
+      '<button type="button" class="btn btn-gold" data-add-ride-driver="' + esc(driverId) + '" style="margin:4px 0 8px">+ Add ride for ' + esc(displayName(d.name, "driver")) + "</button>" + /* v72d */
       '<p class="meta">' +
       "<strong>All-time ride total</strong> " + esc(fmtCents(totals.rideTotal)) + "<br>" +
       "<strong>All-time commission total</strong> " + esc(fmtCents(totals.commissionTotal)) + "<br>" +
       (totals.tipTotal ? "<strong>All-time tips (100% to driver)</strong> " + esc(fmtCents(totals.tipTotal)) + "<br>" : "") +
       "<strong>Pay week</strong> Mon–Sun · " + esc(monday) + " → " + esc(addDaysYmd(monday, 6)) +
+      (function () { /* v72d: net per driver for the pay week */
+        var wk = payBalance(historyEntries(driverId).filter(function (e) { return weekDays.indexOf(e.day) >= 0; }));
+        return '<br><span class="pay-week-net"><strong>Week owed to driver</strong> ' + esc(fmtCents(wk.owedToDriver)) +
+          " · <strong>owed by driver (cash)</strong> " + esc(fmtCents(wk.owedByDriver)) +
+          " · <strong>Net</strong> " + esc(payNetText(wk)) + "</span>";
+      })() +
       "</p>" +
       '<div class="cal-week">' +
       '<button type="button" class="btn btn-ghost" id="detail-week-prev">←</button>' +
@@ -3544,6 +3565,7 @@
             "</summary>" +
             '<div class="driver-card-body">' +
               locateBtn +
+              '<button type="button" class="btn btn-gold" data-add-ride-driver="' + esc(d.id) + '">+ Add ride</button>' + /* v72d */
               '<p class="driver-speed"><strong>Speed</strong> ' + esc(speedTxt) + "</p>" +
               '<h3 class="driver-card-status">' + badge + "</h3>" +
               '<p class="meta">' +
@@ -3561,6 +3583,9 @@
               (trip ? "<br><strong>With</strong> " + esc(displayName(trip.name, "Rider")) : "") + "<br>" +
               "<strong>Ride total</strong> " + esc(fmtCents(totals.rideTotal)) + "<br>" +
               "<strong>Commission total</strong> " + esc(fmtCents(totals.commissionTotal)) +
+              (function () { var wd = []; var m0 = mondayOfWeek(chicagoToday()); for (var k = 0; k < 7; k += 1) wd.push(addDaysYmd(m0, k));
+                var wk = payBalance(historyEntries(d.id).filter(function (e) { return wd.indexOf(e.day) >= 0; }));
+                return '<br><strong>This week</strong> ' + esc(payNetText(wk)) + (wk.cashRides ? " (" + wk.cashRides + " cash ride" + (wk.cashRides === 1 ? "" : "s") + ", driver owes " + esc(fmtCents(wk.owedByDriver)) + ")" : ""); })() + /* v72d */
               " · " + esc(String(totals.count)) + " logged rides" +
               "</p>" +
               (hist.length
@@ -3903,6 +3928,7 @@
       if (next) b.replaceWith(next);
     }
     refreshDailyMiles(); /* v71m */
+    mountAddRide(); /* v72d */
     bindDriverActions();
     bindBookingActions();
     bindPaymentActions();
@@ -4092,11 +4118,11 @@
     var st = String(ride.status || "").toLowerCase();
     if (st !== "cancelled" && st !== "canceled") return false;
     if (String(ride.cancelledBy || "rider").toLowerCase() !== "rider") return false;
-    /* v59: a free cancel (driver over 1 mile away / location not current) can't be charged */
+    /* a cancel the Worker already decided free (test ride / old v59 rule) can't be charged */
     if (String(ride.cancelFeeStatus || "").toLowerCase() === "free") return false;
     if (ride.cancelPolicy && typeof ride.cancelPolicy === "object" && ride.cancelPolicy.charge === false) return false;
     if (p && p.cancelPolicy) return false;
-    return !!(ride.acceptedAt || ride.driverId || ride.driverUid);
+    return true; /* v72c: any rider cancel of a booked ride owes the fee, accepted or not */
   }
 
   /* ---------------- v70: metered rides (driver app) ---------------- */
@@ -4333,7 +4359,7 @@
 
   function chargeCancelFeeNow(code) {
     if (!code || state.payBusy[code]) return;
-    if (!window.confirm("Charge the cancel fee for " + code + " to the saved card?\n\nOnly allowed if the driver was within 1 mile of the pickup when the rider cancelled. The payment server checks this.")) return;
+    if (!window.confirm("Charge the cancel fee for " + code + " to the saved card?\n\nFee = 25% of the fare or $10, whichever is higher (any rider cancel after booking). The payment server works out the amount.")) return;
     state.payBusy[code] = true;
     setPayNotice("Charging cancel fee " + code + "…");
     var body = { rideCode: code, by: "god", requireFee: true };
@@ -4512,8 +4538,8 @@
     return (
       '<div class="login-wrap">' +
         '<form class="login-card" id="god-login" autocomplete="username">' +
-          '<p class="eyebrow">Private Car Services</p>' +
-          "<h1>PCS God mode</h1>" +
+          '<svg class="pcs-wm" viewBox="0 0 390 96" role="img" aria-label="Private Car Services God mode" style="display:block;width:100%;max-width:420px;height:auto;max-height:120px;border-radius:8px" xmlns="http://www.w3.org/2000/svg"><defs><pattern id="wmg-gl" width="16" height="16" patternUnits="userSpaceOnUse"><path d="M16 0H0V16" fill="none" stroke="#2c4a2a" stroke-width=".6"/></pattern></defs><rect width="390" height="96" fill="#20371d"/><rect width="390" height="96" fill="url(#wmg-gl)"/><text x="195" y="44" text-anchor="middle" font-family="Poppins,Montserrat,Helvetica,Arial,sans-serif" font-style="italic" font-size="21" letter-spacing="1.5" font-weight="300" fill="#cdeccd">PRIVATE CAR SERVICES</text><path d="M28 54H350" stroke="#cdeccd" stroke-width="3"/><path d="M348 48L362 54L348 60Z" fill="#cdeccd"/><text x="195" y="76" text-anchor="middle" font-family="Poppins,Helvetica,Arial,sans-serif" font-style="italic" font-size="14" letter-spacing="1" fill="#a9c9a9">God mode</text></svg>' + /* v72e wordmark */
+          '<h1 style="position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)">PCS God mode</h1>' +
           '<p class="lede">Owner console. Drivers, riders, and live trips — for you only.</p>' +
           '<div class="field">' +
             '<label for="god-email">Email</label>' +
@@ -4532,6 +4558,47 @@
     );
   }
 
+
+  /* v72f: collapsible Scheduled rides board + per-card collapse, remembered in localStorage */
+  var DB_COLLAPSE_KEY = "pcs-god-dayboard-collapsed";
+  var DB_CARDS_KEY = "pcs-god-daycards-collapsed";
+  function dbBoardCollapsed() { try { return localStorage.getItem(DB_COLLAPSE_KEY) === "1"; } catch (e) { return false; } }
+  function dbCardSet() { try { var o = JSON.parse(localStorage.getItem(DB_CARDS_KEY) || "{}"); return o && typeof o === "object" ? o : {}; } catch (e) { return {}; } }
+  function dbHeaderHtml(count) {
+    var c = dbBoardCollapsed();
+    return '<h2 class="day-board-h" style="margin:0"><button type="button" id="day-board-toggle" aria-expanded="' + (c ? "false" : "true") + '" aria-controls="day-board-body"' +
+      ' style="all:unset;cursor:pointer;display:flex;align-items:center;gap:8px;width:100%">' +
+      '<span class="db-caret" aria-hidden="true">' + (c ? "\u25B6" : "\u25BC") + "</span>Scheduled rides" +
+      ' <span class="badge" id="day-board-count">' + count + "</span></button></h2>";
+  }
+  function dbBindOnce() {
+    if (window.__pcsDbBound) return;
+    window.__pcsDbBound = true;
+    document.addEventListener("click", function (ev) {
+      var t = ev.target && ev.target.closest ? ev.target.closest("#day-board-toggle,[data-day-card-toggle]") : null;
+      if (!t) return;
+      ev.preventDefault();
+      if (t.id === "day-board-toggle") {
+        var c = !dbBoardCollapsed();
+        try { localStorage.setItem(DB_COLLAPSE_KEY, c ? "1" : "0"); } catch (e) {}
+        var body = document.getElementById("day-board-body");
+        if (body) body.style.display = c ? "none" : "";
+        t.setAttribute("aria-expanded", c ? "false" : "true");
+        var car = t.querySelector(".db-caret"); if (car) car.textContent = c ? "\u25B6" : "\u25BC";
+        return;
+      }
+      var id = t.getAttribute("data-day-card-toggle");
+      var set = dbCardSet();
+      if (set[id]) delete set[id]; else set[id] = 1;
+      try { localStorage.setItem(DB_CARDS_KEY, JSON.stringify(set)); } catch (e) {}
+      var card = t.closest(".day-card");
+      var det = card && card.querySelector(".day-card-body");
+      if (det) det.style.display = set[id] ? "none" : "";
+      t.setAttribute("aria-expanded", set[id] ? "false" : "true");
+      t.textContent = set[id] ? "\u25B6" : "\u25BC";
+    });
+  }
+  window.__pcsGodDayBoard = { collapsed: dbBoardCollapsed, cards: dbCardSet };
 
   function dayBoardHtml() {
     var rows = upcomingCalendarRides();
@@ -4560,14 +4627,17 @@
         emptyNote +
       "</details>"
     );
+    dbBindOnce();
+    var dbBodyStyle = dbBoardCollapsed() ? ' style="display:none"' : "";
     if (!rows.length && !err) {
       return (
         '<section class="day-board" id="day-board">' +
-        "<h2>Scheduled rides</h2>" +
-        howBlock + notice +
+        dbHeaderHtml(0) +
+        '<div id="day-board-body"' + dbBodyStyle + ">" + howBlock + "</div>" + notice +
         "</section>"
       );
     }
+    var dbCards = dbCardSet();
     var cards = rows.map(function (r) {
       var st = r.status || "open";
       var badge = st === "completed"
@@ -4587,10 +4657,12 @@
       return (
         '<article class="day-card status-' + esc(st) + '">' +
           '<div class="day-card-top">' +
+            '<button type="button" class="btn btn-ghost db-card-toggle" data-day-card-toggle="' + esc(r.id) + '" aria-expanded="' + (dbCards[r.id] ? "false" : "true") + '" aria-label="Collapse or expand this ride" style="padding:2px 8px;min-height:0">' + (dbCards[r.id] ? "\u25B6" : "\u25BC") + "</button>" +
             '<p class="day-time">' + esc(fmtBoardWhen(r.start)) + "</p>" +
             badge +
           "</div>" +
           '<h3 class="day-rider">' + esc(r.rider) + "</h3>" +
+          '<div class="day-card-body"' + (dbCards[r.id] ? ' style="display:none"' : "") + ">" +
           '<p class="day-line"><span>Pickup</span> ' + esc(r.pickup || "—") + "</p>" +
           '<p class="day-line"><span>Drop-off</span> ' + esc(r.dropoff || "—") + "</p>" +
           (r.assignedDriverName
@@ -4610,14 +4682,17 @@
                 '<button type="button" class="btn btn-ghost btn-complete-ride" data-event-id="' + esc(r.id) + '"' + completeDisabled + ">Complete + credit</button>" +
               "</div>"
             )) +
+          "</div>" +
         "</article>"
       );
     }).join("");
     return (
       '<section class="day-board" id="day-board">' +
-        "<h2>Scheduled rides</h2>" +
-        howBlock + notice + err +
+        dbHeaderHtml(rows.length) + notice +
+        '<div id="day-board-body"' + dbBodyStyle + ">" +
+        howBlock + err +
         '<div class="day-grid">' + cards + "</div>" +
+        "</div>" +
       "</section>"
     );
   }
@@ -4809,13 +4884,474 @@
 
   window.__pcsGodDailyMiles = { compute: dailyMilesCompute, csv: dailyMilesCsv };
 
+  /* ---------- v72d: God-only "Add ride" manual entry (Oct 9) ----------
+     FULL manual authority: every field is editable; calculations only PREFILL fields Matthew hasn't typed in.
+     Saves a normal scheduled ride on /rides/PCSCALND/{id} (same hub + assign path as the day board), assigned to the
+     chosen driver: driver app "Scheduled for you", God board, and when status = completed a /rides/DRVRHSTY/{driver}/{code}
+     entry (cents) that counts toward commission and the Mon–Sun pay week. Edit / delete after saving, each with an audit note.
+     Delete is a soft delete (status "deleted", kept for the audit trail; pay-week entry removed). */
+  var ADD_RIDE_PAY = [["square", "Card (Square)"], ["cash", "Cash (driver collects)"], ["card_failed", "Card failed - collect"], ["prepaid", "Prepaid"], ["invoice", "Invoice"]];
+  function arCollects(pm) { return pm === "cash" || pm === "card_failed"; }
+  var ADD_RIDE_STATUS = [["assigned", "Assigned (upcoming)"], ["completed", "Completed"], ["cancelled", "Cancelled"]];
+  var AR_DERIVED = ["total", "commission", "balance"];
+
+  /* v72d cash rule: on a CASH ride the driver holds the money, so the driver OWES Matthew everything except his
+     commission: fare total (incl. taxes/fees) - commission (= 30% of the fare + taxes/fees at 70%). Card/other rides:
+     Matthew owes the driver commission + tip. Net per driver = owed to driver - owed by driver. */
+  /* Card failed - collect: a declined card flips the ride like cash (driver collects from the rider and owes PCS
+     30% + taxes). Auto when the pay-week entry says paymentStatus failed; God's cardFailedCollect true/false overrides. */
+  function isCardFailedCollect(e) {
+    if (!e) return false;
+    if (e.cardFailedCollect === true || e.cardFailedCollect === false) return e.cardFailedCollect;
+    var pm = String(e.payMethod || "").toLowerCase();
+    return pm === "card_failed" || String(e.paymentStatus || "").toLowerCase() === "failed";
+  }
+  function isCashEntry(e) {
+    if (!e) return false;
+    if (isCardFailedCollect(e)) return true;
+    return String(e.payMethod || "").toLowerCase() === "cash" || String(e.paidVia || "").toLowerCase() === "cash" || e.cashCollected === true;
+  }
+  function cashDriverOwesCents(e) {
+    if (!isCashEntry(e)) return 0;
+    if (e.driverOwesCents != null && isFinite(+e.driverOwesCents)) return Math.max(0, Math.round(+e.driverOwesCents));
+    return Math.max(0, Math.round((Number(e.fareTotal) || 0) - (Number(e.commissionCents) || 0)));
+  }
+  function payBalance(entries) {
+    var out = { owedToDriver: 0, owedByDriver: 0, net: 0, cashRides: 0 };
+    (entries || []).forEach(function (e) {
+      if (isCashEntry(e)) { out.owedByDriver += cashDriverOwesCents(e); out.cashRides += 1; }
+      else out.owedToDriver += (Number(e.commissionCents) || 0) + (Number(e.tipCents) || 0);
+    });
+    out.net = out.owedToDriver - out.owedByDriver;
+    return out;
+  }
+  function payNetText(b) {
+    return b.net >= 0 ? "PCS owes driver " + fmtCents(b.net) : "Driver owes PCS " + fmtCents(-b.net);
+  }
+
+  function addRideNewId(now) {
+    var alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+    var rnd = "";
+    var i;
+    for (i = 0; i < 6; i += 1) rnd += alphabet.charAt(Math.floor(Math.random() * alphabet.length));
+    return "manual-" + String(now || Date.now()) + "-" + rnd;
+  }
+
+  function addRideCode() {
+    var alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+    var out = "M";
+    while (out.length < 8) out += alphabet.charAt(Math.floor(Math.random() * alphabet.length));
+    return out;
+  }
+
+  /* "2026-10-09" + "19:30" (Chicago wall time) -> ISO with the right offset (CDT -05:00 / CST -06:00). */
+  function addRideChicagoIso(date, time) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(String(date || "")) || !/^\d{2}:\d{2}$/.test(String(time || ""))) return "";
+    var guess = new Date(date + "T" + time + ":00-06:00");
+    var parts = {};
+    new Intl.DateTimeFormat("en-US", { timeZone: "America/Chicago", hour12: false, year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" })
+      .formatToParts(guess).forEach(function (p) { if (p.type !== "literal") parts[p.type] = p.value; });
+    var hh = parts.hour === "24" ? "00" : parts.hour;
+    var off = (hh + ":" + parts.minute) === time && (parts.year + "-" + parts.month + "-" + parts.day) === date ? "-06:00" : "-05:00";
+    return date + "T" + time + ":00" + off;
+  }
+
+  function arNum(v) {
+    if (v === null || v === undefined || String(v).trim() === "") return null;
+    var n = Number(String(v).replace(/[$,%\s]/g, ""));
+    return isFinite(n) ? n : NaN;
+  }
+  function ar2(n) { return Math.round(n * 100) / 100; }
+
+  /* Pure: fill the derived fields (total, commission, balance) from fare / discount / tax / % / payment, but ONLY the
+     ones not in `touched` (Matthew's typed values always win). Returns a new draft. */
+  function addRidePrefill(d, touched, defaultPct) {
+    d = Object.assign({}, d || {});
+    touched = touched || {};
+    if (!touched.commissionPct && (d.commissionPct == null || d.commissionPct === "")) d.commissionPct = String(defaultPct != null ? defaultPct : 70);
+    var fare = arNum(d.fare), disc = arNum(d.discount) || 0, tax = arNum(d.taxFees) || 0, pct = arNum(d.commissionPct);
+    if (fare == null || isNaN(fare) || isNaN(disc) || isNaN(tax) || pct == null || isNaN(pct)) return d;
+    var net = ar2(fare - disc);
+    var total = ar2(net + tax);
+    var commission = ar2(net * pct / 100);
+    if (!touched.total) d.total = total.toFixed(2);
+    if (!touched.commission) d.commission = commission.toFixed(2);
+    var t = arNum(d.total), c = arNum(d.commission);
+    /* collect (cash / card failed): PCS share = (100 - %) of the fare, rounded, + all taxes/fees (Brian example: 48.89 + 13.44 = 62.33).
+       If Matthew typed his own total or commission, use total - commission instead. */
+    var share = touched.total || touched.commission ? ar2((isNaN(t) ? total : t) - (isNaN(c) ? commission : c)) : ar2(ar2(net * (100 - pct) / 100) + tax);
+    if (!touched.balance) d.balance = arCollects(d.payMethod) ? share.toFixed(2) : (isNaN(c) ? commission : c).toFixed(2);
+    return d;
+  }
+
+  /* Pure: validate + build the PCSCALND row from Matthew's values (no recalculation). prev = row being edited. */
+  function addRideBuild(f, drivers, now, prev) {
+    f = f || {};
+    now = now || Date.now();
+    var driver = null;
+    (drivers || []).forEach(function (d) { if (d && d.id === f.driverId) driver = d; });
+    if (!driver && prev && prev.assignedDriverId === f.driverId) driver = { id: prev.assignedDriverId, name: prev.assignedDriverName };
+    if (!driver) return { ok: false, error: "Pick a driver." };
+    var name = String(f.name || "").trim().slice(0, 200);
+    if (!name) return { ok: false, error: "Enter the client's name." };
+    var phone = String(f.phone || "").replace(/[^\d+]/g, "").slice(0, 20);
+    var pickup = String(f.pickup || "").trim().slice(0, 400);
+    var dropoff = String(f.dropoff || "").trim().slice(0, 400);
+    if (!pickup || !dropoff) return { ok: false, error: "Enter pickup and drop-off." };
+    var stops = String(f.stops || "").split(/\n/).map(function (s) { return s.trim().slice(0, 400); }).filter(Boolean).slice(0, 5);
+    var start = addRideChicagoIso(f.date, f.time);
+    if (!start) return { ok: false, error: "Enter the date and time." };
+    var pay = String(f.payMethod || "");
+    if (!ADD_RIDE_PAY.some(function (p) { return p[0] === pay; })) return { ok: false, error: "Pick a payment method (cash or card)." };
+    var status = String(f.status || "assigned");
+    if (!ADD_RIDE_STATUS.some(function (p) { return p[0] === status; })) return { ok: false, error: "Pick a status." };
+    var nums = {};
+    var spec = [["fare", "Fare", true], ["discount", "Discount"], ["taxFees", "Tax / fees"], ["total", "Total", true],
+      ["commissionPct", "Commission %", true], ["commission", "Driver commission", true], ["balance", arCollects(pay) ? "Driver owes" : "Owed to driver", true]];
+    for (var i = 0; i < spec.length; i += 1) {
+      var v = arNum(f[spec[i][0]]);
+      if (v == null) { if (spec[i][2]) return { ok: false, error: spec[i][1] + " is empty." }; v = 0; }
+      if (isNaN(v)) return { ok: false, error: spec[i][1] + " must be a number." };
+      if (v < 0 || v > 100000) return { ok: false, error: spec[i][1] + " is out of range." };
+      nums[spec[i][0]] = ar2(v);
+    }
+    var notes = String(f.notes || "").trim().slice(0, 2000);
+    var row = Object.assign({}, prev || {}, {
+      id: (prev && prev.id) || addRideNewId(now),
+      source: "manual",
+      title: "PCS – " + name,
+      rider: name, riderPhone: phone,
+      pickup: pickup, dropoff: dropoff, stops: stops,
+      start: start, end: "",
+      description: (stops.length ? "Stops: " + stops.join(" | ") + "\n" : "") + (notes ? "Notes: " + notes : ""),
+      notes: notes,
+      fareBeforeTax: ar2(nums.fare - nums.discount), /* day board / driver app read this */
+      fare: nums.fare, discount: nums.discount, taxFees: nums.taxFees, total: nums.total,
+      commissionPct: nums.commissionPct, commissionDollars: nums.commission,
+      balance: nums.balance, balanceDir: arCollects(pay) ? "driver_owes" : "owed_to_driver",
+      flatPrice: !!f.flat,
+      payMethod: pay,
+      assignedDriverId: driver.id, assignedDriverName: driver.name || driver.id,
+      status: status,
+      code: (prev && prev.code) || addRideCode(),
+      createdBy: (prev && prev.createdBy) || "god",
+      createdAt: (prev && prev.createdAt) || now,
+      updatedAt: now
+    });
+    if (status === "completed") {
+      row.completedAt = (prev && prev.completedAt) || now;
+      row.commissionCents = Math.round(nums.commission * 100);
+    } else { delete row.completedAt; row.commissionCents = null; }
+    return { ok: true, row: row };
+  }
+
+  /* Pure: the DRVRHSTY entry for a completed manual ride, straight from the row (cents, no recalculation). */
+  function addRideHistoryEntry(row, now) {
+    var cash = arCollects(row.payMethod);
+    var c = Math.round((Number(row.commissionDollars) || 0) * 100);
+    var bal = Math.round((Number(row.balance) || 0) * 100);
+    return {
+      code: row.code,
+      day: boardDayKey(row.start) || chicagoToday(),
+      completedAt: row.completedAt || now || Date.now(),
+      when: fmtBoardWhen(row.start),
+      pickup: row.pickup || "", drop: row.dropoff || "",
+      rawMiles: null, billedMiles: null,
+      fareSub: Math.round((Number(row.fareBeforeTax) || 0) * 100),
+      discountCents: Math.round((Number(row.discount) || 0) * 100),
+      fareTax: Math.round((Number(row.taxFees) || 0) * 100),
+      fareTotal: Math.round((Number(row.total) || 0) * 100),
+      commissionPct: Number(row.commissionPct) || 0,
+      commissionCents: cash ? c : bal, /* card: Matthew's "owed to driver" value is what the week pays */
+      riderName: row.rider || "",
+      payMethod: row.payMethod || "",
+      cashCollected: row.payMethod === "cash",
+      cardFailedCollect: row.payMethod === "card_failed",
+      driverOwesCents: cash ? bal : 0,
+      manual: true,
+      source: "manual"
+    };
+  }
+
+  function arAudit(prev, note, action, now) {
+    var log = Array.isArray(prev && prev.audit) ? prev.audit.slice(-49) : [];
+    log.push({ at: now, by: state.sessionEmail || "god", action: action, note: String(note || "").slice(0, 500) });
+    return log;
+  }
+
+  function arHistoryPut(driverId, code, entry) {
+    return fetch(historyUrl(driverId, code), { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(entry) })
+      .then(function (res) { if (!res.ok) throw new Error("Saved the ride, but the pay-week entry failed."); });
+  }
+  function arHistoryDelete(driverId, code) {
+    if (!driverId || !code) return Promise.resolve();
+    return fetch(historyUrl(driverId, code), { method: "DELETE" }).then(function (res) { if (!res.ok) throw new Error("Could not remove the old pay-week entry."); });
+  }
+
+  function arDriverChoices(includeId) {
+    var list = approvedDriversForAssign().slice();
+    if (includeId && !list.some(function (d) { return d.id === includeId; })) {
+      knownDriverRows().forEach(function (d) { if (d && d.id === includeId) list.push(d); });
+    }
+    return list;
+  }
+
+  function arFindRow(id) {
+    var row = null;
+    (state.calendar || []).forEach(function (r) { if (r && r.id === id) row = r; });
+    return row;
+  }
+
+  function addRideSave(f) {
+    var editId = state.addRideEditId || "";
+    var prevNorm = editId ? arFindRow(editId) : null;
+    var prev = editId ? Object.assign({}, (state.addRideRaw && state.addRideRaw[editId]) || prevNorm || {}) : null;
+    if (editId && !String(f.audit || "").trim()) return Promise.reject(new Error("Add an audit note saying what you changed and why."));
+    var now = Date.now();
+    var built = addRideBuild(f, arDriverChoices(f.driverId), now, prev);
+    if (!built.ok) return Promise.reject(new Error(built.error));
+    var row = built.row;
+    row.audit = arAudit(prev, editId ? f.audit : (f.audit || "created"), editId ? "edit" : "create", now);
+    var wasDone = prev && prev.status === "completed";
+    var steps = Promise.resolve();
+    if (wasDone && (row.status !== "completed" || prev.assignedDriverId !== row.assignedDriverId)) {
+      steps = steps.then(function () { return arHistoryDelete(prev.assignedDriverId, prev.code); });
+    }
+    return steps.then(function () { return putCalendarRide(row); }).then(function () {
+      if (row.status !== "completed") return null;
+      return arHistoryPut(row.assignedDriverId, row.code, addRideHistoryEntry(row, now));
+    }).then(function () {
+      state.addRideDraft = null; state.addRideTouched = {}; state.addRideOpen = false; state.addRideEditId = "";
+      var cash = arCollects(row.payMethod);
+      state.boardNotice = (editId ? "Updated " : "Added ") + row.rider + " → " + row.assignedDriverName + " · " + row.status +
+        (cash ? " · cash - driver owes " + fmtCents(Math.round(row.balance * 100)) : " · owed to driver " + fmtCents(Math.round(row.balance * 100))) + " (" + row.code + ")";
+      return refresh();
+    }).then(function () { return row; });
+  }
+
+  function addRideDelete(id, note) {
+    var prev = Object.assign({}, (state.addRideRaw && state.addRideRaw[id]) || arFindRow(id) || {});
+    if (!prev.id) return Promise.reject(new Error("Ride not found."));
+    if (!String(note || "").trim()) return Promise.reject(new Error("An audit note is required to delete."));
+    var now = Date.now();
+    var next = Object.assign({}, prev, { status: "deleted", deletedAt: now, updatedAt: now, audit: arAudit(prev, note, "delete", now) });
+    var steps = prev.status === "completed" ? arHistoryDelete(prev.assignedDriverId, prev.code) : Promise.resolve();
+    return steps.then(function () { return putCalendarRide(next); }).then(function () {
+      state.boardNotice = "Deleted manual ride " + (prev.rider || "") + " (" + (prev.code || "") + ") · audit note saved";
+      return refresh();
+    });
+  }
+
+  function arLoadRaw(id) {
+    return fetch(calendarUrl(id)).then(function (res) { return res.ok ? res.json() : null; }).then(function (raw) {
+      state.addRideRaw = state.addRideRaw || {};
+      if (raw) state.addRideRaw[id] = raw;
+      return raw;
+    }).catch(function () { return null; });
+  }
+
+  function arDraftFromRow(r) {
+    var parts = {};
+    try {
+      new Intl.DateTimeFormat("en-US", { timeZone: "America/Chicago", hour12: false, year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" })
+        .formatToParts(new Date(r.start)).forEach(function (p) { if (p.type !== "literal") parts[p.type] = p.value; });
+    } catch (e) {}
+    var s2 = function (v) { return v == null || v === "" ? "" : Number(v).toFixed(2); };
+    return { driverId: r.assignedDriverId, status: r.status === "deleted" ? "cancelled" : (r.status || "assigned"), name: r.rider || "", phone: r.riderPhone || "",
+      pickup: r.pickup || "", stops: (r.stops || []).join("\n"), dropoff: r.dropoff || "",
+      date: parts.year ? parts.year + "-" + parts.month + "-" + parts.day : "", time: parts.hour ? (parts.hour === "24" ? "00" : parts.hour) + ":" + parts.minute : "",
+      fare: s2(r.fare != null ? r.fare : r.fareBeforeTax), discount: s2(r.discount || 0), taxFees: s2(r.taxFees || 0), total: s2(r.total),
+      commissionPct: r.commissionPct != null ? String(r.commissionPct) : "", commission: s2(r.commissionDollars), balance: s2(r.balance),
+      payMethod: r.payMethod || "", flat: !!r.flatPrice, notes: r.notes || "", audit: "" };
+  }
+
+  function addRideOpenFor(driverId, editId) {
+    state.addRideOpen = true; state.addRideError = ""; state.addRideEditId = editId || "";
+    if (editId) {
+      return arLoadRaw(editId).then(function (raw) {
+        var r = raw || arFindRow(editId) || {};
+        state.addRideDraft = arDraftFromRow(r);
+        state.addRideTouched = { total: true, commission: true, balance: true, commissionPct: true }; /* keep saved overrides */
+        mountAddRideModal(true);
+      });
+    }
+    state.addRideTouched = {};
+    state.addRideDraft = addRidePrefill({ driverId: driverId || "", status: "assigned", date: chicagoToday() }, {}, driverId ? commissionPctFor(driverId) : DEFAULT_COMMISSION_PCT);
+    mountAddRideModal(true);
+    return Promise.resolve();
+  }
+
+  function addRideFormHtml() {
+    var d = state.addRideDraft || {};
+    var drivers = arDriverChoices(d.driverId);
+    var sel = function (id, list, ph) {
+      return '<select id="ar-' + id + '" data-ar="' + id + '"><option value="">' + ph + "</option>" + list.map(function (o) {
+        return '<option value="' + esc(o[0]) + '"' + (o[0] === d[id] ? " selected" : "") + ">" + esc(o[1]) + "</option>";
+      }).join("") + "</select>";
+    };
+    var inp = function (id, label, type, extra) {
+      return '<label class="ar-l" for="ar-' + id + '">' + label + "</label>" +
+        '<input id="ar-' + id + '" data-ar="' + id + '" type="' + (type || "text") + '" value="' + esc(d[id] == null ? "" : d[id]) + '"' + (extra || "") + ">";
+    };
+    var money = ' inputmode="decimal" autocomplete="off"';
+    var cash = arCollects(d.payMethod);
+    return (
+      '<div class="add-ride-sheet" role="dialog" aria-modal="true" aria-labelledby="ar-title" style="background:#141414;color:#fff;border:2px solid #f0d48a;border-radius:16px;max-width:560px;width:100%;max-height:92vh;overflow:auto;padding:16px 18px">' +
+      '<h2 id="ar-title" style="margin:0 0 8px">' + (state.addRideEditId ? "Edit manual ride" : "Add ride") + "</h2>" +
+      '<p class="fine" style="opacity:.8;margin:0 0 10px">Every field is yours to change. Totals only prefill boxes you haven\'t typed in.</p>' +
+      '<div class="ar-grid" style="display:grid;grid-template-columns:1fr 1fr;gap:6px 12px">' +
+      '<div><label class="ar-l" for="ar-driverId">Driver</label>' + sel("driverId", drivers.map(function (x) { return [x.id, x.name || x.id]; }), "Pick a driver…") + "</div>" +
+      '<div><label class="ar-l" for="ar-status">Status</label>' + sel("status", ADD_RIDE_STATUS, "Status…") + "</div>" +
+      "<div>" + inp("name", "Client name") + "</div><div>" + inp("phone", "Client phone", "tel") + "</div>" +
+      '<div style="grid-column:1/3">' + inp("pickup", "Pickup") + "</div>" +
+      '<div style="grid-column:1/3"><label class="ar-l" for="ar-stops">Stops (optional, one per line)</label><textarea id="ar-stops" data-ar="stops" rows="2" style="width:100%">' + esc(d.stops || "") + "</textarea></div>" +
+      '<div style="grid-column:1/3">' + inp("dropoff", "Drop-off") + "</div>" +
+      "<div>" + inp("date", "Date", "date") + "</div><div>" + inp("time", "Time", "time") + "</div>" +
+      '<div><label class="ar-l" for="ar-payMethod">Payment method</label>' + sel("payMethod", ADD_RIDE_PAY, "Cash or card…") + "</div>" +
+      '<div><label class="ar-c" style="display:block;margin-top:22px"><input type="checkbox" id="ar-flat" data-ar="flat"' + (d.flat ? " checked" : "") + "> Flat price</label></div>" +
+      "<div>" + inp("fare", "Fare ($)", "text", money) + "</div><div>" + inp("discount", "Discount ($)", "text", money) + "</div>" +
+      "<div>" + inp("taxFees", "Tax / fees ($)", "text", money) + "</div><div>" + inp("total", "Total charged ($)", "text", money) + "</div>" +
+      "<div>" + inp("commissionPct", "Commission %", "text", money) + "</div><div>" + inp("commission", "Driver commission ($)", "text", money) + "</div>" +
+      '<div style="grid-column:1/3">' + inp("balance", cash ? "Driver owes PCS ($) — driver collects" : "PCS owes driver ($)", "text", money + ' style="font-weight:800;font-size:18px"') + "</div>" +
+      '<div style="grid-column:1/3"><label class="ar-l" for="ar-notes">Notes</label><textarea id="ar-notes" data-ar="notes" rows="2" style="width:100%">' + esc(d.notes || "") + "</textarea></div>" +
+      '<div style="grid-column:1/3">' + inp("audit", state.addRideEditId ? "Audit note (required): what changed and why" : "Audit note (optional)") + "</div>" +
+      "</div>" +
+      '<p class="error" id="add-ride-error" role="alert" style="color:#ff6b6b">' + esc(state.addRideError || "") + "</p>" +
+      '<div class="row-actions" style="display:flex;gap:8px;flex-wrap:wrap">' +
+      '<button type="button" class="btn btn-gold" id="add-ride-save"' + (state.addRideBusy ? " disabled" : "") + ">" + (state.addRideBusy ? "Saving…" : (state.addRideEditId ? "Save changes" : "Save ride")) + "</button>" +
+      '<button type="button" class="btn btn-ghost" id="add-ride-recalc">Recalculate totals</button>' +
+      '<button type="button" class="btn btn-ghost" id="add-ride-cancel">Close</button></div>' +
+      "</div>"
+    );
+  }
+
+  function arSyncDerivedDom() {
+    AR_DERIVED.forEach(function (k) {
+      var el = document.getElementById("ar-" + k);
+      if (el && document.activeElement !== el && el.value !== String(state.addRideDraft[k] == null ? "" : state.addRideDraft[k])) el.value = state.addRideDraft[k];
+    });
+    var bl = document.querySelector('label[for="ar-balance"]');
+    if (bl) bl.textContent = arCollects(state.addRideDraft.payMethod) ? "Driver owes PCS ($) — driver collects" : "PCS owes driver ($)";
+    var pe = document.getElementById("ar-commissionPct");
+    if (pe && document.activeElement !== pe && pe.value !== String(state.addRideDraft.commissionPct || "")) pe.value = state.addRideDraft.commissionPct || "";
+  }
+
+  function mountAddRideModal(force) {
+    var host = document.getElementById("add-ride-modal");
+    if (!state.addRideOpen) { if (host) host.remove(); return; }
+    if (!host) {
+      host = document.createElement("div");
+      host.id = "add-ride-modal";
+      host.setAttribute("style", "position:fixed;inset:0;z-index:20000;background:rgba(0,0,0,.72);display:flex;align-items:center;justify-content:center;padding:12px");
+      document.body.appendChild(host);
+      force = true;
+    }
+    if (!force) return;
+    host.innerHTML = addRideFormHtml();
+    Array.prototype.forEach.call(host.querySelectorAll("[data-ar]"), function (el) {
+      var key = el.getAttribute("data-ar");
+      var save = function () {
+        state.addRideDraft = state.addRideDraft || {};
+        state.addRideDraft[key] = el.type === "checkbox" ? el.checked : el.value;
+        if (key === "total" || key === "commission" || key === "balance" || key === "commissionPct") state.addRideTouched[key] = true;
+        if (key === "driverId" && !state.addRideTouched.commissionPct && el.value) state.addRideDraft.commissionPct = String(commissionPctFor(el.value));
+        if (["fare", "discount", "taxFees", "commissionPct", "payMethod", "driverId", "total", "commission"].indexOf(key) >= 0) {
+          state.addRideDraft = addRidePrefill(state.addRideDraft, state.addRideTouched, DEFAULT_COMMISSION_PCT);
+          arSyncDerivedDom();
+        }
+      };
+      el.addEventListener("input", save);
+      el.addEventListener("change", save);
+    });
+    document.getElementById("add-ride-cancel").addEventListener("click", function () { state.addRideOpen = false; state.addRideEditId = ""; mountAddRideModal(); });
+    document.getElementById("add-ride-recalc").addEventListener("click", function () {
+      state.addRideTouched = {};
+      state.addRideDraft = addRidePrefill(Object.assign({}, state.addRideDraft, { commissionPct: state.addRideDraft.driverId ? String(commissionPctFor(state.addRideDraft.driverId)) : state.addRideDraft.commissionPct }), { commissionPct: true }, DEFAULT_COMMISSION_PCT);
+      mountAddRideModal(true);
+    });
+    document.getElementById("add-ride-save").addEventListener("click", function () {
+      var f = state.addRideDraft || {};
+      if (f.status === "completed" && !state.addRideEditId && !window.confirm("Save as completed and put it in the driver's pay week now?")) return;
+      state.addRideBusy = true; state.addRideError = ""; mountAddRideModal(true);
+      addRideSave(f).then(function () {
+        state.addRideBusy = false; mountAddRideModal();
+      }).catch(function (err) {
+        state.addRideBusy = false; state.addRideError = (err && err.message) || "Could not save the ride."; mountAddRideModal(true);
+      });
+    });
+  }
+
+  function manualRidesListHtml() {
+    var rows = (state.calendar || []).filter(function (r) { return r && r.source === "manual" && r.status !== "deleted"; })
+      .sort(function (a, b) { return String(b.start || "").localeCompare(String(a.start || "")); }).slice(0, 30);
+    var head = '<button type="button" class="btn btn-gold" data-add-ride-driver="">+ Add ride</button>' +
+      '<p class="fine" style="opacity:.75;margin:6px 0">Tip: open a driver and tap Add ride to pre-pick them.</p>';
+    if (!rows.length) return head;
+    return head + rows.map(function (r) {
+      return '<article class="card manual-ride" data-manual-id="' + esc(r.id) + '" style="padding:8px 10px;margin:6px 0">' +
+        "<strong>" + esc(r.rider) + "</strong> · " + esc(fmtBoardWhen(r.start)) + " · " + esc(r.assignedDriverName || "") + " · " + esc(r.status) + "<br>" +
+        '<span class="fine">' + esc(r.pickup) + " → " + esc(r.dropoff) + "</span> " +
+        '<button type="button" class="btn btn-ghost" data-ar-edit="' + esc(r.id) + '">Edit</button> ' +
+        '<button type="button" class="btn btn-ghost" data-ar-delete="' + esc(r.id) + '">Delete</button></article>';
+    }).join("");
+  }
+
+  /* Pure: patch for a pay-week entry when God sets / clears Card failed - collect (driver owes 30% + taxes = total - commission). */
+  function cardFailPatch(e, on) {
+    if (!on) return { cardFailedCollect: false, driverOwesCents: 0 };
+    return { cardFailedCollect: true, driverOwesCents: Math.max(0, Math.round((Number(e.fareTotal) || 0) - (Number(e.commissionCents) || 0))) };
+  }
+  function cardFailToggle(driverId, code, on) {
+    var e = ((state.history && state.history[driverId]) || {})[code];
+    if (!e) return;
+    var note = window.prompt((on ? "Mark Card failed - collect" : "Undo Card failed - collect") + " for " + code + "? Audit note:", "");
+    if (note === null) return;
+    var patch = cardFailPatch(e, on);
+    patch.cardFailAudit = { at: Date.now(), by: state.sessionEmail || "god", on: on, note: String(note).slice(0, 500) };
+    fetch(historyUrl(driverId, code), { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(patch) }).then(function (res) {
+      if (!res.ok) throw new Error("x");
+      Object.assign(e, patch);
+      state.boardNotice = on ? code + ": Card failed - collect · driver owes " + fmtCents(patch.driverOwesCents) : code + ": back to card (owed to driver)";
+      return refresh();
+    }).catch(function () { state.boardNotice = "Could not update " + code + "."; });
+  }
+
+  function mountAddRide() {
+    var box = document.getElementById("add-ride-box");
+    if (box) {
+      var html = manualRidesListHtml();
+      if (box.getAttribute("data-html") !== html) { box.innerHTML = html; box.setAttribute("data-html", html); }
+    }
+    mountAddRideModal(false);
+    if (!window.__pcsArBound) {
+      window.__pcsArBound = true;
+      document.addEventListener("click", function (ev) {
+        var t = ev.target && ev.target.closest ? ev.target.closest("[data-add-ride-driver],[data-ar-edit],[data-ar-delete],[data-cardfail-toggle]") : null;
+        if (!t) return;
+        ev.preventDefault();
+        if (t.hasAttribute("data-cardfail-toggle")) { cardFailToggle(t.getAttribute("data-driver"), t.getAttribute("data-cardfail-toggle"), t.getAttribute("data-on") !== "1"); return; }
+        if (t.hasAttribute("data-add-ride-driver")) { addRideOpenFor(t.getAttribute("data-add-ride-driver") || ""); return; }
+        if (t.hasAttribute("data-ar-edit")) { addRideOpenFor("", t.getAttribute("data-ar-edit")); return; }
+        var id = t.getAttribute("data-ar-delete");
+        var note = window.prompt("Delete this manual ride? Type an audit note (why):", "");
+        if (note === null) return;
+        arLoadRaw(id).then(function () { return addRideDelete(id, note); }).catch(function (err) {
+          state.boardNotice = (err && err.message) || "Could not delete."; try { renderBoardLists(); } catch (e) {}
+        });
+      });
+    }
+  }
+
+  window.__pcsGodAddRide = { build: addRideBuild, prefill: addRidePrefill, historyEntry: addRideHistoryEntry, chicagoIso: addRideChicagoIso,
+    payBalance: payBalance, isCash: isCashEntry, cashOwes: cashDriverOwesCents, cardFailPatch: cardFailPatch, isCardFailed: isCardFailedCollect, openFor: function (d, e) { return addRideOpenFor(d, e); } };
+
   function renderBoard() {
     return (
       '<div class="shell">' +
         '<header class="topbar">' +
           "<div>" +
-            '<p class="eyebrow">Private Car Services</p>' +
-            "<h1>PCS God mode</h1>" +
+            '<svg class="pcs-wm" viewBox="0 0 390 96" role="img" aria-label="Private Car Services God mode" style="display:block;width:100%;max-width:300px;height:auto;max-height:64px;border-radius:8px" xmlns="http://www.w3.org/2000/svg"><defs><pattern id="wmg-gh" width="16" height="16" patternUnits="userSpaceOnUse"><path d="M16 0H0V16" fill="none" stroke="#2c4a2a" stroke-width=".6"/></pattern></defs><rect width="390" height="96" fill="#20371d"/><rect width="390" height="96" fill="url(#wmg-gh)"/><text x="195" y="44" text-anchor="middle" font-family="Poppins,Montserrat,Helvetica,Arial,sans-serif" font-style="italic" font-size="21" letter-spacing="1.5" font-weight="300" fill="#cdeccd">PRIVATE CAR SERVICES</text><path d="M28 54H350" stroke="#cdeccd" stroke-width="3"/><path d="M348 48L362 54L348 60Z" fill="#cdeccd"/><text x="195" y="76" text-anchor="middle" font-family="Poppins,Helvetica,Arial,sans-serif" font-style="italic" font-size="14" letter-spacing="1" fill="#a9c9a9">God mode</text></svg>' + /* v72e wordmark */
+            '<h1 style="position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)">PCS God mode</h1>' +
             '<p class="who">' + esc(state.sessionEmail) + "</p>" +
           "</div>" +
           '<div class="top-actions">' +
@@ -4827,6 +5363,10 @@
         dayBoardHtml() +
         '<div class="workspace">' +
           '<aside class="side">' +
+            '<section class="side-section" id="add-ride-section">' +
+              "<h2>Add ride</h2>" +
+              '<div id="add-ride-box"></div>' +
+            "</section>" +
             '<section class="side-section">' +
               "<h2>Drivers</h2>" +
               hireBlockHtml() +
@@ -5075,6 +5615,7 @@
     }
     bindHireForm();
     refreshDailyMiles(); /* v71m */
+    mountAddRide(); /* v72d */
     bindDriverActions();
     bindBookingActions();
     bindPaymentActions();
