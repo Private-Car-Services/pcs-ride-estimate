@@ -30,6 +30,10 @@
         Rider sign-in acknowledgment (BETA_ACK_REQUIRED): a Beta Mode sheet with "I understand" blocks the rider app at
         every login and every fresh launch with a saved session; remembered only in sessionStorage for this app launch
         (pcs-beta-ack), cleared at login and logout. Driver app and God mode: nothing.
+   v71 (Oct 8): metered ride: clean $0.25 steps after the start ($12.10 -> $12.25 -> $12.50; v70 counted the steps from the
+        start, giving $12.35 / $12.60). Live MPH on the driver's meter panel (4th box; "MPH · SLOW" tint under the slow
+        speed) and in the rider live meter snapshot (meterLive.mph / mphAt). Display only: the fare still uses the
+        per-minute average speed. Live snapshot every 5 s.
    v70 (Oct 8): DRIVER app "Metered ride" (Home + Home menu): Start with no rider name/phone, live fare from GPS miles
         (straight-line between fixes, gaps bridged) + stopped/slow-traffic minutes (under 10 mph; first 2 min at the start
         free), profiles METER_PROFILES (Day Trip $1.10 / Night $1.38 / Late $1.43 per mile, band picked at Start; meter
@@ -116,7 +120,8 @@
      One profile per time band; the band is picked when the driver taps Start and stays for the whole ride.
        The meter STARTS at METER_START_BASE ($11) + one mile's rate = $12.10 / $12.38 / $12.43, and that start COVERS the
        first mile (includedMiles). After that it adds perMile for each mile beyond the first, plus perMinute for each slow
-       minute, going up in `step` amounts (rounded up).
+       minute. v71: after the start the meter rounds UP to the next whole `step` on the plain $0.25 grid
+       ($12.10 -> $12.25 -> $12.50, never $12.35).
        perMile / perMinute / entry / minimum / step are in DOLLARS.
        entry   = null -> METER_START_BASE + perMile (put a number to override one band).
        minimum = null -> same as the start (a safety net: the meter never ends below the start, so it normally never shows).
@@ -138,7 +143,12 @@
   var METER_MAX_MPH = 110;                 /* faster than this between fixes = bad fix, ignored */
   var METER_GAP_MS = 45000;                /* a longer gap between fixes is bridged by the straight line */
   var METER_QR_VERSION = 70;
-  var METER_LIVE_PUSH_MS = 10000;          /* rider live meter: the driver's phone saves the meter numbers every 10 s */
+  var METER_LIVE_PUSH_MS = 5000;           /* rider live meter: the driver's phone saves the meter numbers every 5 s (v71: was 10 s, so the MPH is fresher) */
+  var METER_SPEED_WINDOW_MS = 12000;       /* v71 live MPH: when the phone gives no GPS speed, MPH = straight-line distance over the last ~12 s of fixes */
+  var METER_ROUTE_REFRESH_MS = 60000;      /* v71 destination: road route + ETA refreshed every 60 s while the meter runs */
+  var METER_DEST_ARRIVED_MI = 0.1;         /* v71: within ~160 m of the destination = "At destination" */
+  var METER_SPEED_MAX_GAP_MS = 40000;      /* v71: fixes further apart than this are not averaged (tunnel, background) */
+  var METER_SPEED_STALE_MS = 25000;        /* v71: no fresh GPS speed for this long -> MPH shows "--" (never a made-up number) */
   var METER_RIDER_QR_SEC = 30;             /* "Watch your meter" QR shows this long at Start / "Show rider meter", then closes */
   var METER_VIEW_PATH = "../meter/";       /* rider live meter page, relative to app/app.js */
   /* Airport bases = estimator app.js RATES (dollars→cents). Local base remains BASE_CENTS ($11). */
@@ -3469,6 +3479,22 @@
       '<a class="btn" href="signup/?v=60">Complete vehicle profile</a>' +
       "</div>"
     );
+  }
+
+  /* v71 login fix: while the opening odometer is still needed, that prompt is the ONLY driver screen
+     (no Home menu / Today / earnings / meter screen can sit on top of it or open first).
+     A metered ride that is running or waiting to be paid is the only exception (a rider is involved). */
+  function odometerGatePending() {
+    return ROLE === "driver" && signedIn() && state.screen === "home" && !state.milesEndPrompt &&
+      !meterActive() && milesStartCard() !== "";
+  }
+
+  function closeDriverOverlaysForGate() {
+    if (!odometerGatePending()) return false;
+    state.hubOpen = false;
+    state.hubView = "menu";
+    state.meterOpen = false;
+    return true;
   }
 
   function milesStartCard() {
@@ -9673,8 +9699,9 @@
     };
   }
 
-  /* start ($11 + one mile, covers the first mile), then each mile after the first + slow minutes, added in steps rounded UP
-     ($0.25) = the running meter. When the ride has ended the minimum (= the start, a safety net) applies, then tax. */
+  /* start ($11 + one mile, covers the first mile), then each mile after the first + slow minutes; v71: the meter shows the
+     start exactly ($12.10), and once anything is added it rounds UP to the next whole quarter dollar on the ordinary
+     $0.25 grid ($12.10 -> $12.25 -> $12.50 -> $12.75 ...), never odd cents like $12.35 = the running meter. When the ride has ended the minimum (= the start, a safety net) applies, then tax. */
   function meterFare(M) {
     var miles = Math.max(0, Number(M && M.miles) || 0);
     var incl = M.includedMiles != null && isFinite(Number(M.includedMiles)) ? Math.max(0, Number(M.includedMiles)) : 0;
@@ -9685,7 +9712,8 @@
     var base = Number(M.baseCents) || 0;
     var raw = base + mileCents + waitCents;
     var step = Math.max(0, Math.round(Number(M.stepCents) || 0));
-    var stepped = base + (step > 0 ? Math.ceil((raw - base) / step) * step : raw - base); /* starts exactly at the start amount */
+    /* v71: clean quarter-dollar steps after the start (v70 counted the steps from the start: $12.10 -> $12.35 -> $12.60) */
+    var stepped = raw <= base ? base : (step > 0 ? Math.max(base, Math.ceil(raw / step) * step) : raw);
     var min = Math.max(0, Math.round(Number(M.minCents) || 0));
     var final = !!M.status && M.status !== "running";
     var sub = final ? Math.max(min, stepped) : stepped;
@@ -9709,10 +9737,11 @@
     var now = Date.now();
     if (isFinite(acc) && acc > METER_MAX_ACCURACY_M) { M.gpsWeakAt = now; return; }
     M.gpsAt = now;
+    var spd = pos.coords.speed; /* v71 live MPH (sampled below, never from a rejected jump) */
     if (!M.startPt) { M.startPt = { lat: lat, lng: lng }; meterSyncStartPoint(); }
-    if (!M.lastPt) { M.lastPt = { lat: lat, lng: lng, t: now }; meterEvalMinutes(now, false); meterSave(); return; }
+    if (!M.lastPt) { M.lastPt = { lat: lat, lng: lng, t: now }; meterSpeedSample(M, lat, lng, now, spd); meterEvalMinutes(now, false); meterSave(); return; }
     var d = haversineMi(M.lastPt.lat, M.lastPt.lng, lat, lng);
-    if (d < METER_JITTER_MI) { meterEvalMinutes(now, false); meterSave(); return; }
+    if (d < METER_JITTER_MI) { meterSpeedSample(M, lat, lng, now, spd); meterEvalMinutes(now, false); meterSave(); return; }
     var hours = Math.max(1000, now - Number(M.lastPt.t || now)) / 3600000;
     if (d / hours > METER_MAX_MPH) {
       M.jumps = (M.jumps || 0) + 1;
@@ -9721,12 +9750,47 @@
       return;
     }
     M.jumps = 0;
+    meterSpeedSample(M, lat, lng, now, spd);
     if (now - Number(M.lastPt.t || now) > METER_GAP_MS) M.gapFills = (M.gapFills || 0) + 1;
     M.miles = Math.round(((Number(M.miles) || 0) + d) * 100000) / 100000;
     M.lastPt = { lat: lat, lng: lng, t: now };
     meterEvalMinutes(now, false);
     meterSave();
   }
+
+  /* v71 live MPH (display only; the per-minute charge still uses each minute's average speed below).
+     1) The phone's own GPS speed (coords.speed, m/s) when it gives one.
+     2) Otherwise the straight-line distance between accepted fixes over the last ~12 s (needs at least 3 s of fixes;
+        with sparse fixes, the previous fix if it is at most 40 s old). A longer gap starts over (no average across a
+        tunnel or the app in the background). Readings over METER_MAX_MPH (bad fixes) are ignored.
+     Under 1.5 mph shows 0 (GPS wobble while stopped). No fresh reading for 25 s -> "--" on both screens. */
+  var meterSpdPts = [];
+  function meterSpeedSample(M, lat, lng, now, speed) {
+    var last = meterSpdPts.length ? meterSpdPts[meterSpdPts.length - 1] : null;
+    if (last && (now - last.t > METER_SPEED_MAX_GAP_MS || now < last.t)) meterSpdPts = [];
+    meterSpdPts.push({ lat: lat, lng: lng, t: now });
+    /* base point = the newest fix that is at least the window old (or the previous fix when fixes are sparse) */
+    while (meterSpdPts.length > 2 && now - meterSpdPts[1].t >= METER_SPEED_WINDOW_MS) meterSpdPts.shift();
+    var mph = null, src = "";
+    var sp = speed === null || speed === undefined || speed === "" ? NaN : Number(speed);
+    if (isFinite(sp) && sp >= 0) { mph = sp * 2.2369363; src = "gps"; }
+    else if (meterSpdPts.length >= 2) {
+      var a = meterSpdPts[0], span = (now - a.t) / 1000;
+      if (span >= 3) { mph = haversineMi(a.lat, a.lng, lat, lng) / (span / 3600); src = "calc"; }
+    }
+    if (mph === null || !isFinite(mph) || mph > METER_MAX_MPH) return;
+    M.mph = mph < 1.5 ? 0 : Math.round(mph);
+    M.mphAt = now;
+    M.mphSrc = src;
+  }
+  function meterMphNow(M, now) {
+    if (!M || M.mphAt == null || !isFinite(Number(M.mph))) return null;
+    if ((now || Date.now()) - Number(M.mphAt) > METER_SPEED_STALE_MS) return null;
+    return Math.max(0, Math.round(Number(M.mph)));
+  }
+  function meterMphSlow(M, mph) { return mph !== null && mph < (Number(M.slowMph) || 10); }
+  function meterMphLabel(M, mph) { return meterMphSlow(M, mph) ? "MPH · slow" : "MPH"; }
+  function meterMphBoxClass(M, mph) { return "meter-mph" + (mph === null ? " is-none" : meterMphSlow(M, mph) ? " is-slow" : ""); }
 
   /* Per-minute charge: every completed minute whose average speed was under the profile's slowMph (stopped or heavy traffic).
      Minutes that pass without GPS (app in the background) are judged together when GPS is back: the distance covered
@@ -9777,6 +9841,7 @@
         try { navigator.geolocation.getCurrentPosition(onGpsFix, function () {}, { enableHighAccuracy: true, maximumAge: 5000, timeout: 15000 }); } catch (e) {}
       }
       if (meterTicks % 15 === 0) { meterSave(); acquireWakeLock(); }
+      if (M.dest) meterRouteFetch(false); /* v71: first route as soon as there is a position, then every 60 s */
       if (Date.now() - meterLiveAt >= METER_LIVE_PUSH_MS) meterPushLive(M);
       if (!M.viewToken && meterTicks % 15 === 0) meterFetchView();
       if (M.viewToken && Date.now() - meterLivePollAt >= 15000) meterPollLive();
@@ -9803,7 +9868,16 @@
     set("meter-miles", f.miles.toFixed(2));
     set("meter-time", meterClock(Date.now() - M.startedAt));
     set("meter-wait", String(f.waitMin));
+    var mph = meterMphNow(M);
+    set("meter-mph", mph === null ? "--" : String(mph));
+    set("meter-mph-label", meterMphLabel(M, mph));
+    var mb = document.getElementById("meter-mph-box");
+    if (mb && mb.className !== meterMphBoxClass(M, mph)) mb.className = meterMphBoxClass(M, mph);
     set("meter-gps", meterGpsLine(M));
+    set("meter-eta-chip", meterChipText(M)); /* v71 */
+    var chipEl = document.getElementById("meter-eta-chip");
+    if (chipEl) chipEl.classList.toggle("has-dest", !!M.dest);
+    set("meter-dest-eta", meterEtaLine(M));
     set("meter-bar-fare", money(f.sub));
     set("meter-free", meterFreeLine(M));
   }
@@ -9829,8 +9903,11 @@
   /* ---------- v70: rider live meter ("Watch your meter" QR -> public read-only page; no rider info needed) ---------- */
   function meterLiveSnapshot(M) {
     var f = meterFare(M);
+    var mph = meterMphNow(M);
+    var eta = meterEtaInfo(M);
     return { miles: f.miles, waitMin: f.waitMin, freeUsed: Number(M.freeUsed) || 0, moved: !!M.moved, fareCents: f.sub, at: Date.now(),
-      gpsOk: !!(M.gpsAt && Date.now() - M.gpsAt <= 30000) };
+      gpsOk: !!(M.gpsAt && Date.now() - M.gpsAt <= 30000), mph: mph, mphAt: mph === null ? 0 : Number(M.mphAt) || 0, /* v71: live MPH (null = no fresh GPS) */
+      etaMin: eta && !eta.pending ? eta.min : null, etaMiles: eta && !eta.pending ? eta.miles : null }; /* v71: ETA numbers only (never the address) */
   }
   function meterPushLive(M) {
     meterLiveAt = Date.now();
@@ -9974,6 +10051,7 @@
   function meterStart() {
     if (state.meter || !canGoOnline() || driverMidRide()) return;
     var now = Date.now();
+    meterSpdPts = []; meterRoute = null; /* v71 */
     var band = meterBand(new Date(now));
     var M = {
       v: 1, code: makeRideCode(), status: "running", startedAt: now, tier: band.key, tierLabel: band.label, holiday: !!band.holiday,
@@ -9987,6 +10065,9 @@
       M.lastPt = { lat: +state.hereLat, lng: +state.hereLng, t: now };
       M.gpsAt = state.gpsAt;
     }
+    var pend = state.meterDestPending; /* v71: optional destination picked on the Start screen */
+    if (pend && isCoord(pend.lat) && isCoord(pend.lng)) M.dest = { label: String(pend.label || ""), sub: String(pend.sub || ""), lat: +pend.lat, lng: +pend.lng };
+    state.meterDestPending = null; state.meterDestEdit = false; state.meterDestQ = ""; state.meterDestList = [];
     state.meter = M;
     state.meterOpen = false; /* v70: the meter runs in a compact panel above the map */
     state.meterQrUntil = Date.now() + METER_RIDER_QR_SEC * 1000; /* "Watch your meter" QR for 30 s */
@@ -10000,6 +10081,7 @@
     acquireWakeLock();
     meterLoadQr(); /* cache the QR code drawer while there is signal */
     render();
+    if (M.dest) meterRouteFetch(true); /* v71 */
   }
 
   function meterLogPayWeek(M) {
@@ -10352,6 +10434,8 @@
       ".meter-panel{background:#0e2442;border:2px solid #f0d48a;border-radius:16px;padding:10px 12px;margin:6px 0 10px}" +
       ".meter-panel .meter-fare{font-size:40px;margin:0}.meter-panel .meter-sub{margin:0 0 4px;font-size:13px}" +
       ".meter-panel .meter-grid{margin:0 0 4px;gap:6px}.meter-panel .meter-grid div{padding:3px 2px}.meter-panel .meter-grid b{font-size:18px}.meter-panel .meter-grid span{font-size:11px}" +
+      ".meter-panel .meter-grid{grid-template-columns:repeat(4,1fr)}.meter-panel .meter-grid span{letter-spacing:.02em;white-space:nowrap}" +
+      ".meter-panel .meter-grid .meter-mph.is-slow{background:rgba(240,180,80,.13);border-color:rgba(240,180,80,.75)}.meter-mph.is-slow span{color:#f3c77a;opacity:1}.meter-mph.is-none b{opacity:.55}" +
       ".meter-rates{font-size:12.5px;line-height:1.3;text-align:center;margin:0 0 2px;opacity:.9}" +
       ".meter-status-line{text-align:center;font-size:13px;margin:0 0 2px;opacity:.95}.meter-free{color:#8fd0a8;font-weight:700}.meter-free:empty{display:none}.meter-free:not(:empty)::after{content:\" · \";color:#cfd8e3;font-weight:400}" +
       ".meter-actions{display:flex;gap:8px;align-items:stretch}.meter-actions .btn{margin:6px 0 0}" +
@@ -10360,7 +10444,12 @@
       ".meter-rqr-code{flex:0 0 152px;width:152px}.meter-rqr-code svg{display:block;width:152px;height:152px}" +
       ".meter-rqr-text{display:flex;flex-direction:column;gap:4px;font-size:13px;line-height:1.3}.meter-rqr-text b{font-size:16px}" +
       ".meter-rqr-count{font-weight:800;color:#7a1f1f}" +
-      ".meter-map .map-caption{margin:4px 0 0}";
+      ".meter-map .map-caption{margin:4px 0 0}" +
+      ".meter-map{position:relative}.meter-eta-chip{position:absolute;top:8px;right:8px;z-index:900;background:#0e2442;color:#f0d48a;border:1.5px solid #f0d48a;border-radius:999px;padding:5px 11px;font-size:13px;font-weight:800;box-shadow:0 2px 6px rgba(0,0,0,.35);max-width:70%;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}" +
+      ".meter-eta-chip.has-dest{background:#f0d48a;color:#0b1f3a}" +
+      ".meter-dest{margin:10px 0}.meter-dest input{width:100%;font-size:16px;padding:10px;border-radius:10px;border:1px solid rgba(212,177,90,.5);background:#0b1c33;color:#f4efe4}" +
+      ".meter-dest-to{margin:0 0 4px}.meter-dest-eta{margin:0 0 6px;font-weight:700;color:#f0d48a}.meter-dest-btns{display:flex;gap:8px}.meter-dest-btns .btn{flex:1;margin:4px 0 0}" +
+      ".meter-dest-list{position:static}.meter-dest-list .suggest-item{width:100%}";
     document.head.appendChild(st);
   }
   function meterMilesWord(n) { n = Number(n) || 0; return n === 1 ? "first mile" : n + " mi"; }
@@ -10440,6 +10529,7 @@
         '<div class="card">' + meterRatesHtml(band) + "</div>" +
         (ready ? "" : '<p class="error" id="meter-gate">Finish the steps on Home (approval, car details and starting odometer) before starting a metered ride.</p>') +
         '<p class="fine" id="meter-gps">' + esc(meterGpsLine(null)) + "</p>" +
+        meterDestHtml("ready") + /* v71: optional destination */
         '<button class="btn meter-big" type="button" id="meter-start"' + (ready ? "" : " disabled") + ">Start</button>" +
         "</section>"
       );
@@ -10521,7 +10611,9 @@
       '<p class="meter-sub">Meter' + (M.minCents > M.baseCents ? " · " + money(M.minCents) + " minimum" : "") + (M.taxRate ? " · tax added at the end" : "") + "</p>" +
       '<div class="meter-grid"><div><b id="meter-miles">' + f.miles.toFixed(2) + "</b><span>Miles</span></div>" +
       '<div><b id="meter-time">' + meterClock(Date.now() - M.startedAt) + "</b><span>Time</span></div>" +
-      '<div><b id="meter-wait">' + f.waitMin + "</b><span>Slow min</span></div></div>" +
+      '<div><b id="meter-wait">' + f.waitMin + "</b><span>Slow min</span></div>" +
+      (function () { var mph = meterMphNow(M); return '<div id="meter-mph-box" class="' + meterMphBoxClass(M, mph) + '"><b id="meter-mph">' + (mph === null ? "--" : mph) +
+        '</b><span id="meter-mph-label">' + esc(meterMphLabel(M, mph)) + "</span></div>"; })() + "</div>" +
       '<p class="meter-status-line"><span class="meter-free" id="meter-free">' + esc(meterFreeLine(M)) + '</span><span id="meter-gps">' + esc(meterGpsLine(M)) + "</span></p>" +
       (M.riderCard ? '<p class="fine" id="meter-rider-card-note" style="color:#8fd0a8;text-align:center;margin:0">✓ Rider saved a card on their meter page</p>' : "") +
       meterRiderQrHtml(M) + busy +
@@ -10539,8 +10631,9 @@
       accountNav() + meterPanelHtml() +
       '<div class="map-stage board-map meter-map">' +
       '<div id="live-map" role="img" aria-label="Map: you during the metered ride"></div>' +
+      '<button type="button" class="meter-eta-chip' + (state.meter && state.meter.dest ? " has-dest" : "") + '" id="meter-eta-chip">' + esc(meterChipText(state.meter)) + "</button>" + /* v71 */
       '<p class="map-caption">You · metered ride</p>' +
-      "</div>" +
+      "</div>" + meterDestHtml("run") +
       (isFinite(state.hereLat) ? "" : '<p class="fine">Allow location so the map can show where you are.</p>') +
       bgGpsTipCard()
     );
@@ -10554,6 +10647,235 @@
       (M.status === "running" ? 'Metered ride running · <span id="meter-bar-fare">' + money(f.sub) + "</span> · Open" :
         M.status === "paid" ? "Metered ride paid · Open" : "Metered ride ended · " + money(f.total) + " · Open to get paid") + "</button>";
   }
+  /* ---------- v71: optional DESTINATION + road route on the map + ETA (metered ride) ----------
+     Optional on the Start screen and any time during the ride (map chip "+ Destination" or the card under the map).
+     Search: Google Places through the pcs-pay Worker (/places/autocomplete + /details, the key stays in the Worker),
+     falling back to the free map search when Google is capped/off. No ZIP needed.
+     Route + ETA: OSRM road route from the car to the destination (refreshed every 60 s); between refreshes the miles
+     left go down with the meter's GPS miles. No road route -> straight line x1.3 at 30 mph, marked "about".
+     Privacy: the destination address stays on the driver's phone (localStorage). Firebase / the rider page only get the
+     minutes and miles left (meterLive.etaMin / etaMiles), never the address. */
+  var meterRoute = null;      /* { key, line, miles, minutes, at, milesAt, approx } (not saved: fetched again after a reload) */
+  var meterRouteBusy = false;
+  var meterDestTimer = 0, meterDestSeq = 0, meterDestSess = "";
+  function meterDestKey(d) { return d ? (+d.lat).toFixed(5) + "," + (+d.lng).toFixed(5) : ""; }
+  function meterHerePt() {
+    var M = state.meter;
+    if (M && M.lastPt && isCoord(M.lastPt.lat) && isCoord(M.lastPt.lng) && Date.now() - Number(M.gpsAt || 0) < 120000) return { lat: +M.lastPt.lat, lng: +M.lastPt.lng };
+    if (isCoord(state.hereLat) && isCoord(state.hereLng)) return { lat: +state.hereLat, lng: +state.hereLng };
+    return null;
+  }
+  function meterDestNow() {
+    var M = state.meter;
+    if (M && M.status === "running") return M.dest || null;
+    return M ? null : state.meterDestPending || null;
+  }
+  function meterPlaces(path, body, ms) {
+    if (typeof fetch !== "function") return Promise.resolve(null);
+    return withTimeout(fetch(METER_WORKER + "/places" + path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) })
+      .then(function (r) { return r.json(); }), ms || 5000).then(function (d) {
+      return d && d.ok && !d.capped && !d.fallback ? d : null;
+    }).catch(function () { return null; });
+  }
+  function meterDestSearch(q) {
+    var here = meterHerePt();
+    var bias = here || HOUSTON_CENTER;
+    if (!meterDestSess) meterDestSess = newPlacesToken();
+    return meterPlaces("/autocomplete", { input: q, sessionToken: meterDestSess, lat: bias.lat, lng: bias.lng, radius: 50000 }).then(function (d) {
+      var preds = d && Array.isArray(d.predictions) ? d.predictions : [];
+      if (preds.length) {
+        return preds.slice(0, 6).map(function (p) {
+          return { placeId: String(p.placeId || ""), main: String(p.main || ""), sub: String(p.sub || ""), miles: here && p.miles != null && isFinite(p.miles) ? +p.miles : null };
+        }).filter(function (x) { return x.placeId && x.main; });
+      }
+      /* Google capped / off: the free map search the booking form also uses */
+      return suggestPlaces(q, { point: bias, from: here ? "you" : "houston" }).then(function (res) {
+        return (res && res.shown ? res.shown : []).slice(0, 6).map(function (it) {
+          var pl = it.place || {};
+          return { main: String(pl.line1 || ""), sub: [pl.city, pl.state].filter(Boolean).join(", "), lat: +pl.lat, lng: +pl.lng, miles: here && isFinite(it.dist) ? +it.dist : null };
+        }).filter(function (x) { return x.main && isCoord(x.lat) && isCoord(x.lng); });
+      }).catch(function () { return []; });
+    });
+  }
+  function meterDestListHtml() {
+    var list = state.meterDestList || [];
+    if (state.meterDestBusy) return '<p class="fine" id="meter-dest-busy">' + esc(state.meterDestBusy) + "</p>";
+    if (!list.length) return state.meterDestNone ? '<p class="fine" id="meter-dest-none">No match yet. Keep typing, or add the city.</p>' : "";
+    return list.map(function (x, i) {
+      return '<button type="button" class="suggest-item meter-dest-item" data-i="' + i + '"><span class="suggest-main"><strong>' + esc(x.main) + "</strong>" +
+        (x.miles != null ? '<em class="suggest-dist">' + esc(fmtMiles(x.miles)) + "</em>" : "") + "</span><span>" + esc(x.sub) + "</span></button>";
+    }).join("") + (list[0] && list[0].placeId ? '<p class="suggest-note powered-by-google" style="text-align:right;margin:0;padding:4px 8px;font-size:12px;opacity:.85">Powered by Google</p>' : "");
+  }
+  function meterEtaInfo(M) {
+    if (!M || M.status !== "running" || !M.dest) return null;
+    var here = meterHerePt();
+    if (here && haversineMi(here.lat, here.lng, M.dest.lat, M.dest.lng) <= METER_DEST_ARRIVED_MI) return { arrived: true, miles: 0, min: 0 };
+    var R = meterRoute;
+    if (!R || R.key !== meterDestKey(M.dest)) return { pending: true };
+    var left = Math.max(0, R.miles - Math.max(0, (Number(M.miles) || 0) - R.milesAt));
+    var min = R.miles > 0 ? R.minutes * left / R.miles : 0;
+    return { miles: Math.round(left * 10) / 10, min: Math.max(left > 0.05 ? 1 : 0, Math.round(min)), approx: !!R.approx, at: Date.now() + min * 60000 };
+  }
+  function meterClockText(ms) {
+    try { return new Date(ms).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }); } catch (e) { return ""; }
+  }
+  function meterChipText(M) {
+    var e = meterEtaInfo(M);
+    if (!e) return "+ Destination";
+    if (e.arrived) return "At destination";
+    if (e.pending) return "Finding route…";
+    return (e.approx ? "≈ " : "") + "ETA " + meterClockText(e.at) + " · " + e.min + " min";
+  }
+  function meterEtaLine(M) {
+    var e = meterEtaInfo(M);
+    if (!e) return "";
+    if (e.arrived) return "You're at the destination.";
+    if (e.pending) return "Finding the road route…";
+    return e.miles.toFixed(1) + " mi · about " + e.min + " min · arrive about " + meterClockText(e.at) + (e.approx ? " (no road route: straight-line estimate)" : "");
+  }
+  function meterRouteFetch(force) {
+    var M = state.meter;
+    if (!M || M.status !== "running" || !M.dest || meterRouteBusy) return;
+    var key = meterDestKey(M.dest);
+    if (!force && meterRoute && meterRoute.key === key && Date.now() - meterRoute.at < METER_ROUTE_REFRESH_MS) return;
+    var from = meterHerePt();
+    if (!from) return;
+    meterRouteBusy = true;
+    var to = { lat: +M.dest.lat, lng: +M.dest.lng };
+    var url = "https://router.project-osrm.org/route/v1/driving/" + from.lng + "," + from.lat + ";" + to.lng + "," + to.lat + "?overview=full&geometries=geojson";
+    withTimeout(fetch(url).then(function (r) { return r.json(); }), 8000).then(function (data) {
+      var r = data && data.routes && data.routes[0];
+      var c = r && r.geometry && r.geometry.coordinates;
+      if (!r || !c || c.length < 2 || !isFinite(+r.distance) || !isFinite(+r.duration)) throw new Error("osrm");
+      return { line: c.map(function (p) { return [p[1], p[0]]; }), miles: +r.distance / 1609.344, minutes: +r.duration / 60, approx: false };
+    }).catch(function () {
+      var mi = haversineMi(from.lat, from.lng, to.lat, to.lng) * 1.3;
+      return { line: [[from.lat, from.lng], [to.lat, to.lng]], miles: mi, minutes: mi * 2, approx: true }; /* 30 mph */
+    }).then(function (rt) {
+      meterRouteBusy = false;
+      var cur = state.meter;
+      if (!cur || cur.status !== "running" || !cur.dest || meterDestKey(cur.dest) !== key) return;
+      rt.key = key; rt.at = Date.now(); rt.milesAt = Number(cur.miles) || 0;
+      meterRoute = rt;
+      meterRefreshDom();
+      if (meterOnMap() && boardMapStillMounted()) syncDriverBoardMarkers();
+    });
+  }
+  /* map layers for the running meter: road route + destination pin (called from syncDriverBoardMarkers) */
+  function meterMapLayers(bounds) {
+    var M = state.meter;
+    if (!meterOnMap() || !M.dest || !state.boardMarkers || !window.L) return;
+    var key = meterDestKey(M.dest);
+    if (meterRoute && meterRoute.key === key && meterRoute.line && meterRoute.line.length > 1) {
+      state.boardMarkers.addLayer(window.L.polyline(meterRoute.line, { color: "#d4b15a", weight: 5, opacity: 0.95, dashArray: meterRoute.approx ? "6 8" : null, className: "meter-route" }));
+    }
+    state.boardMarkers.addLayer(window.L.marker([+M.dest.lat, +M.dest.lng], { icon: pinIcon("Destination", "pin-drop"), zIndexOffset: 400 }));
+    bounds.push([+M.dest.lat, +M.dest.lng]);
+  }
+  function meterDestSet(d) {
+    var M = state.meter;
+    state.meterDestList = []; state.meterDestQ = ""; state.meterDestEdit = false; state.meterDestNone = false; state.meterDestErr = "";
+    meterDestSess = "";
+    if (M && M.status === "running") {
+      M.dest = d; meterRoute = null; meterSave();
+
+      if (d) meterRouteFetch(true);
+      meterLiveAt = 0; /* push the new ETA soon */
+    } else if (!M) {
+      state.meterDestPending = d;
+    }
+    var ae = document.activeElement;
+    if (ae && ae.blur && ae.id === "meter-dest-q") try { ae.blur(); } catch (e) {} /* close the keyboard */
+    render();
+    if (M && M.status === "running") { /* back to the meter + map to see the route */
+      var top = function () { try { window.scrollTo(0, 0); if (document.scrollingElement) document.scrollingElement.scrollTop = 0; var ap = document.getElementById("app"); if (ap) ap.scrollTop = 0; } catch (e) {} }; /* #app is the scroll box */
+      top(); setTimeout(top, 60); setTimeout(top, 400);
+    }
+  }
+  function meterDestPick(i) {
+    var x = (state.meterDestList || [])[i];
+    if (!x) return;
+    if (isCoord(x.lat) && isCoord(x.lng)) { meterDestSet({ label: x.main, sub: x.sub, lat: +x.lat, lng: +x.lng }); return; }
+    state.meterDestBusy = "Getting the address…";
+    meterDestDomList();
+    meterPlaces("/details", { placeId: x.placeId, sessionToken: meterDestSess }, 6000).then(function (d) {
+      state.meterDestBusy = "";
+      var p = d && d.place;
+      if (!p || !isCoord(p.lat) || !isCoord(p.lng)) { state.meterDestErr = "Couldn't get that place. Try another one."; render(); return; }
+      var street = String(p.street || "").trim();
+      var sub = [street && normText(street) !== normText(x.main) ? street : "", p.city].filter(Boolean).join(", ") || x.sub;
+      meterDestSet({ label: x.main, sub: sub, lat: +p.lat, lng: +p.lng });
+    });
+  }
+  function meterDestDomList() {
+    var box = document.getElementById("meter-dest-list");
+    if (!box) return;
+    box.innerHTML = meterDestListHtml();
+    Array.prototype.forEach.call(box.querySelectorAll(".meter-dest-item"), function (b) {
+      b.addEventListener("click", function () { meterDestPick(Number(b.getAttribute("data-i"))); });
+    });
+  }
+  function meterDestInput(q) {
+    state.meterDestQ = q;
+    state.meterDestErr = "";
+    if (meterDestTimer) clearTimeout(meterDestTimer);
+    var t = String(q || "").trim();
+    if (t.length < 3) { state.meterDestList = []; state.meterDestNone = false; meterDestDomList(); return; }
+    meterDestTimer = setTimeout(function () {
+      var seq = ++meterDestSeq;
+      meterDestSearch(t).then(function (list) {
+        if (seq !== meterDestSeq) return;
+        state.meterDestList = list || [];
+        state.meterDestNone = !state.meterDestList.length;
+        meterDestDomList();
+      });
+    }, 350);
+  }
+  /* where = "ready" (Start screen) or "run" (card under the map) */
+  function meterDestHtml(where) {
+    var ae = document.activeElement;
+    if (ae && ae.id === "meter-dest-q") { state.meterRefocus = "meter-dest-q"; state.meterDestQ = ae.value; }
+    var d = meterDestNow();
+    var M = state.meter;
+    var head = '<p class="tag" style="margin:0 0 4px">Destination <span style="opacity:.75;text-transform:none;letter-spacing:0">(optional)</span></p>';
+    if (d && !state.meterDestEdit) {
+      return '<section class="card meter-dest" id="meter-dest">' + head +
+        '<p class="meter-dest-to" id="meter-dest-set">To: <strong id="meter-dest-label">' + esc(d.label) + "</strong>" + (d.sub ? '<br><span class="fine">' + esc(d.sub) + "</span>" : "") + "</p>" +
+        (where === "run" ? '<p class="meter-dest-eta" id="meter-dest-eta">' + esc(meterEtaLine(M)) + "</p>" : '<p class="fine">The route and ETA show on the map after Start.</p>') +
+        '<div class="meter-dest-btns"><button class="btn ghost" type="button" id="meter-dest-change">Change</button><button class="btn ghost" type="button" id="meter-dest-clear">Clear</button></div></section>';
+    }
+    if (where === "run" && !state.meterDestEdit) {
+      return '<section class="card meter-dest" id="meter-dest"><button class="btn ghost" type="button" id="meter-dest-add">+ Add destination (optional): route + ETA</button></section>';
+    }
+    return '<section class="card meter-dest" id="meter-dest">' + head +
+      '<input id="meter-dest-q" type="search" inputmode="search" autocomplete="off" enterkeyhint="search" placeholder="Where to? Address or place (no ZIP needed)" aria-label="Destination (optional)" value="' + esc(state.meterDestQ || "") + '">' +
+      '<div class="suggest-list meter-dest-list" id="meter-dest-list">' + meterDestListHtml() + "</div>" +
+      (state.meterDestErr ? '<p class="error" id="meter-dest-err">' + esc(state.meterDestErr) + "</p>" : "") +
+      (where === "ready" ? '<p class="fine" style="margin:4px 0 0">Not needed to start. Shows the road route and ETA on the map.</p>' : "") +
+      ((where === "run" || d) ? '<button class="btn ghost" type="button" id="meter-dest-cancel">Cancel</button>' : "") + "</section>";
+  }
+  function bindMeterDest() {
+    var on = function (id, fn) { var el = document.getElementById(id); if (el) el.addEventListener("click", fn); };
+    var q = document.getElementById("meter-dest-q");
+    if (q) q.addEventListener("input", function () { meterDestInput(q.value); });
+    meterDestDomList();
+    on("meter-dest-add", function () { state.meterDestEdit = true; render(); meterDestFocus(); });
+    on("meter-dest-change", function () { state.meterDestEdit = true; state.meterDestQ = ""; state.meterDestList = []; render(); meterDestFocus(); });
+    on("meter-dest-cancel", function () { state.meterDestEdit = false; state.meterDestQ = ""; state.meterDestList = []; state.meterDestNone = false; render(); });
+    on("meter-dest-clear", function () { meterDestSet(null); });
+    on("meter-eta-chip", function () {
+      if (!meterDestNow()) state.meterDestEdit = true;
+      render();
+      var sec = document.getElementById("meter-dest");
+      if (sec && sec.scrollIntoView) try { sec.scrollIntoView({ block: "center" }); } catch (e) {}
+      meterDestFocus();
+    });
+  }
+  function meterDestFocus() {
+    var q = document.getElementById("meter-dest-q");
+    if (q) try { q.focus(); } catch (e) {}
+  }
+
   function bindMeter() {
     if (ROLE !== "driver") return;
     var on = function (id, fn) { var el = document.getElementById(id); if (el) el.addEventListener("click", fn); };
@@ -10601,6 +10923,7 @@
     on("meter-unpaid-no", function () { state.meterUnpaidAsk = false; render(); });
     on("meter-unpaid-yes", function () { state.meterUnpaidAsk = false; meterFinishUnpaid(); });
     on("meter-done", meterClear);
+    bindMeterDest(); /* v71 */
     if (state.meterRefocus) {
       var el = document.getElementById(state.meterRefocus);
       state.meterRefocus = "";
@@ -10728,6 +11051,14 @@
       return (
         milesTodayHtml() +
         milesEndCard()
+      );
+    }
+    if (odometerGatePending()) {
+      /* v71 login fix: opening odometer first, before anything else (miles don't count until it's saved) */
+      return (
+        milesStartCard() +
+        approvalGateCard() +
+        '<div class="app-nav">' + logoutLine() + "</div>"
       );
     }
     if (state.hubOpen) return driverHub();
@@ -10970,6 +11301,7 @@
 
   function render() {
     meterEnsureLoaded(); /* v70 */
+    closeDriverOverlaysForGate(); /* v71 login fix */
     var stayOnBoard = ROLE === "driver" && state.screen === "home" && signedIn() && !state.hubOpen && !state.meterOpen;
     var keptBoard = null;
     if (stayOnBoard && boardMapStillMounted()) {
@@ -11389,6 +11721,11 @@
         writeShift(null);
         state.milesEndSaving = false;
         state.milesEndWarnedFor = "";
+        /* v71 login fix: don't come back to the Home menu / Today screen after the next login */
+        state.hubOpen = false;
+        state.hubView = "menu";
+        state.meterOpen = false;
+        state.milesNeedStart = true; /* re-checked by ensureMilesDayReady() at the next login */
       }
       writeSession("");
       var a = pcsAuth();
@@ -12970,6 +13307,7 @@
       state.boardMarkers.addLayer(marker);
       bounds.push([+ride.pickupLat, +ride.pickupLng]);
     });
+    if (ROLE === "driver") meterMapLayers(bounds); /* v71: metered ride destination route + pin */
     fitDriverBoard(bounds);
     setTimeout(function () {
       if (liveMap) liveMap.invalidateSize();
