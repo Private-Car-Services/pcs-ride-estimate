@@ -248,6 +248,19 @@
     } catch (e) {}
   })();
 
+  /* v72f chime volume (Matthew 2026-10-10: too loud). Low / Medium / High, saved on this phone. Medium (default) = 40%
+     of the old level. iPhone ignores <audio>.volume, so there the Web Audio loop carries the level and the <audio>
+     element is muted while the AudioContext is really playing (unmuted again if iOS drops Web Audio, so it never goes silent). */
+  var CHIME_VOL_KEY = "pcs-driver-chime-vol";
+  var CHIME_LEVELS = { low: 0.25, medium: 0.4, high: 0.7 };
+  function chimeVolName() {
+    var v = "";
+    try { v = localStorage.getItem(CHIME_VOL_KEY) || ""; } catch (e) {}
+    return CHIME_LEVELS[v] ? v : "medium";
+  }
+  function chimeLevel() { return CHIME_LEVELS[chimeVolName()]; }
+  function setChimeVolName(v) { try { localStorage.setItem(CHIME_VOL_KEY, CHIME_LEVELS[v] ? v : "medium"); } catch (e) {} }
+
   function openRideAlertMuted() {
     try { return localStorage.getItem(MUTE_KEY) === "1"; } catch (err) { return false; }
   }
@@ -293,6 +306,23 @@
     var stats = { unlocks: 0, elPlays: 0, bufStarts: 0, oscBursts: 0, blocked: 0 };
     function noop() {}
     function isMuted() { try { return !!(o.muted && o.muted()); } catch (e) { return false; } }
+    function lvl() { try { var v = Number(o.level && o.level()); return v > 0 && v <= 1 ? v : 1; } catch (e) { return 1; } }
+    var volFixed = null; /* true on iPhone/iPad: <audio>.volume is read-only */
+    function elVolumeFixed(e) {
+      if (volFixed !== null || !e) return !!volFixed;
+      try { e.volume = 0.5; volFixed = Math.abs(e.volume - 0.5) > 0.01; e.volume = lvl(); } catch (x) { volFixed = true; }
+      return volFixed;
+    }
+    /* <audio> carries the sound only where it can be turned down, or when Web Audio is not really playing */
+    function elShouldMute(isTest) {
+      if (!el || lvl() >= 0.7 || !elVolumeFixed(el) || !ctxRunning()) return false;
+      return isTest ? true : !!loopSrc;
+    }
+    function applyElLevel(isTest) {
+      if (!el) return;
+      try { el.volume = lvl(); } catch (x) {}
+      try { el.muted = elShouldMute(isTest); } catch (x2) {}
+    }
     /* audioSession first (before any AudioContext), only if the API exists. Never playAndRecord (earpiece on iPhone). */
     function setSession() {
       try {
@@ -370,7 +400,7 @@
       try { e.pause(); } catch (x2) {}
       try { e.currentTime = 0; } catch (x3) {}
       e.muted = false;
-      try { e.volume = 1; } catch (x4) {}
+      try { e.volume = lvl(); } catch (x4) {}
       if (p && p.then) {
         p.then(function () {
           elPrimed = true;
@@ -419,7 +449,8 @@
       var gen = alertGen;
       e.loop = !isTest;
       e.muted = false;
-      try { e.volume = 1; } catch (x0) {}
+      try { e.volume = lvl(); } catch (x0) {}
+      if (isTest) applyElLevel(true);
       try { e.currentTime = 0; } catch (x1) {}
       var p = null;
       try { p = e.play(); } catch (x2) { onBlocked(); return null; }
@@ -458,7 +489,7 @@
         var notes = [[1046.5, 0], [1318.5, 0.18], [1568, 0.36], [1318.5, 0.58]];
         var now = ctx.currentTime + 0.01;
         var master = ctx.createGain();
-        master.gain.value = 0.95;
+        master.gain.value = 0.95 * lvl();
         master.connect(ctx.destination);
         var nodes = [master];
         var last = null;
@@ -498,7 +529,7 @@
         var g = ctx.createGain();
         src.buffer = buf;
         src.loop = true;
-        g.gain.value = 1.0;
+        g.gain.value = lvl();
         src.connect(g);
         g.connect(ctx.destination);
         src.start(0);
@@ -520,6 +551,7 @@
       if (el && el.paused && !blocked) playEl(false);
       if (!buf) { load(); oscBurst(false); }
       else startCtxLoop();
+      applyElLevel(false);
     }
     /* Ride arrived: both paths at once, until stopAlert(). Idempotent while ringing. */
     function startAlert() {
@@ -565,7 +597,7 @@
       testing = true;
       vibrate(60);
       var p = playEl(true);
-      if (!el || !p) oscBurst(true); /* no <audio> support: Web Audio only */
+      if (!el || !p || (el && el.muted)) oscBurst(true); /* no <audio> support (or iPhone volume via Web Audio) */
       if (testTimer) clearTimeout(testTimer);
       testTimer = setTimeout(function () { testing = false; }, 1600);
       ui();
@@ -661,7 +693,7 @@
         return {
           ctxState: ctx ? ctx.state : "none", elPrimed: elPrimed, elHeard: elHeard, alerting: alerting, blocked: blocked,
           bufReady: !!buf, elPaused: el ? el.paused : null, elLoop: el ? el.loop : null, elMuted: el ? el.muted : null,
-          elSrc: el ? el.src : "", stats: stats
+          elSrc: el ? el.src : "", stats: stats, level: lvl(), elVolume: el ? el.volume : null, volFixed: volFixed
         };
       },
       url: function () { return o.url; },
@@ -674,6 +706,7 @@
   var rideAudio = pcsAlertAudio({
     url: RIDE_CHIME_URL,
     muted: openRideAlertMuted,
+    level: chimeLevel, /* v72f */
     wantBar: function () { return ROLE === "driver"; } /* v57: always on /app/driver/ until a chime really played */
   });
 
@@ -10971,8 +11004,20 @@
       '<button class="btn secondary" type="button" id="hub-meter">Metered ride</button>' +
       '<button class="btn secondary" type="button" id="hub-history">Earnings & history</button>' +
       '<a class="btn secondary" href="signup/?v=60">Profile</a>' +
+      chimeVolHtml() + /* v72f */
       logoutLine()
     );
+  }
+
+  function chimeVolHtml() {
+    var names = ["low", "medium", "high"], cur = names.indexOf(chimeVolName());
+    return '<div class="card chime-vol" id="chime-vol-card" style="margin:10px 0">' +
+      '<label for="chime-vol" style="display:block;font-weight:700;margin:0 0 6px">New-ride chime volume: <span id="chime-vol-name">' +
+      ["Low", "Medium", "High"][cur] + "</span></label>" +
+      '<input type="range" id="chime-vol" min="0" max="2" step="1" value="' + cur + '" aria-valuetext="' + ["Low", "Medium", "High"][cur] +
+      '" style="width:100%;min-height:36px;accent-color:#f0d48a">' +
+      '<div class="fine" style="display:flex;justify-content:space-between"><span>Low</span><span>Medium</span><span>High</span></div>' +
+      "</div>";
   }
 
   function driverHubToday() {
@@ -12538,6 +12583,14 @@
     });
     var preview = document.getElementById("preview-only");
     if (preview) preview.addEventListener("click", openPreview);
+    var chimeVol = document.getElementById("chime-vol"); /* v72f: save + play a short sample at the new level */
+    if (chimeVol) chimeVol.addEventListener("change", function () {
+      var name = ["low", "medium", "high"][Number(chimeVol.value)] || "medium";
+      setChimeVolName(name);
+      var lab = document.getElementById("chime-vol-name"); if (lab) lab.textContent = name.charAt(0).toUpperCase() + name.slice(1);
+      chimeVol.setAttribute("aria-valuetext", lab ? lab.textContent : name);
+      try { rideAudio.test(); } catch (e) {}
+    });
   }
 
 
@@ -13757,6 +13810,32 @@
       rideAudio.install();
     }
     setInterval(refreshEtaDoms, 5000);
+    if (ROLE === "driver") {
+      /* v72f day-start fix (Matthew 2026-10-10): an iPhone Home Screen app is RESUMED, not reloaded, so the day check that ran
+         only at launch/login never ran again. On every resume (visibilitychange / pageshow / focus) and every 30 s: if the
+         Chicago day changed since the last check (or the shift was closed elsewhere), re-check the miles day; when the opening
+         odometer is needed, close the Home menu / Today / earnings / meter screens and show the prompt first. */
+      var odoDayChecked = chicagoToday();
+      var odoDayCheck = function (force) {
+        if (!signedIn()) { odoDayChecked = ""; return; }
+        var day = chicagoToday();
+        if (!force && day === odoDayChecked) return;
+        odoDayChecked = day;
+        var before = !!state.milesNeedStart;
+        ensureMilesDayReady();
+        if (state.milesNeedStart && !driverMidRide() && !meterActive()) {
+          var wasOver = !!state.hubOpen || !!state.meterOpen || state.screen !== "home";
+          if (state.screen !== "home" && state.screen !== "trip") state.screen = "home";
+          closeDriverOverlaysForGate();
+          if (!before || wasOver || !document.getElementById("miles-start-form")) render(); /* never re-render under the driver's typing */
+        }
+      };
+      var odoResume = function () { if (document.visibilityState !== "hidden") odoDayCheck(true); };
+      document.addEventListener("visibilitychange", odoResume);
+      window.addEventListener("pageshow", odoResume);
+      window.addEventListener("focus", odoResume);
+      setInterval(function () { odoDayCheck(false); }, 30000);
+    }
     if (ROLE === "driver" && document.visibilityState !== "hidden") presenceApp.foregroundAt = Date.now(); /* v64 */
     if (ROLE === "driver" && signedIn()) {
       loadRideHistory();
@@ -13911,6 +13990,8 @@
   /* v54 test hooks (no UI). */
   window.__pcsApp = {
     estimate: estimate,
+    rideAudioInfo: function () { return rideAudio.info(); }, /* v72f test hook */
+    stopRideAlert: function () { rideAudio.stopAlert(); },
     intlArrivalEligible: intlArrivalEligible,
     placeNameVariants: placeNameVariants,
     googleSuggest: googleSuggest,
