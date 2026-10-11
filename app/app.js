@@ -3624,7 +3624,13 @@
       if (restUntil <= now) restUntil = 0;
     }
     var needBreak = !!st && c.breakAfterMin > 0 && contMs >= c.breakAfterMin * 60000;
-    return { clocks: clocks, restUntil: restUntil, dutyStart: dutyStart, cycleFrom: cycleFrom, sinceBreakMs: sinceBreakMs,
+    /* v72t (Matthew): "On break" while stationary (2+ min not moving) or on Break status; counts the break UP; 30 min resets "Break due in" */
+    var movingNow = !!(hosDrvPrev && hosDrvPrev.moving && now - Number(hosDrvPrev.at || 0) < 120000);
+    var statusBreak = false; try { statusBreak = qOnBreak(); } catch (e) {}
+    var stillMs = movingNow ? 0 : (lastDrvEnd ? now - lastDrvEnd : (st ? now - st : 0));
+    var onBreak = !!st && (statusBreak || stillMs >= 120000);
+    var breakTakenMs = onBreak ? Math.min(stillMs, BRK) : 0;
+    return { clocks: clocks, onBreak: onBreak, breakTakenMs: breakTakenMs, breakNeedMs: BRK, statusBreak: statusBreak, restUntil: restUntil, dutyStart: dutyStart, cycleFrom: cycleFrom, sinceBreakMs: sinceBreakMs,
       streakAt: streakAt, contMs: contMs, needBreak: needBreak, override: ovr ? hosOvr.override : null, onShift: !!st,
       driveMs: driveMs, shiftMs: shiftMs, windowMs: cycleMs, cycleMs: cycleMs, leftMs: left, level: level, by: by, cfg: c };
   }
@@ -3637,15 +3643,23 @@
     return d > 5 * 60000 ? d : 0;
   }
   function hosClockName(k) { return { break: "BREAK (30-min break after 8 h driving)", drive: "DRIVE (11 h)", shift: "SHIFT (14 h window)", cycle: "CYCLE (70 h / 8 days)" }[k] || "HOS"; }
+  /* v72t: logo colors (dark green #20371d, mint #cdeccd); a clock turns RED in its last 45 min.
+     Break clock: "Break due in" (counts down with driving) / "On break" (counts the break up to 30 min). */
+  var HOS_RED_MS = 45 * 60000;
+  function hosClockLabel(h, k) {
+    if (k === "break") return h.onBreak ? "On break" : "Break due in";
+    return { drive: "Drive", shift: "Shift", cycle: "Cycle" }[k];
+  }
   function hosClocksHtml(h) {
-    var c = h.cfg;
-    var lab = { break: "Break", drive: "Drive", shift: "Shift", cycle: "Cycle" };
-    return '<div id="hos-clocks" style="display:grid;grid-template-columns:repeat(4,1fr);gap:4px;margin:6px 0">' + ["break", "drive", "shift", "cycle"].map(function (k) {
+    return '<div id="hos-clocks" class="hos-clocks" style="display:grid;grid-template-columns:repeat(4,1fr);gap:4px;margin:4px 0;background:#20371d;border-radius:10px;padding:5px">' + ["break", "drive", "shift", "cycle"].map(function (k) {
       var v = h.clocks[k];
       var off = !isFinite(v);
-      var col = off ? "#6b7280" : v <= 0 ? "#b91c1c" : v <= 3600000 ? "#b45309" : "#166534";
-      return '<div class="hos-clock hos-clock-' + k + '" data-left-min="' + (off ? "" : Math.round(v / 60000)) + '" style="border:1px solid ' + col + ';border-radius:8px;padding:4px;text-align:center">' +
-        '<div style="font-size:11px;color:#6b7280">' + lab[k] + '</div><div style="font-weight:800;color:' + col + '">' + (off ? "off" : v <= 0 ? "0h 00m" : hosFmt(v)) + "</div></div>";
+      var brk = k === "break" && h.onBreak;
+      var red = !off && !brk && v <= HOS_RED_MS;
+      var bg = red ? "#b91c1c" : brk ? "#2c4a2a" : "#20371d", fg = red ? "#fff" : off ? "#8aa58a" : "#cdeccd";
+      var val = off ? "off" : brk ? hosFmt(h.breakTakenMs) + " / " + Math.round(h.breakNeedMs / 60000) + "m" : v <= 0 ? "0h 00m" : hosFmt(v);
+      return '<div class="hos-clock hos-clock-' + k + (red ? " hos-red" : "") + (brk ? " hos-onbreak" : "") + '" data-left-min="' + (off ? "" : Math.round(v / 60000)) + '" style="background:' + bg + ";border:1px solid " + (red ? "#fca5a5" : "#3f6a3b") + ';border-radius:8px;padding:4px 2px;text-align:center;color:' + fg + '">' +
+        '<div class="hos-lab" style="font-size:11px;opacity:.85;white-space:nowrap">' + hosClockLabel(h, k) + '</div><div style="font-weight:800">' + val + "</div></div>";
     }).join("") + "</div>";
   }
   function hosLimitReached() { return ROLE === "driver" && signedIn() && (hosStatus().level === "limit" || !!hosRestUntil()); }
@@ -3673,7 +3687,7 @@
         "You've been driving " + hosFmt(h.contMs) + " without a break. Take a 15-minute break when it's safe.</p>" + banner;
     }
     var gpsBad = hosGpsStale();
-    return '<div id="hos-box">' + hosClocksHtml(h) + '<p class="fine" id="hos-counter">Driving ' + esc(hosFmt(h.driveMs)) + " · on duty " + esc(hosFmt(h.shiftMs)) + " · cycle " + esc(hosFmt(h.cycleMs)) + " used</p>" + banner +
+    return '<div id="hos-box">' + hosClocksHtml(h) + '<p class="fine" id="hos-counter" style="background:#20371d;color:#cdeccd;border-radius:8px;padding:3px 8px;margin:0 0 4px">Driving ' + esc(hosFmt(h.driveMs)) + " · on duty " + esc(hosFmt(h.shiftMs)) + " · cycle " + esc(hosFmt(h.cycleMs)) + " used</p>" + banner +
       (gpsBad ? '<p id="gps-health-banner" role="alert" style="background:#b91c1c;color:#fff;font-weight:700;padding:8px 10px;border-radius:8px;margin:6px 0">GPS not reporting for ' +
         esc(String(Math.floor(gpsBad / 60000))) + " min. Set Location for this app to \u201cAlways\u201d (Settings \u203a Privacy \u203a Location Services) and keep the app open, so your driving time and miles are counted.</p>" : "") + "</div>";
   }
@@ -3711,7 +3725,7 @@
     var h = hosStatus();
     var m = function (v) { return isFinite(v) ? Math.round(v / 60000) : null; };
     return { gpsStaleMin: Math.round(hosGpsStale() / 60000), hosLevel: h.level, hosBy: h.by,
-      hosBreakLeftMin: m(h.clocks.break), hosDriveLeftMin: m(h.clocks.drive), hosShiftLeftMin: m(h.clocks.shift), hosCycleLeftMin: m(h.clocks.cycle),
+      hosBreakLeftMin: m(h.clocks.break), hosOnBreak: !!h.onBreak, hosBreakTakenMin: Math.round((h.breakTakenMs || 0) / 60000), hosDriveLeftMin: m(h.clocks.drive), hosShiftLeftMin: m(h.clocks.shift), hosCycleLeftMin: m(h.clocks.cycle),
       hosDriveMin: Math.round(h.driveMs / 60000), hosShiftMin: Math.round(h.shiftMs / 60000), hosCycleMin: Math.round(h.cycleMs / 60000), hosCfg: h.cfg };
   }
   /* ===== end v72r HOS ===== */
@@ -3724,16 +3738,27 @@
 
   var BG_GPS_TIP_KEY = "pcs-driver-bg-gps-tip-v64";
 
+  /* v72t (Matthew): "Got it" hides the GPS tip for good (saved on this device); afterwards only a small (i) icon remains.
+     A delegated handler is used so the tap still lands while Home re-renders every second. */
+  function bgGpsTipDismissed() { try { return !!localStorage.getItem(BG_GPS_TIP_KEY); } catch (err) { return false; } }
   function bgGpsTipCard() {
     if (ROLE !== "driver" || !signedIn() || state.milesNeedStart) return "";
-    try { if (localStorage.getItem(BG_GPS_TIP_KEY)) return ""; } catch (err) { return ""; }
+    if (bgGpsTipDismissed() && !state.bgTipPeek) {
+      return '<button type="button" class="bg-gps-info" id="bg-gps-info" aria-label="About GPS in the background" title="About GPS in the background" style="flex:0 0 26px;width:26px;height:26px;min-height:0;border-radius:50%;border:1px solid #cdeccd;background:#20371d;color:#cdeccd;font:italic 700 14px Georgia,serif;padding:0;margin:0 0 0 6px;line-height:24px">i</button>';
+    }
     return (
-      '<div class="card notice-card bg-gps-tip" id="bg-gps-tip" role="note">' +
-      '<p class="tag">Tip</p>' +
-      '<p class="lede">iPhone pauses GPS for web apps in the background. Miles are filled in when you come back to this app.</p>' +
-      '<button class="btn ghost" type="button" id="bg-gps-tip-ok">Got it</button></div>'
+      '<div class="card notice-card bg-gps-tip" id="bg-gps-tip" role="note" style="padding:8px 12px">' +
+      '<p class="fine" style="margin:0 0 4px"><strong>Tip:</strong> iPhone pauses GPS for web apps in the background. Miles are filled in when you come back to this app.</p>' +
+      '<button class="btn ghost" type="button" id="bg-gps-tip-ok" style="margin:0;padding:6px 10px;min-height:0;width:auto">Got it</button></div>'
     );
   }
+  if (typeof document !== "undefined") document.addEventListener("click", function (e) {
+    var t = e.target && e.target.closest ? e.target.closest("#bg-gps-tip-ok,#bg-gps-info") : null;
+    if (!t) return;
+    if (t.id === "bg-gps-tip-ok") { try { localStorage.setItem(BG_GPS_TIP_KEY, String(Date.now())); } catch (err) {} state.bgTipPeek = false; }
+    else state.bgTipPeek = true;
+    render();
+  }, true);
 
   /* ---------- v64: one record per shift (opening odometer -> ending odometer at Log out) ---------- */
   function shiftStoreKey() {
@@ -5228,11 +5253,14 @@
       (state.finalTaxCents ? '<div class="money-row"><span>Texas tax 8.25%</span><span>' + esc(money(state.finalTaxCents)) + "</span></div>" : "") +
       '<div class="money-row"><span>Final fare</span><span>' + esc(money(state.finalFareCents)) + "</span></div>" +
       (deposit ? '<div class="money-row"><span>Deposit already paid</span><span>\u2212' + esc(money(deposit)) + "</span></div>" : "") +
-      '<p class="fine" style="margin-top:10px">Add a tip for your driver? <span id="tip-pick-hint">' + esc(tipPicked() ? "You can change it any time before you pay." : "Tap one to continue. No tip is fine.") + "</span></p>" +
+      /* v72t: the tip section folds up (tap "Tip" to open/close); open until a tip is picked */
+      '<details class="rider-tip-box" id="rider-tip-box"' + (riderTipOpen("app", tipPicked(), state.tipChoice === "custom") ? " open" : "") + ' style="margin-top:10px">' +
+      '<summary id="rider-tip-sum" style="cursor:pointer;padding:4px 0"><strong>Tip:</strong> ' + esc(tipPicked() ? (state.tipChoice === "0" ? "No tip" : money(tip)) : "pick one") + ' <span class="fine">(tap to open/close)</span></summary>' +
+      '<p class="fine" style="margin:4px 0">Add a tip for your driver? <span id="tip-pick-hint">' + esc(tipPicked() ? "You can change it any time before you pay." : "Tap one to continue. No tip is fine.") + "</span></p>" +
       '<div class="tip-chips" style="display:flex;flex-wrap:wrap;gap:8px;margin:6px 0">' + chips + "</div>" +
       (state.tipChoice === "custom"
         ? '<label for="tip-custom">Tip amount ($)</label><input id="tip-custom" type="text" inputmode="decimal" maxlength="7" value="' + esc(state.tipCustom || "") + '" placeholder="5.00">'
-        : "") +
+        : "") + "</details>" +
       '<div class="money-row"><span>Tip</span><span id="pay-tip-amt">' + esc(tipPicked() ? money(tip) : "pick one") + "</span></div>" +
       '<div class="total-row"><span>Total</span><span id="pay-total-amt">' + esc(money(total)) + "</span></div>" +
       (useSaved
@@ -10262,12 +10290,105 @@
     var min = Math.max(0, Math.round(Number(M.minCents) || 0));
     var final = !!M.status && M.status !== "running";
     var sub = final ? Math.max(min, stepped) : stepped;
+    var air = meterAirportLines(M); /* v72t: airport fee + international arrival (taxed, like the quote page / app) */
+    var meterSub = sub;
+    sub += air.cents;
     var bp = Math.round((Number(M.taxRate) || 0) * 1000000); /* rate in millionths: whole-number math, half-cent rounds up */
     var tax = bp > 0 ? Math.round(sub * bp / 1000000) : 0;
     return { base: base, miles: Math.round(miles * 100) / 100, includedMiles: incl, afterMiles: Math.round(afterMiles * 100) / 100,
       mileCents: mileCents, waitMin: waitMin, waitCents: waitCents, raw: raw,
       roundCents: stepped - raw, meter: stepped, minAdd: sub - stepped, minApplied: sub > stepped, minCents: min, freeMin: Math.max(0, Number(M.freeUsed) || 0),
+      feeLines: air.lines, airportCents: air.airportCents, intlCents: air.intlCents, meterSub: meterSub,
       sub: sub, tax: tax, total: sub + tax };
+  }
+  /* ---------- v72t: metered-ride trip type (Regular / To airport / From airport) ----------
+     Same airport rules as the quote page + rider app: the airport base for the time band (drop-off / pick-up) replaces the
+     local base, so the meter adds the difference as "Airport drop-off/pick-up fee (IAH)" (taxed). Matthew 2026-10-11: NO
+     $15 international arrival fee and NO airport wait-time rules on metered rides (meter pickups are curbside and ready).
+     No return fee is added on metered airport rides (Waco rule). Editable until the ride is paid. */
+  var METER_AIRPORTS = [["IAH", "Bush Intercontinental (IAH)"], ["HOU", "Hobby (HOU)"], ["DFW", "Dallas Fort Worth (DFW)"], ["DAL", "Dallas Love Field (DAL)"]];
+  var METER_TIER_AIRPORT = { day: "daytime", night: "weekendNight", late: "late" };
+  var METER_AIR_FREE_MIN = { domestic: 30, intl: 60 };
+  function meterTripOf(M) {
+    var t = (M && M.trip) || {};
+    var kind = t.kind === "airport-drop" ? "airport-drop" : "local"; /* v72t (Matthew): one Airport toggle = to-airport pricing */
+    var code = METER_AIRPORTS.some(function (a) { return a[0] === t.code; }) ? t.code : "IAH";
+    return { kind: kind, code: code, intl: false, landedAt: 0 }; /* Matthew: no intl fee / airport wait rules on metered rides (curbside pickups) */
+  }
+  function meterAirportLines(M) {
+    var t = meterTripOf(M), lines = [], airportCents = 0, intlCents = 0;
+    if (t.kind !== "local") {
+      var band = AIRPORT[METER_TIER_AIRPORT[M.tier] || "daytime"] || AIRPORT.daytime;
+      var airBase = t.kind === "airport-drop" ? band.drop : band.pick;
+      airportCents = Math.max(0, airBase - BASE_CENTS);
+      if (airportCents) lines.push({ key: "airport", label: "Airport drop-off fee", cents: airportCents, taxed: true });
+      if (t.intl) { intlCents = INTL_ARRIVAL_CENTS; lines.push({ key: "intl", label: INTL_ARRIVAL_LABEL, cents: intlCents, taxed: true }); }
+    }
+    return { lines: lines, cents: airportCents + intlCents, airportCents: airportCents, intlCents: intlCents };
+  }
+  function meterTripLabel(t) {
+    return t.kind === "airport-drop" ? "Airport: Yes" : "Airport: No";
+  }
+  /* free waiting for From airport: policy minutes counted from the actual landing time */
+  function meterAirFreeSec(t, startedAt) {
+    if (t.kind !== "airport-pick") return null;
+    var mins = t.intl ? METER_AIR_FREE_MIN.intl : METER_AIR_FREE_MIN.domestic;
+    var landed = t.landedAt && t.landedAt <= (startedAt || Date.now()) ? t.landedAt : (startedAt || Date.now());
+    return Math.max(0, mins * 60 - Math.floor(((startedAt || Date.now()) - landed) / 1000));
+  }
+  function meterTripEditable(M) { return !M || (M.status !== "paid" && !(M.pay && (M.pay.status === "link_open" || M.pay.status === "paid_other"))); }
+  /* v72t (Matthew): ONE Airport toggle on the metered ride: red = No (default), green = Yes (to-airport pricing). */
+  function meterTripHtml(M) {
+    var t = M ? meterTripOf(M) : meterTripOf({ trip: state.meterTripPending });
+    var on = t.kind === "airport-drop";
+    if (!meterTripEditable(M)) return '<p class="fine" id="meter-trip-fixed">' + esc(meterTripLabel(t)) + "</p>";
+    var fee = on ? meterAirportLines({ trip: t, tier: M ? M.tier : meterBand(new Date()).key }).lines.map(function (l) { return l.label + " " + money(l.cents); }).join(" \u00b7 ") : "";
+    return '<div class="meter-trip" id="meter-trip" style="display:flex;align-items:center;gap:10px;margin:6px 0">' +
+      '<span class="meter-route-lbl">Airport</span>' +
+      '<button type="button" id="meter-airport-toggle" role="switch" aria-checked="' + on + '" aria-label="Airport trip" style="width:auto;min-height:0;margin:0;padding:8px 18px;border-radius:999px;border:0;font-weight:800;font-size:16px;color:#fff;background:' + (on ? "#2e9d4f" : "#b91c1c") + '">' + (on ? "Yes" : "No") + "</button>" +
+      (on ? '<span class="fine" id="meter-trip-fees">' + esc(fee) + " \u00b7 no return fee</span>" : "") + "</div>";
+  }
+  function meterTripSet(patch) {
+    var M = state.meter;
+    var cur = M ? meterTripOf(M) : meterTripOf({ trip: state.meterTripPending });
+    var t = Object.assign({}, cur, patch);
+    if (t.kind !== "airport-pick") { t.intl = false; t.landedAt = 0; }
+    if (!M) { state.meterTripPending = t; state.meterEst = null; render(); return; }
+    if (!meterTripEditable(M)) return;
+    M.trip = t;
+
+    if (M.status === "ended") {
+      M.fare = meterFare(M);
+      var f = M.fare;
+      meterWrite(rideUrl(M.code), "PATCH", { meterTrip: t, tripType: t.kind, airportCode: t.kind === "local" ? null : t.code, internationalArrival: !!t.intl,
+        internationalFeeCents: f.intlCents || 0, airportFeeCents: f.airportCents || 0, feeLines: f.feeLines,
+        fareSub: f.sub, fareTax: f.tax, fareTotal: f.total, estimateCents: f.total, updatedAt: Date.now() });
+      try { meterIndexPatch(M, "ended", { paymentStatus: (M.pay && M.pay.status) || "unpaid" }); } catch (e) {}
+      try { meterLogPayWeek(M); } catch (e) {}
+    } else {
+      meterWrite(rideUrl(M.code), "PATCH", { meterTrip: t, tripType: t.kind, airportCode: t.kind === "local" ? null : t.code, internationalArrival: !!t.intl, freeWaitSec: M.freeWaitSec, updatedAt: Date.now() });
+    }
+    meterSave();
+    render();
+  }
+  if (typeof document !== "undefined") {
+    document.addEventListener("click", function (e) {
+      var b = e.target && e.target.closest ? e.target.closest("#meter-airport-toggle") : null;
+      if (!b) return;
+      meterTripSet({ kind: b.getAttribute("aria-checked") === "true" ? "local" : "airport-drop" });
+    });
+    document.addEventListener("change", function (e) {
+      var t = e.target;
+      if (!t) return;
+      if (t.id === "meter-trip-intl") meterTripSet({ intl: !!t.checked });
+      if (t.id === "meter-trip-landed") {
+        var m = /^(\d{1,2}):(\d{2})$/.exec(t.value || "");
+        if (!m) { meterTripSet({ landedAt: 0 }); return; }
+        var d = new Date(); d.setHours(+m[1], +m[2], 0, 0);
+        if (d.getTime() > Date.now() + 60000) d.setDate(d.getDate() - 1); /* landed before midnight */
+        meterTripSet({ landedAt: d.getTime() });
+      }
+    });
   }
 
   /* GPS (the same watchPosition the driver app already runs): straight-line steps between accepted fixes. A gap
@@ -10489,6 +10610,7 @@
     if (!state.meterQrUntil) return;
     var left = Math.ceil((state.meterQrUntil - Date.now()) / 1000);
     if (left <= 0) { state.meterQrUntil = 0; render(); return; }
+    if (!document.querySelector("#meter-rider-qr svg") && document.getElementById("meter-rider-qr") && state.meterQrUntil - Date.now() < (METER_RIDER_QR_SEC - 5) * 1000) { render(); return; } /* v72t: draw the fallback code */
     var el = document.getElementById("meter-rqr-count");
     var txt = "Closes in " + left + " s · tap to close";
     if (el && el.textContent !== txt) el.textContent = txt;
@@ -10496,6 +10618,10 @@
   function meterRiderQrHtml(M) {
     if (!meterQrShowing()) return "";
     var url = meterViewUrl(M);
+    if (!url && state.meterQrUntil - Date.now() < (METER_RIDER_QR_SEC - 5) * 1000) { /* v72t: live link not ready: retry, meanwhile the app link */
+      try { meterFetchView(); } catch (e) {}
+      try { url = new URL("./", APP_SCRIPT_SRC || window.location.href).href.replace(/\/driver\/?$/, "/"); } catch (e) { url = ""; }
+    }
     var qr = url ? meterQrSvg(url, "QR code: watch your meter", "L") : "";
     var left = Math.max(1, Math.ceil((state.meterQrUntil - Date.now()) / 1000));
     return '<div class="meter-rqr" id="meter-rider-qr" role="button" tabindex="0" aria-label="Rider meter QR code. Tap to close.">' +
@@ -10555,6 +10681,7 @@
       code: M.code, rideType: "metered", metered: true, name: "Metered ride", status: "started",
       requestedAt: M.startedAt, startedAt: M.startedAt, acceptedAt: M.startedAt, updatedAt: Date.now(),
       driverId: M.driverId, driverUid: firebaseUid() || "", driverName: M.driverName, driverEmail: String(readSession() || "").slice(0, 120),
+      meterTrip: meterTripOf(M), tripType: meterTripOf(M).kind, airportCode: meterTripOf(M).kind === "local" ? null : meterTripOf(M).code, internationalArrival: meterTripOf(M).intl,
       meterTier: M.tier, meterTierLabel: M.tierLabel, meterProfile: M.profileName, perMileCents: M.perMileCents, baseCents: M.baseCents,
       waitCentsPerMin: M.waitCentsPerMin, includedMiles: M.includedMiles, minimumCents: M.minCents, stepCents: M.stepCents, freeWaitSec: M.freeWaitSec,
       slowMph: M.slowMph, taxRate: M.taxRate, holiday: !!M.holiday,
@@ -10612,6 +10739,9 @@
     }
     var pend = state.meterDestPending; /* v71: optional destination picked on the Start screen */
     if (pend && isCoord(pend.lat) && isCoord(pend.lng)) M.dest = { label: String(pend.label || ""), sub: String(pend.sub || ""), lat: +pend.lat, lng: +pend.lng };
+    var tp = meterTripOf({ trip: state.meterTripPending }); /* v72t trip type */
+    M.trip = tp; M.freeWaitSecBand = M.freeWaitSec;
+    state.meterTripPending = null;
     var pst = state.meterStopPending;
     if (pst && isCoord(pst.lat) && isCoord(pst.lng)) M.stop = { label: String(pst.label || ""), sub: String(pst.sub || ""), lat: +pst.lat, lng: +pst.lng };
     state.meterStopPending = null; state.meterEst = null; state.meterDestTarget = "";
@@ -10696,6 +10826,7 @@
       pickupLat: M.startPt ? M.startPt.lat : null, pickupLng: M.startPt ? M.startPt.lng : null,
       meterMiles: f.miles, billedMiles: f.miles, meterMinutes: M.minutes, waitMinutes: f.waitMin, gpsGapFills: M.gapFills || 0,
       fareBase: f.base, fareMileCents: f.mileCents, fareWaitCents: f.waitCents, fareSub: f.sub, fareTax: f.tax, fareTotal: f.total,
+      feeLines: f.feeLines || [], airportFeeCents: f.airportCents || 0, internationalFeeCents: f.intlCents || 0, meterTrip: meterTripOf(M), /* v72t */
       estimateCents: f.total, paymentStatus: "unpaid",
       meterLive: { miles: f.miles, waitMin: f.waitMin, freeUsed: Number(M.freeUsed) || 0, moved: !!M.moved, fareCents: f.sub, at: now, gpsOk: true }
     });
@@ -11077,12 +11208,65 @@
       (f.roundCents ? '<div class="money-row"><span>Round up to ' + money(M.stepCents) + " step</span><span>" + money(f.roundCents) + "</span></div>" : "") +
       (f.minApplied ? '<div class="money-row"><span>Meter</span><span>' + money(f.meter) + "</span></div>" +
         '<div class="money-row" id="meter-min-applied" style="color:#f0d48a;font-weight:700"><span>Minimum fare ' + money(f.minCents) + " applied</span><span>+" + money(f.minAdd) + "</span></div>" : "") +
+      (f.feeLines || []).map(function (l) { return '<div class="money-row meter-fee-line" id="meter-fee-' + esc(l.key) + '"><span>' + esc(l.label) + "</span><span>" + money(l.cents) + "</span></div>"; }).join("") + /* v72t airport lines */
       (M.taxRate ? '<div class="money-row"><span>Fare</span><span id="meter-fare-sub">' + money(f.sub) + "</span></div>" +
         '<div class="money-row" id="meter-tax"><span>Tax (' + meterPct(M.taxRate) + ")</span><span>" + money(f.tax) + "</span></div>" : "") +
       '<div class="total-row"><span>Total</span><span id="meter-total">' + money(f.total) + "</span></div>" +
-      '<p class="fine">' + esc(M.tierLabel) + " · " + esc(String(M.minutes || "")) + " min ride · ride " + esc(M.code) + "</p>" +
+      '<p class="fine">' + esc(M.tierLabel) + " · " + esc(meterTripLabel(meterTripOf(M))) + " · " + esc(String(M.minutes || "")) + " min ride · ride " + esc(M.code) + "</p>" +
       "</div>"
     );
+  }
+  /* v72t: rider tip boxes fold up. Open until a tip is picked (or while typing a custom tip); the rider's own open/close sticks. */
+  var riderTipOpenState = {};
+  function riderTipOpen(where, picked, custom) {
+    if (custom) return true;
+    if (Object.prototype.hasOwnProperty.call(riderTipOpenState, where)) return riderTipOpenState[where];
+    return !picked;
+  }
+  if (typeof document !== "undefined") document.addEventListener("toggle", function (e) {
+    if (e.target && e.target.id === "rider-tip-box") riderTipOpenState.app = e.target.open;
+  }, true);
+  /* v72t: in-app number pad for "Cash received" / "Amount collected" and the Custom tip */
+  function meterPadTarget() {
+    var t = state.meterPadTarget || "amount";
+    if (t === "tip" && state.meterTipChoice !== "custom") t = "amount";
+    return t;
+  }
+  function meterPadHtml() {
+    var keys = ["1", "2", "3", "4", "5", "6", "7", "8", "9", ".", "0", "back"];
+    return '<div class="meter-pad" id="meter-pad" role="group" aria-label="Number pad for ' + (meterPadTarget() === "tip" ? "the custom tip" : "the amount") + '">' +
+      keys.map(function (k) {
+        return '<button type="button" class="meter-pad-key" data-pad-key="' + k + '" aria-label="' + (k === "back" ? "Delete" : k === "." ? "Decimal point" : k) + '">' + (k === "back" ? "\u232b" : k) + "</button>";
+      }).join("") + "</div>";
+  }
+  function meterPadPress(k) {
+    var id = meterPadTarget() === "tip" ? "meter-other-tip" : "meter-other-amount";
+    var el = document.getElementById(id);
+    if (!el) return;
+    var v = String(el.value || "");
+    if (k === "back") v = v.slice(0, -1);
+    else if (k === ".") { if (v.indexOf(".") < 0) v = (v || "0") + "."; }
+    else {
+      var dot = v.indexOf(".");
+      if (dot >= 0 && v.length - dot > 2) return; /* 2 decimals max */
+      if (v.replace(".", "").length >= 6) return;
+      v = v === "0" ? k : v + k;
+    }
+    el.value = v;
+    state.meterOtherDraft = Object.assign({}, state.meterOtherDraft || {}, id === "meter-other-tip" ? { tip: v } : { amount: v });
+    try { el.dispatchEvent(new Event("input", { bubbles: true })); } catch (e) {}
+  }
+  if (typeof document !== "undefined") {
+    document.addEventListener("click", function (e) {
+      var k = e.target && e.target.closest ? e.target.closest("[data-pad-key]") : null;
+      if (k) { e.preventDefault(); meterPadPress(k.getAttribute("data-pad-key")); return; }
+      var inp = e.target && e.target.closest ? e.target.closest("input[data-pad]") : null;
+      if (inp) {
+        state.meterPadTarget = inp.getAttribute("data-pad");
+        Array.prototype.forEach.call(document.querySelectorAll("input[data-pad]"), function (x) { x.classList.toggle("pad-on", x === inp); });
+        try { inp.blur(); } catch (er) {}
+      }
+    });
   }
   function meterOtherHtml(M) {
     var draft = state.meterOtherDraft || {};
@@ -11116,13 +11300,14 @@
         return '<button class="btn secondary meter-method" type="button" data-method="' + m[0] + '" aria-pressed="' + (state.meterOtherMethod === m[0] ? "true" : "false") + '">' + m[1] + "</button>";
       }).join("") + "</div>" +
       (r.method
-        ? '<details class="meter-tip-box" id="meter-tip-box"' + (state.meterTipOpen || r.choice === "custom" ? " open" : "") + '><summary id="meter-tip-summary"><strong>Tip:</strong> ' +
-            esc(r.choice === "0" ? "No tip" : r.choice === "custom" ? "Custom " + money(r.tip) : r.choice + "% \u00b7 " + money(r.tip)) + ' <span class="fine">(tap to ' + (state.meterTipOpen ? "hide" : "change") + ")</span></summary>" +
+        ? '<div class="meter-tip-box" id="meter-tip-box"><p class="fine" id="meter-tip-summary" style="margin:4px 0 2px"><strong>Tip:</strong> ' + /* v72t: presets always visible */
+            esc(r.choice === "0" ? "No tip" : r.choice === "custom" ? "Custom " + money(r.tip) : r.choice + "% \u00b7 " + money(r.tip)) + "</p>" +
           '<div class="meter-tips" role="group" aria-label="Tip">' + chip("0", "No tip") +
             METER_TIP_PCTS.map(function (p) { return chip(p, p + "% · " + money(Math.round((Number(M.fare.sub) || 0) * Number(p) / 100))); }).join("") + chip("custom", "Custom") + "</div>" +
-          (r.choice === "custom" ? '<label for="meter-other-tip">Custom tip</label><input id="meter-other-tip" type="text" inputmode="decimal" autocomplete="off" autocorrect="off" spellcheck="false" name="pcs-meter-tip-' + esc(M.code) + '" placeholder="0.00" value="' + esc(draft.tip || "") + '">' : "") + "</details>" +
+          (r.choice === "custom" ? '<label for="meter-other-tip">Custom tip</label><input id="meter-other-tip" type="text" readonly data-pad="tip" class="meter-pad-input' + (meterPadTarget() === "tip" ? " pad-on" : "") + '" inputmode="none" autocomplete="off" autocorrect="off" spellcheck="false" name="pcs-meter-tip-' + esc(M.code) + '" placeholder="0.00" value="' + esc(draft.tip || "") + '">' : "") + "</div>" +
           '<label for="meter-other-amount">' + (cash ? "Cash received" : "Amount collected (fare)") + "</label>" +
-          '<input id="meter-other-amount" type="text" inputmode="decimal" autocomplete="off" autocorrect="off" spellcheck="false" name="pcs-meter-collected-' + esc(M.code) + '" placeholder="' + esc(((M.fare.total + (cash ? r.tip : 0)) / 100).toFixed(2)) + '" value="' + esc(amtVal) + '">' +
+          '<input id="meter-other-amount" type="text" readonly data-pad="amount" class="meter-pad-input' + (meterPadTarget() === "amount" ? " pad-on" : "") + '" inputmode="none" autocomplete="off" autocorrect="off" spellcheck="false" name="pcs-meter-collected-' + esc(M.code) + '" placeholder="' + esc(((M.fare.total + (cash ? r.tip : 0)) / 100).toFixed(2)) + '" value="' + esc(amtVal) + '">' +
+          meterPadHtml() + /* v72t: on-screen number pad (iPad ignores inputmode); the system keyboard never opens */
           (cash ? '<button class="btn ghost" type="button" id="meter-exact">Exact change</button>' +
             '<div id="meter-cash-sum" class="fine" style="font-weight:700">Fare ' + esc(money(r.fare)) + " · Tip " + esc(money(r.tip)) + ' · <span id="meter-change"' + (r.change < 0 ? ' style="color:#b91c1c"' : "") + ">Change due: " + (isFinite(r.received) ? esc(money(r.change)) : "\u2014") + "</span></div>" : "") +
           '<p class="fine">Extra cash is change, never a tip. Flagged for Matthew in God mode (not checked by Square).</p>' +
@@ -11153,6 +11338,7 @@
         '<details class="card meter-rates-box" id="meter-rates-box"><summary>Rates · starts ' + esc(money(band.entryCents)) + " · " + esc(money(band.cents)) + "/mi</summary>" + meterRatesHtml(band) + "</details>" +
         (ready ? "" : '<p class="error" id="meter-gate">Finish the steps on Home (approval, car details and starting odometer) before starting a metered ride.</p>') +
         '<p class="fine" id="meter-gps">' + esc(meterGpsLine(null)) + "</p>" +
+        meterTripHtml(null) + /* v72t: Regular / To airport / From airport */
         meterRouteHtml("ready") + /* v72s: From / + Add a stop / To */
         '<button class="btn meter-big" type="button" id="meter-start"' + (ready ? "" : " disabled") + ">Start</button>" +
         "</div>" +
@@ -11188,6 +11374,7 @@
       '<section id="meter-ended">' + meterTestTag(M) +
       "<h2>Ride ended</h2>" +
       meterRiderQrHtml(M) +
+      meterTripHtml(M) + /* v72t: still editable until payment */
       (state.meterOtherOpen /* v72s: one screen, no scrolling: the breakdown folds up while marking paid */
         ? '<details class="card meter-bd-box" id="meter-breakdown-box"><summary>Total <strong id="meter-total-sum">' + money(f.total) + "</strong> \u00b7 breakdown</summary>" + meterBreakdownHtml(M) + "</details>"
         : meterBreakdownHtml(M)) + busy + err +
@@ -11246,7 +11433,7 @@
         '</b><span id="meter-mph-label">' + esc(meterMphLabel(M, mph)) + "</span></div>"; })() + "</div>" +
       '<p class="meter-status-line"><span class="meter-free" id="meter-free">' + esc(meterFreeLine(M)) + '</span><span id="meter-gps">' + esc(meterGpsLine(M)) + "</span></p>" +
       (M.riderCard ? '<p class="fine" id="meter-rider-card-note" style="color:#8fd0a8;text-align:center;margin:0">✓ Rider saved a card on their meter page</p>' : "") +
-      meterRiderQrHtml(M) + busy +
+      (meterQrShowing() ? '<div class="meter-qr-modal" id="meter-qr-modal">' + meterRiderQrHtml(M) + "</div>" : "") + busy + /* v72t: big QR overlay at the START */
       (state.meterConfirmEnd
         ? '<div id="meter-confirm-end"><p class="lede" style="margin:6px 0">End this ride? Meter ' + money(f.sub) + ".</p>" +
           '<button class="btn meter-big meter-end" type="button" id="meter-end-yes">Yes, end ride</button>' +
@@ -11258,9 +11445,10 @@
   }
   function meterMapHome() {
     return (
-      accountNav() + '<div class="meter-split" id="meter-split-run"><div class="meter-col">' + meterPanelHtml() + meterRouteHtml("run") + "</div>" +
+      accountNav() + '<div class="meter-split" id="meter-split-run"><div class="meter-col">' + meterPanelHtml() + meterRouteHtml("run") + meterTripHtml(state.meter) + "</div>" +
       '<div class="meter-map-col"><div class="map-stage board-map meter-map">' +
       '<div id="live-map" role="img" aria-label="Map: you during the metered ride"></div>' +
+      meterTurnHtml() + /* v72t: next turn right on the map */
       '<button type="button" class="meter-eta-chip' + (state.meter && state.meter.dest ? " has-dest" : "") + '" id="meter-eta-chip">' + esc(meterChipText(state.meter)) + "</button>" + /* v71 */
       '<p class="map-caption">You · metered ride</p>' +
       "</div></div></div>" +
@@ -11531,18 +11719,61 @@
     return [h.lat.toFixed(3), h.lng.toFixed(3), st ? meterDestKey(st) : "", meterDestKey(d)].join("|");
   }
   function meterOsrm(pts) {
-    var url = "https://router.project-osrm.org/route/v1/driving/" + pts.map(function (p) { return p.lng + "," + p.lat; }).join(";") + "?overview=full&geometries=geojson";
+    var url = "https://router.project-osrm.org/route/v1/driving/" + pts.map(function (p) { return p.lng + "," + p.lat; }).join(";") + "?overview=full&geometries=geojson&steps=true";
     return withTimeout(fetch(url).then(function (r) { return r.json(); }), 8000).then(function (data) {
       var r = data && data.routes && data.routes[0];
       var c = r && r.geometry && r.geometry.coordinates;
       if (!r || !c || c.length < 2 || !isFinite(+r.distance) || !isFinite(+r.duration)) throw new Error("osrm");
-      return { line: c.map(function (p) { return [p[1], p[0]]; }), miles: +r.distance / 1609.344, minutes: +r.duration / 60, approx: false };
+      var steps = [];
+      (r.legs || []).forEach(function (lg) { (lg.steps || []).forEach(function (st) { var mv = st.maneuver || {}; if (mv.location) steps.push({ lat: +mv.location[1], lng: +mv.location[0], text: meterTurnText(st) }); }); });
+      return { line: c.map(function (p) { return [p[1], p[0]]; }), miles: +r.distance / 1609.344, minutes: +r.duration / 60, approx: false, steps: steps };
     }).catch(function () {
       var mi = 0, i;
       for (i = 1; i < pts.length; i += 1) mi += haversineMi(pts[i - 1].lat, pts[i - 1].lng, pts[i].lat, pts[i].lng) * 1.3;
       return { line: pts.map(function (p) { return [p.lat, p.lng]; }), miles: mi, minutes: mi * 2, approx: true }; /* 30 mph */
     });
   }
+  /* v72t: turn-by-turn text from the OSRM route steps */
+  function meterTurnText(st) {
+    var mv = st.maneuver || {}, t = mv.type || "", m = mv.modifier || "", road = st.name || st.ref || "";
+    var dir = m ? m.replace("sharp ", "sharp ").replace("slight ", "slight ") : "";
+    var onto = road ? " onto " + road : "";
+    if (t === "depart") return "Head out" + (road ? " on " + road : "");
+    if (t === "arrive") return "Arrive at the destination";
+    if (t === "roundabout" || t === "rotary") return "At the roundabout, take exit " + (mv.exit || 1) + onto;
+    if (t === "merge") return "Merge" + (dir ? " " + dir : "") + onto;
+    if (t === "on ramp") return "Take the ramp" + (dir ? " on the " + dir.replace("slight ", "") : "") + onto;
+    if (t === "off ramp") return "Take the exit" + (dir ? " on the " + dir.replace("slight ", "") : "") + onto;
+    if (t === "fork") return "Keep " + (dir.replace("slight ", "") || "straight") + " at the fork" + onto;
+    if (m === "straight") return "Continue straight" + onto;
+    if (m === "uturn") return "Make a U-turn" + onto;
+    if (dir) return (t === "continue" || t === "new name" ? "Continue " : "Turn ") + dir + onto;
+    return "Continue" + onto;
+  }
+  function meterNextTurn() {
+    var M = state.meter, here = meterHerePt();
+    if (!M || !M.dest || !here || !meterRoute || !meterRoute.steps || !meterRoute.steps.length) return null;
+    var S = meterRoute.steps, k = 0, best = Infinity, i;
+    for (i = 0; i < S.length; i += 1) { var d = haversineMi(here.lat, here.lng, S[i].lat, S[i].lng); if (d < best) { best = d; k = i; } }
+    if (k + 1 < S.length && (best < 0.03 || haversineMi(S[k].lat, S[k].lng, S[k + 1].lat, S[k + 1].lng) > haversineMi(here.lat, here.lng, S[k + 1].lat, S[k + 1].lng))) k += 1;
+    if (k === 0 && S.length > 1) k = 1; /* skip "Head out" */
+    var dist = haversineMi(here.lat, here.lng, S[k].lat, S[k].lng);
+    return { text: S[k].text, mi: dist };
+  }
+  function meterTurnHtml() {
+    var t = meterNextTurn();
+    if (!t) return '<div class="meter-turn" id="meter-turn" style="display:none"></div>';
+    var d = t.mi < 0.1 ? Math.max(50, Math.round(t.mi * 5280 / 50) * 50) + " ft" : t.mi.toFixed(1) + " mi";
+    return '<div class="meter-turn" id="meter-turn" role="status" aria-live="polite"><small>In ' + esc(d) + "</small>" + esc(t.text) + "</div>";
+  }
+  if (typeof window !== "undefined") setInterval(function () {
+    try {
+      var el = document.getElementById("meter-turn");
+      if (!el) return;
+      var html = meterTurnHtml();
+      if (el.outerHTML !== html) el.outerHTML = html;
+    } catch (e) {}
+  }, 2000);
   function meterEstFetch() {
     var key = meterEstKey();
     if (!key || state.meter || (state.meterEst && state.meterEst.key === key) || state.meterEstBusy === key) return;
@@ -11589,8 +11820,17 @@
     st.id = "pcs-meter-split-style";
     st.textContent =
       ".meter-split{display:flex;flex-direction:column;gap:8px}" +
-      "@media (max-width:759px){.meter-split>.meter-map-col{order:-1}.meter-split .map-stage.board-map{height:30vh;height:30dvh}}" +
-      ".meter-tip-box{margin:6px 0}.meter-tip-box summary{cursor:pointer;padding:6px 0}.meter-tips{display:flex;flex-wrap:wrap;gap:6px}.meter-tips .btn{flex:1 1 30%;margin:0;padding:8px 6px;font-size:14px}" +
+      /* v72t (Matthew): back to the pre-v72s single column; while driving the MAP is at the TOP with the next turn on it */
+      "#meter-split-run>.meter-map-col{order:-1}" +
+      "#meter-split-run .map-stage.board-map{height:46vh;height:46dvh;min-height:240px}#meter-split-run .map-stage.board-map #live-map,#meter-split-run .map-stage.board-map .leaflet-container{min-height:240px}" +
+      ".meter-turn{position:absolute;left:8px;right:8px;top:8px;z-index:500;background:#20371d;color:#cdeccd;border-radius:10px;padding:8px 12px;font-weight:800;font-size:18px;line-height:1.25;box-shadow:0 2px 8px rgba(0,0,0,.35)}" +
+      ".meter-turn small{display:block;font-weight:600;font-size:13px;opacity:.85}" +
+      ".meter-qr-modal{position:fixed;inset:0;z-index:2147482000;background:rgba(0,0,0,.6);display:flex;align-items:center;justify-content:center;padding:16px}" +
+      ".meter-qr-modal .meter-rqr{flex-direction:column;text-align:center;max-width:420px;padding:16px}.meter-qr-modal .meter-rqr-code{flex:0 0 auto;width:260px}.meter-qr-modal .meter-rqr-code svg{width:260px;height:260px}" +
+      ".meter-pad{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin:6px 0;max-width:420px}" +
+      ".meter-pad-key{font-size:24px;font-weight:700;padding:10px 0;border-radius:10px;border:1px solid #3f6a3b;background:#20371d;color:#cdeccd;cursor:pointer;touch-action:manipulation}" +
+      ".meter-pad-key:active{background:#3f6a3b}.meter-pad-input{caret-color:transparent;cursor:pointer}.meter-pad-input.pad-on{outline:3px solid #cdeccd;outline-offset:1px}" +
+      ".meter-tip-box{margin:6px 0}.meter-tip-box summary{cursor:pointer;padding:6px 0}.meter-tips{display:flex;flex-wrap:wrap;gap:6px}.meter-tips .btn{flex:1 1 30%;margin:0;padding:8px 6px;font-size:14px}.meter-tips .btn.ghost{border:1px solid rgba(240,212,138,.65);border-radius:10px}" +
       ".meter-bd-box{padding:6px 10px;margin:6px 0}.meter-bd-box summary{cursor:pointer}.meter-bd-box #meter-breakdown{margin:6px 0 0;border:0;padding:0;background:none}" +
       "#meter-other-card{padding:10px 12px}#meter-other-card label{margin:6px 0 2px}#meter-other-card .btn{margin:4px 0}#meter-other-card input{padding:8px;font-size:18px}" +
       "#meter-ended h2{margin:0 0 4px;font-size:22px}#meter-ended .meter-big{font-size:22px;padding:12px}" +
@@ -11605,12 +11845,7 @@
       ".meter-prev-stage{height:30vh;height:30dvh;min-height:170px}.meter-prev-stage #meter-prev-map{position:absolute;inset:0;background:#dce6f0}" +
       ".meter-split .map-stage.board-map{height:34vh;height:34dvh;min-height:180px}.meter-split .map-stage.board-map #live-map,.meter-split .map-stage.board-map .leaflet-container{min-height:180px}" +
       ".meter-est-line{margin:4px 2px 0;font-size:12px;line-height:1.3;opacity:.85}" +
-      "@media (min-width:700px),(orientation:landscape) and (min-width:560px){" +
-        ".meter-split{flex-direction:row;align-items:flex-start}" +
-        ".meter-split>.meter-col{flex:0 0 min(430px,46%);max-width:min(430px,46%)}" +
-        ".meter-split>.meter-map-col{flex:1 1 auto;min-width:0;position:sticky;top:0}" +
-        ".meter-prev-stage,.meter-split .map-stage.board-map{height:calc(100vh - 150px);height:calc(100dvh - 150px);min-height:300px}" +
-        ".meter-split .map-stage.board-map #live-map,.meter-split .map-stage.board-map .leaflet-container{min-height:300px}}";
+      "";
     document.head.appendChild(st);
   }
   /* where = "ready" (Start screen) or "run" (card under the map) */
@@ -11684,6 +11919,8 @@
       rq.addEventListener("click", closeQr);
       rq.addEventListener("keydown", function (e) { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); closeQr(); } });
     }
+    var qm = document.getElementById("meter-qr-modal");
+    if (qm) qm.addEventListener("click", function (e) { if (e.target === qm) { state.meterQrUntil = 0; render(); } });
     on("meter-back", function () { state.meterOpen = false; state.meterConfirmEnd = false; render(); });
     on("meter-start", meterStart);
     on("meter-end", function () { state.meterConfirmEnd = true; render(); });
@@ -11711,7 +11948,7 @@
     if (tipBox) tipBox.addEventListener("toggle", function () { state.meterTipOpen = tipBox.open; });
     on("meter-other-change", function () { state.meterOtherReview = ""; state.meterHighTipOk = false; state.meterError = ""; render(); });
     Array.prototype.forEach.call(document.querySelectorAll(".meter-tip-chip"), function (b) {
-      b.addEventListener("click", function () { meterOtherRead(); state.meterTipChoice = b.getAttribute("data-tip") || "0"; state.meterOtherReview = ""; state.meterError = ""; render(); });
+      b.addEventListener("click", function () { meterOtherRead(); state.meterTipChoice = b.getAttribute("data-tip") || "0"; state.meterPadTarget = state.meterTipChoice === "custom" ? "tip" : "amount"; state.meterOtherReview = ""; state.meterError = ""; render(); });
     });
     on("meter-exact", function () {
       var r = meterOtherRead();
@@ -11906,13 +12143,13 @@
     if (state.hubOpen) return driverHub();
     if (meterOnMap()) return meterMapHome(); /* v70: running meter = compact panel above the map (never covers it) */
     var gated = !canGoOnline();
+    /* v72t (Matthew): Home fits one iPad/iPhone screen: clocks, status and a LARGE map without scrolling.
+       Offers sit above the map; the map fills the rest of the screen (sized after render, see homeMapFit). */
     return (
       accountNav() +
       meterBarHtml() + /* v70 */
       milesTodayHtml() +
-      (gated ? "" : qDriverSliderHtml()) + /* v72q: Available / On a ride */
-      '<p class="fine" id="rides-count">' + esc(ridesCountLabel()) + "</p>" +
-      bgGpsTipCard() +
+      (gated ? "" : qDriverSliderHtml()) + /* v72q: Available / On a ride / Break (v72t) */
       (state.driverNotice
         ? '<div class="card notice-card" role="status"><p class="lede">' + esc(state.driverNotice) + "</p>" +
           '<button class="btn ghost" type="button" id="dismiss-driver-notice">OK</button></div>'
@@ -11920,26 +12157,54 @@
       approvalGateCard() +
       vehicleNeededCard() +
       milesStartCard() +
-      (state.meter ? "" : '<button class="btn secondary" type="button" id="open-meter">Metered ride</button>') + /* v70 */
       (gated
-        ? '<p class="lede">Finish the steps above to go online and see open requests.</p>'
+        ? bgGpsTipCard() + (state.meter ? "" : '<button class="btn secondary" type="button" id="open-meter">Metered ride</button>') +
+          '<p class="lede">Finish the steps above to go online and see open requests.</p>'
         : (
-          "<h2>Open requests</h2>" +
+          '<div class="home-row" id="home-row" style="display:flex;align-items:center;gap:8px;margin:4px 0">' +
+          (state.meter ? "" : '<button class="btn secondary" type="button" id="open-meter" style="flex:0 0 auto;width:auto;margin:0;padding:8px 14px;min-height:0">Metered ride</button>') + /* v70 */
+          '<p class="fine" id="rides-count" style="flex:1 1 auto;margin:0">' + esc(ridesCountLabel()) + "</p>" +
+          (bgGpsTipDismissed() && !state.bgTipPeek ? bgGpsTipCard() : "") + openRideAlertToggleHtml() + "</div>" +
+          (bgGpsTipDismissed() && !state.bgTipPeek ? "" : bgGpsTipCard()) +
           qDriverPausedHtml() + /* v72q */
           driverBoardStatus() +
-          openRideAlertToggleHtml() +
-          '<div class="map-stage board-map">' +
+          waitingAcceptCard() +
+          openRideCard() +
+          '<div class="map-stage board-map home-map" id="home-map-stage">' +
           '<div id="live-map" role="img" aria-label="Open ride requests map"></div>' +
           '<p class="map-caption">You and open rider pickups</p>' +
           "</div>" +
-          (isFinite(state.hereLat) ? "" : '<p class="fine">Allow location so the map can show where you are.</p>') +
-          '<p class="legend"><span><i class="swatch"></i> You</span>' +
-          '<span><i class="swatch you"></i> Rider pickup</span></p>' +
-          waitingAcceptCard() +
-          openRideCard()
+          (isFinite(state.hereLat) ? "" : '<p class="fine">Allow location so the map can show where you are.</p>')
         ))
     );
   }
+  function ensureHomeStyle() {
+    if (document.getElementById("pcs-home-style")) return;
+    var st = document.createElement("style"); st.id = "pcs-home-style";
+    st.textContent = ".home-row #toggle-ride-alert{width:auto;margin:0;padding:6px 10px;min-height:0;font-size:13px;flex:0 0 auto}" +
+      ".home-map{margin:4px 0 0}.map-stage.board-map.home-map{min-height:0}.home-map #live-map,.home-map .leaflet-container{min-height:0 !important}" +
+      "@media (max-width:600px){#q-avail-note{display:none}.q-avail .q-opt{padding:9px 4px}#hos-counter{font-size:11px}.hos-clock{padding:2px !important}}" +
+      ".q-avail{padding:8px 12px;margin:6px 0}.q-avail .tag{margin:0}.q-avail .q-switch{margin:4px 0}#q-avail-note{font-size:12px;margin:2px 0}" +
+      "#miles-today{margin:2px 0}" +
+      "@media (max-width:600px){#home-row{flex-wrap:wrap;row-gap:2px}#rides-count{order:9;flex:1 0 100% !important;font-size:12px}}";
+    document.head.appendChild(st);
+  }
+  /* v72t: size the Home map to fill the rest of the screen (min 260 px), so nothing needs scrolling */
+  function homeMapFit() {
+    var st = document.getElementById("home-map-stage");
+    if (!st) return;
+    var vh = window.innerHeight || document.documentElement.clientHeight || 800;
+    var top = st.getBoundingClientRect().top + (window.scrollY || 0);
+    var foot = 26; /* version footer + caption */
+    var h = Math.max(220, Math.round(vh - top - foot));
+    if (Math.abs((parseFloat(st.style.height) || 0) - h) > 4) {
+      st.style.height = h + "px";
+      var lm = document.getElementById("live-map"); if (lm) lm.style.height = (h - 18) + "px";
+      try { if (liveMap && liveMap.invalidateSize) liveMap.invalidateSize(); } catch (e) {}
+      try { if (window.PCSMaps && PCSMaps.resize) PCSMaps.resize(); } catch (e) {}
+    }
+  }
+  if (typeof window !== "undefined") { window.addEventListener("resize", function () { try { homeMapFit(); } catch (e) {} }); setInterval(function () { try { homeMapFit(); } catch (e) {} }, 1500); }
 
   function driverFareCard(finalLabel) {
     var est = estimate();
@@ -12144,6 +12409,8 @@
   }
 
   function render() {
+    setTimeout(function () { try { homeMapFit(); } catch (e) {} }, 0); /* v72t */
+    try { ensureHomeStyle(); } catch (e) {}
     meterEnsureLoaded(); /* v70 */
     closeDriverOverlaysForGate(); /* v71 login fix */
     var stayOnBoard = ROLE === "driver" && state.screen === "home" && signedIn() && !state.hubOpen && !state.meterOpen;
@@ -13288,13 +13555,6 @@
           saveRide(state.rideStatus);
           if (syncOn()) patchRide(state.code, { cardStatus: "test_skip", cardSkippedAt: Date.now() }).catch(function () {});
         }
-        render();
-      });
-    }
-    var bgTipOk = document.getElementById("bg-gps-tip-ok");
-    if (bgTipOk) {
-      bgTipOk.addEventListener("click", function () {
-        try { localStorage.setItem(BG_GPS_TIP_KEY, String(Date.now())); } catch (err) {}
         render();
       });
     }
@@ -14850,9 +15110,22 @@
     };
     go();
   }
-  function qManualBusy() {
+  function qManualBusy() { /* "1" = On a ride, "b" = Break (v72t); both pause offers */
     if (ROLE !== "driver") return false;
-    try { return localStorage.getItem(qBusyKey()) === "1"; } catch (e) { return false; }
+    try { var v = localStorage.getItem(qBusyKey()); return v === "1" || v === "b"; } catch (e) { return false; }
+  }
+  function qOnBreak() {
+    if (ROLE !== "driver") return false;
+    try { return localStorage.getItem(qBusyKey()) === "b" && !qAutoBusy(); } catch (e) { return false; }
+  }
+  function qSetBreak(on) {
+    if (ROLE !== "driver") return;
+    try { if (on) localStorage.setItem(qBusyKey(), "b"); else localStorage.removeItem(qBusyKey()); } catch (e) {}
+    qd.lastPub = null;
+    try { publishDriverPresence(); } catch (e) {}
+    render();
+    try { syncOpenRideAlert(); } catch (e) {}
+    try { refreshOpenRides(true); } catch (e) {}
   }
   function qAutoBusy() {
     if (ROLE !== "driver" || !signedIn()) return false;
@@ -14867,7 +15140,8 @@
     if (!tok) return;
     var auto = qAutoBusy(), busy = auto || qManualBusy();
     qd.pubBusy = true;
-    qWorker("/driver/status", { token: tok, onRide: busy, source: auto ? "pcs" : "manual" }).then(function () {
+    var brk = qOnBreak();
+    qWorker("/driver/status", { token: tok, onRide: busy && !brk, onBreak: brk, source: auto ? "pcs" : "manual" }).then(function () {
       qd.pubBusy = false; qd.pubErr = "";
     }).catch(function (e) {
       qd.pubBusy = false; qd.pubErr = e.message || "Couldn't update your status.";
@@ -14907,19 +15181,21 @@
   function qDriverSliderHtml() {
     if (ROLE !== "driver" || !signedIn()) return "";
     ensureQueueStyle();
-    var auto = qAutoBusy(), busy = auto || qManualBusy();
+    var auto = qAutoBusy(), brk = qOnBreak(), busy = (auto || qManualBusy()) && !brk;
     var tok = qToken();
     return (
-      '<div class="card q-avail' + (busy ? " q-busy" : "") + '" id="q-avail">' +
+      '<div class="card q-avail q-three' + (busy ? " q-busy" : "") + (brk ? " q-break" : "") + '" id="q-avail">' +
       '<p class="tag">Your status</p>' +
       '<div class="q-switch" role="radiogroup" aria-label="Your status">' +
       '<span class="q-knob" aria-hidden="true"></span>' +
-      '<button type="button" role="radio" class="q-opt" id="q-set-available" aria-checked="' + (busy ? "false" : "true") + '"' + (auto || !tok ? " disabled" : "") + ">Available</button>" +
+      '<button type="button" role="radio" class="q-opt" id="q-set-available" aria-checked="' + (busy || brk ? "false" : "true") + '"' + (auto || !tok ? " disabled" : "") + ">Available</button>" +
       '<button type="button" role="radio" class="q-opt" id="q-set-onride" aria-checked="' + (busy ? "true" : "false") + '"' + (auto || !tok ? " disabled" : "") + ">On a ride</button>" +
+      '<button type="button" role="radio" class="q-opt" id="q-set-break" aria-checked="' + (brk ? "true" : "false") + '"' + (auto || !tok ? " disabled" : "") + ">Break</button>" +
       "</div>" +
       (tok ? "" : qDriverAuthHtml()) +
       '<p class="fine" id="q-avail-note">' + esc(auto
         ? "Set automatically during your PCS ride. You switch back to Available when it ends."
+        : brk ? "On break: no ride offers, riders see \u201cDriver on break\u201d. 30 minutes of break resets your Break clock."
         : (busy
           ? "Riders see you are online but finishing a ride, and can join the queue. New ride offers are paused. Slide to Available for the next rider in line."
           : "Slide to On a ride whenever you are carrying a passenger, so riders can join the queue instead.")) + "</p>" +
@@ -14943,11 +15219,13 @@
   function qBoardPollOk() { return ROLE === "driver" && signedIn() && state.screen === "home" && qManualBusy(); }
   function qDriverPausedHtml() {
     if (ROLE !== "driver" || !qManualBusy()) return "";
+    if (qOnBreak()) return '<p class="lede q-paused" id="q-paused">You are on Break, so new ride offers are paused.</p>';
     return '<p class="lede q-paused" id="q-paused">You are set to On a ride, so new ride offers are paused.</p>';
   }
 
   /* ---------- rider side ---------- */
   function qAllBusy() { return !!(qr.ws && qr.ws.allBusy); }
+  function qBusyText() { return qr.ws && qr.ws.allOnBreak ? "Driver on break" : (qr.ws && qr.ws.onBreak && !qr.ws.inLine && qr.ws.busy === qr.ws.onBreak ? "Driver on break" : "Driver online, finishing a ride"); }
   function qOwnerKey(code) { return "pcs-q-owner-" + String(code || ""); }
   function qOwnerSecret(code) { try { return localStorage.getItem(qOwnerKey(code)) || ""; } catch (e) { return ""; } }
   function qMyQueued() {
@@ -14969,7 +15247,7 @@
     if (onForm && qr.join) {
       return (
         '<div class="card q-prompt q-joined" id="q-prompt">' +
-        '<div class="status"><i></i><span>Driver online, finishing a ride</span></div>' +
+        '<div class="status"><i></i><span>' + esc(qBusyText()) + '</span></div>' +
         '<p class="lede">You\u2019re joining the queue for the next ride. Send your request below (pickup now) to get your place in line.</p>' +
         (n ? '<p class="fine">' + n + (n === 1 ? " rider is" : " riders are") + " in line now.</p>" : "") +
         '<button class="btn ghost" type="button" id="q-unjoin">Don\u2019t join the queue</button>' +
@@ -14978,7 +15256,7 @@
     }
     return (
       '<div class="card q-prompt" id="q-prompt">' +
-      '<div class="status"><i></i><span>Driver online, finishing a ride</span></div>' +
+      '<div class="status"><i></i><span>' + esc(qBusyText()) + '</span></div>' +
       '<p class="lede">Your driver is finishing a ride. Join the queue and you\u2019ll be picked up next.</p>' +
       (n ? '<p class="fine" id="q-count">' + n + (n === 1 ? " rider is" : " riders are") + " in line now.</p>" : '<p class="fine" id="q-count">No one is in line yet.</p>') +
       '<button class="btn" type="button" id="q-join">Join the queue for the next ride</button>' +
@@ -15020,7 +15298,7 @@
   }
   function qWaitLabel(fallback) {
     var st = String(state.rideStatus || "").toLowerCase();
-    if (st === "requested" && qAllBusy()) return "Driver online, finishing a ride";
+    if (st === "requested" && qAllBusy()) return qBusyText();
     return fallback;
   }
   function qEnsureJoined() {
@@ -15056,7 +15334,7 @@
     var h2 = document.getElementById("q-place-host");
     if (h2) { var b = qPlaceInner(); if (h2.__qHtml !== b) { h2.innerHTML = b; h2.__qHtml = b; } }
     var s = document.querySelector(".status span");
-    if (s && state.screen === "waiting" && String(state.rideStatus || "").toLowerCase() === "requested" && qAllBusy()) s.textContent = "Driver online, finishing a ride";
+    if (s && state.screen === "waiting" && String(state.rideStatus || "").toLowerCase() === "requested" && qAllBusy()) s.textContent = qBusyText();
   }
   function qAfterRender() {
     if (ROLE === "driver") {
@@ -15087,7 +15365,7 @@
     if (want) qPaintHosts();
   }
   function qClick(ev) {
-    var t = ev.target && ev.target.closest ? ev.target.closest("#q-join,#q-unjoin,#q-leave,#q-leave-yes,#q-leave-no,#q-set-available,#q-set-onride,#q-auth-go") : null;
+    var t = ev.target && ev.target.closest ? ev.target.closest("#q-join,#q-unjoin,#q-leave,#q-leave-yes,#q-leave-no,#q-set-available,#q-set-onride,#q-set-break,#q-auth-go") : null;
     if (!t || t.disabled) return;
     if (t.id === "q-auth-go") {
       var pass = (document.getElementById("q-auth-pass") || {}).value || "";
@@ -15099,7 +15377,8 @@
       return;
     }
     if (t.id === "q-set-available") { if (qManualBusy()) qSetManualBusy(false); return; }
-    if (t.id === "q-set-onride") { if (!qManualBusy()) qSetManualBusy(true); return; }
+    if (t.id === "q-set-onride") { if (!qManualBusy() || qOnBreak()) qSetManualBusy(true); return; }
+    if (t.id === "q-set-break") { if (!qOnBreak()) qSetBreak(true); return; }
     if (t.id === "q-join") {
       qr.join = true;
       qPrepSecret();
@@ -15146,6 +15425,7 @@
       ".q-avail .q-knob{position:absolute;top:4px;bottom:4px;left:4px;width:calc(50% - 4px);border-radius:999px;background:#2e9d4f;transition:transform .22s ease,background .22s ease}" +
       ".q-avail .q-opt[aria-checked=true]{color:#fff}" +
       ".q-avail.q-busy .q-knob{transform:translateX(100%);background:#c27a12}" +
+      ".q-avail.q-three .q-knob{width:calc(33.333% - 2.67px)}.q-avail.q-three .q-opt{font-size:15px;padding:11px 4px}.q-avail.q-break .q-knob{transform:translateX(200%);background:#3f6a3b}" +
       ".q-line-count{margin:4px 0 0;font-weight:600;color:#7fe09a}" +
       ".q-paused{color:#f0b35a;font-weight:600}" +
       ".q-prompt,.q-place{border:2px solid #2e9d4f;background:rgba(46,157,79,.12)}" +
@@ -15155,7 +15435,7 @@
   }
   window.__pcsQueue = {
     state: function () { return { join: qr.join, place: qr.place, inLine: qr.inLine, queued: !!state.qQueued, allBusy: qAllBusy(), ws: qr.ws, order: qd.order, token: !!qToken() }; },
-    manualBusy: function () { return qManualBusy(); }, autoBusy: function () { return qAutoBusy(); },
+    manualBusy: function () { return qManualBusy(); }, onBreak: function () { return qOnBreak(); }, autoBusy: function () { return qAutoBusy(); },
     offers: function () { return alertableOpenRides().map(function (r) { return r.code; }); }, poll: function () { qd.pollAt = 0; qDriverPoll(); qRiderPollOnce(); }, setOnRide: qSetManualBusy
   };
 

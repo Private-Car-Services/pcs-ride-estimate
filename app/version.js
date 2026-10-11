@@ -1,6 +1,6 @@
-/* PCS app version: the ONE place to change it each release (v72s). Loaded by rider, driver, God mode and meter. */
+/* PCS app version: the ONE place to change it each release (v72t). Loaded by rider, driver, God mode and meter. */
 (function () {
-  var APP_VERSION = "v72s";
+  var APP_VERSION = "v72t";
   window.PCS_APP_VERSION = APP_VERSION;
   /* "v72r" -> [72, "r"]; returns <0 if a is older than b. Unknown/missing counts as oldest. */
   window.pcsVersionCmp = function (a, b) {
@@ -63,4 +63,47 @@
   window.addEventListener("focus", check);
   setInterval(function () { if (newer) tryAuto(); else check(); }, 5 * 60000);
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", check); else check();
+  /* v72t: GOOGLE map display everywhere (rider, driver + meter, God). Every OpenStreetMap/CARTO tile layer the apps create is
+     swapped for Google roadmap + live traffic tiles (Map Tiles API through the PCS Worker, same server key as Places; the
+     key never reaches the browser). If Google tiles fail (API off, daily cap, offline) the layer switches back to the
+     original OpenStreetMap URL by itself. Pins, routes and the heading/zoom follow are unchanged (still Leaflet). */
+  var MAPS_BASE = window.PCS_MAPS_BASE || "https://pcs-pay.pcsrides.workers.dev";
+  var PCSMaps = window.PCSMaps = { provider: "google", failed: false, layers: [], base: MAPS_BASE,
+    googleUrl: MAPS_BASE + "/maps/tile/{z}/{x}/{y}",
+    attribution: "Map data &copy;" + new Date().getFullYear() + " Google \u00b7 live traffic" };
+  try { if (/[?&]osm=1\b/.test(location.search) || localStorage.getItem("pcs-maps-osm") === "1") PCSMaps.failed = true; } catch (e) {}
+  /* local test / dev copies (127.0.0.1, localhost) stay on OpenStreetMap: the Worker only serves tiles to the PCS site */
+  try { if (/^(127\.0\.0\.1|localhost|\[::1\])$/.test(location.hostname) && !window.PCS_MAPS_FORCE && !/[?&]gmaps=1\b/.test(location.search)) PCSMaps.failed = true; } catch (e) {}
+  PCSMaps.resize = function () { PCSMaps.layers.forEach(function (l) { try { if (l._map) l._map.invalidateSize(); } catch (e) {} }); };
+  function patchLeaflet() {
+    var L = window.L;
+    if (!L || !L.tileLayer || L.tileLayer.__pcsGoogle) return;
+    var orig = L.tileLayer;
+    var wrapped = function (url, opts) {
+      if (PCSMaps.failed || !/openstreetmap\.org|cartocdn\.com/.test(String(url))) return orig.apply(this, arguments);
+      var osmOpts = opts || {};
+      var g = orig(PCSMaps.googleUrl, { maxZoom: 20, maxNativeZoom: 20, attribution: PCSMaps.attribution, crossOrigin: false });
+      var errs = 0, ok = 0, swapped = false;
+      g.pcsProvider = "google";
+      g.on("tileload", function () { ok += 1; });
+      g.on("tileerror", function () {
+        errs += 1;
+        if (swapped || errs < 3 || errs <= ok) return;
+        swapped = true; PCSMaps.failed = true; g.pcsProvider = "osm";
+        var m = g._map;
+        try { if (m && m.attributionControl) { m.attributionControl.removeAttribution(PCSMaps.attribution); m.attributionControl.addAttribution(osmOpts.attribution || "&copy; OpenStreetMap"); } } catch (e) {}
+        g.options.attribution = osmOpts.attribution || "&copy; OpenStreetMap";
+        g.options.maxNativeZoom = osmOpts.maxZoom || 19;
+        if (osmOpts.subdomains) g.options.subdomains = osmOpts.subdomains;
+        g.setUrl(url);
+      });
+      PCSMaps.layers.push(g);
+      if (PCSMaps.layers.length > 20) PCSMaps.layers.shift();
+      return g;
+    };
+    wrapped.__pcsGoogle = true;
+    L.tileLayer = wrapped;
+  }
+  patchLeaflet();
+  if (!window.L) document.addEventListener("DOMContentLoaded", patchLeaflet);
 })();
