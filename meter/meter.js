@@ -301,9 +301,14 @@
     on("rm-pay", function () {
       var d = S.d, tip = tipCents(d);
       if (S.tip === "") return;
-      if (tip > Math.max((d.final && d.final.total) || 0, 5000)) { S.payErr = "That tip is over the limit. Pick a smaller tip."; redrawEnded(); return; }
+      var fareT = (d.final && d.final.total) || 0, high = false;
+      if (tip > 0 && tip >= fareT) { /* v72s: a tip as big as the fare needs an explicit yes */
+        if (!window.confirm("Your tip of " + money(tip) + " is as much as the whole fare (" + money(fareT) + "). Tap OK only if you really mean it.")) { S.payErr = "Pick a smaller tip, or No tip."; redrawEnded(); return; }
+        high = true;
+      }
+      if (tip > Math.max(Math.round(fareT * 0.5), 5000) && !(high && tip <= Math.max(fareT, 5000))) { S.payErr = "That tip is over the limit. Pick a smaller tip."; redrawEnded(); return; }
       S.payErr = "";
-      S.confirm = { fare: d.final.total, tip: tip, total: d.final.total + tip };
+      S.confirm = { fare: d.final.total, tip: tip, total: d.final.total + tip, high: high };
       redrawEnded();
     });
     on("rm-confirm-change", function () { S.confirm = null; redrawEnded(); });
@@ -402,7 +407,7 @@
     S.busy = "Charging…";
     S.payErr = "";
     redrawEnded();
-    post("/meter/charge", { t: token, tipCents: c.tip, expectedCents: c.total }).then(function (data) {
+    post("/meter/charge", { t: token, tipCents: c.tip, expectedCents: c.total, highTipConfirmed: !!c.high }).then(function (data) {
       S.busy = "";
       S.confirm = null;
       if (S.d) {
