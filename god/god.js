@@ -5376,6 +5376,10 @@
               "<h2>Riders &amp; trips</h2>" +
               '<div id="rides-list">' + ridesPanelHtml() + "</div>" +
             "</section>" +
+            '<section class="side-section" id="queue-section">' + /* v72q */
+              "<h2>Rider queue</h2>" +
+              '<div id="queue-list">' + gqPanelHtml() + "</div>" +
+            "</section>" +
             '<section class="side-section" id="payments-section">' +
               "<h2>Payments</h2>" +
               '<div id="payments-list">' + paymentsPanelHtml() + "</div>" +
@@ -5685,6 +5689,76 @@
     boot();
   }
 
+  /* ================= v72q (Oct 10): rider queue + driver Available / On a ride in God mode (through the Worker) =================
+     The queue and driver statuses are read ONLY from the Worker (POST /queue/state with the God password, kept in memory
+     for this page only), which trusts only rows it signed. Names come from what God mode already loads. Also: "Confirm a
+     driver's new password" (POST /driver/pin-reset) after a driver's roster password was changed. */
+  var gq = { pw: "", data: null, err: "", busy: false, timer: 0, msg: "" };
+  function gqMins(ms) { var m = Math.max(0, Math.round((Date.now() - (Number(ms) || Date.now())) / 60000)); return m < 1 ? "just now" : m + " min"; }
+  function gqName(id) { var d = (state.drivers || []).filter(function (x) { return x && x.id === id; })[0]; return (d && d.name) || id; }
+  function gqRide(code) { return (state.rides || []).filter(function (r) { return r && String(r.code) === String(code); })[0] || {}; }
+  function gqPanelHtml() {
+    if (!gq.pw) {
+      return '<p class="muted">Enter the God-mode password to load the rider queue and driver statuses.</p>' +
+        '<input type="password" id="gq-pw" autocomplete="current-password" aria-label="God-mode password">' +
+        '<button type="button" class="btn btn-gold" id="gq-load"' + (gq.busy ? " disabled" : "") + ">" + (gq.busy ? "Loading\u2026" : "Show queue") + "</button>" +
+        (gq.err ? '<p class="error" role="alert">' + esc(gq.err) + "</p>" : "");
+    }
+    var d = gq.data || { drivers: [], rows: [] };
+    var drivers = d.drivers || [], rows = d.rows || [];
+    var onRide = drivers.filter(function (x) { return x.onRide; });
+    var head = '<p class="muted" id="gq-drivers">Drivers online: ' + drivers.length + " \u00b7 Available " + (drivers.length - onRide.length) + " \u00b7 On a ride " + onRide.length + "</p>" +
+      (onRide.length ? '<ul class="gq-onride">' + onRide.map(function (x) {
+        return '<li data-driver-id="' + esc(x.id) + '">' + esc(gqName(x.id)) + " \u2014 On a ride" + (x.onRideSource === "pcs" ? " (PCS ride)" : " (set by driver)") + (x.at ? " \u00b7 " + gqMins(x.at) : "") + "</li>";
+      }).join("") + "</ul>" : "");
+    var list = !rows.length ? '<p class="muted" id="gq-empty">No riders in the queue.</p>' : '<ol class="gq-list" id="gq-list">' + rows.map(function (r, i) {
+      var ride = gqRide(r.code);
+      return '<li class="gq-row" data-ride-code="' + esc(r.code) + '"><strong>#' + (i + 1) + " " + esc(ride.name || "Rider") + "</strong> \u00b7 " + esc(r.code) + " \u00b7 waiting " + gqMins(r.queueAt) + "<br>" +
+        '<span class="gq-st">' + (r.status === "requested" ? "Open: offered to the next Available driver" : "Needs your OK (Approve booking)") + "</span></li>";
+    }).join("") + "</ol>";
+    return head + list + (gq.err ? '<p class="error">' + esc(gq.err) + "</p>" : "") +
+      '<details class="gq-pin"><summary>Confirm a driver\u2019s new password</summary><p class="muted">Only after the driver really changed it (otherwise someone may have tampered with the roster).</p>' +
+      '<input type="text" id="gq-pin-id" placeholder="driver id (e.g. name_example_com)" aria-label="Driver id"><button type="button" class="btn" id="gq-pin-go">Confirm new password</button>' +
+      (gq.msg ? '<p class="muted" id="gq-pin-msg">' + esc(gq.msg) + "</p>" : "") + "</details>";
+  }
+  function gqRender() {
+    var el = document.getElementById("queue-list");
+    if (!el) return;
+    var html = gqPanelHtml();
+    if (el.__gqHtml === html) return;
+    el.innerHTML = html;
+    el.__gqHtml = html;
+    var inp = document.getElementById("gq-pw"); if (inp && gq.typed) inp.value = gq.typed; /* the board redraws often: keep what was typed (memory only) */
+  }
+  document.addEventListener("input", function (ev) { if (ev.target && ev.target.id === "gq-pw") gq.typed = ev.target.value; });
+  document.addEventListener("keydown", function (ev) { if (ev.target && ev.target.id === "gq-pw" && ev.key === "Enter") { var b = document.getElementById("gq-load"); if (b) b.click(); } });
+  function gqLoad() {
+    if (!gq.pw) return Promise.resolve();
+    return workerJson("/queue/state", { godPassword: gq.pw }).then(function (d) { gq.data = d; gq.err = ""; }).catch(function (e) {
+      if (e.status === 403) { gq.pw = ""; gq.data = null; var el0 = document.getElementById("queue-list"); if (el0) el0.__gqHtml = ""; }
+      gq.err = e.message || "Couldn't load the queue.";
+    }).then(gqRender);
+  }
+  document.addEventListener("click", function (ev) {
+    var t = ev.target && ev.target.closest ? ev.target.closest("#gq-load,#gq-pin-go") : null;
+    if (!t) return;
+    if (t.id === "gq-load") {
+      var pw = String((document.getElementById("gq-pw") || {}).value || gq.typed || "");
+      if (!pw) return;
+      gq.pw = pw; gq.typed = ""; gq.busy = true; gqRender();
+      gqLoad().then(function () { gq.busy = false; gqRender(); });
+      if (!gq.timer) gq.timer = setInterval(gqLoad, 6000);
+    }
+    if (t.id === "gq-pin-go") {
+      var id = String((document.getElementById("gq-pin-id") || {}).value || "").trim().toLowerCase();
+      if (!id || !gq.pw) return;
+      workerJson("/driver/pin-reset", { godPassword: gq.pw, driverId: id }).then(function () { gq.msg = "Confirmed for " + id + ". They can log in again now."; })
+        .catch(function (e) { gq.msg = e.message || "Couldn't confirm."; }).then(function () { gq.__force = 1; var el = document.getElementById("queue-list"); if (el) el.__gqHtml = ""; gqRender(); });
+    }
+  });
+  setInterval(gqRender, 3000);
+
+  window.__pcsQueueGod = { panel: gqPanelHtml, render: gqRender, state: function () { return gq; } };
   window.__pcsGod = {
     showGodPendingPopup: showGodPendingPopup,
     showGodAcceptPopup: showGodAcceptPopup,
