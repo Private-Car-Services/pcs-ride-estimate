@@ -324,11 +324,29 @@
       try { el.muted = elShouldMute(isTest); } catch (x2) {}
     }
     /* audioSession first (before any AudioContext), only if the API exists. Never playAndRecord (earpiece on iPhone). */
-    function setSession() {
+    /* v72r (Matthew: the driver app stopped his game stream / music while open): never hold an exclusive audio session.
+       Idle = "ambient" (mixes with other apps' audio); while a chime is actually playing = "transient" (short sound that
+       ducks / mixes instead of stopping the other audio). The AudioContext is suspended again right after each chime and
+       after each tap-unlock, so nothing holds the audio session between rides. Keep-awake is the Wake Lock API only. */
+    var sessionMode = "ambient";
+    function setSession(mode) {
+      if (mode) sessionMode = mode;
       try {
         var s = navigator.audioSession;
-        if (s && s.type !== "playback") s.type = "playback";
+        if (s && s.type !== sessionMode) s.type = sessionMode;
       } catch (e) {}
+    }
+    var idleTimer = null;
+    var unlockedOnce = false; /* the AudioContext was resumed inside a real gesture once in this page session */
+    function goIdle(delay) {
+      if (idleTimer) clearTimeout(idleTimer);
+      idleTimer = setTimeout(function () {
+        idleTimer = null;
+        if (alerting || testing) return;
+        try { if (ctx && ctx.state === "running" && ctx.suspend) ctx.suspend(); } catch (e) {}
+        if (el) { try { el.pause(); } catch (e2) {} }
+        setSession("ambient");
+      }, delay == null ? 1200 : delay);
     }
     function makeCtx() {
       if (ctx || !AC) return ctx;
@@ -355,12 +373,12 @@
     }
     function ctxRunning() { return !!ctx && ctx.state === "running"; }
     /* "Really heard": AudioContext running AND the <audio> element's play() resolved. */
-    function ready() { return ctxRunning() && elHeard; }
+    function ready() { return (ctxRunning() || (unlockedOnce && !!ctx && ctx.state !== "closed")) && elHeard; } /* v72r: suspended-after-unlock counts */
     function resumeCtx() {
       if (!ctx || ctx.state === "running" || ctx.state === "closed" || !ctx.resume) return;
       try {
         var p = ctx.resume();
-        if (p && p.then) p.then(function () { ui(); if (alerting) startCtxLoop(); }, noop);
+        if (p && p.then) p.then(function () { ui(); if (alerting) startCtxLoop(); else if (!testing) goIdle(); }, noop);
       } catch (e) {}
     }
     function load() {
@@ -417,10 +435,11 @@
     /* Runs synchronously inside every user gesture. opts.noPrime: caller plays the element itself right after. */
     function unlock(opts) {
       stats.unlocks++;
-      setSession();
+      setSession(alerting || testing ? "transient" : "ambient");
       makeCtx();
       if (ctx) {
         resumeCtx();
+        unlockedOnce = true;
         try {
           var s = ctx.createBufferSource();
           s.buffer = ctx.createBuffer(1, 1, 22050);
@@ -437,6 +456,7 @@
       } else if (!(opts && opts.noPrime)) {
         primeEl();
       }
+      if (!alerting && !testing) goIdle(); /* v72r: don't keep the context running after the unlock */
     }
     function onBlocked() {
       blocked = true;
@@ -560,7 +580,8 @@
       alerting = true;
       alertGen++;
       testing = false;
-      setSession();
+      if (idleTimer) { clearTimeout(idleTimer); idleTimer = null; }
+      setSession("transient");
       makeCtx();
       makeEl();
       resumeCtx();
@@ -589,17 +610,20 @@
       }
       if (buzzing) { buzzing = false; vibrate(0); }
       if (blocked || was) { blocked = false; ui(); }
+      goIdle(400); /* v72r: release the audio session right after the chime */
     }
     /* Gold-bar test: plays NOW inside the tap via the primed element (works before the buffer is decoded). */
     function test() {
       unlock({ noPrime: true });
       if (alerting) return;
       testing = true;
+      if (idleTimer) { clearTimeout(idleTimer); idleTimer = null; }
+      setSession("transient");
       vibrate(60);
       var p = playEl(true);
       if (!el || !p || (el && el.muted)) oscBurst(true); /* no <audio> support (or iPhone volume via Web Audio) */
       if (testTimer) clearTimeout(testTimer);
-      testTimer = setTimeout(function () { testing = false; }, 1600);
+      testTimer = setTimeout(function () { testing = false; goIdle(300); }, 1600);
       ui();
     }
     /* ---- UI: gold bar (until really heard) + red banner (blocked while ringing) ---- */
@@ -656,8 +680,7 @@
        come back, the gold bar returns so the next tap fixes it. */
     function onReturn() {
       if (document.visibilityState && document.visibilityState !== "visible") return;
-      resumeCtx();
-      if (alerting && el && el.paused) playEl(false);
+      if (alerting) { resumeCtx(); if (el && el.paused) playEl(false); } /* v72r: only wake audio on return when a ride is ringing */
       ui();
       setTimeout(ui, 700);
     }
@@ -669,7 +692,7 @@
       unlock();
     }
     function install() {
-      setSession();
+      setSession("ambient");
       ["touchstart", "touchend", "pointerdown", "pointerup", "mousedown", "click", "keydown"].forEach(function (t) {
         document.addEventListener(t, onGesture, true);
       });
@@ -693,7 +716,7 @@
         return {
           ctxState: ctx ? ctx.state : "none", elPrimed: elPrimed, elHeard: elHeard, alerting: alerting, blocked: blocked,
           bufReady: !!buf, elPaused: el ? el.paused : null, elLoop: el ? el.loop : null, elMuted: el ? el.muted : null,
-          elSrc: el ? el.src : "", stats: stats, level: lvl(), elVolume: el ? el.volume : null, volFixed: volFixed
+          elSrc: el ? el.src : "", stats: stats, level: lvl(), elVolume: el ? el.volume : null, volFixed: volFixed, session: sessionMode, unlockedOnce: unlockedOnce
         };
       },
       url: function () { return o.url; },
@@ -714,7 +737,7 @@
   function setPlaybackAudioSession() {
     try {
       var s = navigator.audioSession;
-      if (s && s.type !== "playback") s.type = "playback";
+      if (s && s.type !== "ambient" && s.type !== "transient") s.type = "ambient"; /* v72r: mix with other audio (was "playback") */
     } catch (err) {}
   }
 
@@ -810,6 +833,7 @@
   /* Free for a new ride: map board, Home menu pages, or a finished trip. Never mid-ride (one ride at a time). */
   function driverCanTakeNew() {
     if (ROLE !== "driver" || !signedIn()) return false;
+    if (hosLimitReached()) return false; /* v72r hours of service: no new offers at the limit (an in-progress ride can finish) */
     if (meterActive()) return false; /* v70: busy with a metered ride */
     if (qManualBusy()) return false; /* v72q: driver set On a ride (offers pause) */
     if (state.screen === "home") return true;
@@ -1300,6 +1324,7 @@
     if (mph != null && isFinite(mph) && mph < 130) {
       state.speedMph = mph < 1 ? 0 : mph;
       state.speedAt = now;
+      try { hosDriveNote(now, state.speedMph, lat, lng); } catch (e) {} /* v72r driving time */
     }
   }
 
@@ -2940,9 +2965,92 @@
     } catch (err) {}
   }
 
+  /* v72r shift-across-midnight (Matthew 2026-10-11): a shift does NOT roll over at 12:00. The miles row (DRVRMLES day key)
+     is the day the shift STARTED. While a shift opened on an earlier day is still open and active (last activity < 18 h),
+     that earlier day stays the miles day: GPS miles and online time keep adding to it, and no new opening odometer is asked.
+     A shift idle for 18 h+ is stale: the next opening-odometer form first asks for that shift's ending odometer. */
+  var SHIFT_STALE_MS = 18 * 3600000;
+  function shiftLastActive(row) {
+    var t = Math.max(Number(row && row.lastUpdate) || 0, Number(row && row.shiftStartAt) || 0, Number(row && row.startedAt) || 0);
+    try { var seg = hosReadLog()[String(Number(row && row.shiftStartAt) || 0)]; if (seg && Number(seg.e) > t) t = Number(seg.e); } catch (e) {} /* app open = active */
+    return t;
+  }
+  function openShiftDayInfo() {
+    var map = readMilesLocal();
+    var today = chicagoToday();
+    var i, d, row;
+    for (i = 1; i <= 3; i += 1) {
+      d = addDaysYmd(today, -i);
+      row = map[d];
+      if (row && typeof row === "object" && shiftOpen(row)) {
+        var t = map[today];
+        if (t && typeof t === "object" && shiftOpen(t)) return null; /* (merged on load) */
+        return { day: d, row: row, stale: Date.now() - shiftLastActive(row) > SHIFT_STALE_MS };
+      }
+    }
+    return null;
+  }
+  function milesDay() {
+    var o = openShiftDayInfo();
+    return o && !o.stale ? o.day : chicagoToday();
+  }
+  /* Live v72q split a shift at midnight (new opening odometer just after 12:00): fold the after-midnight row back into the
+     shift that started the day before, so miles + time continue. Runs on load, after pulling the Firebase rows. */
+  function mergeMidnightSplit() {
+    if (ROLE !== "driver") return false;
+    var map = readMilesLocal();
+    var today = chicagoToday();
+    var y = addDaysYmd(today, -1);
+    var a = map[y], b = map[today];
+    if (!a || !b || typeof a !== "object" || typeof b !== "object" || a.mergedInto) return false;
+    if (!shiftOpen(a) || b.splitMerged) return false;
+    var bStart = Number(b.startedAt) || Number(b.shiftStartAt) || 0;
+    var aLast = shiftLastActive(a);
+    if (!(bStart > 0) || bStart - aLast > SHIFT_STALE_MS) return false;
+    if (b.shifts && Object.keys(b.shifts).length) return false; /* b already has its own finished shifts: leave it alone */
+    var now = Date.now();
+    var m = Object.assign({}, a);
+    m.gpsMiles = Math.round(((Number(a.gpsMiles) || 0) + (Number(b.gpsMiles) || 0)) * 100) / 100;
+    m.lastUpdate = Math.max(Number(a.lastUpdate) || 0, Number(b.lastUpdate) || 0, now);
+    /* online time: a's closed segments + a's open segment (still running from a.shiftStartAt); b's minutes overlap a's clock */
+    m.splitAtMidnight = { secondOpeningOdometer: b.startOdometer != null ? Number(b.startOdometer) : null, at: bStart, mergedGps: Number(b.gpsMiles) || 0 };
+    if (shiftClosed(b)) {
+      m.endOdometer = b.endOdometer; m.shiftClosed = true;
+      m.onlineMs = (Number(a.onlineMs) || 0) + Math.max(0, (Number(b.lastUpdate) || now) - (Number(a.shiftStartAt) || bStart));
+    }
+    map[y] = m;
+    delete map[today];
+    writeMilesLocal(map);
+    if (syncOn()) {
+      authFetch(milesUrl(driverPresenceId(), y), { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(m) }).catch(function () {});
+      authFetch(milesUrl(driverPresenceId(), today), { method: "DELETE" }).catch(function () {});
+    }
+    return true;
+  }
+  /* Pull the last 2 days' miles rows from Firebase when this phone doesn't have them (cache cleared / other phone). */
+  function pullRecentMilesRows() {
+    if (ROLE !== "driver" || !syncOn() || !signedIn()) return Promise.resolve(false);
+    var today = chicagoToday();
+    var days = [addDaysYmd(today, -1), today];
+    return Promise.all(days.map(function (d) {
+      return authFetch(milesUrl(driverPresenceId(), d)).then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; });
+    })).then(function (rows) {
+      var map = readMilesLocal();
+      var changed = false;
+      rows.forEach(function (row, i) {
+        var d = days[i];
+        if (!row || typeof row !== "object") return;
+        var loc = map[d];
+        if (!loc || (Number(row.lastUpdate) || 0) > (Number(loc.lastUpdate) || 0) + 1000) { map[d] = row; changed = true; }
+      });
+      if (changed) writeMilesLocal(map);
+      return changed;
+    });
+  }
+
   function todayMilesRow() {
     var map = readMilesLocal();
-    var day = chicagoToday();
+    var day = milesDay();
     var row = map[day];
     if (!row || typeof row !== "object") return null;
     return row;
@@ -2959,9 +3067,9 @@
     return root + ".json";
   }
 
-  function persistMilesRow(row) {
+  function persistMilesRow(row, dayKey) {
     if (!row) return Promise.resolve();
-    var day = chicagoToday();
+    var day = dayKey || milesDay(); /* v72r: the shift's start day, not the calendar day */
     var map = readMilesLocal();
     map[day] = row;
     writeMilesLocal(map);
@@ -3024,6 +3132,7 @@
 
   function canGoOnline() {
     if (ROLE !== "driver" || !signedIn()) return false;
+    if (hosRestUntil() && !driverMidRide()) return false; /* v72r mandatory rest */
     if (driverMidRide()) return true;
     return hasCompleteCar(readDriverAccount()) && !state.milesNeedStart && isDriverApproved();
   }
@@ -3162,7 +3271,7 @@
         lng: +state.milesTrackLng,
         at: state.milesTrackAt,
         seen: state.milesSeenAt || state.milesTrackAt,
-        day: chicagoToday()
+        day: milesDay()
       }));
     } catch (err) {}
   }
@@ -3179,7 +3288,7 @@
     if (!a || typeof a !== "object") return false;
     var row = todayMilesRow();
     var at = Number(a.at) || 0;
-    if (a.day !== chicagoToday() || !shiftOpen(row) || !isCoord(a.lat) || !isCoord(a.lng)) return false;
+    if (a.day !== milesDay() || !shiftOpen(row) || !isCoord(a.lat) || !isCoord(a.lng)) return false;
     if (!(at > 0) || at > Date.now() + 60000) return false;
     var shiftAt = Number(row.shiftStartAt) || 0;
     if (shiftAt && at < shiftAt - 1000) return false; /* point from an earlier shift today: miles in between were off the clock */
@@ -3272,9 +3381,344 @@
     return "Includes " + f.toFixed(1) + " mi filled in after the app was in the background (estimated).";
   }
 
+  /* ===== v72r hours of service (HOS) =====
+     PCS company policy (Matthew 2026-10-11; his CDL / Motive ELD "USA Property 70 hour / 8 day"), editable in God mode
+     (rides/HOSLIMIT): DRIVE 11 h moving time (GPS speed > 3 mph during a shift); SHIFT 14 h window from coming on duty;
+     BREAK 30 min required after 8 h of driving; CYCLE 70 h on duty in a rolling 8 days; 10 h off resets DRIVE + SHIFT,
+     34 h off restarts the CYCLE. Four countdown clocks; warnings at 1 h and 30 min left (banner + chime); at a limit new
+     ride offers stop (a ride in progress can finish) until the off-duty reset or a God override (logged).
+     GPS health: no fix for > 5 min during a shift shows a red banner (Location "Always", keep the app open); a GPS gap
+     where the position jumped is counted as driving time (conservative).
+     Records: on-duty segments {s,e} at rides/DRVRHOSL/{driver}/{shiftStart}, driving intervals at .../drive/{start},
+     alert events at .../events/{at}, overrides at .../overrides/{at}, rest periods at .../rest/{at}. */
+  var HOS_DEFAULTS = { maxDriveHours: 11, shiftWindowHours: 14, breakAfterDriveHours: 8, breakMinutes: 30, cycleHours: 70, cycleDays: 8, resetHours: 10, restartHours: 34, breakAfterMin: 150 };
+  var HOS_BREAK_GAP_MS = 15 * 60000; /* a stop of 15 min+ counts as a break */
+  var HOS_MOVING_MPH = 3;
+  var hosCfg = Object.assign({}, HOS_DEFAULTS);
+  var hosWarned = {};
+  var hosLastPush = 0, hosDrvPushAt = 0;
+  var hosDrvPrev = { at: 0, moving: false };
+  function hosKey() { return "pcs-driver-hos-" + driverPresenceId(); }
+  function hosDrvKey() { return "pcs-driver-hosdrv-" + driverPresenceId(); }
+  function hosReadLog() { try { var o = JSON.parse(localStorage.getItem(hosKey()) || "{}"); return o && typeof o === "object" ? o : {}; } catch (e) { return {}; } }
+  function hosWriteLog(o) { try { localStorage.setItem(hosKey(), JSON.stringify(o)); } catch (e) {} }
+  function hosReadDrv() { try { var a = JSON.parse(localStorage.getItem(hosDrvKey()) || "[]"); return Array.isArray(a) ? a : []; } catch (e) { return []; } }
+  function hosWriteDrv(a) { try { localStorage.setItem(hosDrvKey(), JSON.stringify(a)); } catch (e) {} }
+  function hosNum(v, d, lo, hi) { v = Number(v); return isFinite(v) && v >= lo && v <= hi ? v : d; }
+  function hosApplyCfg(c) {
+    c = c || {};
+    hosCfg = {
+      maxDriveHours: hosNum(c.maxDriveHours, 11, 0, 24), shiftWindowHours: hosNum(c.shiftWindowHours, 14, 0, 24),
+      breakAfterDriveHours: hosNum(c.breakAfterDriveHours, 8, 0, 24), breakMinutes: hosNum(c.breakMinutes, 30, 5, 120),
+      cycleHours: hosNum(c.cycleHours, 70, 0, 200), cycleDays: hosNum(c.cycleDays, 8, 1, 14),
+      resetHours: hosNum(c.resetHours, 10, 1, 48), restartHours: hosNum(c.restartHours, 34, 1, 96), breakAfterMin: hosNum(c.breakAfterMin, 150, 0, 600)
+    };
+  }
+  function hosLoadCfg() {
+    if (!syncOn()) return Promise.resolve();
+    return authFetch(databaseURL() + "/rides/HOSLIMIT.json").then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (c) { if (c && typeof c === "object") hosApplyCfg(c); }).catch(function () {});
+  }
+  /* v72r HOS override + mandatory rest (rides/HOSOVRDE/{driver}): God approves an extension (1-6 h or until the end of the
+     driver's scheduled rides, with a reason); the driver can request it from the limit banner. After a shift that hit a
+     limit, a mandatory off-duty rest (God-configurable, default 6 h) blocks going online / offers unless God overrides;
+     the rest is logged as a segment that counts toward the rolling on-duty total. All overrides are logged at
+     rides/DRVRHOSL/{driver}/overrides (God writes who / when / reason / hours). */
+  var hosOvr = { override: null, restUntil: 0, request: null };
+  function hosOvrUrl() { return databaseURL() + "/rides/HOSOVRDE/" + encodeURIComponent(driverPresenceId()) + ".json"; }
+  function hosPollOvr() {
+    if (ROLE !== "driver" || !syncOn() || !signedIn()) return Promise.resolve();
+    return authFetch(hosOvrUrl()).then(function (r) { return r.ok ? r.json() : null; }).then(function (o) {
+      o = o && typeof o === "object" ? o : {};
+      hosOvr = { override: o.override || null, restUntil: Number(o.restUntil) || 0, request: o.request || null };
+      try { localStorage.setItem(hosKey() + "-ovr", JSON.stringify(hosOvr)); } catch (e) {}
+    }).catch(function () {
+      try { var c = JSON.parse(localStorage.getItem(hosKey() + "-ovr") || "null"); if (c) hosOvr = c; } catch (e) {}
+    });
+  }
+  function hosOverrideActive(now) {
+    var o = hosOvr.override;
+    return !!(o && Number(o.until) > (now || Date.now()) && o.kind !== "rest");
+  }
+  function hosRestUntil(now) {
+    if (ROLE !== "driver" || !signedIn() || hosShiftStart()) return 0;
+    return hosStatus(now).restUntil; /* computed from the clocks: 30 min break / 10 h off / 34 h restart (God override lifts it) */
+  }
+  function hosRequestOverride() {
+    var h = hosStatus();
+    var req = { at: Date.now(), level: hosRestUntil() ? "rest" : h.level, by: h.by || (hosRestUntil() ? "rest" : ""), driveMin: Math.round(h.driveMs / 60000), restUntil: hosRestUntil() || null, name: (readDriverAccount() || {}).name || "" };
+    hosOvr.request = req;
+    if (syncOn()) authFetch(databaseURL() + "/rides/HOSOVRDE/" + encodeURIComponent(driverPresenceId()) + "/request.json", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(req) }).catch(function () {});
+    hosLogEvent(Object.assign({}, h, { level: "override-requested" }));
+    render();
+  }
+  function hosShiftKeyHit() { return hosKey() + "-hit-" + hosShiftStart(); }
+  /* at logout (ending odometer): if this shift reached a limit, start the mandatory rest */
+  function hosOnShiftClose(now) {
+    var st = hosShiftStart();
+    var hit = false;
+    try { hit = !!localStorage.getItem(hosKey() + "-hit-" + st); localStorage.removeItem(hosKey() + "-hit-" + st); } catch (e) {}
+    if (!hit) return;
+    var hs = hosStatus(now);
+    var until = now + (hs.by === "break" ? hosCfg.breakMinutes * 60000 : hs.by === "cycle" ? hosCfg.restartHours * 3600000 : hosCfg.resetHours * 3600000);
+    hosOvr.restUntil = until;
+    hosOvr.override = null;
+    try { localStorage.setItem(hosKey() + "-ovr", JSON.stringify(hosOvr)); } catch (e) {}
+    if (syncOn()) {
+      authFetch(databaseURL() + "/rides/HOSOVRDE/" + encodeURIComponent(driverPresenceId()) + ".json", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ restUntil: until, restStartedAt: now, override: null, request: null }) }).catch(function () {});
+      authFetch(databaseURL() + "/rides/DRVRHOSL/" + encodeURIComponent(driverPresenceId()) + "/rest/" + now + ".json", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ s: now, e: until, by: hs.by, hours: Math.round((until - now) / 360000) / 10, shiftStart: st }) }).catch(function () {});
+    }
+  }
+  function hosRestCard() {
+    var u = hosRestUntil();
+    if (!u || ROLE !== "driver" || !signedIn()) return "";
+    var pend = hosOvr.request && !(hosOvr.override && Number(hosOvr.override.grantedAt) >= Number(hosOvr.request.at));
+    return '<div class="card miles-gate" id="hos-rest-gate"><p class="tag" style="color:#b91c1c">Mandatory rest</p>' +
+      '<p class="lede">You used up your ' + esc(hosClockName(hosStatus().by)) + ' clock. PCS policy: stay off duty until <strong>' + esc(fmtClockCt(u)) + "</strong> (" + esc(hosFmt(u - Date.now())) + " left). You can't go online or get ride offers until then.</p>" +
+      (pend ? '<p class="fine" id="hos-ovr-pending">Override requested. Waiting for PCS.</p>' : '<button class="btn ghost" type="button" id="hos-request-ovr">Request override from PCS</button>') + "</div>";
+  }
+  function fmtClockCt(ms) {
+    try { return new Date(ms).toLocaleString("en-US", { timeZone: "America/Chicago", weekday: "short", hour: "numeric", minute: "2-digit" }) + " CT"; } catch (e) { return new Date(ms).toISOString(); }
+  }
+  document.addEventListener("click", function (e) {
+    var t = e.target && e.target.closest ? e.target.closest("#hos-request-ovr") : null;
+    if (t) { e.preventDefault(); hosRequestOverride(); }
+  });
+
+  function hosShiftStart() {
+    var row = todayMilesRow();
+    return shiftOpen(row) ? Number(row.shiftStartAt) || 0 : 0;
+  }
+  /* GPS speed fix -> driving intervals [s, e] (only while the shift is open; gaps > 60 s between fixes are not counted) */
+  function hosDriveNote(now, mph, lat, lng) {
+    if (ROLE !== "driver" || !signedIn() || !hosShiftStart()) { hosDrvPrev = { at: 0, moving: false }; return; }
+    var moving = Number(mph) > HOS_MOVING_MPH;
+    var a = hosReadDrv();
+    var last = a[a.length - 1];
+    var gap = hosDrvPrev.at ? now - hosDrvPrev.at : 0;
+    /* GPS gap (app in background / no fixes): conservative. If the position jumped far enough that the car must have been
+       moving (> 0.25 mi and > 3 mph average), the WHOLE gap counts as driving time. */
+    var jumped = false;
+    if (gap > 60000 && isCoord(hosDrvPrev.lat) && isCoord(lat)) {
+      var dist = haversine({ lat: hosDrvPrev.lat, lng: hosDrvPrev.lng }, { lat: lat, lng: lng });
+      jumped = dist > 0.25 && dist / (gap / 3600000) > HOS_MOVING_MPH;
+    }
+    if (jumped || (moving && hosDrvPrev.moving && hosDrvPrev.at && gap <= 60000)) {
+      if (last && Math.abs(Number(last[1]) - hosDrvPrev.at) < 1500) last[1] = now; else a.push([hosDrvPrev.at, now]);
+      if (jumped) a[a.length - 1][2] = 1; /* marks a counted GPS gap */
+      var cut = now - 8 * 86400000;
+      while (a.length && Number(a[0][1]) < cut) a.shift();
+      hosWriteDrv(a);
+      if (syncOn() && now - hosDrvPushAt > 5 * 60000) hosPushDrive(a[a.length - 1]);
+    } else if (!moving && hosDrvPrev.moving && last && syncOn()) {
+      hosPushDrive(last); /* stopped: record the finished driving interval */
+    }
+    hosDrvPrev = { at: now, moving: moving, lat: isCoord(lat) ? +lat : null, lng: isCoord(lng) ? +lng : null };
+  }
+  function hosPushDrive(iv) {
+    if (!iv) return;
+    hosDrvPushAt = Date.now();
+    authFetch(databaseURL() + "/rides/DRVRHOSL/" + encodeURIComponent(driverPresenceId()) + "/drive/" + Number(iv[0]) + ".json", {
+      method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ s: Number(iv[0]), e: Number(iv[1]) })
+    }).catch(function () {});
+  }
+  function hosTick(now) {
+    if (ROLE !== "driver" || !signedIn()) return;
+    now = now || Date.now();
+    var st = hosShiftStart();
+    if (!st) return;
+    var log = hosReadLog();
+    var k = String(st);
+    var seg = log[k] || { s: st, day: milesDay() };
+    if (now - (Number(seg.e) || st) > SHIFT_STALE_MS) return; /* woke after 18 h+ idle: don't mark the stale shift active */
+    seg.e = now;
+    log[k] = seg;
+    Object.keys(log).forEach(function (x) { if (Number(log[x].e || x) < now - 14 * 86400000) delete log[x]; });
+    hosWriteLog(log);
+    if (syncOn() && now - hosLastPush > 5 * 60000) {
+      hosLastPush = now;
+      authFetch(databaseURL() + "/rides/DRVRHOSL/" + encodeURIComponent(driverPresenceId()) + "/" + k + ".json", {
+        method: "PUT", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ s: seg.s, e: seg.e, day: seg.day, cfg: hosCfg, appVersion: window.PCS_APP_VERSION || "" })
+      }).catch(function () {});
+    }
+  }
+  /* v72r PCS HOS policy (Matthew, CDL / Motive ELD "USA Property 70 hour / 8 day"), all editable in God mode:
+     DRIVE  11 h of moving time after 10 h off;  SHIFT 14 h window from coming on duty after 10 h off (does not pause);
+     BREAK  a 30-min break (30 consecutive minutes not driving) is required after 8 h of driving;
+     CYCLE  70 h on duty in any rolling 8 days; 10 h off resets DRIVE + SHIFT; 34 h off restarts the CYCLE. */
+  function hosDutySegs(now) {
+    var st = hosShiftStart();
+    var log = hosReadLog();
+    var segs = [];
+    Object.keys(log).forEach(function (k) {
+      var g = log[k];
+      if (!g || g.rest) return;
+      var s0 = Number(g.s) || 0, e0 = Number(k) === st ? now : (Number(g.e) || s0);
+      if (s0 > 0 && e0 >= s0) segs.push([s0, Math.min(e0, now)]);
+    });
+    if (st && !log[String(st)]) segs.push([st, now]);
+    segs.sort(function (a, b) { return a[0] - b[0]; });
+    return segs;
+  }
+  function hosOverlap(list, from, to) {
+    var t = 0;
+    list.forEach(function (iv) { t += Math.max(0, Math.min(Number(iv[1]), to) - Math.max(Number(iv[0]), from)); });
+    return t;
+  }
+  function hosStatus(now) {
+    now = now || Date.now();
+    var c = hosCfg, H = 3600000;
+    var st = hosShiftStart();
+    var segs = hosDutySegs(now);
+    var drv = hosReadDrv().slice().sort(function (a, b) { return a[0] - b[0]; });
+    /* last off-duty gap >= resetHours -> duty period start; >= restartHours -> cycle restart */
+    var dutyStart = 0, cycleFrom = now - c.cycleDays * 24 * H, i, gapEnd;
+    var lastEnd = segs.length ? segs[segs.length - 1][1] : 0;
+    var offNow = !st && lastEnd ? now - lastEnd : (st ? 0 : Infinity);
+    if (offNow >= c.resetHours * H) dutyStart = 0;
+    else {
+      dutyStart = segs.length ? segs[0][0] : 0;
+      for (i = segs.length - 1; i > 0; i -= 1) { if (segs[i][0] - segs[i - 1][1] >= c.resetHours * H) { dutyStart = segs[i][0]; break; } }
+    }
+    if (offNow >= c.restartHours * H) cycleFrom = now;
+    else for (i = segs.length - 1; i > 0; i -= 1) { if (segs[i][0] - segs[i - 1][1] >= c.restartHours * H) { gapEnd = segs[i][0]; if (gapEnd > cycleFrom) cycleFrom = gapEnd; break; } }
+    var shiftMs = dutyStart ? now - dutyStart : 0;
+    var driveMs = dutyStart ? hosOverlap(drv, dutyStart, now) : 0;
+    /* BREAK: driving since the last 30+ min without driving (a 10 h reset counts too) */
+    var lastDrvEnd = drv.length ? Number(drv[drv.length - 1][1]) : 0;
+    var BRK = c.breakMinutes * 60000, brkAnchor = dutyStart || 0;
+    if (!lastDrvEnd || now - lastDrvEnd >= BRK) brkAnchor = now;
+    else for (i = drv.length - 1; i > 0; i -= 1) { if (Number(drv[i][0]) - Number(drv[i - 1][1]) >= BRK) { brkAnchor = Math.max(brkAnchor, Number(drv[i][0])); break; } }
+    var sinceBreakMs = hosOverlap(drv, brkAnchor, now);
+    var cycleMs = hosOverlap(segs, cycleFrom, now);
+    var clocks = {
+      break: c.breakAfterDriveHours > 0 ? c.breakAfterDriveHours * H - sinceBreakMs : Infinity,
+      drive: c.maxDriveHours > 0 ? c.maxDriveHours * H - driveMs : Infinity,
+      shift: c.shiftWindowHours > 0 ? (dutyStart ? c.shiftWindowHours * H - shiftMs : c.shiftWindowHours * H) : Infinity,
+      cycle: c.cycleHours > 0 ? c.cycleHours * H - cycleMs : Infinity
+    };
+    var by = "", left = Infinity;
+    ["break", "drive", "shift", "cycle"].forEach(function (k) { if (clocks[k] < left) { left = clocks[k]; by = k; } });
+    /* take-a-break nudge (soft): continuous driving, stops < 15 min don't count */
+    var contMs = 0, streakAt = 0;
+    (function () {
+      var k = drv.length - 1;
+      if (k < 0 || now - Number(drv[k][1]) >= HOS_BREAK_GAP_MS) return;
+      var startS = Number(drv[k][0]);
+      while (k > 0 && startS - Number(drv[k - 1][1]) < HOS_BREAK_GAP_MS) { k -= 1; startS = Math.min(startS, Number(drv[k][0])); }
+      streakAt = startS;
+      for (var j = k; j < drv.length; j += 1) contMs += Math.max(0, Math.min(Number(drv[j][1]), now) - Number(drv[j][0]));
+    })();
+    var exhausted = left <= 0;
+    var level = !st ? "off" : exhausted ? "limit" : left <= 30 * 60000 ? "30m" : left <= H ? "1h" : "ok";
+    var ovr = hosOverrideActive(now);
+    if (st && exhausted) { try { localStorage.setItem(hosKey() + "-hit-" + st, "1"); } catch (e) {} }
+    if (ovr && (level === "limit" || level === "30m" || level === "1h")) level = "override";
+    /* off duty and a clock is used up: when can the driver work again? */
+    var restUntil = 0;
+    if (!st && exhausted && !ovr) {
+      if (by === "break") restUntil = lastDrvEnd + c.breakMinutes * 60000;
+      else if (by === "cycle") restUntil = lastEnd + c.restartHours * H;
+      else restUntil = lastEnd + c.resetHours * H;
+      if (restUntil <= now) restUntil = 0;
+    }
+    var needBreak = !!st && c.breakAfterMin > 0 && contMs >= c.breakAfterMin * 60000;
+    return { clocks: clocks, restUntil: restUntil, dutyStart: dutyStart, cycleFrom: cycleFrom, sinceBreakMs: sinceBreakMs,
+      streakAt: streakAt, contMs: contMs, needBreak: needBreak, override: ovr ? hosOvr.override : null, onShift: !!st,
+      driveMs: driveMs, shiftMs: shiftMs, windowMs: cycleMs, cycleMs: cycleMs, leftMs: left, level: level, by: by, cfg: c };
+  }
+  /* GPS health: ms since the last GPS fix while a shift is open and > 5 min (0 = healthy) */
+  function hosGpsStale(now) {
+    if (ROLE !== "driver" || !signedIn() || !hosShiftStart()) return 0;
+    now = now || Date.now();
+    var last = Math.max(Number(state.gpsAt) || 0, hosShiftStart());
+    var d = now - last;
+    return d > 5 * 60000 ? d : 0;
+  }
+  function hosClockName(k) { return { break: "BREAK (30-min break after 8 h driving)", drive: "DRIVE (11 h)", shift: "SHIFT (14 h window)", cycle: "CYCLE (70 h / 8 days)" }[k] || "HOS"; }
+  function hosClocksHtml(h) {
+    var c = h.cfg;
+    var lab = { break: "Break", drive: "Drive", shift: "Shift", cycle: "Cycle" };
+    return '<div id="hos-clocks" style="display:grid;grid-template-columns:repeat(4,1fr);gap:4px;margin:6px 0">' + ["break", "drive", "shift", "cycle"].map(function (k) {
+      var v = h.clocks[k];
+      var off = !isFinite(v);
+      var col = off ? "#6b7280" : v <= 0 ? "#b91c1c" : v <= 3600000 ? "#b45309" : "#166534";
+      return '<div class="hos-clock hos-clock-' + k + '" data-left-min="' + (off ? "" : Math.round(v / 60000)) + '" style="border:1px solid ' + col + ';border-radius:8px;padding:4px;text-align:center">' +
+        '<div style="font-size:11px;color:#6b7280">' + lab[k] + '</div><div style="font-weight:800;color:' + col + '">' + (off ? "off" : v <= 0 ? "0h 00m" : hosFmt(v)) + "</div></div>";
+    }).join("") + "</div>";
+  }
+  function hosLimitReached() { return ROLE === "driver" && signedIn() && (hosStatus().level === "limit" || !!hosRestUntil()); }
+  function hosFmt(ms) { var m = Math.max(0, Math.floor(ms / 60000)); return Math.floor(m / 60) + "h " + String(m % 60).padStart(2, "0") + "m"; }
+  function hosHtml() {
+    if (ROLE !== "driver" || !signedIn()) return "";
+    var h = hosStatus();
+    if (!h.onShift) return '<div id="hos-box">' + (state.milesNeedStart ? "" : hosRestCard()) + "</div>";
+    var what = hosClockName(h.by);
+    var banner = h.level === "limit"
+      ? '<p id="hos-banner" class="hos-limit" role="alert" style="background:#b91c1c;color:#fff;font-weight:800;padding:8px 10px;border-radius:8px;margin:6px 0">' + (h.by === "break"
+        ? "BREAK REQUIRED: you've driven " + esc(String(h.cfg.breakAfterDriveHours)) + " h. Take a " + esc(String(h.cfg.breakMinutes)) + "-minute break (no driving) before more rides. New ride offers are paused; finish a ride in progress.</p>"
+        : "LIMIT REACHED (" + esc(what) + "): stop accepting rides. New ride offers are blocked; finish a ride in progress, then end your shift.</p>") +
+        (hosOvr.request && !(hosOvr.override && Number(hosOvr.override.grantedAt) >= Number(hosOvr.request.at))
+          ? '<p class="fine" id="hos-ovr-pending">Override requested. Waiting for PCS.</p>'
+          : '<button class="btn ghost" type="button" id="hos-request-ovr">Request override from PCS</button>')
+      : h.level === "override"
+      ? '<p id="hos-banner" class="hos-override" role="status" style="background:#dbeafe;color:#1e3a8a;font-weight:700;padding:8px 10px;border-radius:8px;margin:6px 0">PCS approved an override until ' + esc(fmtClockCt(Number(h.override.until))) + " (" + esc(String(h.override.reason || "")) + ").</p>"
+      : (h.level === "1h" || h.level === "30m"
+        ? '<p id="hos-banner" class="hos-warn" role="alert" style="background:#fef3c7;color:#92400e;font-weight:700;padding:8px 10px;border-radius:8px;margin:6px 0">' +
+          (h.level === "30m" ? "30 minutes" : "1 hour") + " left (" + esc(what) + ", " + hosFmt(h.leftMs) + "). Plan to finish your last ride.</p>"
+        : "");
+    if (h.needBreak && h.level !== "limit") {
+      banner = '<p id="hos-break" class="hos-break" role="status" style="background:#ecfdf5;color:#065f46;font-weight:700;padding:8px 10px;border-radius:8px;margin:6px 0">' +
+        "You've been driving " + hosFmt(h.contMs) + " without a break. Take a 15-minute break when it's safe.</p>" + banner;
+    }
+    var gpsBad = hosGpsStale();
+    return '<div id="hos-box">' + hosClocksHtml(h) + '<p class="fine" id="hos-counter">Driving ' + esc(hosFmt(h.driveMs)) + " · on duty " + esc(hosFmt(h.shiftMs)) + " · cycle " + esc(hosFmt(h.cycleMs)) + " used</p>" + banner +
+      (gpsBad ? '<p id="gps-health-banner" role="alert" style="background:#b91c1c;color:#fff;font-weight:700;padding:8px 10px;border-radius:8px;margin:6px 0">GPS not reporting for ' +
+        esc(String(Math.floor(gpsBad / 60000))) + " min. Set Location for this app to \u201cAlways\u201d (Settings \u203a Privacy \u203a Location Services) and keep the app open, so your driving time and miles are counted.</p>" : "") + "</div>";
+  }
+  function hosCheck() {
+    if (ROLE !== "driver" || !signedIn()) return;
+    hosTick();
+    var h = hosStatus();
+    var key = String(hosShiftStart()) + ":" + h.level;
+    if (h.needBreak) {
+      var bk = "brk:" + h.streakAt; /* once per driving streak */
+      if (!hosWarned[bk]) {
+        hosWarned[bk] = true;
+        hosLogEvent(Object.assign({}, h, { level: "break-nudge" }));
+        try { if (!openRideAlertMuted() && !(state.openRides || []).length) { rideAudio.startAlert(); setTimeout(function () { if (!(state.openRides || []).length) rideAudio.stopAlert(); }, 1500); } } catch (e) {}
+      }
+    }
+    if ((h.level === "1h" || h.level === "30m" || h.level === "limit") && !hosWarned[key]) {
+      hosWarned[key] = true;
+      hosLogEvent(h);
+      try { if (!openRideAlertMuted()) { rideAudio.startAlert(); setTimeout(function () { if (!(state.openRides || []).length) rideAudio.stopAlert(); }, 1800); } } catch (e) {}
+      if (h.level === "limit") { stopOpenRideAlert(); state.openRides = []; }
+      publishDriverPresence();
+    }
+    var html = hosHtml();
+    Array.prototype.forEach.call(document.querySelectorAll("#hos-box"), function (el) {
+      if (el.outerHTML !== html) el.outerHTML = html;
+    });
+  }
+  function hosLogEvent(h) {
+    var ev = { at: Date.now(), level: h.level, by: h.by, driveMin: Math.round(h.driveMs / 60000), shiftMin: Math.round(h.shiftMs / 60000), windowMin: Math.round(h.windowMs / 60000), shiftStart: hosShiftStart(), cfg: h.cfg };
+    try { var a = JSON.parse(localStorage.getItem(hosKey() + "-events") || "[]"); a.push(ev); localStorage.setItem(hosKey() + "-events", JSON.stringify(a.slice(-200))); } catch (e) {}
+    if (syncOn()) authFetch(databaseURL() + "/rides/DRVRHOSL/" + encodeURIComponent(driverPresenceId()) + "/events/" + ev.at + ".json", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(ev) }).catch(function () {});
+  }
+  function hosPresenceFields() {
+    var h = hosStatus();
+    var m = function (v) { return isFinite(v) ? Math.round(v / 60000) : null; };
+    return { gpsStaleMin: Math.round(hosGpsStale() / 60000), hosLevel: h.level, hosBy: h.by,
+      hosBreakLeftMin: m(h.clocks.break), hosDriveLeftMin: m(h.clocks.drive), hosShiftLeftMin: m(h.clocks.shift), hosCycleLeftMin: m(h.clocks.cycle),
+      hosDriveMin: Math.round(h.driveMs / 60000), hosShiftMin: Math.round(h.shiftMs / 60000), hosCycleMin: Math.round(h.cycleMs / 60000), hosCfg: h.cfg };
+  }
+  /* ===== end v72r HOS ===== */
+
   function milesTodayHtml() {
     var note = milesFilledNote();
-    return '<p class="fine" id="miles-today">' + esc(milesTodayLabel()) + "</p>" +
+    return hosHtml() + '<p class="fine" id="miles-today">' + esc(milesTodayLabel()) + "</p>" +
       '<p class="fine miles-filled" id="miles-filled"' + (note ? "" : ' style="display:none"') + ">" + esc(note) + "</p>";
   }
 
@@ -3537,9 +3981,12 @@
 
   function milesStartCard() {
     if (ROLE !== "driver" || !signedIn() || !state.milesNeedStart) return "";
+    if (hosRestUntil()) return hosRestCard(); /* v72r: no new shift during the mandatory rest */
     if (!hasCompleteCar(readDriverAccount())) return "";
     if (driverMidRide()) return "";
     var closed = shiftClosed(todayMilesRow());
+    var stale = openShiftDayInfo(); /* v72r */
+    if (stale && !stale.stale) stale = null;
     var tag = closed ? "New shift — opening odometer" : "Starting mileage";
     var lede = closed
       ? "You logged out and closed the last shift. Enter a new opening odometer before miles count again. Miles while logged out stay personal (not counted). Today's GPS total so far stays on screen."
@@ -3552,6 +3999,11 @@
         ? '<p class="fine">Today so far (before this shift): ' + Number(state.milesToday).toFixed(1) + " mi</p>"
         : "") +
       '<form id="miles-start-form" autocomplete="off">' +
+      (stale
+        ? '<p class="fine" id="miles-stale-note">Your shift from ' + esc(stale.day) + " was never closed. Enter its ending odometer first.</p>" +
+          '<label for="miles-stale-end-odo">Ending odometer (shift from ' + esc(stale.day) + ")</label>" +
+          '<input id="miles-stale-end-odo" type="number" inputmode="decimal" min="0" step="0.1" required value="' + esc(state.milesStaleDraft || "") + '">'
+        : "") +
       '<label for="miles-start-odo">Opening odometer</label>' +
       '<input id="miles-start-odo" name="odo" type="number" inputmode="decimal" min="0" step="0.1" required value="' +
       esc(state.milesOdoDraft || "") + '">' +
@@ -8242,9 +8694,11 @@
       startOdometer: state.milesStartOdo,
       speedMph: speedFresh ? Math.round(state.speedMph || 0) : 0,
       speedAt: state.speedAt || null,
-      gpsAt: state.gpsAt || null /* v59 */
+      gpsAt: state.gpsAt || null, /* v59 */
+      appVersion: window.PCS_APP_VERSION || "" /* v72r */
     };
     Object.assign(body, presenceShiftFields()); /* v64 */
+    try { Object.assign(body, hosPresenceFields()); } catch (e) {} /* v72r */
     return authFetch(driversUrl(driverPresenceId()), {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
@@ -11574,7 +12028,9 @@
           if (ROLE === "driver") {
             /* v50: pull the saved car details + photos from the server (or back them up if only here). */
             syncDriverProfile().then(function () { render(); });
+            mergeMidnightSplit(); /* v72r */
             ensureMilesDayReady();
+            pullRecentMilesRows().then(function (ch) { if (mergeMidnightSplit() || ch) { ensureMilesDayReady(); render(); } });
             followGps();
             qDriverLoginToken(loginEmail, password); /* v72q: Worker session for Available / On a ride */
             loadRideHistory();
@@ -11712,7 +12168,9 @@
           if (ROLE === "driver") {
             /* v50: pull the saved car details + photos from the server (or back them up if only here). */
             syncDriverProfile().then(function () { render(); });
+            mergeMidnightSplit(); /* v72r */
             ensureMilesDayReady();
+            pullRecentMilesRows().then(function (ch) { if (mergeMidnightSplit() || ch) { ensureMilesDayReady(); render(); } });
             followGps();
             qDriverLoginToken(loginEmail, password); /* v72q: Worker session for Available / On a ride */
             loadRideHistory();
@@ -11838,6 +12296,31 @@
           render();
           return;
         }
+        /* v72r: close a stale (18 h+ idle) shift from an earlier day with its ending odometer, under ITS start day. */
+        var staleInfo = openShiftDayInfo();
+        if (staleInfo && staleInfo.stale) {
+          var sEl = document.getElementById("miles-stale-end-odo");
+          var sRaw = sEl ? sEl.value : "";
+          var sOdo = Number(sRaw);
+          var sStart = Number(staleInfo.row.startOdometer);
+          state.milesStaleDraft = sRaw;
+          state.milesOdoDraft = raw;
+          if (String(sRaw).trim() === "" || !isFinite(sOdo) || sOdo < 0) { state.milesOdoError = "Enter the ending odometer for your shift from " + staleInfo.day + "."; render(); return; }
+          if (isFinite(sStart) && sOdo < sStart) { state.milesOdoError = "That ending odometer is less than that shift's opening odometer (" + sStart.toFixed(1) + ")."; render(); return; }
+          if (odo < sOdo) { state.milesOdoError = "The opening odometer can't be less than the last shift's ending odometer (" + sOdo.toFixed(1) + ")."; render(); return; }
+          var sRow = Object.assign({}, staleInfo.row);
+          var sEnd = shiftLastActive(sRow);
+          closeOnlineSegment(sRow, sEnd);
+          sRow.endOdometer = sOdo; sRow.shiftClosed = true; sRow.staleClosedAt = Date.now();
+          var sShifts = sRow.shifts && typeof sRow.shifts === "object" ? Object.assign({}, sRow.shifts) : {};
+          var sKey = String(Number(sRow.shiftStartAt) || Number(sRow.startedAt) || sEnd);
+          sShifts[sKey] = { startOdo: isFinite(sStart) ? sStart : null, endOdo: sOdo, odoMiles: isFinite(sStart) ? Math.round((sOdo - sStart) * 10) / 10 : null,
+            trackedMiles: round2(Number(sRow.gpsMiles) || 0), shiftStartedAt: Number(sKey), shiftEndedAt: sEnd, day: staleInfo.day, staleClosed: true };
+          sRow.shifts = sShifts;
+          persistMilesRow(sRow, staleInfo.day);
+          writeShift(null);
+          state.milesStaleDraft = "";
+        }
         var now = Date.now();
         var prev = todayMilesRow() || {};
         var keepMiles = Number(prev.gpsMiles) || 0;
@@ -11861,7 +12344,7 @@
             var pk = String(Number(prev.shiftStartAt) || Number(prev.startedAt) || (now - 1));
             keptShifts[pk] = { startOdo: Number(prev.startOdometer), endOdo: prev.endOdometer != null ? Number(prev.endOdometer) : null,
               odoMiles: prev.endOdometer != null ? Math.round((Number(prev.endOdometer) - Number(prev.startOdometer)) * 10) / 10 : null,
-              shiftStartedAt: Number(pk), shiftEndedAt: Number(prev.lastUpdate) || null, day: chicagoToday(), trackedFrom: "day", skippedEnd: prev.endOdometer == null };
+              shiftStartedAt: Number(pk), shiftEndedAt: Number(prev.lastUpdate) || null, day: milesDay(), trackedFrom: "day", skippedEnd: prev.endOdometer == null };
           }
         }
         if (Object.keys(keptShifts).length) row.shifts = keptShifts;
@@ -11880,7 +12363,7 @@
         state.milesTrackLng = null;
         state.milesTrackAt = 0;
         clearMilesAnchor(); /* v64 */
-        writeShift({ startOdo: odo, shiftStartedAt: now, startDay: chicagoToday(), trackedMiles: 0, filledInMiles: 0 });
+        writeShift({ startOdo: odo, shiftStartedAt: now, startDay: milesDay(), trackedMiles: 0, filledInMiles: 0 });
         persistMilesRow(row).then(function () {
           followGps();
           acquireWakeLock();
@@ -11930,6 +12413,7 @@
           startedAt: now,
           lastUpdate: now
         };
+        try { hosLastPush = 0; hosTick(now); hosOnShiftClose(now); } catch (e) {} /* v72r: final HOS segment + mandatory rest */
         closeOnlineSegment(row, now);
         row.endOdometer = odo;
         row.shiftClosed = true;
@@ -11943,7 +12427,7 @@
           shiftStartedAt: info.shiftStartedAt || null,
           shiftEndedAt: now,
           odoWarned: !!warn,
-          day: chicagoToday()
+          day: milesDay() /* v72r: shift start day */
         };
         if (info.legacy) rec.trackedFrom = "day";
         var shifts = row.shifts && typeof row.shifts === "object" ? Object.assign({}, row.shifts) : {};
@@ -13255,6 +13739,11 @@
       render();
       return;
     }
+    if (hosLimitReached() && !driverMidRide()) { /* v72r */
+      setAcceptNotice("LIMIT REACHED: you've hit the maximum hours on duty. Stop accepting rides and end your shift.");
+      render();
+      return;
+    }
     if (!isDriverApproved()) {
       state.openListError = "pending-approval";
       setAcceptNotice("Your driver account is still waiting for owner approval, so you can't accept rides yet.");
@@ -13827,10 +14316,10 @@
          only at launch/login never ran again. On every resume (visibilitychange / pageshow / focus) and every 30 s: if the
          Chicago day changed since the last check (or the shift was closed elsewhere), re-check the miles day; when the opening
          odometer is needed, close the Home menu / Today / earnings / meter screens and show the prompt first. */
-      var odoDayChecked = chicagoToday();
+      var odoDayChecked = milesDay();
       var odoDayCheck = function (force) {
         if (!signedIn()) { odoDayChecked = ""; return; }
-        var day = chicagoToday();
+        var day = milesDay(); /* v72r: stays on the shift's start day while that shift is open (no midnight prompt) */
         if (!force && day === odoDayChecked) return;
         odoDayChecked = day;
         var before = !!state.milesNeedStart;
@@ -13847,11 +14336,20 @@
       window.addEventListener("pageshow", odoResume);
       window.addEventListener("focus", odoResume);
       setInterval(function () { odoDayCheck(false); }, 30000);
+      setInterval(function () { hosCheck(); }, 20000); /* v72r hours of service */
+      setInterval(function () { var before = JSON.stringify(hosOvr); hosPollOvr().then(function () { if (JSON.stringify(hosOvr) !== before) { hosCheck(); render(); } }); }, 30000);
+      setInterval(function () { hosLoadCfg(); }, 10 * 60000);
     }
     if (ROLE === "driver" && document.visibilityState !== "hidden") presenceApp.foregroundAt = Date.now(); /* v64 */
     if (ROLE === "driver" && signedIn()) {
       loadRideHistory();
+      mergeMidnightSplit(); /* v72r */
       ensureMilesDayReady();
+      hosLoadCfg().then(hosPollOvr).then(function () { hosCheck(); render(); });
+      pullRecentMilesRows().then(function (changed) { /* v72r: recover a shift row this phone lost; then re-check */
+        var merged = mergeMidnightSplit();
+        if (changed || merged) { ensureMilesDayReady(); render(); }
+      });
       followGps();
       acquireWakeLock();
       refreshRosterStatus().then(function () {
@@ -14360,7 +14858,14 @@
   window.__pcsApp = {
     estimate: estimate,
     rideAudioInfo: function () { return rideAudio.info(); }, /* v72f test hook */
+    hosLimitReached: hosLimitReached, /* v72r test hooks */
+    driverCanTakeNew: driverCanTakeNew,
+    hosStatus: hosStatus,
+    hosPollOvr: hosPollOvr,
+    hosRestUntil: hosRestUntil,
     stopRideAlert: function () { rideAudio.stopAlert(); },
+    startRideAlert: function () { rideAudio.startAlert(); }, /* v72r test hook */
+    testChime: function () { rideAudio.test(); },
     intlArrivalEligible: intlArrivalEligible,
     placeNameVariants: placeNameVariants,
     googleSuggest: googleSuggest,
