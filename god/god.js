@@ -3674,7 +3674,8 @@
             ? '<br><button type="button" class="btn btn-ghost" data-cardfail-toggle="' + esc(e.code || "") + '" data-driver="' + esc(driverId) + '" data-on="' + (isCardFailedCollect(e) ? "1" : "0") + '">' +
               (isCardFailedCollect(e) ? "Undo Card failed - collect" : "Mark Card failed - collect") + "</button>" : "") +
           (e.billedMiles != null ? "<br><strong>Miles</strong> " + esc(String(e.billedMiles)) : "") +
-          (Number(e.tipCents) > 0 ? "<br><strong>Tip</strong> " + esc(fmtCents(e.tipCents)) + " (100% to driver)" : "") +
+          (Number(e.tipCents) > 0 ? "<br><strong>" + (isCashEntry(e) ? "Cash tip" : "Tip") + "</strong> " + esc(fmtCents(e.tipCents)) + (isCashEntry(e) ? " (driver kept it; not owed to PCS)" : " (100% to driver)") : "") +
+          (e.cashReceivedCents != null ? "<br><strong>Cash received</strong> " + esc(fmtCents(e.cashReceivedCents)) + " · <strong>change</strong> " + esc(fmtCents(Number(e.changeCents) || 0)) : "") +
           (String(e.rideType || "") === "metered" && e.paymentStatus ? "<br><strong>Payment</strong> " + esc(meterPayWord(e.paymentStatus, e.paidVia)) : "") +
           "</p></article>"
         );
@@ -3693,7 +3694,8 @@
         var wk = payBalance(historyEntries(driverId).filter(function (e) { return weekDays.indexOf(e.day) >= 0; }));
         return '<br><span class="pay-week-net"><strong>Week owed to driver</strong> ' + esc(fmtCents(wk.owedToDriver)) +
           " · <strong>owed by driver (cash)</strong> " + esc(fmtCents(wk.owedByDriver)) +
-          " · <strong>Net</strong> " + esc(payNetText(wk)) + "</span>";
+          " · <strong>Net</strong> " + esc(payNetText(wk)) + "</span>" +
+          '<br><span class="pay-week-cash-tips"><strong>Cash tips received</strong> ' + esc(fmtCents(wk.cashTips)) + " (driver keeps 100%; not owed to PCS, not fare; record only)</span>";
       })() +
       "</p>" +
       '<div class="cal-week">' +
@@ -3814,7 +3816,8 @@
               "<strong>Commission total</strong> " + esc(fmtCents(totals.commissionTotal)) +
               (function () { var wd = []; var m0 = mondayOfWeek(chicagoToday()); for (var k = 0; k < 7; k += 1) wd.push(addDaysYmd(m0, k));
                 var wk = payBalance(historyEntries(d.id).filter(function (e) { return wd.indexOf(e.day) >= 0; }));
-                return '<br><strong>This week</strong> ' + esc(payNetText(wk)) + (wk.cashRides ? " (" + wk.cashRides + " cash ride" + (wk.cashRides === 1 ? "" : "s") + ", driver owes " + esc(fmtCents(wk.owedByDriver)) + ")" : ""); })() + /* v72d */
+                return '<br><strong>This week</strong> ' + esc(payNetText(wk)) + (wk.cashRides ? " (" + wk.cashRides + " cash ride" + (wk.cashRides === 1 ? "" : "s") + ", driver owes " + esc(fmtCents(wk.owedByDriver)) + ")" : "") +
+                  (wk.cashTips ? '<br><span class="pay-week-cash-tips">Cash tips received ' + esc(fmtCents(wk.cashTips)) + " (driver's own, record only)</span>" : ""); })() + /* v72d */
               " · " + esc(String(totals.count)) + " logged rides" +
               "</p>" +
               (hist.length
@@ -4409,7 +4412,8 @@
     else if (st === "paid_other") {
       var o = p.paidOther || {};
       lines.push('<span style="color:#ffc96b">Paid another way · ' + esc(String(o.method || "other").replace("_", " ")) + " · " + esc(fmtCents(o.amountCents)) +
-        (Number(o.tipCents) > 0 ? " + tip " + esc(fmtCents(o.tipCents)) : "") + " · reported by " + esc(o.by || m.driverName || "driver") + " · not checked by Square</span>");
+        " · tip " + esc(fmtCents(Number(o.tipCents) || 0)) +
+        (o.cashReceivedCents != null ? " · cash received " + esc(fmtCents(o.cashReceivedCents)) + " · change " + esc(fmtCents(Number(o.changeCents) || 0)) : "") + " · reported by " + esc(o.by || m.driverName || "driver") + " · not checked by Square</span>");
     } else if (st === "unpaid") lines.push('<span style="color:#ff8a8a"><strong>NOT PAID</strong></span>');
     if (p.meterLink && !payRecOk(p.final)) lines.push('<span style="opacity:.8">QR link ' + esc(String(p.meterLink.status || "").toLowerCase()) + "</span>");
     var rr = payRideOf(p.code) || {};
@@ -5146,9 +5150,10 @@
     return Math.max(0, Math.round((Number(e.fareTotal) || 0) - (Number(e.commissionCents) || 0)));
   }
   function payBalance(entries) {
-    var out = { owedToDriver: 0, owedByDriver: 0, net: 0, cashRides: 0 };
+    var out = { owedToDriver: 0, owedByDriver: 0, net: 0, cashRides: 0, cashTips: 0 };
     (entries || []).forEach(function (e) {
-      if (isCashEntry(e)) { out.owedByDriver += cashDriverOwesCents(e); out.cashRides += 1; }
+      /* v72s: cash tips are the driver's own money (100% kept, not part of the 30% owed, not fare): record only */
+      if (isCashEntry(e)) { out.owedByDriver += cashDriverOwesCents(e); out.cashRides += 1; out.cashTips += Number(e.tipCents) || 0; }
       else out.owedToDriver += (Number(e.commissionCents) || 0) + (Number(e.tipCents) || 0);
     });
     out.net = out.owedToDriver - out.owedByDriver;
@@ -5859,6 +5864,7 @@
     bindOwnerRideActions();
   }
 
+  window.pcsIdleForReload = function () { var ae = document.activeElement; return !(ae && /^(INPUT|TEXTAREA|SELECT)$/.test(ae.tagName)) && !document.querySelector("dialog[open], .modal.open"); };
   function render() {
     var root = document.getElementById("root");
     if (!root) return;
