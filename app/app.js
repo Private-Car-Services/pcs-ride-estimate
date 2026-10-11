@@ -747,6 +747,7 @@
   }
 
   function syncOpenRideAlert() {
+    qPaintDriver(); /* v72q */
     if (ROLE === "driver") showRideSoundBar(); /* v57: always, until a chime really played */
     if (ROLE !== "driver" || !signedIn() || !canGoOnline() || !driverCanTakeNew()) {
       stopOpenRideAlert();
@@ -810,17 +811,18 @@
   function driverCanTakeNew() {
     if (ROLE !== "driver" || !signedIn()) return false;
     if (meterActive()) return false; /* v70: busy with a metered ride */
+    if (qManualBusy()) return false; /* v72q: driver set On a ride (offers pause) */
     if (state.screen === "home") return true;
     return state.screen === "trip" && state.rideStatus === "completed";
   }
 
   function alertableOpenRides() {
-    return (state.openRides || []).filter(function (r) {
+    return qSortOffers((state.openRides || []).filter(function (r) { /* v72q: Worker-verified queue first (oldest first) */
       if (!r || !r.code) return false;
       if (r.isTest && !isOwnerSession()) return false;
       if (String(r.status || "requested") !== "requested") return false;
       return !rideDismissed(r.code);
-    });
+    }));
   }
 
   /* iOS: keep Web Audio alive. Any tap resumes it (iOS suspends it after the app is hidden). */
@@ -2189,6 +2191,7 @@
       "<div><h2 id=\"home-greeting\">" + esc(first ? "Hi, " + first : "Welcome") + "</h2><p>Where are we going today?</p></div>" +
       "</div>" +
       (state.notice ? '<p class="note notice-ok" role="status">' + esc(state.notice) + "</p>" : "") +
+      qRiderPromptHtml() + /* v72q: driver online, finishing a ride -> join the queue */
       '<button class="btn rh-book" type="button" id="home-book">Book a ride</button>' +
       '<div class="rh-links">' +
       '<button class="btn ghost" type="button" id="open-history">My rides / History</button>' +
@@ -8327,6 +8330,7 @@
     remote.updatedAt = remote.requestedAt;
     remote.isTest = !!state.isTest && testModeAvailable();
     remote.cardStatus = remote.isTest ? "test_skip" : (remote.cardStatus && remote.cardStatus !== "" ? remote.cardStatus : "none");
+    qMarkRemote(remote, code); /* v72q: joined the queue -> queued + qOwnerHash (secret stays on this phone) */
     if (squareConfigured() && squareCfg().testMode) remote.squareSandbox = true; /* Square TEST MODE (?squaretest=1): flags the ride so it is easy to spot and delete */
     var est0 = estimate();
     if (est0.ready) {
@@ -9034,6 +9038,7 @@
       betaNoticeHtml() + /* v68 */
       (state.notice ? '<p class="note notice-ok" role="status">' + esc(state.notice) + "</p>" : "") +
       "<h2>Request a ride</h2>" +
+      qRiderPromptHtml() + /* v72q */
       "<p class=\"lede\">Request goes to Private Car Services for confirmation. Card charges are not taken on this screen.</p>" +
       (testModeAvailable()
         ? ('<div class="card" style="border:1px solid #7a1f1f;">' +
@@ -9329,11 +9334,12 @@
       ? '<div class="status"><i></i><span>Booking declined</span></div>'
       : (st === "cancelled"
         ? '<div class="status"><i></i><span>Ride cancelled</span></div>'
-        : waitingStatusBlock(waitLabel));
+        : waitingStatusBlock(qWaitLabel(waitLabel))); /* v72q */
     var live = st !== "denied" && st !== "cancelled";
     return (
       riderBackButton() +
       statusHtml +
+      qPlaceHtml() + /* v72q: "You're #2 in line" + Leave the queue */
       driverIdentityLine() +
       driverEtaLine() +
       routeLedeHtml() +
@@ -9366,6 +9372,7 @@
     state.dropFound = ride.dropFound || "";
     state.stopList = normalizeStops(ride.stopList);
     state.internationalArrival = !!ride.internationalArrival; /* v62 */
+    state.qQueued = !!(ride.code && ride.qOwnerHash && qOwnerSecret(ride.code)); /* v72q.1: queued = this phone holds the owner secret */
     state.cardStatus = ride.cardStatus || "";
     state.cardLast4 = ride.cardLast4 || "";
     state.cardBrand = ride.cardBrand || "";
@@ -11144,6 +11151,7 @@
       accountNav() +
       meterBarHtml() + /* v70 */
       milesTodayHtml() +
+      (gated ? "" : qDriverSliderHtml()) + /* v72q: Available / On a ride */
       '<p class="fine" id="rides-count">' + esc(ridesCountLabel()) + "</p>" +
       bgGpsTipCard() +
       (state.driverNotice
@@ -11158,6 +11166,7 @@
         ? '<p class="lede">Finish the steps above to go online and see open requests.</p>'
         : (
           "<h2>Open requests</h2>" +
+          qDriverPausedHtml() + /* v72q */
           driverBoardStatus() +
           openRideAlertToggleHtml() +
           '<div class="map-stage board-map">' +
@@ -11437,6 +11446,7 @@
     restoreAppFocus(app, focusKeep);
     ensureSosButton();
     syncBetaAck(); /* v68: riders only; blocks until "I understand" */
+    qAfterRender(); /* v72q */
     if (keptBoard) {
       var slot = app.querySelector(".map-stage.board-map");
       if (slot && slot.parentNode) {
@@ -11566,6 +11576,7 @@
             syncDriverProfile().then(function () { render(); });
             ensureMilesDayReady();
             followGps();
+            qDriverLoginToken(loginEmail, password); /* v72q: Worker session for Available / On a ride */
             loadRideHistory();
             acquireWakeLock();
             refreshRosterStatus().then(function () {
@@ -11703,6 +11714,7 @@
             syncDriverProfile().then(function () { render(); });
             ensureMilesDayReady();
             followGps();
+            qDriverLoginToken(loginEmail, password); /* v72q: Worker session for Available / On a ride */
             loadRideHistory();
             acquireWakeLock();
             refreshRosterStatus().then(function () {
@@ -12257,7 +12269,7 @@
     }
     if (ROLE === "customer" && signedIn() && riderAgreed()) syncAgreementToServer();
     var homeBook = document.getElementById("home-book");
-    if (homeBook) homeBook.addEventListener("click", function () { startNewBooking(); });
+    if (homeBook) homeBook.addEventListener("click", function () { qr.join = false; qr.pend = null; startNewBooking(); }); /* v72q: plain booking = no queue */
     var bookingHome = document.getElementById("booking-home");
     if (bookingHome) {
       bookingHome.addEventListener("click", function () {
@@ -13028,7 +13040,7 @@
   }
 
   function refreshOpenRides(force) {
-    if (ROLE !== "driver" || !signedIn() || !driverCanTakeNew()) return;
+    if (ROLE !== "driver" || !signedIn() || !(driverCanTakeNew() || qBoardPollOk())) return; /* v72q */
     if (!syncOn()) {
       state.openRides = [];
       state.openListError = "";
@@ -13862,7 +13874,7 @@
     setInterval(function () { if (chatOpenForRole()) loadChatMessages(); }, 3000);
     setInterval(pollDriverRideCancel, 5000);
     setInterval(function () {
-      if (ROLE === "driver" && signedIn() && canGoOnline() && driverCanTakeNew()) refreshOpenRides();
+      if (ROLE === "driver" && signedIn() && canGoOnline() && (driverCanTakeNew() || qBoardPollOk())) refreshOpenRides(); /* v72q */
     }, 3000);
     setInterval(function () {
       if (ROLE === "driver" && signedIn() && !state.hubOpen) refreshScheduledRides(false);
@@ -13986,6 +13998,363 @@
     if (!ride) return;
     ingestCustomerRide(ride);
   }
+
+  /* ================= v72q (Oct 10): driver Available / On a ride + rider queue, through the Worker only =================
+     Harry's v72 finding fixed: the app NEVER writes onRide / queue rows to Firebase. The Worker (v69) is the only writer:
+       - driver: a session token from POST /driver/session (password checked on the Worker against the roster) at every login
+         (or a one-time "confirm your password" on the slider after a restored session); status via POST /driver/status.
+       - rider: "Join the queue" makes a random owner secret on this phone; only its SHA-256 (qOwnerHash) goes on the ride.
+         POST /queue/join / /queue/leave prove ownership with the secret. POST /queue/state returns counts + MY place only.
+       - drivers get the queued codes in order (token) to offer the oldest queued request first.
+     Offers pause while the driver is On a ride (set by hand, PCS ride, or running meter). Teen/TEST rides never queue. */
+  var Q_POLL_MS = 4000;
+  var Q_DRIVER_POLL_MS = 8000;
+  var qr = { join: false, ws: null, place: 0, inLine: 0, leaveConfirm: false, timer: 0, polling: false, pend: null, joinedCode: "", joinBusy: false, joinErr: "" };
+  var qd = { lastPub: null, order: [], pollAt: 0, authErr: "", authBusy: false, pubBusy: false, pubErr: "" };
+  function qWorker(path, body) {
+    return fetch(METER_WORKER + path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body || {}) }).then(function (res) {
+      return res.json().catch(function () { return {}; }).then(function (d) {
+        if (!res.ok || !d || d.ok === false) { var e = new Error((d && d.error) || ("Server error " + res.status)); e.status = res.status; e.code = d && d.code; throw e; }
+        return d;
+      });
+    });
+  }
+  function qHex(bytes) { return Array.prototype.map.call(bytes, function (b) { return ("0" + b.toString(16)).slice(-2); }).join(""); }
+  function qSha(s) { return crypto.subtle.digest("SHA-256", new TextEncoder().encode(s)).then(function (b) { return qHex(new Uint8Array(b)); }); }
+
+  /* ---------- driver side ---------- */
+  function qBusyKey() { var id = ""; try { id = driverPresenceId(); } catch (e) {} return "pcs-driver-onride-" + id; }
+  function qTokKey() { var id = ""; try { id = driverPresenceId(); } catch (e) {} return "pcs-driver-qtoken-" + id; }
+  function qToken() {
+    try {
+      var t = localStorage.getItem(qTokKey()) || "";
+      var exp = Number(t.split(".")[1]) || 0;
+      return exp > Date.now() + 60000 ? t : "";
+    } catch (e) { return ""; }
+  }
+  function qSetToken(t) { try { if (t) localStorage.setItem(qTokKey(), t); else localStorage.removeItem(qTokKey()); } catch (e) {} }
+  function qDriverLoginToken(email, password) {
+    if (ROLE !== "driver" || !email || !password) return;
+    var tries = 0;
+    var go = function () {
+      tries++;
+      qWorker("/driver/session", { driverId: driverPresenceId(), email: email, password: password }).then(function (d) {
+        qSetToken(d.token); qd.authErr = ""; qd.lastPub = null; render();
+      }).catch(function (e) {
+        if (e.status === 403 && e.code !== "pin_changed" && tries < 3) { setTimeout(go, 4000 * tries); return; } /* roster password backfill may land a moment later */
+        qd.authErr = e.message || "Couldn't confirm your driver login.";
+      });
+    };
+    go();
+  }
+  function qManualBusy() {
+    if (ROLE !== "driver") return false;
+    try { return localStorage.getItem(qBusyKey()) === "1"; } catch (e) { return false; }
+  }
+  function qAutoBusy() {
+    if (ROLE !== "driver" || !signedIn()) return false;
+    var st = String(state.rideStatus || "").toLowerCase();
+    if (state.screen === "trip" && (st === "accepted" || st === "started")) return true;
+    try { if (meterActive()) return true; } catch (e) {}
+    return false;
+  }
+  function qDriverBusy() { return qManualBusy() || qAutoBusy(); }
+  function qPushStatus() {
+    var tok = qToken();
+    if (!tok) return;
+    var auto = qAutoBusy(), busy = auto || qManualBusy();
+    qd.pubBusy = true;
+    qWorker("/driver/status", { token: tok, onRide: busy, source: auto ? "pcs" : "manual" }).then(function () {
+      qd.pubBusy = false; qd.pubErr = "";
+    }).catch(function (e) {
+      qd.pubBusy = false; qd.pubErr = e.message || "Couldn't update your status.";
+      if (e.status === 401) { qSetToken(""); qd.lastPub = null; render(); }
+    });
+  }
+  function qSetManualBusy(on) {
+    if (ROLE !== "driver") return;
+    try { if (on) localStorage.setItem(qBusyKey(), "1"); else localStorage.removeItem(qBusyKey()); } catch (e) {}
+    qd.lastPub = null;
+    render();
+    try { syncOpenRideAlert(); } catch (e) {}
+    try { refreshOpenRides(true); } catch (e) {}
+  }
+  function qQueuedOpenCount() { return (qd.order || []).length; }
+  function qSortOffers(list) {
+    var order = qd.order || [];
+    return list.map(function (r, i) { return { r: r, i: i, q: order.indexOf(String(r.code)) }; }).sort(function (a, b) {
+      var qa = a.q >= 0 ? 0 : 1, qb = b.q >= 0 ? 0 : 1;
+      if (qa !== qb) return qa - qb;
+      if (qa === 0) return a.q - b.q;
+      return a.i - b.i;
+    }).map(function (x) { return x.r; });
+  }
+  function qDriverPoll() {
+    var tok = qToken();
+    if (!tok || Date.now() - qd.pollAt < Q_DRIVER_POLL_MS - 200) return;
+    qd.pollAt = Date.now();
+    qWorker("/queue/state", { token: tok }).then(function (d) { qd.order = (d.order || []).map(String); qPaintDriver(); }).catch(function (e) { if (e.status === 401) { qSetToken(""); render(); } });
+  }
+  function qDriverAuthHtml() {
+    return '<div id="q-auth"><p class="fine">Confirm your password once to use Available / On a ride on this phone.</p>' +
+      '<label for="q-auth-pass" class="fine">Driver password</label><input type="password" id="q-auth-pass" autocomplete="current-password">' +
+      '<button class="btn secondary" type="button" id="q-auth-go"' + (qd.authBusy ? " disabled" : "") + ">" + (qd.authBusy ? "Checking\u2026" : "Turn on status") + "</button>" +
+      (qd.authErr ? '<p class="error" role="alert">' + esc(qd.authErr) + "</p>" : "") + "</div>";
+  }
+  function qDriverSliderHtml() {
+    if (ROLE !== "driver" || !signedIn()) return "";
+    ensureQueueStyle();
+    var auto = qAutoBusy(), busy = auto || qManualBusy();
+    var tok = qToken();
+    return (
+      '<div class="card q-avail' + (busy ? " q-busy" : "") + '" id="q-avail">' +
+      '<p class="tag">Your status</p>' +
+      '<div class="q-switch" role="radiogroup" aria-label="Your status">' +
+      '<span class="q-knob" aria-hidden="true"></span>' +
+      '<button type="button" role="radio" class="q-opt" id="q-set-available" aria-checked="' + (busy ? "false" : "true") + '"' + (auto || !tok ? " disabled" : "") + ">Available</button>" +
+      '<button type="button" role="radio" class="q-opt" id="q-set-onride" aria-checked="' + (busy ? "true" : "false") + '"' + (auto || !tok ? " disabled" : "") + ">On a ride</button>" +
+      "</div>" +
+      (tok ? "" : qDriverAuthHtml()) +
+      '<p class="fine" id="q-avail-note">' + esc(auto
+        ? "Set automatically during your PCS ride. You switch back to Available when it ends."
+        : (busy
+          ? "Riders see you are online but finishing a ride, and can join the queue. New ride offers are paused. Slide to Available for the next rider in line."
+          : "Slide to On a ride whenever you are carrying a passenger, so riders can join the queue instead.")) + "</p>" +
+      (qd.pubErr ? '<p class="error" id="q-pub-err">' + esc(qd.pubErr) + "</p>" : "") +
+      '<div id="q-driver-queue-host">' + qDriverQueueInner() + "</div>" +
+      "</div>"
+    );
+  }
+  function qDriverQueueInner() {
+    var waiting = qQueuedOpenCount();
+    if (!waiting) return "";
+    return '<p class="lede q-line-count" id="q-driver-queue">' + waiting + (waiting === 1 ? " rider is" : " riders are") + " waiting in line." +
+      (qDriverBusy() ? "" : " The first one is offered to you first.") + "</p>";
+  }
+  function qPaintDriver() {
+    var h = document.getElementById("q-driver-queue-host");
+    if (!h) return;
+    var html = qDriverQueueInner();
+    if (h.__qHtml !== html) { h.innerHTML = html; h.__qHtml = html; }
+  }
+  function qBoardPollOk() { return ROLE === "driver" && signedIn() && state.screen === "home" && qManualBusy(); }
+  function qDriverPausedHtml() {
+    if (ROLE !== "driver" || !qManualBusy()) return "";
+    return '<p class="lede q-paused" id="q-paused">You are set to On a ride, so new ride offers are paused.</p>';
+  }
+
+  /* ---------- rider side ---------- */
+  function qAllBusy() { return !!(qr.ws && qr.ws.allBusy); }
+  function qOwnerKey(code) { return "pcs-q-owner-" + String(code || ""); }
+  function qOwnerSecret(code) { try { return localStorage.getItem(qOwnerKey(code)) || ""; } catch (e) { return ""; } }
+  function qMyQueued() {
+    var st = String(state.rideStatus || "").toLowerCase();
+    return ROLE === "customer" && !!state.qQueued && (st === "pending_owner" || st === "requested");
+  }
+  function qOrdinal(n) { return "#" + n; }
+  function qPrepSecret() {
+    var b = new Uint8Array(24); crypto.getRandomValues(b);
+    var sec = qHex(b);
+    qr.pend = { secret: sec, hash: "" };
+    var mine = qr.pend;
+    qSha(sec).then(function (h) { mine.hash = h; }).catch(function () {});
+  }
+  function qPromptInner() {
+    if (!qAllBusy()) return "";
+    var n = (qr.ws && qr.ws.inLine) || 0;
+    var onForm = state.riderView === "book";
+    if (onForm && qr.join) {
+      return (
+        '<div class="card q-prompt q-joined" id="q-prompt">' +
+        '<div class="status"><i></i><span>Driver online, finishing a ride</span></div>' +
+        '<p class="lede">You\u2019re joining the queue for the next ride. Send your request below (pickup now) to get your place in line.</p>' +
+        (n ? '<p class="fine">' + n + (n === 1 ? " rider is" : " riders are") + " in line now.</p>" : "") +
+        '<button class="btn ghost" type="button" id="q-unjoin">Don\u2019t join the queue</button>' +
+        "</div>"
+      );
+    }
+    return (
+      '<div class="card q-prompt" id="q-prompt">' +
+      '<div class="status"><i></i><span>Driver online, finishing a ride</span></div>' +
+      '<p class="lede">Your driver is finishing a ride. Join the queue and you\u2019ll be picked up next.</p>' +
+      (n ? '<p class="fine" id="q-count">' + n + (n === 1 ? " rider is" : " riders are") + " in line now.</p>" : '<p class="fine" id="q-count">No one is in line yet.</p>') +
+      '<button class="btn" type="button" id="q-join">Join the queue for the next ride</button>' +
+      "</div>"
+    );
+  }
+  function qRiderPromptHtml() {
+    if (ROLE !== "customer" || !signedIn()) return "";
+    ensureQueueStyle();
+    return '<div id="q-prompt-host">' + qPromptInner() + "</div>";
+  }
+  function qPlaceInner() {
+    if (!qMyQueued()) return "";
+    var st = String(state.rideStatus || "").toLowerCase();
+    var place = qr.ws && qr.wsCode === state.code ? (qr.ws.place || 0) : 0;
+    qr.place = place;
+    qr.inLine = (qr.ws && qr.ws.inLine) || 0;
+    var leave = qr.leaveConfirm
+      ? ('<div class="q-leave-confirm" id="q-leave-confirm"><p class="lede">Leave the queue? This cancels your ride request. Nothing is charged.</p>' +
+         '<button class="btn danger" type="button" id="q-leave-yes">Yes, leave the queue</button>' +
+         '<button class="btn secondary" type="button" id="q-leave-no">Stay in line</button></div>')
+      : '<button class="btn secondary" type="button" id="q-leave">Leave the queue</button>';
+    return (
+      '<div class="card q-place" id="q-place">' +
+      '<p class="tag">Queue for the next ride</p>' +
+      '<p class="q-place-big" id="q-place-num">' + (place ? "You\u2019re " + qOrdinal(place) + " in line" : "Getting your place in line\u2026") + "</p>" +
+      '<p class="lede">' + esc(st === "pending_owner"
+        ? "Private Car Services is confirming your request. Your place in line is saved."
+        : (place === 1 ? "You\u2019re next. The first free driver gets your ride." : "Driver online, finishing a ride. Your place updates as riders ahead of you are picked up.")) + "</p>" +
+      (qr.joinErr ? '<p class="error" id="q-join-err">' + esc(qr.joinErr) + "</p>" : "") +
+      leave +
+      "</div>"
+    );
+  }
+  function qPlaceHtml() {
+    if (ROLE !== "customer") return "";
+    ensureQueueStyle();
+    return '<div id="q-place-host">' + qPlaceInner() + "</div>";
+  }
+  function qWaitLabel(fallback) {
+    var st = String(state.rideStatus || "").toLowerCase();
+    if (st === "requested" && qAllBusy()) return "Driver online, finishing a ride";
+    return fallback;
+  }
+  function qEnsureJoined() {
+    if (!qMyQueued() || !state.code || qr.joinedCode === state.code || qr.joinBusy) return;
+    var sec = qOwnerSecret(state.code);
+    if (!sec) return;
+    qr.joinBusy = true;
+    var code = state.code;
+    qWorker("/queue/join", { code: code, ownerSecret: sec }).then(function (d) {
+      qr.joinBusy = false; qr.joinedCode = code; qr.joinErr = "";
+      qr.ws = Object.assign({}, qr.ws || {}, { place: d.place, inLine: d.inLine }); qr.wsCode = code;
+      qPaintHosts();
+    }).catch(function (e) {
+      qr.joinBusy = false; qr.joinErr = e.status === 429 ? "" : (e.message || "Couldn't join the queue.");
+      if (e.status === 403 || e.status === 409) qr.joinedCode = code; /* don't retry a refusal */
+      qPaintHosts();
+    });
+  }
+  function qRiderPollOnce() {
+    if (qr.polling) return;
+    qr.polling = true;
+    var body = {};
+    if (qMyQueued() && state.code && qOwnerSecret(state.code)) { body.code = state.code; body.ownerSecret = qOwnerSecret(state.code); }
+    var code = body.code || "";
+    qWorker("/queue/state", body).then(function (d) { qr.ws = d; qr.wsCode = code; }).catch(function () {}).then(function () {
+      qr.polling = false;
+      qPaintHosts();
+    });
+  }
+  function qPaintHosts() {
+    var h1 = document.getElementById("q-prompt-host");
+    if (h1) { var a = qPromptInner(); if (h1.__qHtml !== a) { h1.innerHTML = a; h1.__qHtml = a; } }
+    var h2 = document.getElementById("q-place-host");
+    if (h2) { var b = qPlaceInner(); if (h2.__qHtml !== b) { h2.innerHTML = b; h2.__qHtml = b; } }
+    var s = document.querySelector(".status span");
+    if (s && state.screen === "waiting" && String(state.rideStatus || "").toLowerCase() === "requested" && qAllBusy()) s.textContent = "Driver online, finishing a ride";
+  }
+  function qAfterRender() {
+    if (ROLE === "driver") {
+      if (!signedIn()) return;
+      try { if (state.milesEndPrompt || odometerGatePending() || !canGoOnline()) { qd.lastPub = null; return; } } catch (e) {}
+      var busy = qDriverBusy();
+      var key = (qToken() ? "t" : "n") + (busy ? 1 : 0);
+      if (qd.lastPub !== key) {
+        var was = qd.lastPub;
+        qd.lastPub = key;
+        qPushStatus();
+        if (was && was.slice(-1) === "1" && !busy) { try { syncOpenRideAlert(); } catch (e) {} }
+      }
+      qDriverPoll();
+      return;
+    }
+    if (ROLE !== "customer" || !signedIn()) return;
+    qEnsureJoined();
+    var want = !!(document.getElementById("q-prompt-host") || document.getElementById("q-place-host"));
+    if (want && !qr.timer) {
+      qRiderPollOnce();
+      qr.timer = setInterval(function () {
+        if (!document.getElementById("q-prompt-host") && !document.getElementById("q-place-host")) { clearInterval(qr.timer); qr.timer = 0; return; }
+        qEnsureJoined();
+        qRiderPollOnce();
+      }, Q_POLL_MS);
+    }
+    if (want) qPaintHosts();
+  }
+  function qClick(ev) {
+    var t = ev.target && ev.target.closest ? ev.target.closest("#q-join,#q-unjoin,#q-leave,#q-leave-yes,#q-leave-no,#q-set-available,#q-set-onride,#q-auth-go") : null;
+    if (!t || t.disabled) return;
+    if (t.id === "q-auth-go") {
+      var pass = (document.getElementById("q-auth-pass") || {}).value || "";
+      if (!pass) { qd.authErr = "Enter your driver password."; render(); return; }
+      qd.authBusy = true; render();
+      qWorker("/driver/session", { driverId: driverPresenceId(), email: readSession(), password: pass }).then(function (d) {
+        qd.authBusy = false; qd.authErr = ""; qSetToken(d.token); qd.lastPub = null; render();
+      }).catch(function (e) { qd.authBusy = false; qd.authErr = e.message || "Couldn't confirm your password."; render(); });
+      return;
+    }
+    if (t.id === "q-set-available") { if (qManualBusy()) qSetManualBusy(false); return; }
+    if (t.id === "q-set-onride") { if (!qManualBusy()) qSetManualBusy(true); return; }
+    if (t.id === "q-join") {
+      qr.join = true;
+      qPrepSecret();
+      if (state.riderView === "book") { state.asap = true; render(); return; }
+      startNewBooking();
+      qr.join = state.riderView === "book";
+      state.asap = true;
+      render();
+      return;
+    }
+    if (t.id === "q-unjoin") { qr.join = false; qr.pend = null; qPaintHosts(); return; }
+    if (t.id === "q-leave") { qr.leaveConfirm = true; qPaintHosts(); return; }
+    if (t.id === "q-leave-no") { qr.leaveConfirm = false; qPaintHosts(); return; }
+    if (t.id === "q-leave-yes") {
+      qr.leaveConfirm = false;
+      var code = state.code, sec = qOwnerSecret(code);
+      if (code && sec) qWorker("/queue/leave", { code: code, ownerSecret: sec }).catch(function () {});
+      state.riderView = "home"; cancelRiderRide(); return;
+    }
+  }
+  document.addEventListener("click", qClick);
+  /* publishRide: a queued ride = ASAP request + qOwnerHash (the secret stays on this phone). Never TEST rides. */
+  function qMarkRemote(remote, code) {
+    state.qQueued = false;
+    state.qQueueAt = 0;
+    var pend = qr.pend;
+    if (!remote || remote.family || remote.isTest || !qr.join || !pend || !pend.hash || !rideIsAsap(remote)) { qr.join = false; return; }
+    remote.qOwnerHash = pend.hash; /* v72q.1: no queued/queueAt on the ride (the Worker's signed queue entry is the only queue record) */
+    try { localStorage.setItem(qOwnerKey(code || remote.code || state.code), pend.secret); } catch (e) {}
+    state.qQueued = true;
+    state.qQueueAt = Date.now();
+    qr.join = false;
+    qr.pend = null;
+    qr.joinedCode = "";
+  }
+  function ensureQueueStyle() {
+    if (document.getElementById("q-style")) return;
+    var st = document.createElement("style");
+    st.id = "q-style";
+    st.textContent =
+      ".q-avail .q-switch{position:relative;display:flex;background:rgba(255,255,255,.07);border-radius:999px;padding:4px;margin:6px 0 8px;border:1px solid rgba(255,255,255,.22)}" +
+      ".q-avail .q-opt{position:relative;z-index:1;flex:1;border:0;background:transparent;padding:12px 8px;font-weight:700;font-size:16px;border-radius:999px;color:#dfe7f1;cursor:pointer}" +
+      ".q-avail .q-opt[disabled]{cursor:default;opacity:.75}" +
+      ".q-avail .q-knob{position:absolute;top:4px;bottom:4px;left:4px;width:calc(50% - 4px);border-radius:999px;background:#2e9d4f;transition:transform .22s ease,background .22s ease}" +
+      ".q-avail .q-opt[aria-checked=true]{color:#fff}" +
+      ".q-avail.q-busy .q-knob{transform:translateX(100%);background:#c27a12}" +
+      ".q-line-count{margin:4px 0 0;font-weight:600;color:#7fe09a}" +
+      ".q-paused{color:#f0b35a;font-weight:600}" +
+      ".q-prompt,.q-place{border:2px solid #2e9d4f;background:rgba(46,157,79,.12)}" +
+      ".q-place{text-align:center}" +
+      ".q-place-big{font-size:30px;font-weight:800;margin:6px 0;color:#7fe09a}";
+    document.head.appendChild(st);
+  }
+  window.__pcsQueue = {
+    state: function () { return { join: qr.join, place: qr.place, inLine: qr.inLine, queued: !!state.qQueued, allBusy: qAllBusy(), ws: qr.ws, order: qd.order, token: !!qToken() }; },
+    manualBusy: function () { return qManualBusy(); }, autoBusy: function () { return qAutoBusy(); },
+    offers: function () { return alertableOpenRides().map(function (r) { return r.code; }); }, poll: function () { qd.pollAt = 0; qDriverPoll(); qRiderPollOnce(); }, setOnRide: qSetManualBusy
+  };
 
   /* v54 test hooks (no UI). */
   window.__pcsApp = {
