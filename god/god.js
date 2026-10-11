@@ -3311,7 +3311,7 @@
       prev.hosShiftMin = d.hosShiftMin; prev.hosWindowMin = d.hosWindowMin; prev.hosLevel = d.hosLevel || ""; /* v72r HOS */
       prev.gpsAt = d.gpsAt || prev.gpsAt; prev.gpsStaleMin = d.gpsStaleMin; /* v72r GPS health */
       prev.hosDriveMin = d.hosDriveMin; prev.hosBy = d.hosBy || ""; prev.hosCycleMin = d.hosCycleMin; prev.hosCfg = d.hosCfg || null;
-      prev.hosBreakLeftMin = d.hosBreakLeftMin; prev.hosDriveLeftMin = d.hosDriveLeftMin; prev.hosShiftLeftMin = d.hosShiftLeftMin; prev.hosCycleLeftMin = d.hosCycleLeftMin;
+      prev.hosBreakLeftMin = d.hosBreakLeftMin; prev.hosOnBreak = d.hosOnBreak; prev.hosBreakTakenMin = d.hosBreakTakenMin; prev.hosDriveLeftMin = d.hosDriveLeftMin; prev.hosShiftLeftMin = d.hosShiftLeftMin; prev.hosCycleLeftMin = d.hosCycleLeftMin;
       prev.presence = d.presence || "live"; /* v64g */
       prev.lastSeenAt = d.lastSeenAt || d.at || 0;
       if (!prev.active && prev.fromRoster) {
@@ -3475,12 +3475,14 @@
   function driverHosHtml(d) {
     if (d.hosDriveLeftMin === undefined && d.hosShiftLeftMin === undefined) return '<p class="driver-hos fine">HOS clocks: not reported (app older than v72r)</p>';
     var lv = d.hosLevel || "ok";
-    var cell = function (k, lab) {
+    var cell = function (k, lab) { /* v72t: logo colors; red in the last 45 min; "Break due in" / "On break" */
       var v = d["hos" + k + "LeftMin"];
       var off = v == null;
-      var col = off ? "#6b7280" : v <= 0 ? "#b91c1c" : v <= 60 ? "#b45309" : "#166534";
-      return '<span class="hos-clock hos-clock-' + k.toLowerCase() + '" style="display:inline-block;min-width:88px;border:1px solid ' + col + ';border-radius:6px;padding:2px 6px;margin:2px;color:' + col + ';font-weight:700">' +
-        lab + " " + (off ? "off" : esc(hmFmt(Math.max(0, v)))) + "</span>";
+      var brk = k === "Break" && d.hosOnBreak;
+      if (k === "Break") lab = brk ? "On break" : "Break due in";
+      var red = !off && !brk && v <= 45;
+      return '<span class="hos-clock hos-clock-' + k.toLowerCase() + (red ? " hos-red" : "") + '" style="display:inline-block;min-width:88px;border:1px solid ' + (red ? "#fca5a5" : "#3f6a3b") + ';border-radius:6px;padding:2px 6px;margin:2px;background:' + (red ? "#b91c1c" : "#20371d") + ";color:" + (red ? "#fff" : "#cdeccd") + ';font-weight:700">' +
+        lab + " " + (off ? "off" : brk ? esc(String(d.hosBreakTakenMin || 0)) + "m / 30m" : esc(hmFmt(Math.max(0, v)))) + "</span>";
     };
     var tag = lv === "limit" ? (d.hosBy === "break" ? "BREAK REQUIRED" : "LIMIT REACHED") : lv === "override" ? "OVERRIDE" : lv === "30m" ? "30 min left" : lv === "1h" ? "1 hour left" : "";
     return '<div class="driver-hos hos-' + esc(lv) + '"><strong>HOS</strong> ' + (tag ? '<strong style="color:' + (lv === "limit" ? "#b91c1c" : lv === "override" ? "#1e3a8a" : "#b45309") + '">' + esc(tag) + "</strong>" : "") + "<br>" +
@@ -5930,11 +5932,17 @@
      for this page only), which trusts only rows it signed. Names come from what God mode already loads. Also: "Confirm a
      driver's new password" (POST /driver/pin-reset) after a driver's roster password was changed. */
   var gq = { pw: "", data: null, err: "", busy: false, timer: 0, msg: "" };
+  /* v72t: the Worker hands back a 30-day device token after the password once; kept on this device and renewed silently */
+  var GQ_TOK_KEY = "pcs-god-queue-token";
+  function gqTok() { try { var t = localStorage.getItem(GQ_TOK_KEY) || ""; var exp = Number(t.split(".")[1]) || 0; return exp > Date.now() + 60000 ? t : ""; } catch (e) { return ""; } }
+  function gqSetTok(t) { try { if (t) localStorage.setItem(GQ_TOK_KEY, t); else localStorage.removeItem(GQ_TOK_KEY); } catch (e) {} }
+  function gqAuth() { return gq.pw ? { godPassword: gq.pw } : { godToken: gqTok() }; }
+  if (gqTok()) { gq.pw = ""; gq.tokOn = true; setTimeout(function () { gqLoad(); if (!gq.timer) gq.timer = setInterval(gqLoad, 6000); }, 0); }
   function gqMins(ms) { var m = Math.max(0, Math.round((Date.now() - (Number(ms) || Date.now())) / 60000)); return m < 1 ? "just now" : m + " min"; }
   function gqName(id) { var d = (state.drivers || []).filter(function (x) { return x && x.id === id; })[0]; return (d && d.name) || id; }
   function gqRide(code) { return (state.rides || []).filter(function (r) { return r && String(r.code) === String(code); })[0] || {}; }
   function gqPanelHtml() {
-    if (!gq.pw) {
+    if (!gq.pw && !gq.tokOn) {
       return '<p class="muted">Enter the God-mode password to load the rider queue and driver statuses.</p>' +
         '<input type="password" id="gq-pw" autocomplete="current-password" aria-label="God-mode password">' +
         '<button type="button" class="btn btn-gold" id="gq-load"' + (gq.busy ? " disabled" : "") + ">" + (gq.busy ? "Loading\u2026" : "Show queue") + "</button>" +
@@ -5943,7 +5951,9 @@
     var d = gq.data || { drivers: [], rows: [] };
     var drivers = d.drivers || [], rows = d.rows || [];
     var onRide = drivers.filter(function (x) { return x.onRide; });
-    var head = '<p class="muted" id="gq-drivers">Drivers online: ' + drivers.length + " \u00b7 Available " + (drivers.length - onRide.length) + " \u00b7 On a ride " + onRide.length + "</p>" +
+    var onBrk = drivers.filter(function (x) { return x.onBreak; }); /* v72t */
+    var head = '<p class="muted" id="gq-drivers">Drivers online: ' + drivers.length + " \u00b7 Available " + (drivers.length - onRide.length - onBrk.length) + " \u00b7 On a ride " + onRide.length + " \u00b7 On break " + onBrk.length + "</p>" +
+      (onBrk.length ? '<ul class="gq-onbreak">' + onBrk.map(function (x) { return '<li data-driver-id="' + esc(x.id) + '">' + esc(gqName(x.id)) + " \u2014 On break" + (x.at ? " \u00b7 " + gqMins(x.at) : "") + "</li>"; }).join("") + "</ul>" : "") +
       (onRide.length ? '<ul class="gq-onride">' + onRide.map(function (x) {
         return '<li data-driver-id="' + esc(x.id) + '">' + esc(gqName(x.id)) + " \u2014 On a ride" + (x.onRideSource === "pcs" ? " (PCS ride)" : " (set by driver)") + (x.at ? " \u00b7 " + gqMins(x.at) : "") + "</li>";
       }).join("") + "</ul>" : "");
@@ -5969,9 +5979,12 @@
   document.addEventListener("input", function (ev) { if (ev.target && ev.target.id === "gq-pw") gq.typed = ev.target.value; });
   document.addEventListener("keydown", function (ev) { if (ev.target && ev.target.id === "gq-pw" && ev.key === "Enter") { var b = document.getElementById("gq-load"); if (b) b.click(); } });
   function gqLoad() {
-    if (!gq.pw) return Promise.resolve();
-    return workerJson("/queue/state", { godPassword: gq.pw }).then(function (d) { gq.data = d; gq.err = ""; }).catch(function (e) {
-      if (e.status === 403) { gq.pw = ""; gq.data = null; var el0 = document.getElementById("queue-list"); if (el0) el0.__gqHtml = ""; }
+    if (!gq.pw && !gq.tokOn) return Promise.resolve();
+    return workerJson("/queue/state", gqAuth()).then(function (d) {
+      gq.data = d; gq.err = "";
+      if (d && d.godToken) { gqSetTok(d.godToken); gq.tokOn = true; gq.pw = ""; } /* password used once, then only the device token */
+    }).catch(function (e) {
+      if (e.status === 403 || e.status === 401) { gq.pw = ""; gq.tokOn = false; gqSetTok(""); gq.data = null; var el0 = document.getElementById("queue-list"); if (el0) el0.__gqHtml = ""; }
       gq.err = e.message || "Couldn't load the queue.";
     }).then(gqRender);
   }
@@ -5987,8 +6000,8 @@
     }
     if (t.id === "gq-pin-go") {
       var id = String((document.getElementById("gq-pin-id") || {}).value || "").trim().toLowerCase();
-      if (!id || !gq.pw) return;
-      workerJson("/driver/pin-reset", { godPassword: gq.pw, driverId: id }).then(function () { gq.msg = "Confirmed for " + id + ". They can log in again now."; })
+      if (!id || (!gq.pw && !gq.tokOn)) return;
+      workerJson("/driver/pin-reset", Object.assign(gqAuth(), { driverId: id })).then(function () { gq.msg = "Confirmed for " + id + ". They can log in again now."; })
         .catch(function (e) { gq.msg = e.message || "Couldn't confirm."; }).then(function () { gq.__force = 1; var el = document.getElementById("queue-list"); if (el) el.__gqHtml = ""; gqRender(); });
     }
   });
