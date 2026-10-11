@@ -3307,6 +3307,11 @@
       if (d.startOdometer != null) prev.startOdometer = d.startOdometer;
       if (d.speedMph != null) prev.speedMph = d.speedMph;
       if (d.speedAt != null) prev.speedAt = d.speedAt;
+      prev.appVersion = d.appVersion || ""; /* v72r */
+      prev.hosShiftMin = d.hosShiftMin; prev.hosWindowMin = d.hosWindowMin; prev.hosLevel = d.hosLevel || ""; /* v72r HOS */
+      prev.gpsAt = d.gpsAt || prev.gpsAt; prev.gpsStaleMin = d.gpsStaleMin; /* v72r GPS health */
+      prev.hosDriveMin = d.hosDriveMin; prev.hosBy = d.hosBy || ""; prev.hosCycleMin = d.hosCycleMin; prev.hosCfg = d.hosCfg || null;
+      prev.hosBreakLeftMin = d.hosBreakLeftMin; prev.hosDriveLeftMin = d.hosDriveLeftMin; prev.hosShiftLeftMin = d.hosShiftLeftMin; prev.hosCycleLeftMin = d.hosCycleLeftMin;
       prev.presence = d.presence || "live"; /* v64g */
       prev.lastSeenAt = d.lastSeenAt || d.at || 0;
       if (!prev.active && prev.fromRoster) {
@@ -3352,6 +3357,227 @@
         (warn ? " ⚠" : "") + "</li>";
     }).join("") + "</ul>";
   }
+
+  /* v72r: the app version this driver's phone is running (from presence); amber if older than this God mode build. */
+  function driverVersionHtml(d) {
+    var cur = window.PCS_APP_VERSION || "";
+    var v = d.appVersion || "";
+    var old = !!cur && (!v || (window.pcsVersionCmp ? window.pcsVersionCmp(v, cur) < 0 : v !== cur));
+    return '<p class="driver-app-version' + (old ? " is-old" : "") + '"' +
+      (old ? ' style="color:#b45309;background:#fef3c7;border-radius:6px;padding:2px 6px;display:inline-block;font-weight:600"' : "") +
+      "><strong>App</strong> " + esc(v || "older than v72r") + (old ? " (update needed, current " + esc(cur) + ")" : "") + "</p>";
+  }
+  /* ===== v72r hours of service: config (rides/HOSLIMIT) + per-driver driving / on-duty display + alerts =====
+     Default = Houston Code Ch. 46 (limousine drivers): max 12 h DRIVING in any rolling 24 h. On-duty caps optional (0 = off). */
+  /* PCS HOS policy (Matthew, CDL / Motive "USA Property 70 hour / 8 day"): 11 h drive, 14 h shift, 30-min break after 8 h
+     driving, 70 h / 8 days; 10 h off resets drive + shift, 34 h off restarts the cycle. All editable here. */
+  var HOS_DEF = { maxDriveHours: 11, shiftWindowHours: 14, breakAfterDriveHours: 8, breakMinutes: 30, cycleHours: 70, cycleDays: 8, resetHours: 10, restartHours: 34, breakAfterMin: 150 };
+  var HOS_FIELDS = [["hos-drive", "maxDriveHours", 0, 24, "DRIVE: max moving time (hours, 0 = off)"], ["hos-shift", "shiftWindowHours", 0, 24, "SHIFT: on-duty window (hours, 0 = off)"],
+    ["hos-brkh", "breakAfterDriveHours", 0, 24, "BREAK: required after this many hours of driving (0 = off)"], ["hos-brkm", "breakMinutes", 5, 120, "BREAK length (minutes)"],
+    ["hos-cyc", "cycleHours", 0, 200, "CYCLE: max on-duty hours (0 = off)"], ["hos-cycd", "cycleDays", 1, 14, "CYCLE rolling days"],
+    ["hos-reset", "resetHours", 1, 48, "Off-duty hours that reset DRIVE + SHIFT"], ["hos-restart", "restartHours", 1, 96, "Off-duty hours that restart the CYCLE"],
+    ["hos-break", "breakAfterMin", 0, 600, "Soft take-a-break nudge after continuous driving (minutes, 0 = off)"]];
+  /* v72r overrides: rides/HOSOVRDE/{driver} = { request, override, restUntil }; log at rides/DRVRHOSL/{driver}/overrides/{at} */
+  state.hosOvr = {};
+  state.hosOvrFor = "";
+  state.hosOvrDraft = { hours: "2", reason: "" };
+  function hosOvrLoad() {
+    return fetch(baseUrl() + "/rides/HOSOVRDE.json").then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (o) { state.hosOvr = o && typeof o === "object" ? o : {}; hosPaint(); }).catch(function () {});
+  }
+  function godWho() {
+    try { var k = JSON.parse(localStorage.getItem("pcs-god-keep-v1") || "null"); if (k && k.email) return String(k.email); } catch (e) {}
+    return "God mode";
+  }
+  /* "until end of scheduled rides": the driver's last assigned, not-finished calendar ride ending in the next 24 h (+30 min) */
+  function scheduledRidesEnd(id) {
+    var now = Date.now(), best = 0;
+    (state.calendar || []).forEach(function (r) {
+      if (!r || r.assignedDriverId !== id || r.status === "completed" || r.status === "cancelled" || r.status === "deleted") return;
+      var e = Date.parse(r.end) || (Date.parse(r.start) ? Date.parse(r.start) + 90 * 60000 : 0);
+      if (e > now && e < now + 24 * 3600000 && e > best) best = e;
+    });
+    return best ? best + 30 * 60000 : 0;
+  }
+  function hosOvrRow(id) { var o = state.hosOvr && state.hosOvr[id]; return o && typeof o === "object" ? o : {}; }
+  function hosNeedsGod(d) {
+    var o = hosOvrRow(d.id), now = Date.now();
+    var req = o.request && !(o.override && Number(o.override.grantedAt) >= Number(o.request.at)) ? o.request : null;
+    var resting = Number(o.restUntil) > now;
+    var ovrOn = o.override && Number(o.override.until) > now;
+    return { req: req, resting: resting, restUntil: Number(o.restUntil) || 0, ovr: ovrOn ? o.override : null, limit: d.online && d.hosLevel === "limit" };
+  }
+  function ctClock(ms) { try { return new Date(ms).toLocaleString("en-US", { timeZone: "America/Chicago", weekday: "short", hour: "numeric", minute: "2-digit" }) + " CT"; } catch (e) { return String(ms); } }
+  function hosOvrFormHtml() {
+    var id = state.hosOvrFor;
+    if (!id) return "";
+    var d = (state.drivers || []).filter(function (x) { return x && x.id === id; })[0] || { id: id, name: (hosOvrRow(id).request || {}).name };
+    var endR = scheduledRidesEnd(id), dr = state.hosOvrDraft;
+    var opts = ["1", "2", "3", "4", "5", "6"].map(function (h) { return '<option value="' + h + '"' + (dr.hours === h ? " selected" : "") + ">" + h + " hour" + (h === "1" ? "" : "s") + "</option>"; }).join("") +
+      (endR ? '<option value="rides"' + (dr.hours === "rides" ? " selected" : "") + ">Until end of scheduled rides (" + esc(ctClock(endR)) + ")</option>" : '<option value="rides" disabled>Until end of scheduled rides (none assigned)</option>');
+    return '<div class="card" id="hos-ovr-form" style="border:2px solid #1e3a8a"><strong>Approve HOS override: ' + esc(displayName(d.name, "Driver")) + "</strong>" +
+      (hosNeedsGod(d).resting ? '<p class="fine">This driver is in a mandatory rest; approving lets them go online again for the time below.</p>' : "") +
+      '<label>Extension <select id="hos-ovr-hours">' + opts + "</select></label><br>" +
+      '<label>Reason (required) <input id="hos-ovr-reason" type="text" maxlength="200" value="' + esc(dr.reason) + '" style="width:min(420px,90%)"></label><br>' +
+      '<button type="button" class="btn btn-gold" id="hos-ovr-save" data-driver-id="' + esc(id) + '">Approve override</button> ' +
+      '<button type="button" class="btn btn-ghost" id="hos-ovr-cancel">Cancel</button> <span class="fine" id="hos-ovr-msg"></span></div>';
+  }
+  document.addEventListener("input", function (e) {
+    var id = e.target && e.target.id;
+    if (id === "hos-ovr-reason") state.hosOvrDraft.reason = e.target.value;
+    if (id === "hos-ovr-hours") state.hosOvrDraft.hours = e.target.value;
+  });
+  document.addEventListener("change", function (e) { if (e.target && e.target.id === "hos-ovr-hours") state.hosOvrDraft.hours = e.target.value; });
+  document.addEventListener("click", function (e) {
+    var t = e.target;
+    if (!t || !t.closest) return;
+    var open = t.closest("[data-hos-ovr]");
+    if (open) { state.hosOvrFor = open.getAttribute("data-hos-ovr"); state.hosOvrDraft = { hours: "2", reason: "" }; hosPaint(true); return; }
+    if (t.id === "hos-ovr-cancel") { state.hosOvrFor = ""; hosPaint(true); return; }
+    if (t.id !== "hos-ovr-save") return;
+    var id = t.getAttribute("data-driver-id"), dr = state.hosOvrDraft, msg = document.getElementById("hos-ovr-msg");
+    var reason = String(dr.reason || "").trim();
+    if (reason.length < 3) { if (msg) msg.textContent = "Enter a reason."; return; }
+    var now = Date.now(), until, hours;
+    if (dr.hours === "rides") { until = scheduledRidesEnd(id); hours = until ? Math.round((until - now) / 360000) / 10 : 0; if (!until) { if (msg) msg.textContent = "No scheduled rides assigned to this driver."; return; } }
+    else { hours = Math.max(1, Math.min(6, Number(dr.hours) || 1)); until = now + hours * 3600000; }
+    var row = hosOvrRow(id);
+    var kind = Number(row.restUntil) > now ? "rest" : "limit";
+    var rec = { grantedAt: now, until: until, hours: hours, extension: dr.hours === "rides" ? "until end of scheduled rides" : hours + "h", reason: reason, by: godWho(), kind: kind, request: row.request || null };
+    var patch = { override: rec, request: null };
+    if (kind === "rest") { patch.restUntil = 0; patch.restWaivedAt = now; rec.kind = "rest-waived"; }
+    Promise.all([
+      fetch(baseUrl() + "/rides/HOSOVRDE/" + encodeURIComponent(id) + ".json", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(patch) }),
+      fetch(baseUrl() + "/rides/DRVRHOSL/" + encodeURIComponent(id) + "/overrides/" + now + ".json", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(rec) })
+    ]).then(function (rs) {
+      if (!rs[0].ok || !rs[1].ok) throw new Error("save");
+      state.hosOvrFor = "";
+      if (document.activeElement) try { document.activeElement.blur(); } catch (x) {}
+      return hosOvrLoad();
+    }).catch(function () { var m = document.getElementById("hos-ovr-msg"); if (m) m.textContent = "Could not save. Try again."; });
+  });
+  setTimeout(hosOvrLoad, 700);
+  setInterval(hosOvrLoad, 10000);
+  state.hosCfg = Object.assign({}, HOS_DEF);
+  state.hosDraft = null;
+  function hosUrl() { return baseUrl() + "/rides/HOSLIMIT.json"; }
+  function hosLoad() {
+    return fetch(hosUrl()).then(function (r) { return r.ok ? r.json() : null; }).then(function (c) {
+      if (c && typeof c === "object") {
+        var n = {};
+        HOS_FIELDS.forEach(function (f) { var v = Number(c[f[1]]); n[f[1]] = isFinite(v) && v >= f[2] && v <= f[3] ? v : HOS_DEF[f[1]]; });
+        state.hosCfg = n;
+      }
+      hosPaint();
+    }).catch(function () {});
+  }
+  function hmFmt(min) { min = Math.max(0, Math.round(Number(min) || 0)); return Math.floor(min / 60) + "h " + String(min % 60).padStart(2, "0") + "m"; }
+  function driverHosHtml(d) {
+    if (d.hosDriveLeftMin === undefined && d.hosShiftLeftMin === undefined) return '<p class="driver-hos fine">HOS clocks: not reported (app older than v72r)</p>';
+    var lv = d.hosLevel || "ok";
+    var cell = function (k, lab) {
+      var v = d["hos" + k + "LeftMin"];
+      var off = v == null;
+      var col = off ? "#6b7280" : v <= 0 ? "#b91c1c" : v <= 60 ? "#b45309" : "#166534";
+      return '<span class="hos-clock hos-clock-' + k.toLowerCase() + '" style="display:inline-block;min-width:88px;border:1px solid ' + col + ';border-radius:6px;padding:2px 6px;margin:2px;color:' + col + ';font-weight:700">' +
+        lab + " " + (off ? "off" : esc(hmFmt(Math.max(0, v)))) + "</span>";
+    };
+    var tag = lv === "limit" ? (d.hosBy === "break" ? "BREAK REQUIRED" : "LIMIT REACHED") : lv === "override" ? "OVERRIDE" : lv === "30m" ? "30 min left" : lv === "1h" ? "1 hour left" : "";
+    return '<div class="driver-hos hos-' + esc(lv) + '"><strong>HOS</strong> ' + (tag ? '<strong style="color:' + (lv === "limit" ? "#b91c1c" : lv === "override" ? "#1e3a8a" : "#b45309") + '">' + esc(tag) + "</strong>" : "") + "<br>" +
+      cell("Break", "Break") + cell("Drive", "Drive") + cell("Shift", "Shift") + cell("Cycle", "Cycle") + "</div>";
+  }
+  /* v72r GPS health: red when a logged-in driver's GPS hasn't reported for > 5 min, or a recent shift's tracked miles are far
+     below its odometer miles (tracked < 70% of odometer, odometer >= 5 mi): moving time may be undercounted. */
+  function driverGpsHealthHtml(d, mileDays) {
+    var why = [];
+    if (d.online) {
+      var gAt = Number(d.gpsAt) || 0;
+      var staleMin = Math.max(Number(d.gpsStaleMin) || 0, gAt ? Math.floor((Date.now() - gAt) / 60000) : 0);
+      if (staleMin > 5) why.push("no GPS fix for " + staleMin + " min");
+    }
+    var days = mileDays && typeof mileDays === "object" ? Object.keys(mileDays).sort().slice(-2) : [];
+    days.forEach(function (ymd) {
+      var sh = mileDays[ymd] && mileDays[ymd].shifts;
+      if (!sh || typeof sh !== "object") return;
+      Object.keys(sh).forEach(function (k) {
+        var r = sh[k] || {};
+        var odo = Number(r.odoMiles), tr = Number(r.trackedMiles);
+        if (isFinite(odo) && odo >= 5 && isFinite(tr) && tr < 0.7 * odo) why.push(ymd + " shift: GPS " + tr.toFixed(1) + " mi vs odometer " + odo.toFixed(1) + " mi");
+      });
+    });
+    if (!why.length) return "";
+    return '<p class="driver-gps-bad" style="color:#fff;background:#b91c1c;font-weight:700;border-radius:6px;padding:4px 8px;display:inline-block">GPS not reporting: moving time may be undercounted (' + esc(why.join("; ")) + ")</p>";
+  }
+  function hosAlertsHtml() {
+    var gpsBad = (state.drivers || []).filter(function (d) { return d && d.online && ((Number(d.gpsStaleMin) || 0) > 5 || (Number(d.gpsAt) && Date.now() - Number(d.gpsAt) > 5 * 60000)); });
+    var gpsHtml = gpsBad.length ? '<div id="gps-alerts" role="alert" style="background:#b91c1c;color:#fff;border-radius:10px;padding:8px 10px;margin:8px 0;font-weight:700">GPS not reporting: moving time may be undercounted: ' +
+      gpsBad.map(function (d) { return esc(displayName(d.name, "Driver")); }).join(", ") + "</div>" : "";
+    var ids = {};
+    (state.drivers || []).forEach(function (d) { if (d && d.id) ids[d.id] = d; });
+    Object.keys(state.hosOvr || {}).forEach(function (id) { if (!ids[id]) ids[id] = { id: id, name: ((state.hosOvr[id] || {}).request || {}).name || id }; });
+    var list = Object.keys(ids).map(function (k) { return ids[k]; }).filter(function (d) {
+      var n = hosNeedsGod(d);
+      return (d.online && (d.hosLevel === "limit" || d.hosLevel === "30m" || d.hosLevel === "1h" || d.hosLevel === "override")) || n.req || n.resting;
+    });
+    if (!list.length) return gpsHtml;
+    return '<div id="hos-alerts" role="alert" style="background:#fef3c7;border:2px solid #b45309;border-radius:10px;padding:8px 10px;margin:8px 0;color:#7c2d12">' +
+      "<strong>Hours-of-service alerts</strong><br>" + list.map(function (d) {
+        var by = d.hosBy ? String(d.hosBy).toUpperCase() : "";
+        var n = hosNeedsGod(d);
+        var head = n.resting ? "<strong style=\"color:#b91c1c\">MANDATORY REST</strong> until " + esc(ctClock(n.restUntil))
+          : d.hosLevel === "limit" ? "<strong style=\"color:#b91c1c\">LIMIT REACHED</strong>" : d.hosLevel === "override" || n.ovr ? "override until " + esc(ctClock(Number(n.ovr && n.ovr.until))) : d.hosLevel === "30m" ? "30 min left" : d.hosLevel === "1h" ? "1 hour left" : "";
+        var btn = (n.req || n.resting || d.hosLevel === "limit") ? ' <button type="button" class="btn btn-gold hos-ovr-open" data-hos-ovr="' + esc(d.id) + '">Approve override</button>' : "";
+        return esc(displayName(d.name, "Driver")) + ": " + head + (n.req ? " · <strong>override requested</strong> " + esc(ctClock(Number(n.req.at))) : "") +
+          (by ? " (" + esc(by) + ")" : "") + (d.hosDriveLeftMin != null ? " · left: break " + esc(hmFmt(Math.max(0, d.hosBreakLeftMin))) + ", drive " + esc(hmFmt(Math.max(0, d.hosDriveLeftMin))) + ", shift " + esc(hmFmt(Math.max(0, d.hosShiftLeftMin))) + ", cycle " + esc(hmFmt(Math.max(0, d.hosCycleLeftMin))) : "") + btn;
+      }).join("<br>") + "</div>" + gpsHtml;
+  }
+  function hosPanelHtml() {
+    var c = state.hosDraft || state.hosCfg, k = state.hosCfg;
+    var rows = HOS_FIELDS.map(function (f) {
+      return "<label>" + esc(f[4]) + ' <input id="' + f[0] + '" type="number" min="' + f[2] + '" max="' + f[3] + '" step="' + (f[1] === "breakAfterMin" ? 15 : f[1] === "breakMinutes" || f[1] === "cycleDays" ? 1 : 0.5) + '" value="' + esc(String(c[f[1]])) + '" style="width:5em"></label><br>';
+    }).join("");
+    return '<details class="card" id="hos-config"' + (state.hosOpen ? " open" : "") + '><summary><strong>Hours of service (PCS policy)</strong> · drive ' + esc(String(k.maxDriveHours)) + "h · shift " + esc(String(k.shiftWindowHours)) +
+      "h · break " + esc(String(k.breakMinutes)) + "m after " + esc(String(k.breakAfterDriveHours)) + "h · cycle " + esc(String(k.cycleHours)) + "h/" + esc(String(k.cycleDays)) + " days</summary>" +
+      '<p class="fine">PCS company policy (Matthew\'s CDL / ELD "USA Property 70 hour / 8 day"). Drive time = vehicle moving (GPS over 3 mph) during a shift. ' + esc(String(k.resetHours)) + " h off resets Drive + Shift; " + esc(String(k.restartHours)) + " h off restarts the Cycle.</p>" +
+      rows + '<button type="button" class="btn btn-gold" id="hos-save">Save limits</button> <span id="hos-msg" class="fine"></span>' +
+      '<p class="fine">Drivers see four countdown clocks (Break, Drive, Shift, Cycle), get a banner + chime at 1 hour and 30 minutes left, and at a limit new ride offers stop (a ride in progress can finish) until the off-duty reset or a God override. Every shift, driving interval, alert and override is logged at /rides/DRVRHOSL.</p></details>';
+  }
+  function hosPaint() {
+    var box = document.getElementById("hos-box-god");
+    if (!box) return;
+    var a = document.activeElement;
+    if (a && /^hos-/.test(a.id || "")) { var al = document.getElementById("hos-alerts-wrap"); if (al) al.innerHTML = hosAlertsHtml(); return; } /* don't wipe typing */
+    box.innerHTML = '<div id="hos-alerts-wrap">' + hosAlertsHtml() + "</div>" + '<div id="hos-ovr-wrap">' + hosOvrFormHtml() + "</div>" + hosPanelHtml();
+  }
+  document.addEventListener("toggle", function (e) { if (e.target && e.target.id === "hos-config") state.hosOpen = e.target.open; }, true);
+  document.addEventListener("input", function (e) {
+    var id = e.target && e.target.id;
+    var f = HOS_FIELDS.filter(function (x) { return x[0] === id; })[0];
+    if (!f) return;
+    var d = state.hosDraft || Object.assign({}, state.hosCfg);
+    d[f[1]] = e.target.value;
+    state.hosDraft = d;
+  });
+  document.addEventListener("click", function (e) {
+    if (!e.target || e.target.id !== "hos-save") return;
+    var d = state.hosDraft || state.hosCfg;
+    var cfg = {}, bad = false;
+    HOS_FIELDS.forEach(function (f) { var v = Number(d[f[1]]); if (!(isFinite(v) && v >= f[2] && v <= f[3])) bad = true; cfg[f[1]] = v; });
+    var msg = document.getElementById("hos-msg");
+    if (bad) { if (msg) msg.textContent = "Check the numbers: " + HOS_FIELDS.map(function (f) { return f[4].split(":")[0] + " " + f[2] + "–" + f[3]; }).join("; "); return; }
+    var body = Object.assign({ updatedAt: Date.now() }, cfg);
+    fetch(hosUrl(), { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }).then(function (r) {
+      if (!r.ok) throw new Error("save");
+      state.hosCfg = cfg;
+      state.hosDraft = null;
+      if (document.activeElement) try { document.activeElement.blur(); } catch (x) {}
+      hosPaint();
+      var m2 = document.getElementById("hos-msg"); if (m2) m2.textContent = "Saved. Drivers pick it up within 10 minutes (or on next app open).";
+    }).catch(function () { if (msg) msg.textContent = "Could not save. Try again."; });
+  });
+  setTimeout(hosLoad, 500);
+  setInterval(hosPaint, 5000);
+  /* ===== end v72r HOS ===== */
 
   function driverSpeedLabel(d) {
     if (!d || !d.online) return "—";
@@ -3567,6 +3793,9 @@
               locateBtn +
               '<button type="button" class="btn btn-gold" data-add-ride-driver="' + esc(d.id) + '">+ Add ride</button>' + /* v72d */
               '<p class="driver-speed"><strong>Speed</strong> ' + esc(speedTxt) + "</p>" +
+              (d.online ? driverVersionHtml(d) : "") + /* v72r */
+              (d.online ? driverHosHtml(d) : "") + /* v72r HOS */
+              driverGpsHealthHtml(d, mileDays) + /* v72r GPS health */
               '<h3 class="driver-card-status">' + badge + "</h3>" +
               '<p class="meta">' +
               (contact.length ? contact.join(" · ") + "<br>" : "") +
@@ -5370,6 +5599,7 @@
             '<section class="side-section">' +
               "<h2>Drivers</h2>" +
               hireBlockHtml() +
+              '<div id="hos-box-god"></div>' + /* v72r HOS */
               '<div id="drivers-list">' + driversPanelHtml() + "</div>" +
             "</section>" +
             '<section class="side-section">' +
