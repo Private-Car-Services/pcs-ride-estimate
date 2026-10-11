@@ -175,7 +175,8 @@
     var f = d.final || {};
     var r = d.rates;
     var incl = Number(r.includedMiles) || 0;
-    var parts = (f.base || 0) + (f.mileCents || 0) + (f.waitCents || 0);
+    var fees = (f.feeLines || []).reduce(function (t, l) { return t + (Number(l.cents) || 0); }, 0); /* v72t airport lines */
+    var parts = (f.base || 0) + (f.mileCents || 0) + (f.waitCents || 0) + fees;
     var diff = (f.sub || 0) - parts;
     var minApplied = diff > 0 && r.minCents > 0 && f.sub === r.minCents && diff >= (r.stepCents || 1);
     return '<div class="card" id="rm-breakdown">' +
@@ -183,6 +184,7 @@
       '<div class="money-row" id="rm-miles-row"><span>Miles after first ' + esc(Number(f.afterMiles || 0).toFixed(2)) + " × " + money(r.perMileCents) + "</span><span>" + money(f.mileCents) + "</span></div>" +
       '<div class="money-row" id="rm-wait-row"><span>Stopped / slow ' + esc(String(f.waitMin || 0)) + " min × " + money(r.perMinCents) + "</span><span>" + money(f.waitCents) + "</span></div>" +
       (d.live && d.live.freeUsed ? '<div class="money-row"><span>Free waiting at start ' + esc(String(d.live.freeUsed)) + " min</span><span>" + money(0) + "</span></div>" : "") +
+      (f.feeLines || []).map(function (l) { return '<div class="money-row rm-fee-line"><span>' + esc(l.label) + "</span><span>" + money(l.cents) + "</span></div>"; }).join("") +
       (diff > 0 ? '<div class="money-row"><span>' + (minApplied ? "Minimum fare " + money(r.minCents) + " applied" : "Round up to " + money(r.stepCents) + " step") + "</span><span>" + money(diff) + "</span></div>" : "") +
       (f.tax ? '<div class="money-row"><span>Fare</span><span id="rm-fare-sub">' + money(f.sub) + "</span></div>" +
         '<div class="money-row" id="rm-tax-row"><span>Tax (' + pct(r.taxRate) + ")</span><span>" + money(f.tax) + "</span></div>" : "") +
@@ -213,8 +215,11 @@
       var c = S.confirm;
       return '<div class="card" id="rm-pay-card"><p class="tag">Pay for your ride</p>' +
         '<p class="fine">Card on file: ' + esc(cardWords(d.card)) + ". Tip is optional (100% goes to your driver).</p>" +
+        /* v72t: collapsible tip section; open until a tip is picked, then the rider's own open/close sticks */
+        '<details class="rm-tip-box" id="rm-tip-box"' + (S.tip === "custom" || (S.tipOpen != null ? S.tipOpen : S.tip === "") ? " open" : "") + '>' +
+        '<summary id="rm-tip-sum" style="cursor:pointer;padding:4px 0"><strong>Tip:</strong> ' + esc(S.tip === "" ? "pick one" : S.tip === "0" ? "No tip" : money(tip)) + ' <span class="fine">(tap to open/close)</span></summary>' +
         '<div class="rm-tips" role="group" aria-label="Tip">' + chips + "</div>" +
-        (S.tip === "custom" ? '<label for="rm-tip-custom">Tip amount</label><input id="rm-tip-custom" inputmode="decimal" placeholder="0.00" value="' + esc(S.tipCustom) + '">' : "") +
+        (S.tip === "custom" ? '<label for="rm-tip-custom">Tip amount</label><input id="rm-tip-custom" inputmode="decimal" placeholder="0.00" value="' + esc(S.tipCustom) + '">' : "") + "</details>" +
         '<p class="error" id="rm-pay-err" role="alert">' + esc(S.payErr || (d.pay && d.pay.error ? "The last try didn\u2019t go through: " + d.pay.error : "")) + "</p>" +
         (c
           ? '<div id="rm-confirm" role="alertdialog" aria-labelledby="rm-confirm-q" style="border:2px solid #f0d48a;border-radius:14px;padding:12px;margin:10px 0">' +
@@ -317,6 +322,10 @@
     on("rm-paylink-alt", payLink);
     Array.prototype.forEach.call(document.querySelectorAll(".rm-tip"), function (b) {
       b.addEventListener("click", function () { S.tip = b.getAttribute("data-tip") || "0"; S.confirm = null; S.payErr = ""; redrawEnded(); });
+    });
+    var tb = document.getElementById("rm-tip-box");
+    if (tb) tb.addEventListener("toggle", function () { S.tipOpen = tb.open; });
+    [].forEach.call([], function () {
     });
     var tc = $("rm-tip-custom");
     if (tc) tc.addEventListener("change", function () { S.tipCustom = tc.value; redrawEnded(); });
