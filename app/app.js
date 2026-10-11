@@ -5155,9 +5155,10 @@
     return isFinite(pct) && pct > 0 ? Math.round(tipBaseCents() * pct / 100) : 0;
   }
 
-  /* Same tip ceiling as the pcs-pay Worker: the larger of the fare or $50. */
+  /* v72s: same tip ceiling as the pcs-pay Worker: 50% of the fare or $50 (the larger), and never >= the fare unless the
+     rider explicitly confirms a tip that large (highTipConfirmed). */
   function tipCapCents() {
-    return Math.max(Number(state.finalFareCents) || 0, 5000);
+    return Math.max(Math.round((Number(state.finalFareCents) || 0) * 0.5), 5000);
   }
 
   function rideFullyPaid() {
@@ -5325,7 +5326,17 @@
       render();
       return;
     }
-    if (tip > tipCapCents()) {
+    var fareNow = Number(state.finalFareCents) || 0;
+    state.highTipConfirmed = false;
+    if (tip > 0 && tip >= fareNow) {
+      if (!window.confirm("Your tip of " + money(tip) + " is as much as the whole fare (" + money(fareNow) + "). Tap OK only if you really mean to tip " + money(tip) + ".")) {
+        state.payError = "Pick a smaller tip, or No tip.";
+        render();
+        return;
+      }
+      state.highTipConfirmed = true;
+    }
+    if (tip > tipCapCents() && !(state.highTipConfirmed && tip <= Math.max(fareNow, 5000))) {
       state.payError = "The most you can tip in the app is " + money(tipCapCents()) + ". Call " + BUSINESS_PHONE + " for more.";
       render();
       return;
@@ -5375,7 +5386,7 @@
       return r.token;
     }) : Promise.reject(new Error("The card form is still loading. Try again in a moment.")));
     tokenP.then(function (token) {
-      var body = { rideCode: code, tipCents: tip, expectedCents: expected, attempt: state.payAttempt || 0 };
+      var body = { rideCode: code, tipCents: tip, expectedCents: expected, attempt: state.payAttempt || 0, highTipConfirmed: !!state.highTipConfirmed };
       if (token) body.sourceId = token;
       return workerPost(cfg.chargeUrl, body);
     }).then(function (data) {
@@ -9674,6 +9685,15 @@
     };
   }
 
+  /* v72s (Matthew): small print under the map next to the address + "About this estimate" link (rider app) */
+  function riderEstLineHtml(both) {
+    if (ROLE === "driver" || !both || state.rideStatus === "completed") return "";
+    var est;
+    try { est = estimate(); } catch (e) { return ""; }
+    if (!est || !est.ready || !(est.total > 0)) return "";
+    var lo = Math.floor(est.total / 100), hi = Math.max(lo + 1, Math.ceil(est.total * 1.1 / 100));
+    return '<p class="fine meter-est-line" id="rider-est-line" style="font-size:12px;margin:4px 2px 0;opacity:.85"><span id="rider-est-to">To: ' + esc(dropLine()) + '</span> \u00b7 <span id="rider-est">Est. $' + lo + "\u2013" + hi + "</span></p>" + estAboutHtml("rider");
+  }
   function customerMapBlock(caption, driverPoint) {
     var pickup = placeCoords("pickup");
     var drop = placeCoords("drop");
@@ -9720,7 +9740,7 @@
       illus +
       '<p class="map-caption">' + esc(caption) + "</p>" +
       "</div>" +
-      legend
+      legend + riderEstLineHtml(both)
     );
   }
 
@@ -10592,6 +10612,9 @@
     }
     var pend = state.meterDestPending; /* v71: optional destination picked on the Start screen */
     if (pend && isCoord(pend.lat) && isCoord(pend.lng)) M.dest = { label: String(pend.label || ""), sub: String(pend.sub || ""), lat: +pend.lat, lng: +pend.lng };
+    var pst = state.meterStopPending;
+    if (pst && isCoord(pst.lat) && isCoord(pst.lng)) M.stop = { label: String(pst.label || ""), sub: String(pst.sub || ""), lat: +pst.lat, lng: +pst.lng };
+    state.meterStopPending = null; state.meterEst = null; state.meterDestTarget = "";
     state.meterDestPending = null; state.meterDestEdit = false; state.meterDestQ = ""; state.meterDestList = [];
     state.meter = M;
     state.meterOpen = false; /* v70: the meter runs in a compact panel above the map */
@@ -10826,21 +10849,66 @@
     meterUpdatePayWeek(M, { tipCents: tip, paymentStatus: "charged" });
     render();
   }
+  /* v72s hotfix (ride B6P2JRQW: the cash collected was saved as a $66.30 tip): the tip is 0 unless the driver turns on
+     "Rider gave a tip" and types it; cash received over the fare is CHANGE, never a tip; a final "Fare + tip = total" review
+     is shown before saving, and a tip >= the fare (or equal to the cash received) needs an extra explicit confirm. */
+  function meterCentsOf(v) {
+    var raw = String(v == null ? "" : v).trim();
+    if (!raw || raw.indexOf("-") !== -1) return NaN;
+    var n = parseFloat(raw.replace(/[^0-9.]/g, ""));
+    return isFinite(n) ? Math.round(n * 100) : NaN;
+  }
+  function meterTipCapCents(fare) { return Math.max(Math.round((Number(fare) || 0) * 0.5), 5000); } /* same as the Worker */
+  /* v72s (Matthew via Harry): tip step with presets (15/20/25%) + Custom, default "No tip"; cash: "Cash received" +
+     "Exact change"; CHANGE DUE = received - fare - tip (error if negative); confirm screen before saving. */
+  var METER_TIP_PCTS = ["15", "20", "25"];
+  function meterTipFromChoice(M, choice, custom) {
+    var c = String(choice || "0");
+    if (c === "custom") { var v = meterCentsOf(custom); return isFinite(v) && v > 0 ? v : 0; }
+    var p = Number(c);
+    var base = Number(M && M.fare && M.fare.sub) || 0;
+    return isFinite(p) && p > 0 && p <= 100 ? Math.round(base * p / 100) : 0;
+  }
+  function meterOtherRead(fromDraft) {
+    var M = state.meter;
+    var fare = M ? Number(M.fare.total) || 0 : 0;
+    var method = state.meterOtherMethod || "";
+    var amtEl = fromDraft ? null : document.getElementById("meter-other-amount");
+    var tipEl = fromDraft ? null : document.getElementById("meter-other-tip");
+    var old = state.meterOtherDraft || {};
+    var d = state.meterOtherDraft = { amount: amtEl ? amtEl.value : old.amount || "", tip: tipEl ? tipEl.value : old.tip || "" };
+    var choice = String(state.meterTipChoice || "0");
+    var tip = meterTipFromChoice(M, choice, d.tip);
+    var cash = method === "cash";
+    var received = meterCentsOf(d.amount);
+    /* fare part: cash -> the fare (extra cash is change, never a tip); other -> the amount collected, max the fare */
+    var amount = cash ? (isFinite(received) ? fare : NaN) : (isFinite(received) ? Math.min(received, fare) : NaN);
+    var change = cash && isFinite(received) ? received - fare - tip : 0;
+    return { fare: fare, method: method, cash: cash, choice: choice, received: received, amount: amount, tip: tip, change: change };
+  }
   function meterMarkOther() {
     var M = state.meter;
     if (!M || M.status !== "ended" || state.meterBusy) return;
     var method = state.meterOtherMethod || "";
     if (!method) { state.meterError = "Pick how the rider paid."; render(); return; }
-    var amtEl = document.getElementById("meter-other-amount");
-    var tipEl = document.getElementById("meter-other-tip");
-    var amount = Math.round(parseFloat(String(amtEl ? amtEl.value : "").replace(/[^0-9.]/g, "")) * 100);
-    var tip = Math.round(parseFloat(String(tipEl ? tipEl.value : "").replace(/[^0-9.]/g, "") || "0") * 100);
-    if (!isFinite(amount) || amount < 0) { state.meterError = "Enter the amount you collected."; render(); return; }
-    if (!isFinite(tip) || tip < 0) tip = 0;
-    state.meterOtherDraft = { amount: amtEl ? amtEl.value : "", tip: tipEl ? tipEl.value : "" };
+    var r = meterOtherRead();
+    var amount = r.amount, tip = r.tip;
+    if (!isFinite(r.received) || r.received < 0) { state.meterError = r.cash ? "Enter the cash received (or tap Exact change)." : "Enter the amount you collected."; render(); return; }
+    if (r.choice === "custom" && !(tip > 0)) { state.meterError = "Enter the custom tip, or pick No tip."; render(); return; }
+    if (r.cash && r.change < 0) { state.meterError = "Cash received (" + money(r.received) + ") is less than fare + tip (" + money(r.fare + tip) + "). Change can't be negative."; render(); return; }
+    var highTip = tip > 0 && (tip >= M.fare.total || tip === r.received);
+    if (tip > meterTipCapCents(M.fare.total) && !highTip) { state.meterError = "That tip is over the limit (" + money(meterTipCapCents(M.fare.total)) + ")."; render(); return; }
+    if (tip > Math.max(M.fare.total, 5000)) { state.meterError = "That tip is over the limit."; render(); return; }
+    /* step 1: confirm screen; step 2 (Confirm) saves */
+    var sig = [r.method, r.received, tip].join("|");
+    if (state.meterOtherReview !== sig) { state.meterOtherReview = sig; state.meterHighTipOk = false; state.meterError = ""; render(); return; }
+    if (highTip && !state.meterHighTipOk) { state.meterError = "Check the box to confirm the rider really gave a " + money(tip) + " tip."; render(); return; }
+    var received = r.cash ? r.received : null, changeC = r.cash ? r.change : null;
     var save = function () {
       var now = Date.now();
-      M.pay = { status: "paid_other", method: method, amountCents: amount, tipCents: tip, paidAt: now, via: "other" };
+      M.pay = { status: "paid_other", method: method, amountCents: amount, tipCents: tip, paidAt: now, via: "other",
+        cashReceivedCents: received, changeCents: changeC };
+      state.meterOtherReview = ""; state.meterHighTipOk = false; state.meterTipChoice = "0";
       M.status = "paid";
       state.meterBusy = "";
       state.meterOtherOpen = false;
@@ -10848,10 +10916,11 @@
       meterSave();
       meterStopTimers();
       meterWrite(rideUrl(M.code), "PATCH", { paymentStatus: "paid_other", paidVia: method, paidOtherCents: amount, tipCents: tip, paidAt: now,
+        cashReceivedCents: received, changeCents: changeC, highTipConfirmed: highTip || null,
         paidOtherBy: M.driverName, paidOtherByDriverId: M.driverId, updatedAt: now });
       meterIndexPatch(M, "paid_other", { paymentStatus: "paid_other",
-        paidOther: { at: now, method: method, amountCents: amount, tipCents: tip, by: M.driverName, driverId: M.driverId, fareTotal: M.fare.total } });
-      meterUpdatePayWeek(M, { tipCents: tip, paymentStatus: "paid_other", paidVia: method });
+        paidOther: { at: now, method: method, amountCents: amount, tipCents: tip, cashReceivedCents: received, changeCents: changeC, by: M.driverName, driverId: M.driverId, fareTotal: M.fare.total } });
+      meterUpdatePayWeek(M, { tipCents: tip, paymentStatus: "paid_other", paidVia: method, cashReceivedCents: received, changeCents: changeC });
       render();
     };
     if (!M.link || !M.link.id || state.meterForceOther) { save(); return; }
@@ -10894,6 +10963,7 @@
     state.meterForceOther = false;
     state.meterOtherMethod = "";
     state.meterOtherDraft = null;
+    state.meterOtherReview = ""; state.meterHighTipOk = false; state.meterTipChoice = "0";
     state.meterError = "";
     state.meterBusy = "";
     meterSave();
@@ -10935,6 +11005,7 @@
 
   /* ---------- screens ---------- */
   function ensureMeterStyle() {
+    ensureMeterSplitStyle();
     if (document.getElementById("pcs-meter-style")) return;
     var st = document.createElement("style");
     st.id = "pcs-meter-style";
@@ -11016,19 +11087,47 @@
   function meterOtherHtml(M) {
     var draft = state.meterOtherDraft || {};
     var methods = [["cash", "Cash"], ["card_machine", "Card machine"], ["other", "Other"]];
+    var r = meterOtherRead(true);
+    var cash = r.cash;
+    var sig = [r.method, r.received, r.tip].join("|");
+    var review = !!r.method && state.meterOtherReview === sig && isFinite(r.received);
+    var highTip = r.tip > 0 && (r.tip >= M.fare.total || r.tip === r.received);
+    var amtVal = draft.amount != null && draft.amount !== "" ? draft.amount : (cash || !r.method ? "" : (M.fare.total / 100).toFixed(2));
+    var chip = function (c, label) {
+      var on = r.choice === c;
+      return '<button type="button" class="btn ' + (on ? "" : "ghost ") + 'meter-tip-chip" data-tip="' + c + '" aria-pressed="' + on + '">' + (on ? "\u2713 " : "") + label + "</button>";
+    };
+    if (review) {
+      return '<div class="card" id="meter-other-card"><p class="tag">Confirm payment</p>' +
+        '<p id="meter-other-review" role="status" style="font-weight:800;font-size:1.1em;margin:8px 0">Fare ' + esc(money(r.fare)) + " + tip " + esc(money(r.tip)) + " = " + esc(money(r.fare + r.tip)) +
+        (cash ? ", change " + esc(money(r.change)) : "") + "</p>" +
+        (cash ? '<p class="fine" id="meter-review-cash">Cash received ' + esc(money(r.received)) + " · give back " + esc(money(r.change)) + " in change</p>" : '<p class="fine">' + esc(r.method === "card_machine" ? "Card machine" : "Other") + " · collected " + esc(money(r.amount)) + "</p>") +
+        (highTip ? '<label id="meter-hightip" style="display:flex;gap:8px;color:#b91c1c;font-weight:700"><input type="checkbox" id="meter-hightip-ok"' + (state.meterHighTipOk ? " checked" : "") + "> The rider really gave a " + esc(money(r.tip)) + " tip (as much as the fare or the cash received).</label>" : "") +
+        '<button class="btn" type="button" id="meter-other-yes"' + (state.meterBusy ? " disabled" : "") + ">Confirm</button>" +
+        '<button class="btn secondary" type="button" id="meter-other-change">Change</button>' +
+        "</div>";
+    }
     return (
       '<div class="card" id="meter-other-card">' +
       '<p class="tag">Paid another way</p>' +
+      '<p class="fine" id="meter-other-fare">Fare: <strong>' + esc(money(M.fare.total)) + "</strong></p>" +
       '<div class="meter-methods" role="group" aria-label="How the rider paid">' +
       methods.map(function (m) {
         return '<button class="btn secondary meter-method" type="button" data-method="' + m[0] + '" aria-pressed="' + (state.meterOtherMethod === m[0] ? "true" : "false") + '">' + m[1] + "</button>";
       }).join("") + "</div>" +
-      '<label for="meter-other-amount">Amount collected (fare)</label>' +
-      '<input id="meter-other-amount" inputmode="decimal" value="' + esc(draft.amount != null && draft.amount !== "" ? draft.amount : (M.fare.total / 100).toFixed(2)) + '">' +
-      '<label for="meter-other-tip">Tip (optional)</label>' +
-      '<input id="meter-other-tip" inputmode="decimal" placeholder="0.00" value="' + esc(draft.tip || "") + '">' +
-      '<p class="fine">This is flagged for Matthew in God mode (not checked by Square).</p>' +
-      '<button class="btn" type="button" id="meter-other-yes"' + (state.meterBusy ? " disabled" : "") + ">Confirm paid</button>" +
+      (r.method
+        ? '<details class="meter-tip-box" id="meter-tip-box"' + (state.meterTipOpen || r.choice === "custom" ? " open" : "") + '><summary id="meter-tip-summary"><strong>Tip:</strong> ' +
+            esc(r.choice === "0" ? "No tip" : r.choice === "custom" ? "Custom " + money(r.tip) : r.choice + "% \u00b7 " + money(r.tip)) + ' <span class="fine">(tap to ' + (state.meterTipOpen ? "hide" : "change") + ")</span></summary>" +
+          '<div class="meter-tips" role="group" aria-label="Tip">' + chip("0", "No tip") +
+            METER_TIP_PCTS.map(function (p) { return chip(p, p + "% · " + money(Math.round((Number(M.fare.sub) || 0) * Number(p) / 100))); }).join("") + chip("custom", "Custom") + "</div>" +
+          (r.choice === "custom" ? '<label for="meter-other-tip">Custom tip</label><input id="meter-other-tip" type="text" inputmode="decimal" autocomplete="off" autocorrect="off" spellcheck="false" name="pcs-meter-tip-' + esc(M.code) + '" placeholder="0.00" value="' + esc(draft.tip || "") + '">' : "") + "</details>" +
+          '<label for="meter-other-amount">' + (cash ? "Cash received" : "Amount collected (fare)") + "</label>" +
+          '<input id="meter-other-amount" type="text" inputmode="decimal" autocomplete="off" autocorrect="off" spellcheck="false" name="pcs-meter-collected-' + esc(M.code) + '" placeholder="' + esc(((M.fare.total + (cash ? r.tip : 0)) / 100).toFixed(2)) + '" value="' + esc(amtVal) + '">' +
+          (cash ? '<button class="btn ghost" type="button" id="meter-exact">Exact change</button>' +
+            '<div id="meter-cash-sum" class="fine" style="font-weight:700">Fare ' + esc(money(r.fare)) + " · Tip " + esc(money(r.tip)) + ' · <span id="meter-change"' + (r.change < 0 ? ' style="color:#b91c1c"' : "") + ">Change due: " + (isFinite(r.received) ? esc(money(r.change)) : "\u2014") + "</span></div>" : "") +
+          '<p class="fine">Extra cash is change, never a tip. Flagged for Matthew in God mode (not checked by Square).</p>' +
+          '<button class="btn" type="button" id="meter-other-yes"' + (state.meterBusy ? " disabled" : "") + ">Review</button>"
+        : '<button class="btn" type="button" id="meter-other-yes">Review</button>') +
       '<button class="btn ghost" type="button" id="meter-other-no">Cancel</button>' +
       "</div>"
     );
@@ -11048,14 +11147,17 @@
       var band = meterBand(new Date(Date.now()));
       var ready = canGoOnline() && !driverMidRide();
       return (
-        back + '<section id="meter-ready">' + (meterSandbox() ? meterTestTag({ sandbox: true }) : "") +
-        "<h2>Metered ride</h2>" + meterModeHtml(band.key, band.label, "meter-mode") +
-        '<p class="lede">For a last-minute ride with no quote. Tap Start when the rider is in the car. The fare runs from GPS miles plus stopped / slow-traffic minutes.</p>' +
-        '<div class="card">' + meterRatesHtml(band) + "</div>" +
+        back + '<section id="meter-ready" class="meter-split">' +
+        '<div class="meter-col">' + (meterSandbox() ? meterTestTag({ sandbox: true }) : "") +
+        '<h2 class="meter-h2">Metered ride</h2>' + meterModeHtml(band.key, band.label, "meter-mode") +
+        '<details class="card meter-rates-box" id="meter-rates-box"><summary>Rates · starts ' + esc(money(band.entryCents)) + " · " + esc(money(band.cents)) + "/mi</summary>" + meterRatesHtml(band) + "</details>" +
         (ready ? "" : '<p class="error" id="meter-gate">Finish the steps on Home (approval, car details and starting odometer) before starting a metered ride.</p>') +
         '<p class="fine" id="meter-gps">' + esc(meterGpsLine(null)) + "</p>" +
-        meterDestHtml("ready") + /* v71: optional destination */
+        meterRouteHtml("ready") + /* v72s: From / + Add a stop / To */
         '<button class="btn meter-big" type="button" id="meter-start"' + (ready ? "" : " disabled") + ">Start</button>" +
+        "</div>" +
+        '<div class="meter-map-col"><div class="map-stage meter-prev-stage"><div id="meter-prev-map" role="img" aria-label="Map: you, stop and destination"></div></div>' +
+        meterEstLineHtml() + "</div>" +
         "</section>"
       );
     }
@@ -11070,7 +11172,8 @@
         '<p class="meter-paid" id="meter-paid-amount">Paid ' + money(paidOther ? (P.amountCents || 0) + (P.tipCents || 0) : (P.totalCents || 0)) + "</p>" +
         '<p class="meter-sub" id="meter-paid-detail">' +
         (paidOther
-          ? "Paid another way · " + esc(P.method === "card_machine" ? "card machine" : P.method || "other") + (P.tipCents ? " · tip " + money(P.tipCents) : "")
+          ? "Paid another way · " + esc(P.method === "card_machine" ? "card machine" : P.method || "other") + " · fare " + money(P.amountCents || 0) + " · tip " + money(P.tipCents || 0) +
+            (P.cashReceivedCents != null ? " · cash received " + money(P.cashReceivedCents) + " · change " + money(P.changeCents || 0) : "")
           : "Fare " + money(P.fareCents || 0) + (P.tipCents ? " + tip " + money(P.tipCents) : " · no tip")) + "</p>" +
         (P.receiptUrl ? '<p class="fine"><a href="' + esc(P.receiptUrl) + '" target="_blank" rel="noopener" style="color:#f0d48a">Square receipt</a></p>' : "") +
         meterBreakdownHtml(M) +
@@ -11085,7 +11188,9 @@
       '<section id="meter-ended">' + meterTestTag(M) +
       "<h2>Ride ended</h2>" +
       meterRiderQrHtml(M) +
-      meterBreakdownHtml(M) + busy + err +
+      (state.meterOtherOpen /* v72s: one screen, no scrolling: the breakdown folds up while marking paid */
+        ? '<details class="card meter-bd-box" id="meter-breakdown-box"><summary>Total <strong id="meter-total-sum">' + money(f.total) + "</strong> \u00b7 breakdown</summary>" + meterBreakdownHtml(M) + "</details>"
+        : meterBreakdownHtml(M)) + busy + err +
       (M.riderCard && !linkOpen
         ? '<div class="card" id="meter-rider-pay" style="border:2px solid #8fd0a8"><p class="tag" style="color:#8fd0a8">Rider saved a card</p>' +
           '<p class="lede">The rider can pay ' + money(f.total) + ' on their phone (meter page, tip optional). This screen flips to Paid by itself.</p>' +
@@ -11153,12 +11258,12 @@
   }
   function meterMapHome() {
     return (
-      accountNav() + meterPanelHtml() +
-      '<div class="map-stage board-map meter-map">' +
+      accountNav() + '<div class="meter-split" id="meter-split-run"><div class="meter-col">' + meterPanelHtml() + meterRouteHtml("run") + "</div>" +
+      '<div class="meter-map-col"><div class="map-stage board-map meter-map">' +
       '<div id="live-map" role="img" aria-label="Map: you during the metered ride"></div>' +
       '<button type="button" class="meter-eta-chip' + (state.meter && state.meter.dest ? " has-dest" : "") + '" id="meter-eta-chip">' + esc(meterChipText(state.meter)) + "</button>" + /* v71 */
       '<p class="map-caption">You · metered ride</p>' +
-      "</div>" + meterDestHtml("run") +
+      "</div></div></div>" +
       (isFinite(state.hereLat) ? "" : '<p class="fine">Allow location so the map can show where you are.</p>') +
       bgGpsTipCard()
     );
@@ -11236,7 +11341,7 @@
     var here = meterHerePt();
     if (here && haversineMi(here.lat, here.lng, M.dest.lat, M.dest.lng) <= METER_DEST_ARRIVED_MI) return { arrived: true, miles: 0, min: 0 };
     var R = meterRoute;
-    if (!R || R.key !== meterDestKey(M.dest)) return { pending: true };
+    if (!R || R.key !== meterDestKey(M.dest) + (M.stop && !M.stopDone ? "|" + meterDestKey(M.stop) : "")) return { pending: true };
     var left = Math.max(0, R.miles - Math.max(0, (Number(M.miles) || 0) - R.milesAt));
     var min = R.miles > 0 ? R.minutes * left / R.miles : 0;
     return { miles: Math.round(left * 10) / 10, min: Math.max(left > 0.05 ? 1 : 0, Math.round(min)), approx: !!R.approx, at: Date.now() + min * 60000 };
@@ -11261,25 +11366,18 @@
   function meterRouteFetch(force) {
     var M = state.meter;
     if (!M || M.status !== "running" || !M.dest || meterRouteBusy) return;
-    var key = meterDestKey(M.dest);
+    var key = meterDestKey(M.dest) + (M.stop && !M.stopDone ? "|" + meterDestKey(M.stop) : "");
     if (!force && meterRoute && meterRoute.key === key && Date.now() - meterRoute.at < METER_ROUTE_REFRESH_MS) return;
     var from = meterHerePt();
     if (!from) return;
     meterRouteBusy = true;
     var to = { lat: +M.dest.lat, lng: +M.dest.lng };
-    var url = "https://router.project-osrm.org/route/v1/driving/" + from.lng + "," + from.lat + ";" + to.lng + "," + to.lat + "?overview=full&geometries=geojson";
-    withTimeout(fetch(url).then(function (r) { return r.json(); }), 8000).then(function (data) {
-      var r = data && data.routes && data.routes[0];
-      var c = r && r.geometry && r.geometry.coordinates;
-      if (!r || !c || c.length < 2 || !isFinite(+r.distance) || !isFinite(+r.duration)) throw new Error("osrm");
-      return { line: c.map(function (p) { return [p[1], p[0]]; }), miles: +r.distance / 1609.344, minutes: +r.duration / 60, approx: false };
-    }).catch(function () {
-      var mi = haversineMi(from.lat, from.lng, to.lat, to.lng) * 1.3;
-      return { line: [[from.lat, from.lng], [to.lat, to.lng]], miles: mi, minutes: mi * 2, approx: true }; /* 30 mph */
-    }).then(function (rt) {
+    if (M.stop && !M.stopDone && haversineMi(from.lat, from.lng, +M.stop.lat, +M.stop.lng) <= METER_DEST_ARRIVED_MI) { M.stopDone = true; meterSave(); }
+    var pts = [from]; if (M.stop && !M.stopDone) pts.push({ lat: +M.stop.lat, lng: +M.stop.lng }); pts.push(to); /* v72s: via the stop */
+    meterOsrm(pts).then(function (rt) {
       meterRouteBusy = false;
       var cur = state.meter;
-      if (!cur || cur.status !== "running" || !cur.dest || meterDestKey(cur.dest) !== key) return;
+      if (!cur || cur.status !== "running" || !cur.dest || (meterDestKey(cur.dest) + (cur.stop && !cur.stopDone ? "|" + meterDestKey(cur.stop) : "")) !== key) return;
       rt.key = key; rt.at = Date.now(); rt.milesAt = Number(cur.miles) || 0;
       meterRoute = rt;
       meterRefreshDom();
@@ -11290,7 +11388,8 @@
   function meterMapLayers(bounds) {
     var M = state.meter;
     if (!meterOnMap() || !M.dest || !state.boardMarkers || !window.L) return;
-    var key = meterDestKey(M.dest);
+    var key = meterDestKey(M.dest) + (M.stop && !M.stopDone ? "|" + meterDestKey(M.stop) : "");
+    if (M.stop && !M.stopDone) state.boardMarkers.addLayer(window.L.marker([+M.stop.lat, +M.stop.lng], { icon: pinIcon("Stop", "pin-drop"), zIndexOffset: 390 }));
     if (meterRoute && meterRoute.key === key && meterRoute.line && meterRoute.line.length > 1) {
       state.boardMarkers.addLayer(window.L.polyline(meterRoute.line, { color: "#d4b15a", weight: 5, opacity: 0.95, dashArray: meterRoute.approx ? "6 8" : null, className: "meter-route" }));
     }
@@ -11299,6 +11398,18 @@
   }
   function meterDestSet(d) {
     var M = state.meter;
+    if (state.meterDestTarget === "stop") {
+      state.meterDestTarget = "";
+      state.meterDestList = []; state.meterDestQ = ""; state.meterDestEdit = false; state.meterDestNone = false; state.meterDestErr = "";
+      meterDestSess = "";
+      if (M && M.status === "running") { M.stop = d; M.stopDone = false; meterRoute = null; meterSave(); if (M.dest) meterRouteFetch(true); }
+      else if (!M) { state.meterStopPending = d; state.meterEst = null; }
+      var ae0 = document.activeElement;
+      if (ae0 && ae0.blur && ae0.id === "meter-dest-q") try { ae0.blur(); } catch (e) {}
+      render();
+      return;
+    }
+    if (!M) state.meterEst = null;
     state.meterDestList = []; state.meterDestQ = ""; state.meterDestEdit = false; state.meterDestNone = false; state.meterDestErr = "";
     meterDestSess = "";
     if (M && M.status === "running") {
@@ -11356,8 +11467,164 @@
       });
     }, 350);
   }
+  /* ---------- v72s (Matthew's test notes): From / + Add a stop / To, small-print estimate under the map, preview map ---------- */
+  function meterStopNow() {
+    var M = state.meter;
+    if (M && M.status === "running") return M.stop && !M.stopDone ? M.stop : null;
+    return M ? null : state.meterStopPending || null;
+  }
+  function meterRouteHtml(where) {
+    var stop = meterStopNow();
+    var editingStop = state.meterDestEdit && state.meterDestTarget === "stop";
+    var stopRow = editingStop ? meterDestHtml(where, "stop")
+      : stop ? '<div class="meter-stop" id="meter-stop-set"><span class="meter-route-lbl">Stop</span> <strong id="meter-stop-label">' + esc(stop.label) + '</strong> <button class="btn ghost meter-mini" type="button" id="meter-stop-clear">Remove</button></div>'
+      : '<button class="btn ghost meter-mini" type="button" id="meter-stop-add">+ Add a stop</button>';
+    return '<div class="card meter-route" id="meter-route">' +
+      '<div class="meter-from" id="meter-from"><span class="meter-route-lbl">From</span> ' + (where === "run" ? "Pickup (meter start)" : "Your location") + "</div>" +
+      stopRow +
+      (editingStop ? (meterDestNow() ? '<div class="meter-from"><span class="meter-route-lbl">To</span> ' + esc(meterDestNow().label) + "</div>" : "") : meterDestHtml(where, "dest")) +
+      "</div>";
+  }
+  function meterEstRates() {
+    var band = meterBand(new Date(Date.now()));
+    return { baseCents: band.entryCents, includedMiles: band.includedMiles, perMileCents: band.cents, waitCentsPerMin: band.perMinCents, minCents: band.minCents,
+      stepCents: band.stepCents, taxRate: Number(METER_TAX_RATE) > 0 && Number(METER_TAX_RATE) < 0.5 ? Number(METER_TAX_RATE) : 0, status: "ended" };
+  }
+  /* range: road miles, no waiting (low) .. +10 % miles and 20 % of the drive time in slow traffic (high); incl. tax */
+  function meterEstRange(miles, minutes) {
+    var r = meterEstRates();
+    var lo = meterFare(Object.assign({}, r, { miles: miles, waitMin: 0 })).total;
+    var hi = meterFare(Object.assign({}, r, { miles: miles * 1.1, waitMin: Math.round((Number(minutes) || 0) * 0.2) })).total;
+    return { lo: Math.floor(lo / 100), hi: Math.max(Math.floor(lo / 100) + 1, Math.ceil(hi / 100)) };
+  }
+  function meterEstLineHtml() {
+    var d = meterDestNow();
+    var E = state.meterEst;
+    var key = meterEstKey();
+    var est = "";
+    if (d && E && E.key === key) { var rg = meterEstRange(E.miles, E.minutes); est = "Est. $" + rg.lo + "\u2013" + rg.hi; }
+    else if (d) est = state.meterEstBusy ? "Estimating\u2026" : (meterHerePt() ? "" : "Allow location for an estimate.");
+    return '<p class="fine meter-est-line" id="meter-est-line">' + (d ? '<span id="meter-est-to">To: ' + esc(d.label) + "</span>" + (est ? ' \u00b7 <span id="meter-est">' + esc(est) + "</span>" : "") : "Add a destination to see the route and an estimate.") + "</p>" +
+      (est && /^Est\./.test(est) ? estAboutHtml("meter") : "");
+  }
+  /* v72s (Matthew): the disclaimer sits behind a small "About this estimate" link (driver + rider apps) */
+  var EST_NOTE = "Estimate only. May not include extra stops, slow traffic, or wait time.";
+  function estAboutHtml(id) {
+    var open = !!(state.estAboutOpen || {})[id];
+    return '<p class="fine" style="margin:0 2px"><button type="button" class="pcs-est-about" style="background:none;border:0;padding:0;color:inherit;text-decoration:underline;font-size:12px;opacity:.85;cursor:pointer;width:auto;margin:0" data-est-about="' + esc(id) + '" id="' + esc(id) + '-est-about" aria-expanded="' + open + '">About this estimate</button></p>' +
+      (open ? '<p class="pcs-est-note" style="font-size:12px;margin:2px 2px 0;opacity:.9" id="' + esc(id) + '-est-note" role="note">' + esc(EST_NOTE) + "</p>" : "");
+  }
+  document.addEventListener("click", function (e) {
+    var b = e.target && e.target.closest ? e.target.closest("[data-est-about]") : null;
+    if (!b) return;
+    var id = b.getAttribute("data-est-about");
+    state.estAboutOpen = state.estAboutOpen || {};
+    state.estAboutOpen[id] = !state.estAboutOpen[id];
+    var n = document.getElementById(id + "-est-note");
+    if (state.estAboutOpen[id] && !n) { b.parentNode.insertAdjacentHTML("afterend", '<p class="pcs-est-note" style="font-size:12px;margin:2px 2px 0;opacity:.9" id="' + id + '-est-note" role="note">' + EST_NOTE + "</p>"); }
+    else if (!state.estAboutOpen[id] && n) n.remove();
+    b.setAttribute("aria-expanded", String(!!state.estAboutOpen[id]));
+  });
+  function meterEstKey() {
+    var d = meterDestNow(), st = meterStopNow(), h = meterHerePt();
+    if (!d || !h) return "";
+    return [h.lat.toFixed(3), h.lng.toFixed(3), st ? meterDestKey(st) : "", meterDestKey(d)].join("|");
+  }
+  function meterOsrm(pts) {
+    var url = "https://router.project-osrm.org/route/v1/driving/" + pts.map(function (p) { return p.lng + "," + p.lat; }).join(";") + "?overview=full&geometries=geojson";
+    return withTimeout(fetch(url).then(function (r) { return r.json(); }), 8000).then(function (data) {
+      var r = data && data.routes && data.routes[0];
+      var c = r && r.geometry && r.geometry.coordinates;
+      if (!r || !c || c.length < 2 || !isFinite(+r.distance) || !isFinite(+r.duration)) throw new Error("osrm");
+      return { line: c.map(function (p) { return [p[1], p[0]]; }), miles: +r.distance / 1609.344, minutes: +r.duration / 60, approx: false };
+    }).catch(function () {
+      var mi = 0, i;
+      for (i = 1; i < pts.length; i += 1) mi += haversineMi(pts[i - 1].lat, pts[i - 1].lng, pts[i].lat, pts[i].lng) * 1.3;
+      return { line: pts.map(function (p) { return [p.lat, p.lng]; }), miles: mi, minutes: mi * 2, approx: true }; /* 30 mph */
+    });
+  }
+  function meterEstFetch() {
+    var key = meterEstKey();
+    if (!key || state.meter || (state.meterEst && state.meterEst.key === key) || state.meterEstBusy === key) return;
+    var pts = [meterHerePt()]; var st = meterStopNow(); if (st) pts.push({ lat: +st.lat, lng: +st.lng }); var d = meterDestNow(); pts.push({ lat: +d.lat, lng: +d.lng });
+    state.meterEstBusy = key;
+    meterOsrm(pts).then(function (rt) {
+      if (state.meterEstBusy === key) state.meterEstBusy = "";
+      rt.key = key; state.meterEst = rt;
+      var el = document.getElementById("meter-est-line");
+      if (el && el.parentNode) {
+        var nx = el.nextElementSibling; while (nx && (nx.querySelector && nx.querySelector("[data-est-about]") || nx.classList.contains("pcs-est-note"))) { var r0 = nx; nx = nx.nextElementSibling; r0.remove(); }
+        el.outerHTML = meterEstLineHtml();
+      }
+      meterPrevMapDraw();
+    });
+  }
+  var meterPrevMap = null, meterPrevLayer = null, meterPrevEl = null;
+  function meterPrevMapDraw() {
+    var el = document.getElementById("meter-prev-map");
+    if (!el || !window.L) { if (!el && meterPrevMap) { try { meterPrevMap.remove(); } catch (e) {} meterPrevMap = null; meterPrevEl = null; } return; }
+    try {
+      if (!meterPrevMap || meterPrevEl !== el) {
+        if (meterPrevMap) { try { meterPrevMap.remove(); } catch (e) {} }
+        meterPrevEl = el;
+        meterPrevMap = window.L.map(el, { zoomControl: true, scrollWheelZoom: false, attributionControl: true });
+        window.L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom: 19, attribution: "&copy; OpenStreetMap" }).addTo(meterPrevMap);
+        meterPrevLayer = window.L.layerGroup().addTo(meterPrevMap);
+      }
+      meterPrevLayer.clearLayers();
+      var b = [];
+      var h = meterHerePt(), st = meterStopNow(), d = meterDestNow(), E = state.meterEst;
+      if (E && E.key === meterEstKey() && E.line && E.line.length > 1) meterPrevLayer.addLayer(window.L.polyline(E.line, { color: "#d4b15a", weight: 5, opacity: 0.95, dashArray: E.approx ? "6 8" : null, className: "meter-route" }));
+      if (h) { meterPrevLayer.addLayer(window.L.marker([h.lat, h.lng], { icon: pinIcon("You", "pin-pickup") })); b.push([h.lat, h.lng]); }
+      if (st) { meterPrevLayer.addLayer(window.L.marker([+st.lat, +st.lng], { icon: pinIcon("Stop", "pin-drop") })); b.push([+st.lat, +st.lng]); }
+      if (d) { meterPrevLayer.addLayer(window.L.marker([+d.lat, +d.lng], { icon: pinIcon("Destination", "pin-drop") })); b.push([+d.lat, +d.lng]); }
+      if (b.length > 1) meterPrevMap.fitBounds(b, { padding: [24, 24], maxZoom: 15 });
+      else meterPrevMap.setView(b[0] || [29.7604, -95.3698], b[0] ? 14 : 10);
+      setTimeout(function () { if (meterPrevMap) meterPrevMap.invalidateSize(); }, 80);
+    } catch (e) {}
+  }
+  function ensureMeterSplitStyle() {
+    if (document.getElementById("pcs-meter-split-style")) return;
+    var st = document.createElement("style");
+    st.id = "pcs-meter-split-style";
+    st.textContent =
+      ".meter-split{display:flex;flex-direction:column;gap:8px}" +
+      "@media (max-width:759px){.meter-split>.meter-map-col{order:-1}.meter-split .map-stage.board-map{height:30vh;height:30dvh}}" +
+      ".meter-tip-box{margin:6px 0}.meter-tip-box summary{cursor:pointer;padding:6px 0}.meter-tips{display:flex;flex-wrap:wrap;gap:6px}.meter-tips .btn{flex:1 1 30%;margin:0;padding:8px 6px;font-size:14px}" +
+      ".meter-bd-box{padding:6px 10px;margin:6px 0}.meter-bd-box summary{cursor:pointer}.meter-bd-box #meter-breakdown{margin:6px 0 0;border:0;padding:0;background:none}" +
+      "#meter-other-card{padding:10px 12px}#meter-other-card label{margin:6px 0 2px}#meter-other-card .btn{margin:4px 0}#meter-other-card input{padding:8px;font-size:18px}" +
+      "#meter-ended h2{margin:0 0 4px;font-size:22px}#meter-ended .meter-big{font-size:22px;padding:12px}" +
+      ".pcs-est-about{background:none;border:0;padding:0;color:inherit;text-decoration:underline;font-size:12px;opacity:.85;cursor:pointer}.pcs-est-note{font-size:12px;margin:2px 2px 0;opacity:.9}" +
+      ".meter-split .meter-col>*:first-child{margin-top:0}" +
+      ".meter-h2{margin:0 0 4px;font-size:22px}" +
+      ".meter-rates-box{padding:6px 10px;margin:6px 0}.meter-rates-box summary{cursor:pointer;font-weight:700}" +
+      ".meter-route{padding:8px 10px;margin:6px 0}.meter-route .meter-dest{margin:4px 0;padding:0;border:0;background:none}" +
+      ".meter-route-lbl{display:inline-block;min-width:44px;font-size:12px;text-transform:uppercase;letter-spacing:.06em;opacity:.75}" +
+      ".meter-from,.meter-stop{margin:2px 0}.meter-mini{padding:4px 10px !important;margin:2px 0 !important;font-size:14px !important;width:auto !important;display:inline-block}" +
+      ".meter-split .meter-big{font-size:24px;padding:14px 12px;margin:6px 0}" +
+      ".meter-prev-stage{height:30vh;height:30dvh;min-height:170px}.meter-prev-stage #meter-prev-map{position:absolute;inset:0;background:#dce6f0}" +
+      ".meter-split .map-stage.board-map{height:34vh;height:34dvh;min-height:180px}.meter-split .map-stage.board-map #live-map,.meter-split .map-stage.board-map .leaflet-container{min-height:180px}" +
+      ".meter-est-line{margin:4px 2px 0;font-size:12px;line-height:1.3;opacity:.85}" +
+      "@media (min-width:700px),(orientation:landscape) and (min-width:560px){" +
+        ".meter-split{flex-direction:row;align-items:flex-start}" +
+        ".meter-split>.meter-col{flex:0 0 min(430px,46%);max-width:min(430px,46%)}" +
+        ".meter-split>.meter-map-col{flex:1 1 auto;min-width:0;position:sticky;top:0}" +
+        ".meter-prev-stage,.meter-split .map-stage.board-map{height:calc(100vh - 150px);height:calc(100dvh - 150px);min-height:300px}" +
+        ".meter-split .map-stage.board-map #live-map,.meter-split .map-stage.board-map .leaflet-container{min-height:300px}}";
+    document.head.appendChild(st);
+  }
   /* where = "ready" (Start screen) or "run" (card under the map) */
-  function meterDestHtml(where) {
+  function meterDestHtml(where, target) {
+    target = target || "dest";
+    if (target === "stop") {
+      var ae1 = document.activeElement;
+      if (ae1 && ae1.id === "meter-dest-q") { state.meterRefocus = "meter-dest-q"; state.meterDestQ = ae1.value; }
+      return '<section class="meter-dest" id="meter-dest"><p class="tag" style="margin:0 0 4px">Stop</p>' +
+        '<input id="meter-dest-q" type="search" inputmode="search" autocomplete="off" enterkeyhint="search" placeholder="Stop: address or place" aria-label="Stop" value="' + esc(state.meterDestQ || "") + '">' +
+        '<div class="suggest-list meter-dest-list" id="meter-dest-list">' + meterDestListHtml() + "</div>" +
+        (state.meterDestErr ? '<p class="error" id="meter-dest-err">' + esc(state.meterDestErr) + "</p>" : "") +
+        '<button class="btn ghost meter-mini" type="button" id="meter-dest-cancel">Cancel</button></section>';
+    }
     var ae = document.activeElement;
     if (ae && ae.id === "meter-dest-q") { state.meterRefocus = "meter-dest-q"; state.meterDestQ = ae.value; }
     var d = meterDestNow();
@@ -11366,7 +11633,7 @@
     if (d && !state.meterDestEdit) {
       return '<section class="card meter-dest" id="meter-dest">' + head +
         '<p class="meter-dest-to" id="meter-dest-set">To: <strong id="meter-dest-label">' + esc(d.label) + "</strong>" + (d.sub ? '<br><span class="fine">' + esc(d.sub) + "</span>" : "") + "</p>" +
-        (where === "run" ? '<p class="meter-dest-eta" id="meter-dest-eta">' + esc(meterEtaLine(M)) + "</p>" : '<p class="fine">The route and ETA show on the map after Start.</p>') +
+        (where === "run" ? '<p class="meter-dest-eta" id="meter-dest-eta">' + esc(meterEtaLine(M)) + "</p>" : "") +
         '<div class="meter-dest-btns"><button class="btn ghost" type="button" id="meter-dest-change">Change</button><button class="btn ghost" type="button" id="meter-dest-clear">Clear</button></div></section>';
     }
     if (where === "run" && !state.meterDestEdit) {
@@ -11376,7 +11643,7 @@
       '<input id="meter-dest-q" type="search" inputmode="search" autocomplete="off" enterkeyhint="search" placeholder="Where to? Address or place (no ZIP needed)" aria-label="Destination (optional)" value="' + esc(state.meterDestQ || "") + '">' +
       '<div class="suggest-list meter-dest-list" id="meter-dest-list">' + meterDestListHtml() + "</div>" +
       (state.meterDestErr ? '<p class="error" id="meter-dest-err">' + esc(state.meterDestErr) + "</p>" : "") +
-      (where === "ready" ? '<p class="fine" style="margin:4px 0 0">Not needed to start. Shows the road route and ETA on the map.</p>' : "") +
+      (where === "ready" ? '<p class="fine" style="margin:4px 0 0">Optional. Not needed to start.</p>' : "") +
       ((where === "run" || d) ? '<button class="btn ghost" type="button" id="meter-dest-cancel">Cancel</button>' : "") + "</section>";
   }
   function bindMeterDest() {
@@ -11384,10 +11651,13 @@
     var q = document.getElementById("meter-dest-q");
     if (q) q.addEventListener("input", function () { meterDestInput(q.value); });
     meterDestDomList();
-    on("meter-dest-add", function () { state.meterDestEdit = true; render(); meterDestFocus(); });
-    on("meter-dest-change", function () { state.meterDestEdit = true; state.meterDestQ = ""; state.meterDestList = []; render(); meterDestFocus(); });
-    on("meter-dest-cancel", function () { state.meterDestEdit = false; state.meterDestQ = ""; state.meterDestList = []; state.meterDestNone = false; render(); });
-    on("meter-dest-clear", function () { meterDestSet(null); });
+    if (document.getElementById("meter-prev-map")) { meterPrevMapDraw(); meterEstFetch(); } else if (meterPrevMap) meterPrevMapDraw();
+    on("meter-dest-add", function () { state.meterDestTarget = ""; state.meterDestEdit = true; render(); meterDestFocus(); });
+    on("meter-dest-change", function () { state.meterDestTarget = ""; state.meterDestEdit = true; state.meterDestQ = ""; state.meterDestList = []; render(); meterDestFocus(); });
+    on("meter-dest-cancel", function () { state.meterDestTarget = ""; state.meterDestEdit = false; state.meterDestQ = ""; state.meterDestList = []; state.meterDestNone = false; render(); });
+    on("meter-dest-clear", function () { state.meterDestTarget = ""; meterDestSet(null); });
+    on("meter-stop-add", function () { state.meterDestTarget = "stop"; state.meterDestEdit = true; state.meterDestQ = ""; state.meterDestList = []; render(); meterDestFocus(); });
+    on("meter-stop-clear", function () { state.meterDestTarget = "stop"; meterDestSet(null); });
     on("meter-eta-chip", function () {
       if (!meterDestNow()) state.meterDestEdit = true;
       render();
@@ -11435,11 +11705,42 @@
     on("meter-other", function () { state.meterOtherOpen = true; state.meterError = ""; state.meterForceOther = false; render(); });
     on("meter-other-no", function () { state.meterOtherOpen = false; state.meterError = ""; state.meterForceOther = false; render(); });
     on("meter-other-yes", meterMarkOther);
+    var hiOk = document.getElementById("meter-hightip-ok");
+    if (hiOk) hiOk.addEventListener("change", function () { state.meterHighTipOk = !!hiOk.checked; state.meterError = ""; });
+    var tipBox = document.getElementById("meter-tip-box");
+    if (tipBox) tipBox.addEventListener("toggle", function () { state.meterTipOpen = tipBox.open; });
+    on("meter-other-change", function () { state.meterOtherReview = ""; state.meterHighTipOk = false; state.meterError = ""; render(); });
+    Array.prototype.forEach.call(document.querySelectorAll(".meter-tip-chip"), function (b) {
+      b.addEventListener("click", function () { meterOtherRead(); state.meterTipChoice = b.getAttribute("data-tip") || "0"; state.meterOtherReview = ""; state.meterError = ""; render(); });
+    });
+    on("meter-exact", function () {
+      var r = meterOtherRead();
+      var el = document.getElementById("meter-other-amount");
+      var v = ((r.fare + r.tip) / 100).toFixed(2);
+      if (el) el.value = v;
+      state.meterOtherDraft.amount = v;
+      state.meterError = "";
+      render();
+    });
+    ["meter-other-amount", "meter-other-tip"].forEach(function (id) {
+      var el = document.getElementById(id);
+      if (!el) return;
+      el.addEventListener("input", function () {
+        var r = meterOtherRead();
+        var ch = document.getElementById("meter-change");
+        if (ch) { ch.textContent = "Change due: " + (isFinite(r.received) ? money(r.change) : "\u2014"); ch.style.color = r.change < 0 ? "#b91c1c" : ""; }
+        var sum = document.getElementById("meter-cash-sum");
+        if (sum && sum.firstChild && sum.firstChild.nodeType === 3) sum.firstChild.nodeValue = "Fare " + money(r.fare) + " \u00b7 Tip " + money(r.tip) + " \u00b7 ";
+      });
+    });
     Array.prototype.forEach.call(document.querySelectorAll(".meter-method"), function (b) {
       b.addEventListener("click", function () {
         var a = document.getElementById("meter-other-amount"), t = document.getElementById("meter-other-tip");
         state.meterOtherDraft = { amount: a ? a.value : "", tip: t ? t.value : "" };
+        var was = state.meterOtherMethod;
         state.meterOtherMethod = b.getAttribute("data-method") || "";
+        if ((was === "cash") !== (state.meterOtherMethod === "cash")) { state.meterOtherDraft = { amount: "", tip: state.meterOtherDraft ? state.meterOtherDraft.tip : "" }; if (a) a.value = ""; }
+        state.meterOtherReview = "";
         state.meterError = "";
         render();
       });
@@ -11511,12 +11812,14 @@
     var weekTotalComm = 0;
     var weekTotalRide = 0;
     var weekTips = 0;
+    var weekCashTips = 0; /* v72s: cash tips = your own money, shown for the record only */
     var cards = days.map(function (d) {
       var stats = readDayStats(d);
       var rides = ridesForDay(d);
       weekTotalComm += stats.commissionCents;
       weekTotalRide += stats.rideTotalCents;
       weekTips += stats.tipCents || 0;
+      rides.forEach(function (e) { if (e && (String(e.paidVia || "").toLowerCase() === "cash" || String(e.payMethod || "").toLowerCase() === "cash")) weekCashTips += Number(e.tipCents) || 0; });
       var label = d === today ? d + " · today" : d;
       return (
         '<button class="btn secondary hub-day-btn" type="button" data-hub-day="' + esc(d) + '">' +
@@ -11531,7 +11834,9 @@
       '<div class="card">' +
       '<div class="money-row"><span>Week ride total</span><span>' + money(weekTotalRide) + "</span></div>" +
       '<div class="money-row"><span>Week commission</span><span id="hub-week-comm">' + money(weekTotalComm) + "</span></div>" +
-      (weekTips ? '<div class="money-row"><span>Week tips (100% yours)</span><span id="hub-week-tips">' + money(weekTips) + "</span></div>" : "") +
+      (weekTips - weekCashTips > 0 ? '<div class="money-row"><span>Week tips (100% yours)</span><span id="hub-week-tips">' + money(weekTips - weekCashTips) + "</span></div>" : "") +
+      '<div class="money-row"><span>Cash tips received</span><span id="hub-week-cash-tips">' + money(weekCashTips) + "</span></div>" +
+      '<p class="fine" id="hub-cash-tips-note">Cash tips are yours (100%). They are not part of the 30% owed to PCS and are not fare. Shown for your records.</p>' +
       "</div>" +
       '<div class="hub-week">' + cards + "</div>" +
       '<div class="row hub-week-nav">' +
@@ -14855,6 +15160,16 @@
   };
 
   /* v54 test hooks (no UI). */
+  /* v72s forced update (version.js): reload by itself only when nothing is in progress */
+  window.pcsIdleForReload = function () {
+    var ae = document.activeElement;
+    if (ae && /^(INPUT|TEXTAREA|SELECT)$/.test(ae.tagName)) return false; /* typing */
+    if (state.meter) return false; /* metered ride open (running, ended or unpaid) */
+    if (driverMidRide()) return false;
+    if (state.payConfirm || state.payBusy || state.meterBusy) return false;
+    if (ROLE !== "driver" && state.code && /^(requested|accepted|started|arrived)$/.test(String(state.rideStatus || ""))) return false; /* rider with a live ride */
+    return true;
+  };
   window.__pcsApp = {
     estimate: estimate,
     rideAudioInfo: function () { return rideAudio.info(); }, /* v72f test hook */
