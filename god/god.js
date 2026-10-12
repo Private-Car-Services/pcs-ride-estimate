@@ -3539,7 +3539,7 @@
       list = entries.map(function (e) {
         return (
           '<article class="card">' +
-          "<h3>" + esc(e.code || "Ride") + (String(e.rideType || "") === "metered" ? ' <span class="badge" style="background:#4a3d12;color:#f0d48a;border:1px solid #f0d48a">Metered</span>' : "") + "</h3>" +
+          "<h3>" + esc(e.code || "Ride") + (e.isTest === true || String(e.paidVia || "") === "test" ? ' <span class="badge" style="background:#7a1f1f;color:#fff;border:1px solid #fff">Test</span>' : "") + (String(e.rideType || "") === "metered" ? ' <span class="badge" style="background:#4a3d12;color:#f0d48a;border:1px solid #f0d48a">Metered</span>' : "") + "</h3>" +
           '<p class="meta">' +
           "<strong>Rider</strong> " + esc(e.riderName || "—") + "<br>" +
           "<strong>Route</strong> " + esc(e.pickup || "") + " → " + esc(e.drop || "") + "<br>" +
@@ -4250,6 +4250,7 @@
   function meterPayWord(ps, via) {
     ps = String(ps || "").toLowerCase();
     if (ps === "charged") return "Paid (Square)";
+    if (ps === "paid_other" && String(via || "") === "test") return "TEST ride (no money)"; /* v72x.1 */
     if (ps === "paid_other") return "Paid another way" + (via ? " (" + String(via).replace("_", " ") + ")" : "");
     return "NOT PAID";
   }
