@@ -3020,6 +3020,17 @@
     }
     return true;
   }
+  /* v72v (Matthew): the server is the source of truth for whether a shift is open. If this phone still has a shift open
+     but the server row says that shift was closed (logout on another device), the local open shift is discarded. */
+  function serverClosedLocalShift(loc, srv) {
+    if (!loc || !srv || !shiftOpen(loc)) return false;
+    var ls = Number(loc.shiftStartAt) || 0;
+    if (!ls) return false;
+    var sh = srv.shifts && typeof srv.shifts === "object" ? srv.shifts : {};
+    if (sh[String(ls)] && sh[String(ls)].shiftEndedAt) return true; /* this exact shift was closed */
+    if (shiftClosed(srv) && (Number(srv.shiftStartAt) || 0) >= ls) return true; /* closed after (or a newer shift than) ours */
+    return false;
+  }
   /* Pull the last 2 days' miles rows from Firebase when this phone doesn't have them (cache cleared / other phone). */
   function pullRecentMilesRows() {
     if (ROLE !== "driver" || !syncOn() || !signedIn()) return Promise.resolve(false);
@@ -3035,6 +3046,7 @@
         if (!row || typeof row !== "object") return;
         var loc = map[d];
         if (!loc || (Number(row.lastUpdate) || 0) > (Number(loc.lastUpdate) || 0) + 1000) { map[d] = row; changed = true; }
+        else if (serverClosedLocalShift(loc, row)) { map[d] = row; changed = true; state.shiftClosedElsewhere = true; } /* v72v: logged out on another device */
       });
       if (changed) writeMilesLocal(map);
       return changed;
@@ -3060,8 +3072,31 @@
     return root + ".json";
   }
 
+  /* v72v: never save an opening/ending odometer below the last real reading (a 0 typo, or a stale phone overwriting a
+     repaired record). Only a God-mode odometer override allows a lower number. */
+  function sanitizeMilesOdos(row) {
+    if (!row || typeof row !== "object") return row;
+    var ovr = false; try { ovr = odoOverrideActive(); } catch (e) {}
+    if (ovr) return row;
+    var last = null; try { last = lastKnownOdometer(); } catch (e) {}
+    var floor = Math.max(Number(row.priorEndOdometer) || 0, 0);
+    var sh = row.shifts && typeof row.shifts === "object" ? row.shifts : {};
+    Object.keys(sh).forEach(function (k) { var x = sh[k]; if (!x) return; if (Number(x.endOdo) > 0 && Number(x.endOdo) < Number(x.startOdo)) x.endOdo = x.startOdo; });
+    Object.keys(sh).forEach(function (k) { var x = sh[k]; if (x && Number(x.endOdo) > floor && Number(x.endOdo) >= Number(x.startOdo || 0)) floor = Math.max(floor, Number(x.startOdo) > 0 ? Number(x.endOdo) : 0); });
+    if (!(floor > 0) && last > 0) floor = last;
+    if (row.priorEndOdometer != null && !(Number(row.priorEndOdometer) > 0) && floor > 0) row.priorEndOdometer = floor;
+    if (row.startOdometer != null && floor > 0 && Number(row.startOdometer) < floor && !shiftClosed(row)) { row.odoRepaired = { from: Number(row.startOdometer), to: floor, at: Date.now(), why: "opening odometer below last reading" }; row.startOdometer = floor; }
+    if (row.endOdometer != null && row.startOdometer != null && Number(row.endOdometer) < Number(row.startOdometer)) row.endOdometer = Number(row.startOdometer);
+    return row;
+  }
   function persistMilesRow(row, dayKey) {
     if (!row) return Promise.resolve();
+    try { sanitizeMilesOdos(row); } catch (e) {}
+    if (state.shiftClosedElsewhere && shiftOpen(row) && Number(row.shiftStartAt) <= Number(state.shiftClosedElsewhereAt || Infinity)) {
+      /* this phone's stale copy must not reopen a shift that was closed on another device */
+      if (!state.shiftClosedElsewhereAt) state.shiftClosedElsewhereAt = Number(row.shiftStartAt);
+      return Promise.resolve();
+    }
     var day = dayKey || milesDay(); /* v72r: the shift's start day, not the calendar day */
     var map = readMilesLocal();
     map[day] = row;
@@ -3408,6 +3443,10 @@
     };
   }
   function hosLoadCfg() {
+    /* v72v: God mode's saved limits live in the Worker (KV); Firebase HOSLIMIT is the fallback */
+    return qWorker("/hos/limits/get", {}).then(function (d) { if (d && d.limits && typeof d.limits === "object") { hosApplyCfg(d.limits); return; } return hosLoadCfgFb(); }).catch(hosLoadCfgFb);
+  }
+  function hosLoadCfgFb() {
     if (!syncOn()) return Promise.resolve();
     return authFetch(databaseURL() + "/rides/HOSLIMIT.json").then(function (r) { return r.ok ? r.json() : null; })
       .then(function (c) { if (c && typeof c === "object") hosApplyCfg(c); }).catch(function () {});
@@ -3452,7 +3491,23 @@
   function odoOverrideActive() { var o = hosOvr && hosOvr.odoOverride; return !!(o && Number(o.until) > Date.now()); }
   function hosOvrUrl() { return databaseURL() + "/rides/HOSOVRDE/" + encodeURIComponent(driverPresenceId()) + ".json"; }
   function hosPollOvr() {
-    if (ROLE !== "driver" || !syncOn() || !signedIn()) return Promise.resolve();
+    if (ROLE !== "driver" || !signedIn()) return Promise.resolve();
+    /* v72v: the Worker (KV) is where God mode's overrides land now; Firebase kept as a fallback/legacy source */
+    var tk = ""; try { tk = qToken(); } catch (e) {}
+    var wk = tk ? qWorker("/hos/ovr/me", { token: tk }).then(function (d) { return d && d.record; }).catch(function () { return null; }) : Promise.resolve(null);
+    return wk.then(function (w) {
+      return (syncOn() ? hosPollOvrFb() : Promise.resolve()).then(function () {
+        if (!w) return;
+        var newer = function (a, b) { return (a && Number(a.grantedAt) || 0) >= (b && Number(b.grantedAt) || 0) ? a : b; };
+        var ov = newer(w.override, hosOvr.override) || null;
+        var rest = ov && ov === w.override && ov.kind === "rest-waived" && Number(ov.until) > Date.now() ? 0 : Math.max(Number(w.restUntil) || 0, Number(hosOvr.restUntil) || 0);
+        hosOvr = { override: ov, restUntil: rest,
+          request: hosOvr.request || w.request || null, odoOverride: newer(w.odoOverride, hosOvr.odoOverride) || null };
+        try { localStorage.setItem(hosKey() + "-ovr", JSON.stringify(hosOvr)); } catch (e) {}
+      });
+    });
+  }
+  function hosPollOvrFb() {
     return authFetch(hosOvrUrl()).then(function (r) { return r.ok ? r.json() : null; }).then(function (o) {
       o = o && typeof o === "object" ? o : {};
       hosOvr = { override: o.override || null, restUntil: Number(o.restUntil) || 0, request: o.request || null, odoOverride: o.odoOverride || null };
@@ -3473,6 +3528,7 @@
     var h = hosStatus();
     var req = { at: Date.now(), level: hosRestUntil() ? "rest" : h.level, by: h.by || (hosRestUntil() ? "rest" : ""), driveMin: Math.round(h.driveMs / 60000), restUntil: hosRestUntil() || null, name: (readDriverAccount() || {}).name || "" };
     hosOvr.request = req;
+    try { var tk0 = qToken(); if (tk0) qWorker("/hos/ovr/ask", { token: tk0, request: req }).catch(function () {}); } catch (e) {} /* v72v: God sees it via the Worker */
     if (syncOn()) authFetch(databaseURL() + "/rides/HOSOVRDE/" + encodeURIComponent(driverPresenceId()) + "/request.json", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(req) }).catch(function () {});
     hosLogEvent(Object.assign({}, h, { level: "override-requested" }));
     render();
@@ -3553,12 +3609,15 @@
     var st = hosShiftStart();
     if (!st) return;
     var log = hosReadLog();
-    var k = String(st);
-    var seg = log[k] || { s: st, day: milesDay() };
+    var k = log.__cur && log[log.__cur] && Number(log[log.__cur].shift || log.__cur) === st ? String(log.__cur) : String(st);
+    var seg = log[k] || { s: st, day: milesDay(), shift: st };
     if (now - (Number(seg.e) || st) > SHIFT_STALE_MS) return; /* woke after 18 h+ idle: don't mark the stale shift active */
+    /* v72v: no heartbeat (app closed / no GPS) for > 30 min = NOT on duty: the gap is left out and a new piece starts now */
+    if (seg.e && now - Number(seg.e) > HOS_HEARTBEAT_GAP_MS) { log[k] = seg; k = String(now); seg = { s: now, day: milesDay(), shift: st }; }
+    log.__cur = k;
     seg.e = now;
     log[k] = seg;
-    Object.keys(log).forEach(function (x) { if (Number(log[x].e || x) < now - 14 * 86400000) delete log[x]; });
+    Object.keys(log).forEach(function (x) { if (x !== "__cur" && Number(log[x].e || x) < now - 14 * 86400000) delete log[x]; });
     hosWriteLog(log);
     if (syncOn() && now - hosLastPush > 5 * 60000) {
       hosLastPush = now;
@@ -3577,6 +3636,7 @@
      logout, reinstall, Home Screen vs Safari copy, a new shift or an odometer entry can never reset the clocks.
      Shifts with no recorded driving intervals count estimated driving = miles / 40 mph (capped at the shift length). */
   var HOS_EST_MPH = 40;
+  var HOS_HEARTBEAT_GAP_MS = 30 * 60000;
   function hosHistKey() { return hosKey() + "-hist"; }
   function hosReadHist() { try { var o = JSON.parse(localStorage.getItem(hosHistKey()) || "null"); return o && Array.isArray(o.segs) ? o : { segs: [], drv: [] }; } catch (e) { return { segs: [], drv: [] }; } }
   function hosHistFromRows(rows) {
@@ -3631,14 +3691,23 @@
   function hosDutySegs(now) {
     var st = hosShiftStart();
     var log = hosReadLog();
-    var segs = hosReadHist().segs.map(function (g) { return [g[0], Math.min(g[1], now)]; });
+    var hist = hosReadHist().segs, histEnd = {};
+    hist.forEach(function (g) { histEnd[String(g[0])] = { e: g[1], closed: g[2] !== -1 }; });
+    var segs = hist.map(function (g) { return [g[0], Math.min(g[1], now)]; });
     Object.keys(log).forEach(function (k) {
       var g = log[k];
-      if (!g || g.rest) return;
-      var s0 = Number(g.s) || 0, e0 = Number(k) === st ? now : (Number(g.e) || s0);
+      if (k === "__cur" || !g || typeof g !== "object" || g.rest) return;
+      var mine = st && Number(g.shift || k) === st && (k === String(log.__cur || st));
+      var e1 = Number(g.e) || s0;
+      var s0 = Number(g.s) || 0;
+      e1 = Number(g.e) || s0;
+      /* v72v: the open piece runs to "now" only while the app keeps a heartbeat (<= 30 min); otherwise it stops at the last one */
+      var e0 = mine && now - e1 <= HOS_HEARTBEAT_GAP_MS ? now : e1;
+      var srvEnd = histEnd[String(Number(g.shift || k))]; /* v72v: a shift the server has closed ends where the server says */
+      if (srvEnd && srvEnd.closed) e0 = Math.min(e0, srvEnd.e);
       if (s0 > 0 && e0 >= s0) segs.push([s0, Math.min(e0, now)]);
     });
-    if (st && !log[String(st)]) segs.push([st, now]);
+    if (st && !log[String(st)] && !log.__cur) segs.push([st, Math.min(now, st + HOS_HEARTBEAT_GAP_MS)]);
     return hosMerge(segs.filter(function (x) { return x[1] >= x[0]; }));
   }
   function hosOverlap(list, from, to) {
@@ -13006,6 +13075,7 @@
           state.milesOdoError = "Odometer can't be lower than your last reading (" + lastOdo.toFixed(1) + "). If the odometer really changed, God mode can allow it.";
           state.milesOdoDraft = raw;
           try { if (syncOn()) authFetch(hosOvrUrl(), { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ odoRequest: { at: Date.now(), entered: odo, last: lastOdo, name: readSession() || "" } }) }).catch(function () {}); } catch (e) {}
+          try { var tk1 = qToken(); if (tk1) qWorker("/hos/ovr/ask", { token: tk1, odoRequest: { entered: odo, last: lastOdo, name: readSession() || "" } }).catch(function () {}); } catch (e) {}
           render();
           return;
         }
@@ -13078,6 +13148,7 @@
         clearMilesAnchor(); /* v64 */
         writeShift({ startOdo: odo, shiftStartedAt: now, startDay: milesDay(), trackedMiles: 0, filledInMiles: 0 });
         noteLastOdometer(odo);
+        state.shiftClosedElsewhere = false; state.shiftClosedElsewhereAt = 0; /* v72v: a fresh shift on this phone */
         persistMilesRow(row).then(function () {
           try { hosPullHistory().then(function () { hosCheck(); render(); }); } catch (e) {} /* v72u: a new shift never resets HOS */
           followGps();
@@ -13096,6 +13167,9 @@
         var raw = document.getElementById("miles-end-odo").value;
         state.milesEndDraft = raw;
         /* v64: the ending odometer is required, and can't be below the starting odometer. */
+        /* v72v: nor below the last real reading (a start of 0 no longer lets any number through) */
+        var endFloor = 0; try { endFloor = odoOverrideActive() ? 0 : (lastKnownOdometer() || 0); } catch (eF) {}
+        if (endFloor > 0 && String(raw).trim() !== "" && Number(raw) < endFloor) { state.milesEndError = "Odometer can't be lower than your last reading (" + endFloor.toFixed(1) + ")."; render(); return; }
         if (String(raw).trim() === "") {
           state.milesEndError = "Enter the ending odometer to log out.";
           render();
@@ -15151,6 +15225,11 @@
       hosPullHistory().then(function () { hosCheck(); render(); }); /* v72u: full duty history from Firebase */
       try { repairLowOpeningOdo(); } catch (e) {}
       setInterval(function () { hosPullHistory(); }, 10 * 60000);
+      var shiftSyncFn = function () { /* v72v: pick up a logout from another device quickly */
+        pullRecentMilesRows().then(function (ch) { if (ch) { if (state.shiftClosedElsewhere) { try { writeShift(null); } catch (e) {} } ensureMilesDayReady(); hosPullHistory().then(function () { hosCheck(); render(); }); } });
+      };
+      setInterval(shiftSyncFn, 2 * 60000);
+      document.addEventListener("visibilitychange", function () { if (document.visibilityState === "visible") shiftSyncFn(); });
       pullRecentMilesRows().then(function (changed) { /* v72r: recover a shift row this phone lost; then re-check */
         var merged = mergeMidnightSplit();
         if (changed || merged) { ensureMilesDayReady(); render(); }
