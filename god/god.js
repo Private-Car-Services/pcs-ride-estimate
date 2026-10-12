@@ -3385,9 +3385,24 @@
   state.hosOvr = {};
   state.hosOvrFor = "";
   state.hosOvrDraft = { hours: "2", reason: "" };
+  /* v72v: Firebase rules refuse God mode's (unauthenticated) writes to HOSOVRDE, so overrides go through the Worker (KV),
+     signed with the God-mode device token (same as the queue panel). Firebase is still read for old records. */
   function hosOvrLoad() {
-    return fetch(baseUrl() + "/rides/HOSOVRDE.json").then(function (r) { return r.ok ? r.json() : null; })
-      .then(function (o) { state.hosOvr = o && typeof o === "object" ? o : {}; hosPaint(); }).catch(function () {});
+    var fb = fetch(baseUrl() + "/rides/HOSOVRDE.json").then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; });
+    var wk = (gqTok() || gq.pw) ? workerJson("/hos/ovr/all", gqAuth()).then(function (d) { if (d && d.godToken) { gqSetTok(d.godToken); gq.tokOn = true; gq.pw = ""; } return d && d.records; }).catch(function () { return null; }) : Promise.resolve(null);
+    return Promise.all([fb, wk]).then(function (r) {
+      var all = Object.assign({}, r[0] && typeof r[0] === "object" ? r[0] : {});
+      var w = r[1] || {};
+      Object.keys(w).forEach(function (id) { all[id] = Object.assign({}, all[id] || {}, w[id]); });
+      state.hosOvr = all; hosPaint();
+    });
+  }
+  function hosOvrSave(id, patch) {
+    if (!gqTok() && !gq.pw) return Promise.reject(new Error("Enter the God-mode password in the Rider queue panel first (one time per device)."));
+    return workerJson("/hos/ovr/god", Object.assign({ driverId: id, patch: patch }, gqAuth())).then(function (d) {
+      if (d && d.godToken) { gqSetTok(d.godToken); gq.tokOn = true; gq.pw = ""; }
+      return d;
+    });
   }
   function godWho() {
     try { var k = JSON.parse(localStorage.getItem("pcs-god-keep-v1") || "null"); if (k && k.email) return String(k.email); } catch (e) {}
@@ -3441,10 +3456,7 @@
       if (reason.length < 3) return;
       var onow = Date.now(), orq = (hosOvrRow(oid).odoRequest) || {};
       var orec = { grantedAt: onow, until: onow + 2 * 3600000, reason: reason, by: godWho(), entered: orq.entered, last: orq.last, kind: "odometer-lower" };
-      Promise.all([
-        fetch(baseUrl() + "/rides/HOSOVRDE/" + encodeURIComponent(oid) + ".json", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ odoOverride: orec }) }),
-        fetch(baseUrl() + "/rides/DRVRHOSL/" + encodeURIComponent(oid) + "/overrides/" + onow + ".json", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(orec) })
-      ]).then(hosOvrLoad).catch(function () { window.alert("Couldn't save the override. Try again."); });
+      hosOvrSave(oid, { odoOverride: orec }).then(hosOvrLoad).catch(function (er) { window.alert((er && er.message) || "Couldn't save the override. Try again."); });
       return;
     }
     var open = t.closest("[data-hos-ovr]");
@@ -3462,15 +3474,11 @@
     var rec = { grantedAt: now, until: until, hours: hours, extension: dr.hours === "rides" ? "until end of scheduled rides" : hours + "h", reason: reason, by: godWho(), kind: kind, request: row.request || null };
     var patch = { override: rec, request: null };
     if (kind === "rest") { patch.restUntil = 0; patch.restWaivedAt = now; rec.kind = "rest-waived"; }
-    Promise.all([
-      fetch(baseUrl() + "/rides/HOSOVRDE/" + encodeURIComponent(id) + ".json", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(patch) }),
-      fetch(baseUrl() + "/rides/DRVRHOSL/" + encodeURIComponent(id) + "/overrides/" + now + ".json", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(rec) })
-    ]).then(function (rs) {
-      if (!rs[0].ok || !rs[1].ok) throw new Error("save");
+    hosOvrSave(id, patch).then(function () { /* v72v: Worker KV (logged there) */
       state.hosOvrFor = "";
       if (document.activeElement) try { document.activeElement.blur(); } catch (x) {}
       return hosOvrLoad();
-    }).catch(function () { var m = document.getElementById("hos-ovr-msg"); if (m) m.textContent = "Could not save. Try again."; });
+    }).catch(function (er) { var m = document.getElementById("hos-ovr-msg"); if (m) m.textContent = (er && er.message) || "Could not save. Try again."; });
   });
   setTimeout(hosOvrLoad, 700);
   setInterval(hosOvrLoad, 10000);
@@ -3478,7 +3486,11 @@
   state.hosDraft = null;
   function hosUrl() { return baseUrl() + "/rides/HOSLIMIT.json"; }
   function hosLoad() {
-    return fetch(hosUrl()).then(function (r) { return r.ok ? r.json() : null; }).then(function (c) {
+    /* v72v: Worker (KV) first; Firebase HOSLIMIT reads are refused for God mode now */
+    return workerJson("/hos/limits/get", {}).then(function (d) { return d && d.limits; }).catch(function () { return null; }).then(function (w) {
+      return w || fetch(hosUrl()).then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; });
+    }).then(function (c) {
+      state.hosLoaded = !!(c && typeof c === "object");
       if (c && typeof c === "object") {
         var n = {};
         HOS_FIELDS.forEach(function (f) { var v = Number(c[f[1]]); n[f[1]] = isFinite(v) && v >= f[2] && v <= f[3] ? v : HOS_DEF[f[1]]; });
@@ -3560,7 +3572,9 @@
   function hosPanelHtml() {
     var c = state.hosDraft || state.hosCfg, k = state.hosCfg;
     var rows = HOS_FIELDS.map(function (f) {
-      return "<label>" + esc(f[4]) + ' <input id="' + f[0] + '" type="number" inputmode="decimal" min="' + f[2] + '" max="' + f[3] + '" step="' + (f[1] === "breakAfterMin" ? 15 : f[1] === "breakMinutes" || f[1] === "cycleDays" ? 1 : 0.5) + '" value="' + esc(String(c[f[1]])) + '" style="width:5em"></label><br>';
+      /* v72v (Matthew): readable inputs (dark text on white, 18px), one value per row */
+      return '<label class="hos-row" for="' + f[0] + '" style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin:6px 0">' + '<span>' + esc(f[4]) + "</span>" +
+        '<input id="' + f[0] + '" type="number" inputmode="decimal" min="' + f[2] + '" max="' + f[3] + '" step="' + (f[1] === "breakAfterMin" ? 15 : f[1] === "breakMinutes" || f[1] === "cycleDays" ? 1 : 0.5) + '" value="' + esc(String(c[f[1]])) + '" style="width:6em;flex:none;background:#ffffff;color:#111827;border:2px solid #3f6a3b;border-radius:8px;padding:6px 8px;font-size:18px;font-weight:700;-webkit-text-fill-color:#111827"></label>';
     }).join("");
     return '<details class="card" id="hos-config"' + (state.hosOpen ? " open" : "") + '><summary><strong>Hours of service (PCS policy)</strong> · drive ' + esc(String(k.maxDriveHours)) + "h · shift " + esc(String(k.shiftWindowHours)) +
       "h · break " + esc(String(k.breakMinutes)) + "m after " + esc(String(k.breakAfterDriveHours)) + "h · cycle " + esc(String(k.cycleHours)) + "h/" + esc(String(k.cycleDays)) + " days</summary>" +
@@ -3592,14 +3606,21 @@
     var msg = document.getElementById("hos-msg");
     if (bad) { if (msg) msg.textContent = "Check the numbers: " + HOS_FIELDS.map(function (f) { return f[4].split(":")[0] + " " + f[2] + "–" + f[3]; }).join("; "); return; }
     var body = Object.assign({ updatedAt: Date.now() }, cfg);
-    fetch(hosUrl(), { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }).then(function (r) {
-      if (!r.ok) throw new Error("save");
+    if (!gqTok() && !gq.pw) { if (msg) msg.textContent = "Enter the God-mode password in the Rider queue panel first (one time per device)."; return; }
+    try { fetch(hosUrl(), { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }).catch(function () {}); } catch (e0) {} /* legacy copy, best effort */
+    workerJson("/hos/limits/set", Object.assign({ limits: cfg }, gqAuth())).then(function (d) {
+      if (d && d.godToken) { gqSetTok(d.godToken); gq.tokOn = true; gq.pw = ""; }
+      return workerJson("/hos/limits/get", {});
+    }).then(function (d) {
+      var got = d && d.limits || {};
+      var same = HOS_FIELDS.every(function (f) { return Number(got[f[1]]) === Number(cfg[f[1]]); });
+      if (!same) throw new Error("The server didn't keep the new limits. Try again.");
       state.hosCfg = cfg;
       state.hosDraft = null;
       if (document.activeElement) try { document.activeElement.blur(); } catch (x) {}
       hosPaint();
-      var m2 = document.getElementById("hos-msg"); if (m2) m2.textContent = "Saved. Drivers pick it up within 10 minutes (or on next app open).";
-    }).catch(function () { if (msg) msg.textContent = "Could not save. Try again."; });
+      var m2 = document.getElementById("hos-msg"); if (m2) m2.textContent = "Saved and verified on the server. Drivers pick it up within 10 minutes (or on next app open).";
+    }).catch(function (er) { if (msg) msg.textContent = (er && er.message) || "Could not save. Try again."; });
   });
   setTimeout(hosLoad, 500);
   setInterval(hosPaint, 5000);
