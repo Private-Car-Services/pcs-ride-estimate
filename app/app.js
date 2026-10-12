@@ -9996,7 +9996,7 @@
     try { est = estimate(); } catch (e) { return ""; }
     if (!est || !est.ready || !(est.total > 0)) return "";
     var lo = Math.floor(est.total / 100), hi = Math.max(lo + 1, Math.ceil(est.total * 1.1 / 100));
-    return '<p class="fine meter-est-line" id="rider-est-line" style="font-size:12px;margin:4px 2px 0;opacity:.85"><span id="rider-est-to">To: ' + esc(dropLine()) + '</span> \u00b7 <span id="rider-est">Est. $' + lo + "\u2013" + hi + "</span></p>" + estAboutHtml("rider");
+    return '<div class="meter-est-line" id="rider-est-line" style="text-align:center;margin:6px 0 4px;padding:5px 10px;background:#111;border:2px solid #f0d48a;border-radius:12px;color:#fff;line-height:1.3"><span style="font-size:16px;font-weight:900;letter-spacing:.08em;text-transform:uppercase">Estimated fare \u00b7 </span><span id="rider-est" style="font-size:16px;font-weight:900;letter-spacing:.08em;color:#f0d48a">$' + lo + "\u2013$" + hi + '</span><div id="rider-est-to" style="font-size:14px;font-weight:700">To: ' + esc(dropLine()) + "</div></div>" + estAboutHtml("rider");
   }
   function customerMapBlock(caption, driverPoint) {
     var pickup = placeCoords("pickup");
@@ -10804,6 +10804,7 @@
       }
       if (meterTicks % 15 === 0) { meterSave(); acquireWakeLock(); }
       if (M.dest) meterRouteFetch(false); /* v71: first route as soon as there is a position, then every 60 s */
+      if (M.dest) meterOffRouteCheck(Date.now()); /* v72z */
       if (Date.now() - meterLiveAt >= METER_LIVE_PUSH_MS) meterPushLive(M);
       if (!M.viewToken && meterTicks % 15 === 0) meterFetchView();
       if (M.viewToken && Date.now() - meterLivePollAt >= 15000) meterPollLive();
@@ -11499,7 +11500,7 @@
       ".meter-map{position:relative}.meter-eta-chip{position:absolute;top:8px;right:8px;z-index:900;background:#0e2442;color:#f0d48a;border:1.5px solid #f0d48a;border-radius:999px;padding:5px 11px;font-size:13px;font-weight:800;box-shadow:0 2px 6px rgba(0,0,0,.35);max-width:70%;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}" +
       ".meter-eta-chip.has-dest{background:#f0d48a;color:#0b1f3a}" +
       ".meter-dest{margin:10px 0}.meter-dest input{width:100%;font-size:16px;padding:10px;border-radius:10px;border:1px solid rgba(212,177,90,.5);background:#0b1c33;color:#f4efe4}" +
-      ".meter-dest-to{margin:0 0 4px}.meter-dest-eta{margin:0 0 6px;font-weight:700;color:#f0d48a}.meter-dest-btns{display:flex;gap:8px}.meter-dest-btns .btn{flex:1;margin:4px 0 0}" +
+      ".meter-dest-to{margin:0 0 4px}.meter-dest-eta{margin:0 0 6px;font-weight:700;color:#f0d48a}.meter-run-eta{text-align:center;font-size:16px;line-height:1.3;margin:4px 0 6px}.meter-dest-btns{display:flex;gap:8px}.meter-dest-btns .btn{flex:1;margin:4px 0 0}" +
       ".meter-dest-list{position:static}.meter-dest-list .suggest-item{width:100%}";
     document.head.appendChild(st);
   }
@@ -11759,6 +11760,7 @@
       (function () { var mph = meterMphNow(M); return '<div id="meter-mph-box" class="' + meterMphBoxClass(M, mph) + '"><b id="meter-mph">' + (mph === null ? "--" : mph) +
         '</b><span id="meter-mph-label">' + esc(meterMphLabel(M, mph)) + "</span></div>"; })() + "</div>" +
       '<p class="meter-status-line"><span class="meter-free" id="meter-free">' + esc(meterFreeLine(M)) + '</span><span id="meter-gps">' + esc(meterGpsLine(M)) + "</span></p>" +
+      (M.dest ? '<p class="meter-dest-eta meter-run-eta" id="meter-dest-eta" role="status">' + esc(meterEtaLine(M)) + "</p>" : "") + /* v72z (Matthew): ETA in the meter card, under GPS OK, above End ride */
       (M.riderCard ? '<p class="fine" id="meter-rider-card-note" style="color:#8fd0a8;text-align:center;margin:0">✓ Rider saved a card on their meter page</p>' : "") +
       (meterQrShowing() ? '<div class="meter-qr-modal" id="meter-qr-modal">' + meterRiderQrHtml(M) + "</div>" : "") + busy + /* v72t: big QR overlay at the START */
       (state.meterConfirmEnd
@@ -11878,6 +11880,41 @@
     if (e.pending) return "Finding the road route…";
     return e.miles.toFixed(1) + " mi · about " + e.min + " min · arrive about " + meterClockText(e.at) + (e.approx ? " (no road route: straight-line estimate)" : "");
   }
+  /* v72z (Matthew): off-route -> reroute. More than ~100 m from the road route line on 3 GPS fixes in a row (or for 10 s+):
+     ask for a new road route from here to the destination (at most once every 30 s). The new route redraws the line and
+     updates the turn-by-turn, ETA/arrival and the estimate (all read meterRoute). */
+  var METER_OFFROUTE_M = 100, METER_OFFROUTE_FIXES = 3, METER_OFFROUTE_MS = 10000, METER_REROUTE_MIN_MS = 30000;
+  var meterOff = { since: 0, fixes: 0, lastFix: 0, lastReroute: 0, dist: 0, reroutes: 0 };
+  function meterDistToLineM(pt, line) {
+    if (!pt || !line || line.length < 2) return Infinity;
+    var R = 6371000, k = Math.cos(pt.lat * Math.PI / 180), best = Infinity, i;
+    var X = function (q) { return [(q[1] - pt.lng) * Math.PI / 180 * R * k, (q[0] - pt.lat) * Math.PI / 180 * R]; };
+    var a = X(line[0]);
+    for (i = 1; i < line.length; i += 1) {
+      var b = X(line[i]), dx = b[0] - a[0], dy = b[1] - a[1], L = dx * dx + dy * dy;
+      var t = L > 0 ? Math.max(0, Math.min(1, -(a[0] * dx + a[1] * dy) / L)) : 0;
+      var x = a[0] + t * dx, y = a[1] + t * dy, d = Math.sqrt(x * x + y * y);
+      if (d < best) best = d;
+      a = b;
+    }
+    return best;
+  }
+  function meterOffRouteCheck(now) {
+    var M = state.meter;
+    if (!M || M.status !== "running" || !M.dest || !meterRoute || meterRoute.approx || !meterRoute.line || meterRouteBusy) { meterOff.since = 0; meterOff.fixes = 0; return; }
+    var h = meterHerePt(); if (!h) return;
+    var fixAt = Number(state.gpsAt) || 0;
+    var d = meterDistToLineM(h, meterRoute.line);
+    meterOff.dist = d;
+    if (!(d > METER_OFFROUTE_M)) { meterOff.since = 0; meterOff.fixes = 0; return; }
+    if (!meterOff.since) meterOff.since = now;
+    if (fixAt && fixAt !== meterOff.lastFix) { meterOff.fixes += 1; meterOff.lastFix = fixAt; }
+    if ((meterOff.fixes >= METER_OFFROUTE_FIXES || now - meterOff.since >= METER_OFFROUTE_MS) && now - meterOff.lastReroute >= METER_REROUTE_MIN_MS) {
+      meterOff.lastReroute = now; meterOff.since = 0; meterOff.fixes = 0; meterOff.reroutes += 1;
+      meterRouteFetch(true);
+    }
+  }
+  window.__pcsMeterOffRoute = function () { return { dist: Math.round(meterOff.dist), fixes: meterOff.fixes, reroutes: meterOff.reroutes, lastReroute: meterOff.lastReroute }; }; /* test/debug hook */
   function meterRouteFetch(force) {
     var M = state.meter;
     if (!M || M.status !== "running" || !M.dest || meterRouteBusy) return;
@@ -11930,11 +11967,11 @@
     if (meterRoute && meterRoute.key === key && meterRoute.line && meterRoute.line.length > 1) {
       /* v72x (Matthew's Uber reference): bold light-gray road line on a dark casing, round ends (no traffic colors: OSRM has no traffic data) */
       var rr = meterRoutePane() || undefined;
-      state.boardMarkers.addLayer(window.L.polyline(meterRoute.line, { color: "#3a3a3a", weight: 11, opacity: 0.9, lineCap: "round", lineJoin: "round", className: "meter-route-casing", pane: "pcsRoute", renderer: rr, interactive: false }));
-      state.boardMarkers.addLayer(window.L.polyline(meterRoute.line, { color: "#d9d9d9", weight: 7, opacity: 1, lineCap: "round", lineJoin: "round", dashArray: meterRoute.approx ? "8 10" : null, className: "meter-route", pane: "pcsRoute", renderer: rr, interactive: false }));
+      state.boardMarkers.addLayer(window.L.polyline(meterRoute.line, { color: "#0B3D91", weight: 11, opacity: 0.9, lineCap: "round", lineJoin: "round", className: "meter-route-casing", pane: "pcsRoute", renderer: rr, interactive: false }));
+      state.boardMarkers.addLayer(window.L.polyline(meterRoute.line, { color: "#1E88FF", weight: 7, opacity: 1, lineCap: "round", lineJoin: "round", dashArray: meterRoute.approx ? "8 10" : null, className: "meter-route", pane: "pcsRoute", renderer: rr, interactive: false }));
     } else { /* v72x: road route not in yet (or for an older destination): dashed straight line so the way is always on the map */
       var sp = meterStraightPts(M);
-      if (sp) state.boardMarkers.addLayer(window.L.polyline(sp.map(function (q) { return [q.lat, q.lng]; }), { color: "#d9d9d9", weight: 6, opacity: 0.95, lineCap: "round", dashArray: "8 10", className: "meter-route meter-route-approx", pane: "pcsRoute", renderer: meterRoutePane() || undefined, interactive: false }));
+      if (sp) state.boardMarkers.addLayer(window.L.polyline(sp.map(function (q) { return [q.lat, q.lng]; }), { color: "#1E88FF", weight: 6, opacity: 0.95, lineCap: "round", dashArray: "8 10", className: "meter-route meter-route-approx", pane: "pcsRoute", renderer: meterRoutePane() || undefined, interactive: false }));
     }
     state.boardMarkers.addLayer(window.L.marker([+M.dest.lat, +M.dest.lng], { icon: pinIcon("Destination", "pin-drop pin-dest-green"), zIndexOffset: 400 }));
     bounds.push([+M.dest.lat, +M.dest.lng]);
@@ -12068,12 +12105,17 @@
     var M = state.meter, run = !!(M && M.status === "running");
     if (run && d) { /* v72u: during the ride = fare so far + the rest of the road route */
       var eta = meterEtaInfo(M);
-      if (eta && !eta.pending) { var rr = meterEstRange(eta.arrived ? 0 : eta.miles, eta.arrived ? 0 : eta.min, Number(M.miles) || 0, Math.floor(Number(M.waitMin) || 0)); est = "Est. $" + rr.lo + "\u2013$" + rr.hi; }
-      else { var sl = meterStraightLeft(M); est = sl ? (function (q) { return "Est. $" + q.lo + "\u2013$" + q.hi; })(meterEstRange(sl, sl * 2, Number(M.miles) || 0, Math.floor(Number(M.waitMin) || 0))) : "Estimating\u2026"; } /* v72x: no road route yet -> straight line x1.3 */
-    } else if (d && E && E.key === key) { var rg = meterEstRange(E.miles, E.minutes); est = "Est. $" + rg.lo + "\u2013$" + rg.hi; }
+      if (eta && !eta.pending) { var rr = meterEstRange(eta.arrived ? 0 : eta.miles, eta.arrived ? 0 : eta.min, Number(M.miles) || 0, Math.floor(Number(M.waitMin) || 0)); est = "$" + rr.lo + "\u2013$" + rr.hi; }
+      else { var sl = meterStraightLeft(M); est = sl ? (function (q) { return "$" + q.lo + "\u2013$" + q.hi; })(meterEstRange(sl, sl * 2, Number(M.miles) || 0, Math.floor(Number(M.waitMin) || 0))) : "Estimating\u2026"; } /* v72x: no road route yet -> straight line x1.3 */
+    } else if (d && E && E.key === key) { var rg = meterEstRange(E.miles, E.minutes); est = "$" + rg.lo + "\u2013$" + rg.hi; }
     else if (d) est = state.meterEstBusy ? "Estimating\u2026" : (meterHerePt() ? "" : "Allow location for an estimate.");
-    return '<p class="fine meter-est-line" id="meter-est-line">' + (d ? '<span id="meter-est-to">To: ' + esc(d.label) + "</span>" + (est ? ' \u00b7 <span id="meter-est">' + esc(est) + "</span>" : "") : "Add a destination to see the route and an estimate.") + "</p>" +
-      (est && /^Est\./.test(est) ? estAboutHtml("meter") : "");
+    /* v72z (Matthew): prominent "Estimated fare" block right under the map (big gold range, destination below) */
+    var isRange = /^\$\d/.test(est);
+    if (!d) return '<div class="meter-est-line meter-est-block meter-est-empty" id="meter-est-line"><span class="meter-est-hint">Add a destination to see the route and an estimate.</span></div>';
+    return '<div class="meter-est-line meter-est-block" id="meter-est-line"><span class="meter-est-lbl">Estimated fare</span>' +
+      (isRange ? '<span class="meter-est-big" id="meter-est">' + esc(est) + "</span>" : (est ? '<span class="meter-est-wait" id="meter-est-wait">' + esc(est) + "</span>" : "")) +
+      '<div class="meter-est-to" id="meter-est-to">To: ' + esc(d.label) + "</div></div>" +
+      (isRange ? estAboutHtml("meter") : "");
   }
   /* v72s (Matthew): the disclaimer sits behind a small "About this estimate" link (driver + rider apps) */
   var EST_NOTE = "Estimate only. May not include extra stops, slow traffic, or wait time.";
@@ -12185,7 +12227,7 @@
       meterPrevLayer.clearLayers();
       var b = [];
       var h = meterHerePt(), st = meterStopNow(), d = meterDestNow(), E = state.meterEst;
-      if (E && E.key === meterEstKey() && E.line && E.line.length > 1) meterPrevLayer.addLayer(window.L.polyline(E.line, { color: "#d4b15a", weight: 5, opacity: 0.95, dashArray: E.approx ? "6 8" : null, className: "meter-route" }));
+      if (E && E.key === meterEstKey() && E.line && E.line.length > 1) meterPrevLayer.addLayer(window.L.polyline(E.line, { color: "#1E88FF", weight: 5, opacity: 0.95, dashArray: E.approx ? "6 8" : null, className: "meter-route" }));
       if (h) { meterPrevLayer.addLayer(window.L.marker([h.lat, h.lng], { icon: pinIcon("You", "pin-pickup") })); b.push([h.lat, h.lng]); }
       if (st) { meterPrevLayer.addLayer(window.L.marker([+st.lat, +st.lng], { icon: pinIcon("Stop", "pin-drop") })); b.push([+st.lat, +st.lng]); }
       if (d) { meterPrevLayer.addLayer(window.L.marker([+d.lat, +d.lng], { icon: pinIcon("Destination", "pin-drop") })); b.push([+d.lat, +d.lng]); }
@@ -12226,7 +12268,11 @@
       ".meter-split .meter-big{font-size:24px;padding:14px 12px;margin:6px 0}" +
       ".meter-prev-stage{height:30vh;height:30dvh;min-height:170px}.meter-prev-stage #meter-prev-map{position:absolute;inset:0;background:#dce6f0}" +
       ".meter-split .map-stage.board-map{height:34vh;height:34dvh;min-height:180px}.meter-split .map-stage.board-map #live-map,.meter-split .map-stage.board-map .leaflet-container{min-height:180px}" +
-      ".meter-est-line{margin:4px 2px 0;font-size:12px;line-height:1.3;opacity:.85}" +
+      ".meter-est-block{display:block;text-align:center;margin:6px 0 4px;padding:5px 10px;background:#111;border:2px solid #f0d48a;border-radius:12px;color:#fff;line-height:1.3}" + /* v72z: same size/weight/box as the rate banner (.meter-mode) */
+      ".meter-est-lbl,.meter-est-big,.meter-est-wait{display:inline;font-size:16px;font-weight:900;letter-spacing:.08em}.meter-est-lbl{color:#fff;text-transform:uppercase}.meter-est-lbl:after{content:\" \\00b7 \"}" +
+      ".meter-est-big,.meter-est-wait{color:#f0d48a}.meter-est-wait{letter-spacing:0;font-weight:700}" +
+      ".meter-est-to{display:block;font-size:14px;font-weight:700;color:#fff;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}" +
+      ".meter-est-block.meter-est-empty{background:none;border:0;padding:0;margin:4px 2px 0;text-align:left}.meter-est-hint{font-size:12px;opacity:.85}" +
       ".pin-dest-green .pin-head{background:#3fbf5f !important;border-color:#fff !important}.pin-dest-green .pin-label{background:#3fbf5f !important;color:#08250f !important}" + /* v72x green destination pin */
       "";
     document.head.appendChild(st);
@@ -12251,7 +12297,6 @@
     if (d && !state.meterDestEdit) {
       return '<section class="card meter-dest" id="meter-dest">' + head +
         '<p class="meter-dest-to" id="meter-dest-set">To: <strong id="meter-dest-label">' + esc(d.label) + "</strong>" + (d.sub ? '<br><span class="fine">' + esc(d.sub) + "</span>" : "") + "</p>" +
-        (where === "run" ? '<p class="meter-dest-eta" id="meter-dest-eta">' + esc(meterEtaLine(M)) + "</p>" : "") +
         '<div class="meter-dest-btns"><button class="btn ghost" type="button" id="meter-dest-change">Change</button><button class="btn ghost" type="button" id="meter-dest-clear">Clear</button></div></section>';
     }
     if (where === "run" && !state.meterDestEdit) {
@@ -15113,7 +15158,7 @@
       var road = routeLatLngs(pickup, drop);
       var bounds = road.slice();
       if (driver) bounds.push([driver.lat, driver.lng]);
-      window.L.polyline(road, { color: "#d4b15a", weight: 4, opacity: 0.9 }).addTo(liveMap);
+      window.L.polyline(road, { color: "#1E88FF", weight: 5, opacity: 0.9 }).addTo(liveMap);
       if (driver) {
         window.L.polyline([[driver.lat, driver.lng], [pickup.lat, pickup.lng]], {
           color: "#d4b15a", weight: 3, opacity: 0.45, dashArray: "6 8"
@@ -15224,7 +15269,7 @@
       var road = route.live
         ? routeLatLngs(route.pickup, route.dropoff)
         : [[route.driver.lat, route.driver.lng], [route.pickup.lat, route.pickup.lng], [route.dropoff.lat, route.dropoff.lng]];
-      window.L.polyline(road, { color: "#d4b15a", weight: 4, opacity: 0.9 }).addTo(liveMap);
+      window.L.polyline(road, { color: "#1E88FF", weight: 5, opacity: 0.9 }).addTo(liveMap);
       var youLabel = state.mode === "driver" ? "Customer" : "You";
       riderMarker = null;
       var beforePickup = ROLE === "driver" && state.rideStatus !== "started" && state.rideStatus !== "completed";
