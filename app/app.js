@@ -2963,6 +2963,10 @@
      that earlier day stays the miles day: GPS miles and online time keep adding to it, and no new opening odometer is asked.
      A shift idle for 18 h+ is stale: the next opening-odometer form first asks for that shift's ending odometer. */
   var SHIFT_STALE_MS = 18 * 3600000;
+  var CARRY_KEY = "pcs-driver-fresh-login-v72w";
+  function carriedLoginAt() { try { return Number(localStorage.getItem(CARRY_KEY)) || 0; } catch (e) { return 0; } }
+  function noteFreshLogin() { try { localStorage.setItem(CARRY_KEY, String(Date.now())); } catch (e) {} }
+  function clearFreshLogin() { try { localStorage.removeItem(CARRY_KEY); } catch (e) {} }
   function shiftLastActive(row) {
     var t = Math.max(Number(row && row.lastUpdate) || 0, Number(row && row.shiftStartAt) || 0, Number(row && row.startedAt) || 0);
     try { var seg = hosReadLog()[String(Number(row && row.shiftStartAt) || 0)]; if (seg && Number(seg.e) > t) t = Number(seg.e); } catch (e) {} /* app open = active */
@@ -2978,7 +2982,10 @@
       if (row && typeof row === "object" && shiftOpen(row)) {
         var t = map[today];
         if (t && typeof t === "object" && shiftOpen(t)) return null; /* (merged on load) */
-        return { day: d, row: row, stale: Date.now() - shiftLastActive(row) > SHIFT_STALE_MS };
+        /* v72w (Matthew 4:55 AM): a fresh LOGIN never silently continues a shift opened on an earlier day: it asks that
+           shift's ending odometer + a new opening odometer (same as an 18 h stale shift). Not mid-ride. */
+        var carry = carriedLoginAt() > 0 && Number(row.shiftStartAt || row.startedAt || 0) < carriedLoginAt() && !driverMidRide();
+        return { day: d, row: row, stale: carry || Date.now() - shiftLastActive(row) > SHIFT_STALE_MS, carry: carry };
       }
     }
     return null;
@@ -3104,10 +3111,21 @@
     state.milesToday = Number(row.gpsMiles) || 0;
     state.milesStartOdo = row.startOdometer != null ? Number(row.startOdometer) : null;
     if (!syncOn()) return Promise.resolve();
+    /* v72w (Matthew 4:49 AM): a whole-row PUT from a stale phone wiped server-side shift edits (closed / hosExcluded shifts).
+       PATCH field by field instead, so shifts and flags this phone doesn't know about stay on the server. */
+    var patch = {};
+    Object.keys(row).forEach(function (k) {
+      var v = row[k];
+      if (k === "shifts" && v && typeof v === "object") {
+        Object.keys(v).forEach(function (sk) { var x = v[sk]; if (x && typeof x === "object") Object.keys(x).forEach(function (f) { if (x[f] !== undefined) patch["shifts/" + sk + "/" + f] = x[f]; }); });
+      } else if (v !== undefined) patch[k] = v;
+    });
+    /* closing fields this phone dropped (a reopened shift) must be cleared on the server too, like the old whole-row PUT did */
+    ["endOdometer", "staleClosedAt", "closedAt", "skippedEnd"].forEach(function (k) { if (row[k] === undefined || row[k] === null) patch[k] = null; });
     return authFetch(milesUrl(driverPresenceId(), day), {
-      method: "PUT",
+      method: "PATCH",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(row)
+      body: JSON.stringify(patch)
     }).then(function (res) {
       if (!res.ok) throw new Error("miles");
       return res.text().then(function () {});
@@ -3160,7 +3178,7 @@
 
   function canGoOnline() {
     if (ROLE !== "driver" || !signedIn()) return false;
-    if (hosRestUntil() && !driverMidRide()) return false; /* v72r mandatory rest */
+    /* v72w (Matthew): HOS rest blocks ride OFFERS only (driverCanTakeNew/hosLimitReached), never login, shift start or tracking */
     if (driverMidRide()) return true;
     return hasCompleteCar(readDriverAccount()) && !state.milesNeedStart && isDriverApproved();
   }
@@ -3555,7 +3573,7 @@
     if (!u || ROLE !== "driver" || !signedIn()) return "";
     var pend = hosOvr.request && !(hosOvr.override && Number(hosOvr.override.grantedAt) >= Number(hosOvr.request.at));
     return '<div class="card miles-gate" id="hos-rest-gate"><p class="tag" style="color:#b91c1c">Mandatory rest</p>' +
-      '<p class="lede">You used up your ' + esc(hosClockName(hosStatus().by)) + ' clock. PCS policy: stay off duty until <strong>' + esc(fmtClockCt(u)) + "</strong> (" + esc(hosFmt(u - Date.now())) + " left). You can't go online or get ride offers until then.</p>" +
+      '<p class="lede">You used up your ' + esc(hosClockName(hosStatus().by)) + ' clock. PCS policy: stay off duty until <strong>' + esc(fmtClockCt(u)) + "</strong> (" + esc(hosFmt(u - Date.now())) + " left). You can still log in and drive (miles are tracked), but no ride offers until then.</p>" +
       (pend ? '<p class="fine" id="hos-ovr-pending">Override requested. Waiting for PCS.</p>' : '<button class="btn ghost" type="button" id="hos-request-ovr">Request override from PCS</button>') + "</div>";
   }
   function fmtClockCt(ms) {
@@ -3646,8 +3664,10 @@
       var sh = r.shifts && typeof r.shifts === "object" ? r.shifts : {};
       Object.keys(sh).forEach(function (k) {
         var x = sh[k] || {}, a = Number(x.shiftStartedAt) || Number(k), b = Number(x.shiftEndedAt) || 0;
-        if (!(a > 0 && b > a) || seen[a]) return;
+        if (!(a > 0) || seen[a]) return;
         seen[a] = 1;
+        if (x.hosExcluded) { segs.push([a, a, 0, 1]); return; } /* v72w: God/owner excluded this shift from HOS: zero duty */
+        if (!(b >= a)) return; /* v72w: a shift closed at its start (b == a) still caps the phone's local copy */
         var mi = Number(x.trackedMiles); if (!(mi >= 0)) mi = Number(x.odoMiles) || 0;
         segs.push([a, b, Math.max(0, mi)]);
       });
@@ -3692,8 +3712,8 @@
     var st = hosShiftStart();
     var log = hosReadLog();
     var hist = hosReadHist().segs, histEnd = {};
-    hist.forEach(function (g) { histEnd[String(g[0])] = { e: g[1], closed: g[2] !== -1 }; });
-    var segs = hist.map(function (g) { return [g[0], Math.min(g[1], now)]; });
+    hist.forEach(function (g) { histEnd[String(g[0])] = { e: g[1], closed: g[2] !== -1, x: !!g[3] }; });
+    var segs = hist.filter(function (g) { return !g[3] && g[1] > g[0]; }).map(function (g) { return [g[0], Math.min(g[1], now)]; });
     Object.keys(log).forEach(function (k) {
       var g = log[k];
       if (k === "__cur" || !g || typeof g !== "object" || g.rest) return;
@@ -3704,6 +3724,7 @@
       /* v72v: the open piece runs to "now" only while the app keeps a heartbeat (<= 30 min); otherwise it stops at the last one */
       var e0 = mine && now - e1 <= HOS_HEARTBEAT_GAP_MS ? now : e1;
       var srvEnd = histEnd[String(Number(g.shift || k))]; /* v72v: a shift the server has closed ends where the server says */
+      if (srvEnd && srvEnd.x) return; /* v72w: excluded shift: no duty at all */
       if (srvEnd && srvEnd.closed) e0 = Math.min(e0, srvEnd.e);
       if (s0 > 0 && e0 >= s0) segs.push([s0, Math.min(e0, now)]);
     });
@@ -4156,7 +4177,7 @@
 
   function milesStartCard() {
     if (ROLE !== "driver" || !signedIn() || !state.milesNeedStart) return "";
-    if (hosRestUntil()) return hosRestCard(); /* v72r: no new shift during the mandatory rest */
+    var restNote = hosRestUntil() ? hosRestCard() : ""; /* v72w: shown as a notice; the shift can still start */
     if (!hasCompleteCar(readDriverAccount())) return "";
     if (driverMidRide()) return "";
     var closed = shiftClosed(todayMilesRow());
@@ -4166,7 +4187,7 @@
     var lede = closed
       ? "You logged out and closed the last shift. Enter a new opening odometer before miles count again. Miles while logged out stay personal (not counted). Today's GPS total so far stays on screen."
       : "Enter the starting odometer for today before you go online. Chicago calendar day.";
-    return (
+    return restNote + (
       '<div class="card miles-gate" id="miles-gate">' +
       '<p class="tag">' + esc(tag) + "</p>" +
       '<p class="lede">' + esc(lede) + "</p>" +
@@ -12801,6 +12822,7 @@
           if (ROLE === "driver") {
             /* v50: pull the saved car details + photos from the server (or back them up if only here). */
             syncDriverProfile().then(function () { render(); });
+            noteFreshLogin(); /* v72w */
             mergeMidnightSplit(); /* v72r */
             ensureMilesDayReady();
             pullRecentMilesRows().then(function (ch) { if (mergeMidnightSplit() || ch) { ensureMilesDayReady(); render(); } });
@@ -12941,6 +12963,7 @@
           if (ROLE === "driver") {
             /* v50: pull the saved car details + photos from the server (or back them up if only here). */
             syncDriverProfile().then(function () { render(); });
+            noteFreshLogin(); /* v72w */
             mergeMidnightSplit(); /* v72r */
             ensureMilesDayReady();
             pullRecentMilesRows().then(function (ch) { if (mergeMidnightSplit() || ch) { ensureMilesDayReady(); render(); } });
@@ -13149,6 +13172,7 @@
         writeShift({ startOdo: odo, shiftStartedAt: now, startDay: milesDay(), trackedMiles: 0, filledInMiles: 0 });
         noteLastOdometer(odo);
         state.shiftClosedElsewhere = false; state.shiftClosedElsewhereAt = 0; /* v72v: a fresh shift on this phone */
+        clearFreshLogin(); /* v72w */
         persistMilesRow(row).then(function () {
           try { hosPullHistory().then(function () { hosCheck(); render(); }); } catch (e) {} /* v72u: a new shift never resets HOS */
           followGps();
