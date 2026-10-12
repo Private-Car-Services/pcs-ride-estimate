@@ -1,6 +1,6 @@
-/* PCS app version: the ONE place to change it each release (v72t). Loaded by rider, driver, God mode and meter. */
+/* PCS app version: the ONE place to change it each release (v72u). Loaded by rider, driver, God mode and meter. */
 (function () {
-  var APP_VERSION = "v72t";
+  var APP_VERSION = "v72u";
   window.PCS_APP_VERSION = APP_VERSION;
   /* "v72r" -> [72, "r"]; returns <0 if a is older than b. Unknown/missing counts as oldest. */
   window.pcsVersionCmp = function (a, b) {
@@ -16,8 +16,14 @@
     el.id = "pcs-app-version";
     el.setAttribute("aria-hidden", "true");
     el.textContent = APP_VERSION;
+    /* v72u (Matthew): same 10px size, high contrast on every screen: mint text on a solid dark-green pill (~11:1, WCAG AA+). */
     el.style.cssText = "position:fixed;left:0;right:0;bottom:0;bottom:env(safe-area-inset-bottom,0);text-align:center;" +
-      "font:10px/14px system-ui,-apple-system,sans-serif;color:rgba(128,128,128,.45);pointer-events:none;z-index:2147483000;user-select:none;";
+      "font:10px/14px system-ui,-apple-system,sans-serif;pointer-events:none;z-index:2147483000;user-select:none;";
+    var pill = document.createElement("span");
+    pill.textContent = APP_VERSION;
+    pill.style.cssText = "display:inline-block;padding:0 6px;border-radius:7px;background:#0b3d23;color:#b8f0c8;font-weight:600;";
+    el.textContent = "";
+    el.appendChild(pill);
     document.body.appendChild(el);
   }
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", addFooter); else addFooter();
