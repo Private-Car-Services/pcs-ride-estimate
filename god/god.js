@@ -3207,7 +3207,7 @@
      driving, 70 h / 8 days; 10 h off resets drive + shift, 34 h off restarts the cycle. All editable here. */
   var HOS_DEF = { maxDriveHours: 11, shiftWindowHours: 14, breakAfterDriveHours: 8, breakMinutes: 30, cycleHours: 70, cycleDays: 8, resetHours: 10, restartHours: 34, breakAfterMin: 150, breakMinOnDutyHours: 3 };
   var HOS_FIELDS = [["hos-drive", "maxDriveHours", 0, 24, "DRIVE: max moving time (hours, 0 = off)"], ["hos-shift", "shiftWindowHours", 0, 24, "SHIFT: on-duty window (hours, 0 = off)"],
-    ["hos-brkh", "breakAfterDriveHours", 0, 24, "BREAK: required after this many hours of driving (0 = off)"], ["hos-brkm", "breakMinutes", 5, 120, "BREAK length (minutes)"], ["hos-brkmin", "breakMinOnDutyHours", 0, 14, "BREAK can start only after this many hours on duty (0 = any time)"],
+    ["hos-brkh", "breakAfterDriveHours", 0, 24, "BREAK: required after this many hours of driving (0 = off)"], ["hos-brkm", "breakMinutes", 5, 120, "BREAK length (minutes)"], ["hos-brkmin", "breakMinOnDutyHours", 0, 14, "BREAK counts as the 30-min break only if it starts this many hours on duty after shift start or the last qualifying break (0 = any time)"],
     ["hos-cyc", "cycleHours", 0, 200, "CYCLE: max on-duty hours (0 = off)"], ["hos-cycd", "cycleDays", 1, 14, "CYCLE rolling days"],
     ["hos-reset", "resetHours", 1, 48, "Off-duty hours that reset DRIVE + SHIFT"], ["hos-restart", "restartHours", 1, 96, "Off-duty hours that restart the CYCLE"],
     ["hos-break", "breakAfterMin", 0, 600, "Soft take-a-break nudge after continuous driving (minutes, 0 = off)"]];
