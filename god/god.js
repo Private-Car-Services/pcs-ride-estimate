@@ -47,16 +47,9 @@
   var BOARD_CENTER = { lat: 30.39, lng: -95.65 };
 
   var CAR_SVG =
-    '<svg viewBox="0 0 64 64" width="36" height="36" aria-hidden="true">' +
-    '<circle cx="32" cy="32" r="30" fill="#193819" stroke="#f0d48a" stroke-width="2"/>' +
-    '<rect x="22" y="12" width="20" height="38" rx="9" fill="#f0d48a"/>' +
-    '<rect x="25" y="18" width="14" height="10" rx="3" fill="#193819"/>' +
-    '<rect x="25" y="33" width="14" height="8" rx="2" fill="#0f2810"/>' +
-    '<rect x="17" y="22" width="5" height="8" rx="1.5" fill="#c6a04a"/>' +
-    '<rect x="42" y="22" width="5" height="8" rx="1.5" fill="#c6a04a"/>' +
-    '<rect x="17" y="36" width="5" height="8" rx="1.5" fill="#c6a04a"/>' +
-    '<rect x="42" y="36" width="5" height="8" rx="1.5" fill="#c6a04a"/>' +
-    "</svg>";
+    '<svg class="nav-arrow" viewBox="0 0 40 40" width="36" height="36" aria-hidden="true">' +
+    '<polygon points="20,3 34,35 20,27 6,35" fill="#2e9d4f" stroke="#ffffff" stroke-width="3" stroke-linejoin="round"/>' +
+    "</svg>"; /* v72u (Matthew): simple navigation arrow, PCS green + white outline, points the way the car is going */
 
   var PERSON_SVG =
     '<svg viewBox="0 0 64 64" width="34" height="34" aria-hidden="true">' +
@@ -2996,14 +2989,25 @@
     }
   }
 
-  function markerIcon(kind, label, focused) {
+  /* v72u: driver arrow points the way they're heading (bearing from their last two reported positions) */
+  var godHead = {};
+  function godHeading(d) {
+    if (!d || !d.id || !isCoord(d.lat) || !isCoord(d.lng)) return 0;
+    var h = godHead[d.id], p = { lat: +d.lat, lng: +d.lng };
+    if (d.heading != null && isFinite(+d.heading)) { godHead[d.id] = { p: p, deg: +d.heading }; return +d.heading; }
+    if (!h) { godHead[d.id] = { p: p, deg: 0 }; return 0; }
+    var dLat = (p.lat - h.p.lat) * 111000, dLng = (p.lng - h.p.lng) * 111000 * Math.cos(p.lat * Math.PI / 180);
+    if (Math.sqrt(dLat * dLat + dLng * dLng) > 8) { h.deg = (Math.atan2(dLng, dLat) * 180 / Math.PI + 360) % 360; h.p = p; }
+    return h.deg;
+  }
+  function markerIcon(kind, label, focused, deg) {
     var svg = kind === "car" ? CAR_SVG : kind === "paired" ? PAIRED_SVG : PERSON_SVG;
     var cls = "god-marker" + (kind === "paired" ? " paired" : "") + (focused ? " focused" : "");
     return window.L.divIcon({
       className: "god-pin",
       html:
         '<div class="' + cls + '">' +
-          '<div class="face">' + svg + "</div>" +
+          '<div class="face"' + (kind === "car" ? ' style="transform:rotate(' + Math.round(Number(deg) || 0) + 'deg)"' : "") + ">" + svg + "</div>" +
           '<div class="name-tag">' + esc(label) + "</div>" +
         "</div>",
       iconSize: kind === "paired" ? [140, 70] : [110, 64],
@@ -3193,7 +3197,7 @@
       var freeBg = isBackgroundDriver(driver);
       if (freeBg) freeLabel += " · app in background, seen " + agoText(driver.lastSeenAt);
       var freeMarker = window.L.marker(here, {
-        icon: markerIcon("car", freeLabel, freeFocused),
+        icon: markerIcon("car", freeLabel, freeFocused, godHeading(driver)),
         zIndexOffset: freeFocused ? 1000 : (freeBg ? 300 : 500),
         opacity: freeBg ? 0.5 : 1
       }).addTo(markerLayer);
@@ -3431,6 +3435,18 @@
   document.addEventListener("click", function (e) {
     var t = e.target;
     if (!t || !t.closest) return;
+    var oo = t.closest("[data-odo-ovr]");
+    if (oo) { /* v72u: God-only override for a lower opening odometer, reason logged */
+      var oid = oo.getAttribute("data-odo-ovr"), reason = (window.prompt("Reason for allowing a lower opening odometer (logged):") || "").trim();
+      if (reason.length < 3) return;
+      var onow = Date.now(), orq = (hosOvrRow(oid).odoRequest) || {};
+      var orec = { grantedAt: onow, until: onow + 2 * 3600000, reason: reason, by: godWho(), entered: orq.entered, last: orq.last, kind: "odometer-lower" };
+      Promise.all([
+        fetch(baseUrl() + "/rides/HOSOVRDE/" + encodeURIComponent(oid) + ".json", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ odoOverride: orec }) }),
+        fetch(baseUrl() + "/rides/DRVRHOSL/" + encodeURIComponent(oid) + "/overrides/" + onow + ".json", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(orec) })
+      ]).then(hosOvrLoad).catch(function () { window.alert("Couldn't save the override. Try again."); });
+      return;
+    }
     var open = t.closest("[data-hos-ovr]");
     if (open) { state.hosOvrFor = open.getAttribute("data-hos-ovr"); state.hosOvrDraft = { hours: "2", reason: "" }; hosPaint(true); return; }
     if (t.id === "hos-ovr-cancel") { state.hosOvrFor = ""; hosPaint(true); return; }
@@ -3517,6 +3533,14 @@
     var ids = {};
     (state.drivers || []).forEach(function (d) { if (d && d.id) ids[d.id] = d; });
     Object.keys(state.hosOvr || {}).forEach(function (id) { if (!ids[id]) ids[id] = { id: id, name: ((state.hosOvr[id] || {}).request || {}).name || id }; });
+    /* v72u: lower-odometer requests (driver typed an opening odometer below the last reading) */
+    var odoHtml = Object.keys(state.hosOvr || {}).filter(function (id) { var o = state.hosOvr[id] || {}; return o.odoRequest && !(o.odoOverride && Number(o.odoOverride.grantedAt) >= Number(o.odoRequest.at)); }).map(function (id) {
+      var r = state.hosOvr[id].odoRequest;
+      return '<div class="odo-req" style="background:#fee2e2;border:2px solid #b91c1c;border-radius:10px;padding:8px 10px;margin:8px 0;color:#7f1d1d">' + esc(displayName((ids[id] || {}).name || r.name || id, "Driver")) +
+        ": opening odometer <strong>" + esc(String(r.entered)) + "</strong> is lower than the last reading <strong>" + esc(String(r.last)) + "</strong> (" + esc(ctClock(Number(r.at))) + ") " +
+        '<button type="button" class="btn btn-gold" data-odo-ovr="' + esc(id) + '">Allow lower odometer</button></div>';
+    }).join("");
+    gpsHtml = odoHtml + gpsHtml;
     var list = Object.keys(ids).map(function (k) { return ids[k]; }).filter(function (d) {
       var n = hosNeedsGod(d);
       return (d.online && (d.hosLevel === "limit" || d.hosLevel === "30m" || d.hosLevel === "1h" || d.hosLevel === "override")) || n.req || n.resting;
@@ -3536,7 +3560,7 @@
   function hosPanelHtml() {
     var c = state.hosDraft || state.hosCfg, k = state.hosCfg;
     var rows = HOS_FIELDS.map(function (f) {
-      return "<label>" + esc(f[4]) + ' <input id="' + f[0] + '" type="number" min="' + f[2] + '" max="' + f[3] + '" step="' + (f[1] === "breakAfterMin" ? 15 : f[1] === "breakMinutes" || f[1] === "cycleDays" ? 1 : 0.5) + '" value="' + esc(String(c[f[1]])) + '" style="width:5em"></label><br>';
+      return "<label>" + esc(f[4]) + ' <input id="' + f[0] + '" type="number" inputmode="decimal" min="' + f[2] + '" max="' + f[3] + '" step="' + (f[1] === "breakAfterMin" ? 15 : f[1] === "breakMinutes" || f[1] === "cycleDays" ? 1 : 0.5) + '" value="' + esc(String(c[f[1]])) + '" style="width:5em"></label><br>';
     }).join("");
     return '<details class="card" id="hos-config"' + (state.hosOpen ? " open" : "") + '><summary><strong>Hours of service (PCS policy)</strong> · drive ' + esc(String(k.maxDriveHours)) + "h · shift " + esc(String(k.shiftWindowHours)) +
       "h · break " + esc(String(k.breakMinutes)) + "m after " + esc(String(k.breakAfterDriveHours)) + "h · cycle " + esc(String(k.cycleHours)) + "h/" + esc(String(k.cycleDays)) + " days</summary>" +
@@ -3619,7 +3643,7 @@
           "</div>" +
           '<div class="field">' +
             '<label for="hire-pct">Commission %</label>' +
-            '<input id="hire-pct" name="pct" type="number" min="0" max="100" step="1" required value="' + esc(state.hirePct) + '">' +
+            '<input id="hire-pct" name="pct" type="number" inputmode="numeric" pattern="[0-9]*" min="0" max="100" step="1" required value="' + esc(state.hirePct) + '">' +
           "</div>" +
         "</div>" +
         '<p class="hire-error" id="hire-error">' + esc(state.hireError) + "</p>" +
@@ -3828,7 +3852,7 @@
               '<button type="button" class="btn btn-ghost btn-open-driver" data-driver-id="' + esc(d.id) + '">Calendar & history</button>' +
               '<div class="commission-row">' +
                 '<label class="commission-label" for="comm-' + esc(d.id) + '">Commission %</label>' +
-                '<input class="commission-input" id="comm-' + esc(d.id) + '" data-driver-id="' + esc(d.id) + '" type="number" min="0" max="100" step="1" value="' + esc(String(pct)) + '"' + (approval === "approved" ? "" : " disabled") + ">" +
+                '<input class="commission-input" id="comm-' + esc(d.id) + '" data-driver-id="' + esc(d.id) + '" type="number" inputmode="numeric" pattern="[0-9]*" min="0" max="100" step="1" value="' + esc(String(pct)) + '"' + (approval === "approved" ? "" : " disabled") + ">" +
                 '<button type="button" class="btn btn-ghost btn-save-comm" data-driver-id="' + esc(d.id) + '"' + (approval === "approved" ? "" : " disabled") + ">Save</button>" +
                 (approval === "pending"
                   ? '<button type="button" class="btn btn-gold btn-approve" data-driver-id="' + esc(d.id) + '">Approve</button>' +
@@ -4913,7 +4937,7 @@
                 "</select>" +
                 '<button type="button" class="btn btn-gold btn-assign-ride" data-event-id="' + esc(r.id) + '"' + assignDisabled + ">Assign</button>" +
                 '<label class="fare-label" for="fare-' + esc(r.id) + '">Fare before tax $</label>' +
-                '<input id="fare-' + esc(r.id) + '" class="day-fare" data-event-id="' + esc(r.id) + '" type="number" min="0" step="0.01" value="' + esc(fareVal) + '"' + completeDisabled + ">" +
+                '<input id="fare-' + esc(r.id) + '" class="day-fare" data-event-id="' + esc(r.id) + '" type="number" inputmode="decimal" min="0" step="0.01" value="' + esc(fareVal) + '"' + completeDisabled + ">" +
                 '<button type="button" class="btn btn-ghost btn-complete-ride" data-event-id="' + esc(r.id) + '"' + completeDisabled + ">Complete + credit</button>" +
               "</div>"
             )) +
@@ -4960,6 +4984,7 @@
       var vehicle = [carSrc.carYear, carSrc.carMake, carSrc.carModel].filter(Boolean).join(" ");
       if (carSrc.carPlate) vehicle += (vehicle ? " · " : "") + String(carSrc.carPlate);
       var ymds = Object.keys(days).filter(function (k) { return /^\d{4}-\d{2}-\d{2}$/.test(k) && days[k] && typeof days[k] === "object"; }).sort();
+      var seenShift = {}; /* v72u: a shift saved again on a later day (ended after midnight) counts once, on its start day */
       ymds.forEach(function (ymd, idx) {
         var row = days[ymd];
         var segs = [];
@@ -4967,6 +4992,9 @@
         Object.keys(sh).forEach(function (k) {
           var x = sh[k];
           if (!x || typeof x !== "object") return;
+          var sk = String(dmNum(x.shiftStartedAt) || dmNum(k) || k);
+          if (seenShift[sk]) return;
+          seenShift[sk] = 1;
           segs.push({ start: dmNum(x.startOdo), end: dmNum(x.endOdo), at: dmNum(x.shiftStartedAt) || dmNum(k) || 0, open: false });
         });
         var rs = dmNum(row.startOdometer), re = dmNum(row.endOdometer);
