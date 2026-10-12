@@ -3205,9 +3205,9 @@
      Default = Houston Code Ch. 46 (limousine drivers): max 12 h DRIVING in any rolling 24 h. On-duty caps optional (0 = off). */
   /* PCS HOS policy (Matthew, CDL / Motive "USA Property 70 hour / 8 day"): 11 h drive, 14 h shift, 30-min break after 8 h
      driving, 70 h / 8 days; 10 h off resets drive + shift, 34 h off restarts the cycle. All editable here. */
-  var HOS_DEF = { maxDriveHours: 11, shiftWindowHours: 14, breakAfterDriveHours: 8, breakMinutes: 30, cycleHours: 70, cycleDays: 8, resetHours: 10, restartHours: 34, breakAfterMin: 150 };
+  var HOS_DEF = { maxDriveHours: 11, shiftWindowHours: 14, breakAfterDriveHours: 8, breakMinutes: 30, cycleHours: 70, cycleDays: 8, resetHours: 10, restartHours: 34, breakAfterMin: 150, breakMinOnDutyHours: 3 };
   var HOS_FIELDS = [["hos-drive", "maxDriveHours", 0, 24, "DRIVE: max moving time (hours, 0 = off)"], ["hos-shift", "shiftWindowHours", 0, 24, "SHIFT: on-duty window (hours, 0 = off)"],
-    ["hos-brkh", "breakAfterDriveHours", 0, 24, "BREAK: required after this many hours of driving (0 = off)"], ["hos-brkm", "breakMinutes", 5, 120, "BREAK length (minutes)"],
+    ["hos-brkh", "breakAfterDriveHours", 0, 24, "BREAK: required after this many hours of driving (0 = off)"], ["hos-brkm", "breakMinutes", 5, 120, "BREAK length (minutes)"], ["hos-brkmin", "breakMinOnDutyHours", 0, 14, "BREAK can start only after this many hours on duty (0 = any time)"],
     ["hos-cyc", "cycleHours", 0, 200, "CYCLE: max on-duty hours (0 = off)"], ["hos-cycd", "cycleDays", 1, 14, "CYCLE rolling days"],
     ["hos-reset", "resetHours", 1, 48, "Off-duty hours that reset DRIVE + SHIFT"], ["hos-restart", "restartHours", 1, 96, "Off-duty hours that restart the CYCLE"],
     ["hos-break", "breakAfterMin", 0, 600, "Soft take-a-break nudge after continuous driving (minutes, 0 = off)"]];
@@ -4870,6 +4870,11 @@
         segs.forEach(function (s) { if (s.start != null && s.end != null && s.end >= s.start) { odo += s.end - s.start; odoCount += 1; } });
         var odoMiles = odoCount ? dmRound1(odo) : null;
         var tracked = dmNum(row.gpsMiles);
+        (function () { /* v72x: mileage-only shift entries (owner reset / split) count as tracked miles too */
+          var sh0 = row.shifts && typeof row.shifts === "object" ? row.shifts : {}, add = 0;
+          Object.keys(sh0).forEach(function (k) { var x = sh0[k]; if (x && (x.mileageOnly || x.hosOwnerReset)) add += dmNum(x.trackedMiles) || dmNum(x.odoMiles) || 0; });
+          if (add) tracked = Math.round(((tracked || 0) + add) * 100) / 100;
+        })();
         var filled = dmNum(row.filledMiles);
         var online = dmNum(row.onlineMs);
         var openStart = dmNum(row.shiftStartAt);

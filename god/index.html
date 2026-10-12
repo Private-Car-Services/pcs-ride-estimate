@@ -15,13 +15,13 @@
   <link rel="icon" href="./icon-192.png">
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="">
   <link rel="stylesheet" href="./styles.css?v=55">
-  <style>/* v72w: every God-mode field readable: black text on white (incl. HOS override Reason) */ input:not([type=checkbox]):not([type=radio]):not([type=range]):not([type=button]):not([type=submit]):not([type=color]), select, textarea { color:#000 !important; -webkit-text-fill-color:#000 !important; background-color:#fff !important; caret-color:#000; opacity:1; } input::placeholder, textarea::placeholder { color:#555 !important; -webkit-text-fill-color:#555 !important; } select option { color:#000; background:#fff; }</style>
+  <style>/* v72w: every God-mode field readable: black text on white (incl. HOS override Reason) */ input:not([type=checkbox]):not([type=radio]):not([type=range]):not([type=button]):not([type=submit]):not([type=color]), select, textarea { color:#000 !important; -webkit-text-fill-color:#000 !important; background-color:#fff !important; caret-color:#000; opacity:1; } input::placeholder, textarea::placeholder { color:#555 !important; -webkit-text-fill-color:#555 !important; } select option { color:#000; background:#fff; }@media (max-width: 640px) { /* v72x: iPhone header fits (Sign out visible), no sideways scroll */ html, body { max-width: 100%; overflow-x: hidden; } .topbar { display: flex !important; flex-wrap: wrap !important; gap: 8px; align-items: center; } .topbar > div:first-child { flex: 1 1 100%; min-width: 0; } .top-actions { display: flex !important; flex-wrap: wrap !important; gap: 6px; width: 100%; min-width: 0; justify-content: flex-start; } .top-actions > * { min-width: 0; max-width: 100%; } .top-actions .status-pill { flex: 1 1 100%; white-space: normal !important; } .top-actions #god-push-btn { flex: 1 1 auto; } .top-actions #god-logout { flex: 0 0 auto; white-space: nowrap; } .shell, .workspace, .side, .main { min-width: 0 !important; max-width: 100%; } }</style>
 </head>
 <body>
   <div id="root"></div>
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
   <script src="./god-auth.js?v=54"></script>
-  <script src="../app/version.js?v=72w"></script>
-  <script src="./god.js?v=72w1"></script>
+  <script src="../app/version.js?v=72x"></script>
+  <script src="./god.js?v=72x"></script>
 </body>
 </html>
