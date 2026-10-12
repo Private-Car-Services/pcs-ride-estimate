@@ -11080,6 +11080,30 @@
     meterWrite(historyUrl(driverPresenceId(), M.code), "PATCH", patch);
   }
 
+  /* v72x.1 (Matthew): TEST payment = practice ride. Labeled Test everywhere; its money is zeroed out of the ride log, day stats,
+     driver history (weekly reports, the 30% owed to PCS, Penny's finance data). Shift miles/hours are logged normally. */
+  function meterMarkTest(M, now) {
+    var list = readRideLog(), old = null;
+    list.forEach(function (e) { if (e && e.code === M.code) old = e; });
+    var patch = { isTest: true, testRide: true, paymentStatus: "paid_other", paidVia: "test", testFareCents: old ? Number(old.fareTotal) || 0 : Number(M.fare.total) || 0,
+      fareSub: 0, fareTax: 0, fareTotal: 0, commissionCents: 0, tipCents: 0, cashReceivedCents: null, changeCents: null, riderName: "TEST ride" };
+    if (old) {
+      var day = old.day || M.logDay;
+      if (day) {
+        var stats = readDayStats(day);
+        stats.completed = Math.max(0, (Number(stats.completed) || 0) - 1);
+        stats.commissionCents = Math.max(0, (Number(stats.commissionCents) || 0) - (Number(old.commissionCents) || 0));
+        stats.rideTotalCents = Math.max(0, (Number(stats.rideTotalCents) || 0) - (Number(old.fareTotal) || 0));
+        stats.tipCents = Math.max(0, (Number(stats.tipCents) || 0) - (Number(old.tipCents) || 0));
+        writeDayStats(day, stats);
+      }
+      Object.assign(old, patch);
+      writeRideLog(list);
+    }
+    meterWrite(historyUrl(driverPresenceId(), M.code), "PATCH", patch);
+    meterWrite(rideUrl(M.code), "PATCH", { isTest: true, testRide: true, paidOtherCents: 0, tipCents: 0, updatedAt: now });
+    meterIndexPatch(M, "paid_other", { isTest: true, paidVia: "test" });
+  }
   function meterFinishEnd() {
     var M = state.meter;
     if (!M || M.status !== "running") return;
@@ -11289,9 +11313,11 @@
     var tip = meterTipFromChoice(M, choice, d.tip);
     var cash = method === "cash";
     var received = meterCentsOf(d.amount);
+    if (method === "test") { choice = "0"; tip = 0; received = fare; } /* v72x.1 Test ride: nothing collected */
     /* fare part: cash -> the fare (extra cash is change, never a tip); other -> the amount collected, max the fare */
     var amount = cash ? (isFinite(received) ? fare : NaN) : (isFinite(received) ? Math.min(received, fare) : NaN);
     var change = cash && isFinite(received) ? received - fare - tip : 0;
+    if (method === "test") amount = 0;
     return { fare: fare, method: method, cash: cash, choice: choice, received: received, amount: amount, tip: tip, change: change };
   }
   function meterMarkOther() {
@@ -11328,6 +11354,7 @@
         paidOtherBy: M.driverName, paidOtherByDriverId: M.driverId, updatedAt: now });
       meterIndexPatch(M, "paid_other", { paymentStatus: "paid_other",
         paidOther: { at: now, method: method, amountCents: amount, tipCents: tip, cashReceivedCents: received, changeCents: changeC, by: M.driverName, driverId: M.driverId, fareTotal: M.fare.total } });
+      if (method === "test") meterMarkTest(M, now); else
       meterUpdatePayWeek(M, { tipCents: tip, paymentStatus: "paid_other", paidVia: method, cashReceivedCents: received, changeCents: changeC });
       render();
     };
@@ -11547,7 +11574,7 @@
   }
   function meterOtherHtml(M) {
     var draft = state.meterOtherDraft || {};
-    var methods = [["cash", "Cash"], ["card_machine", "Card machine"], ["other", "Other"]];
+    var methods = [["cash", "Cash"], ["card_machine", "Card machine"], ["other", "Other"], ["test", "Test"]]; /* v72x.1: Test = practice ride, no money */
     var r = meterOtherRead(true);
     var cash = r.cash;
     var sig = [r.method, r.received, r.tip].join("|");
@@ -11576,7 +11603,10 @@
       methods.map(function (m) {
         return '<button class="btn secondary meter-method" type="button" data-method="' + m[0] + '" aria-pressed="' + (state.meterOtherMethod === m[0] ? "true" : "false") + '">' + m[1] + "</button>";
       }).join("") + "</div>" +
-      (r.method
+      (r.method === "test"
+        ? '<p class="fine" id="meter-test-note" style="font-weight:700;color:#f0d48a">TEST ride: no money collected. Not counted in earnings, weekly reports, the PCS share or finance data. Miles and hours still log normally.</p>' +
+          '<button class="btn" type="button" id="meter-other-yes">Review</button>'
+        : r.method
         ? '<div class="meter-tip-box" id="meter-tip-box"><p class="fine" id="meter-tip-summary" style="margin:4px 0 2px"><strong>Tip:</strong> ' + /* v72t: presets always visible */
             esc(r.choice === "0" ? "No tip" : r.choice === "custom" ? "Custom " + money(r.tip) : r.choice + "% \u00b7 " + money(r.tip)) + "</p>" +
           '<div class="meter-tips" role="group" aria-label="Tip">' + chip("0", "No tip") +

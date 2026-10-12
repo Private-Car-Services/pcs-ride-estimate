@@ -1,14 +1,15 @@
 /* PCS app version: the ONE place to change it each release (v72x). Loaded by rider, driver, God mode and meter. */
 (function () {
-  var APP_VERSION = "v72x";
+  var APP_VERSION = "v72x.1";
   window.PCS_APP_VERSION = APP_VERSION;
   /* "v72r" -> [72, "r"]; returns <0 if a is older than b. Unknown/missing counts as oldest. */
   window.pcsVersionCmp = function (a, b) {
-    function p(v) { var m = /^v?(\d+)([a-z]*)/i.exec(String(v || "")); return m ? [Number(m[1]), m[2].toLowerCase()] : [-1, ""]; }
+    function p(v) { var m = /^v?(\d+)([a-z]*)(?:\.(\d+))?/i.exec(String(v || "")); return m ? [Number(m[1]), m[2].toLowerCase(), Number(m[3] || 0)] : [-1, "", 0]; }
     var x = p(a), y = p(b);
     if (x[0] !== y[0]) return x[0] - y[0];
     if (x[1].length !== y[1].length) return x[1].length - y[1].length;
-    return x[1] < y[1] ? -1 : x[1] > y[1] ? 1 : 0;
+    if (x[1] !== y[1]) return x[1] < y[1] ? -1 : 1;
+    return x[2] - y[2]; /* v72x.1: hotfix number */
   };
   function addFooter() {
     if (!document.body || document.getElementById("pcs-app-version")) return;
