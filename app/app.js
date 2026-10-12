@@ -3790,11 +3790,26 @@
     /* BREAK: driving since the last 30+ min without driving (a 10 h reset counts too) */
     var lastDrvEnd = drv.length ? Number(drv[drv.length - 1][1]) : 0;
     var BRK = c.breakMinutes * 60000, brkAnchor = dutyStart || 0;
-    if (!lastDrvEnd || now - lastDrvEnd >= BRK) brkAnchor = now;
-    else for (i = drv.length - 1; i > 0; i -= 1) { if (Number(drv[i][0]) - Number(drv[i - 1][1]) >= BRK) { brkAnchor = Math.max(brkAnchor, Number(drv[i][0])); break; } }
-    /* v72x: a logged Break of 30+ consecutive minutes also counts (even if GPS jitter logged a little "driving" in it);
-       shorter breaks and short stops never reset the Break clock and are never added together */
-    try { hosBreaks(now).forEach(function (b) { if (Number(b[1]) - Number(b[0]) >= BRK && Number(b[1]) <= now && Number(b[1]) > brkAnchor) brkAnchor = Number(b[1]); }); } catch (e) {}
+    /* v72y owner rule (7:38 AM): a break/stop only counts as THE 30-min break if it starts after breakMinOnDutyHours (default 3 h) on duty */
+    var brkNeedOn = (Number(c.breakMinOnDutyHours) || 0) * H;
+    /* v72y (Matthew 7:40 AM): ...and only if 3 h have passed since shift start OR since the LAST QUALIFYING break, so two
+       qualifying breaks are never less than 3 h apart. Every break still pauses Shift and Cycle (brks above). */
+    var brkCands = [];
+    for (i = 1; i < drv.length; i += 1) { if (Number(drv[i][0]) - Number(drv[i - 1][1]) >= BRK) brkCands.push([Number(drv[i - 1][1]), Number(drv[i][0])]); }
+    if (lastDrvEnd && now - lastDrvEnd >= BRK) brkCands.push([lastDrvEnd, now]);
+    try { brks.forEach(function (b) { var bs = Number(b[0]), be = Math.min(Number(b[1]), now); if (be - bs >= BRK) brkCands.push([bs, be]); }); } catch (e) {}
+    brkCands.sort(function (a, b) { return a[0] - b[0]; });
+    var brkQualEnds = [];
+    var brkLastQualBefore = function (t) { var a = dutyStart || 0; brkQualEnds.forEach(function (e) { if (e <= t && e > a) a = e; }); return a; };
+    var brkQual = function (t) { if (!brkNeedOn || !dutyStart) return true; return Number(t) - brkLastQualBefore(Number(t)) >= brkNeedOn; };
+    var qEnd = 0;
+    brkCands.forEach(function (cd) {
+      if (dutyStart && cd[1] <= dutyStart) return;
+      if (qEnd && cd[0] < qEnd) { if (cd[1] > qEnd) { qEnd = cd[1]; brkQualEnds[brkQualEnds.length - 1] = qEnd; } return; } /* overlaps the qualifying break */
+      if (brkQual(cd[0])) { qEnd = cd[1]; brkQualEnds.push(qEnd); }
+    });
+    if (!lastDrvEnd) brkAnchor = now;
+    else if (qEnd) brkAnchor = Math.max(brkAnchor, qEnd);
     var sinceBreakMs = hosOverlap(drv, brkAnchor, now);
     var cycleMs = Math.max(0, hosOverlap(segs, cycleFrom, now) - hosOverlap2(segs, brks, cycleFrom, now));
     var clocks = {
@@ -3833,12 +3848,16 @@
     var movingNow = !!(hosDrvPrev && hosDrvPrev.moving && now - Number(hosDrvPrev.at || 0) < 120000);
     var statusBreak = false; try { statusBreak = qOnBreak(); } catch (e) {}
     var stillMs = movingNow ? 0 : (lastDrvEnd ? now - lastDrvEnd : (st ? now - st : 0));
-    var onBreak = !!st && (statusBreak || stillMs >= 120000);
-    var breakTakenMs = onBreak ? Math.min(stillMs, BRK) : 0;
+    /* v72y (Matthew 7:33 AM): "On break" ONLY when the driver tapped Break. Being stopped is not a break on screen
+       (a 30+ min stop still resets "Break due in" through the driving-gap rule above). */
+    var onBreak = !!st && statusBreak;
+    var breakTakenMs = 0;
     if (statusBreak) { /* v72x: on Break status the break runs from when Break was tapped (server-backed log) */
       try { var lb = hosReadBrk(), bs = 0; Object.keys(lb).forEach(function (k) { if (lb[k] && lb[k].open) bs = Number(lb[k].s) || 0; }); if (bs) breakTakenMs = Math.min(BRK, Math.max(breakTakenMs, now - bs)); } catch (e) {}
     }
-    return { clocks: clocks, onBreak: onBreak, breakTakenMs: breakTakenMs, breakNeedMs: BRK, statusBreak: statusBreak, restUntil: restUntil, dutyStart: dutyStart, cycleFrom: cycleFrom, sinceBreakMs: sinceBreakMs,
+    var brkEarly = false; /* v72y: on Break before the 3 h mark -> pauses Shift/Cycle but won't count as the 30-min break */
+    if (statusBreak) { try { var lb2 = hosReadBrk(), bs2 = 0; Object.keys(lb2).forEach(function (k) { if (lb2[k] && lb2[k].open) bs2 = Number(lb2[k].s) || 0; }); brkEarly = !brkQual(bs2 || now); } catch (e) {} }
+    return { clocks: clocks, onBreak: onBreak, breakTakenMs: breakTakenMs, breakEarly: brkEarly, breakNeedMs: BRK, statusBreak: statusBreak, restUntil: restUntil, dutyStart: dutyStart, cycleFrom: cycleFrom, sinceBreakMs: sinceBreakMs,
       streakAt: streakAt, contMs: contMs, needBreak: needBreak, override: ovr ? hosOvr.override : null, onShift: !!st,
       driveMs: driveMs, shiftMs: shiftMs, windowMs: cycleMs, cycleMs: cycleMs, leftMs: left, level: level, by: by, cfg: c };
   }
@@ -4129,6 +4148,7 @@
     Object.keys(sh).forEach(function (k) { var x = sh[k]; if (x && (x.mileageOnly || x.hosOwnerReset)) { var m = Number(x.trackedMiles); if (!(m >= 0)) m = Number(x.odoMiles) || 0; t += m; } });
     return Math.round(t * 100) / 100;
   }
+  function milesTodayTotal() { return (Number(state.milesToday) || 0) + milesOnlyExtra(todayMilesRow()); }
   function milesTodayLabel() {
     var n = (Number(state.milesToday) || 0) + milesOnlyExtra(todayMilesRow());
     var spd = speedLabel();
@@ -4239,8 +4259,8 @@
       '<div class="card miles-gate" id="miles-gate">' +
       '<p class="tag">' + esc(tag) + "</p>" +
       '<p class="lede">' + esc(lede) + "</p>" +
-      (closed && Number(state.milesToday) > 0
-        ? '<p class="fine">Today so far (before this shift): ' + Number(state.milesToday).toFixed(1) + " mi</p>"
+      (closed && milesTodayTotal() > 0 /* v72y: incl. mileage-only entries (e.g. the 74 mi 4:30-5:50 AM) */
+        ? '<p class="fine">Today so far (before this shift): ' + milesTodayTotal().toFixed(1) + " mi</p>"
         : "") +
       '<form id="miles-start-form" autocomplete="off">' +
       (stale
@@ -15776,7 +15796,7 @@
     ensureQueueStyle();
     var auto = qAutoBusy(), brk = qOnBreak(), busy = auto || qManualBusy();
     var tok = qToken();
-    var brkWait = brk ? 0 : brkAvailInMs(); /* v72x */
+    var brkEarly = false; try { brkEarly = brk && !!hosStatus(Date.now()).breakEarly; } catch (e) {} /* v72y */
     return (
       '<div class="card q-avail q-three' + (busy ? " q-busy" : "") + (brk ? " q-break" : "") + '" id="q-avail">' +
       '<p class="tag">Your status</p>' +
@@ -15784,11 +15804,11 @@
       '<span class="q-knob" aria-hidden="true"></span>' +
       '<button type="button" role="radio" class="q-opt" id="q-set-available" aria-checked="' + (busy || brk ? "false" : "true") + '"' + (auto || !tok ? " disabled" : "") + ">Available</button>" +
       '<button type="button" role="radio" class="q-opt" id="q-set-onride" aria-checked="' + (busy ? "true" : "false") + '"' + (auto || !tok ? " disabled" : "") + ">On a ride</button>" +
-      '<button type="button" role="radio" class="q-opt" id="q-set-break" aria-checked="' + (brk ? "true" : "false") + '"' + (auto || !tok || (!brk && brkWait > 0) ? " disabled" : "") + ">Break</button>" +
+      '<button type="button" role="radio" class="q-opt" id="q-set-break" aria-checked="' + (brk ? "true" : "false") + '"' + (auto || !tok ? " disabled" : "") + ">Break</button>" + /* v72y: Break always selectable (owner 7:38 AM) */
       "</div>" +
       (tok ? "" : qDriverAuthHtml()) +
       (qd.brkMsg ? '<p class="fine" id="q-break-msg" role="alert" style="color:#b91c1c;font-weight:700">' + esc(qd.brkMsg) + "</p>" : "") +
-      (brkWait > 0 ? '<p class="fine" id="q-break-wait">Break available in ' + esc(hosFmt(brkWait)) + " (after " + esc(String(hosCfg.breakMinOnDutyHours)) + " h on duty)</p>" : "") +
+      (brk && brkEarly ? '<p class="fine" id="q-break-early">Won\u2019t count as your 30-min break until ' + esc(String(hosCfg.breakMinOnDutyHours)) + " h on duty since your last break. Shift and Cycle are paused.</p>" : "") +
       '<p class="fine" id="q-avail-note">' + esc(auto
         ? "Set automatically during your PCS ride. You switch back to Available when it ends."
         : brk ? "On break: your Break clock is running. Ride offers still come in; accepting one ends the break. 30 minutes of break resets your Break clock."
@@ -15979,7 +15999,6 @@
     }
     if (t.id === "q-set-available") { if (qManualBusy() || qOnBreak()) qSetManualBusy(false); return; }
     if (t.id === "q-set-onride") { if (!qManualBusy() || qOnBreak()) qSetManualBusy(true); return; }
-    if (t.id === "q-set-break" && !qOnBreak() && brkAvailInMs() > 0) { render(); return; } /* v72x */
     if (t.id === "q-set-break") { if (!qOnBreak()) { if (brkStoppedOk(Date.now())) { qd.brkMsg = ""; qSetBreak(true); } else { qd.brkMsg = "Pull over and stop to start a break"; render(); } } return; }
     if (t.id === "q-join") {
       qr.join = true;
@@ -16022,7 +16041,7 @@
     st.id = "q-style";
     st.textContent =
       ".q-avail .q-switch{position:relative;display:flex;background:rgba(255,255,255,.07);border-radius:999px;padding:4px;margin:6px 0 8px;border:1px solid rgba(255,255,255,.22)}" +
-      ".q-avail .q-opt{position:relative;z-index:1;flex:1;border:0;background:transparent;padding:12px 8px;font-weight:700;font-size:16px;border-radius:999px;color:#dfe7f1;cursor:pointer}" +
+      ".q-avail .q-opt{position:relative;z-index:1;flex:1;border:0;background:transparent;padding:12px 8px;font-weight:700;font-size:16px;border-radius:999px;color:#dfe7f1;cursor:pointer}#q-avail,#q-avail *{-webkit-user-select:none;user-select:none;-webkit-touch-callout:none;-webkit-tap-highlight-color:transparent}.q-opt:disabled,.q-opt[data-locked]{opacity:.38;color:#9aa4b2;cursor:not-allowed;filter:grayscale(1)}.q-lock{font-size:.85em}" +
       ".q-avail .q-opt[disabled]{cursor:default;opacity:.75}" +
       ".q-avail .q-knob{position:absolute;top:4px;bottom:4px;left:4px;width:calc(50% - 4px);border-radius:999px;background:#2e9d4f;transition:transform .22s ease,background .22s ease}" +
       ".q-avail .q-opt[aria-checked=true]{color:#fff}" +
