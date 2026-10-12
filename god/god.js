@@ -1836,82 +1836,44 @@
     return "../app/driver/ride-chime.mp3";
   })();
 
-  /* ===== v57 ride-alert sound engine (same code in app.js and driver/ride-alert.js) =====
-     iPhone/iPad home-screen app: sound only works after a real tap, and iOS can silently drop Web Audio after an
-     app switch or screen lock. So, belt and suspenders:
-       - EVERY touch / click / key (not only the gold bar) synchronously creates/resumes the AudioContext, plays a
-         1-sample silent buffer, and primes an HTMLAudioElement (muted play, then pause + rewind) inside the gesture.
-         iOS then lets that same element play later with no tap.
-       - A ride alert plays through BOTH: the decoded chime buffer looping on the AudioContext AND the primed
-         <audio> element (loop, volume 1). Stop both on Accept / Deny / hide.
-       - If play is blocked (NotAllowedError), a big red "Tap here to hear ride alerts" banner shows; tapping it
-         unlocks and plays the chime right away.
-       - The gold "Tap to turn on ride alert sound" bar stays at the top until a chime has really played in THIS
-         page session (AudioContext running AND <audio>.play() resolved). Nothing is saved: iOS forgets the unlock on
-         every reopen. It comes back after an app switch if the AudioContext did not come back.
-     o = { url, muted(), wantBar(), onUi() } */
+  /* v72w (Matthew: God mode on iPhone stopped his music): Web Audio ONLY. No <audio> element (an HTMLAudioElement,
+     even muted, takes the iPhone's media session and pauses Music/Spotify), no looping silent keep-alive, no Media
+     Session. audioSession "ambient" always (mixes with other audio; never playback or transient).
+     The AudioContext is suspended ~1 s after every chime / unlock tap so nothing holds audio between alerts.
+     A waiting ride repeats a short one-shot chime every 2.8 s until stopAlert(). o = { url, muted(), wantBar(), onUi() } */
   function pcsAlertAudio(o) {
     var AC = window.AudioContext || window.webkitAudioContext;
-    var ctx = null;
-    var el = null;
-    var elPrimed = false;   /* <audio> was play()-ed inside a gesture without NotAllowedError */
-    var elHeard = false;    /* <audio>.play() of the real (unmuted) chime resolved in this page session */
-    var buf = null;
-    var loading = null;
-    var failedAt = 0;
-    var alerting = false;
-    var alertGen = 0;
-    var loopSrc = null;
-    var loopStartedRunning = false; /* a loop started while suspended/interrupted is restarted once the context runs */
-    var loopNodes = [];
-    var oscNodes = [];
-    var watch = null;
-    var buzzing = false;
-    var blocked = false;
-    var testing = false;
-    var testTimer = null;
-    var stats = { unlocks: 0, elPlays: 0, bufStarts: 0, oscBursts: 0, blocked: 0 };
+    var ctx = null, buf = null, loading = null, failedAt = 0;
+    var alerting = false, testing = false, blocked = false, heard = false, unlockedOnce = false;
+    var nodes = [], watch = null, idleTimer = null, testTimer = null, buzzing = false;
+    var sessionMode = "ambient";
+    var stats = { unlocks: 0, chimes: 0, oscBursts: 0, blocked: 0, suspends: 0 };
     function noop() {}
     function isMuted() { try { return !!(o.muted && o.muted()); } catch (e) { return false; } }
-    /* audioSession first (before any AudioContext), only if the API exists. Never playAndRecord (earpiece on iPhone). */
-    function setSession() {
-      try {
-        var s = navigator.audioSession;
-        if (s && s.type !== "playback") s.type = "playback";
-      } catch (e) {}
+    function setSession(mode) {
+      if (mode) sessionMode = mode;
+      try { var s = navigator.audioSession; if (s && s.type !== sessionMode) s.type = sessionMode; } catch (e) {}
     }
     function makeCtx() {
       if (ctx || !AC) return ctx;
       setSession();
-      try {
-        ctx = new AC();
-        try { ctx.onstatechange = function () { if (alerting) startCtxLoop(); ui(); }; } catch (e1) {}
-      } catch (e) { ctx = null; }
+      try { ctx = new AC(); try { ctx.onstatechange = function () { ui(); }; } catch (e1) {} } catch (e) { ctx = null; }
       return ctx;
     }
-    function makeEl() {
-      if (el) return el;
-      if (typeof Audio !== "function") return null;
-      try {
-        el = new Audio();
-        el.preload = "auto";
-        el.setAttribute("playsinline", "");
-        el.setAttribute("webkit-playsinline", "");
-        try { el.playsInline = true; } catch (e1) {}
-        el.src = o.url;
-        try { el.load(); } catch (e2) {}
-      } catch (e) { el = null; }
-      return el;
-    }
-    function ctxRunning() { return !!ctx && ctx.state === "running"; }
-    /* "Really heard": AudioContext running AND the <audio> element's play() resolved. */
-    function ready() { return ctxRunning() && elHeard; }
+    function running() { return !!ctx && ctx.state === "running"; }
+    function ready() { return heard || (unlockedOnce && !!ctx && ctx.state !== "closed"); }
     function resumeCtx() {
-      if (!ctx || ctx.state === "running" || ctx.state === "closed" || !ctx.resume) return;
-      try {
-        var p = ctx.resume();
-        if (p && p.then) p.then(function () { ui(); if (alerting) startCtxLoop(); }, noop);
-      } catch (e) {}
+      if (!ctx || ctx.state === "running" || ctx.state === "closed" || !ctx.resume) return null;
+      try { var p = ctx.resume(); if (p && p.then) p.then(function () { ui(); }, noop); return p; } catch (e) { return null; }
+    }
+    function goIdle(delay) {
+      if (idleTimer) clearTimeout(idleTimer);
+      idleTimer = setTimeout(function () {
+        idleTimer = null;
+        if (alerting || testing) return;
+        try { if (ctx && ctx.state === "running" && ctx.suspend) { ctx.suspend(); stats.suspends++; } } catch (e) {}
+        setSession("ambient");
+      }, delay == null ? 1200 : delay);
     }
     function load() {
       if (buf) return Promise.resolve(buf);
@@ -1923,170 +1885,52 @@
         if (!res || !res.ok) throw new Error("ride-chime " + (res && res.status));
         return res.arrayBuffer();
       }).then(function (ab) {
-        return new Promise(function (resolve, reject) {
-          var p = c.decodeAudioData(ab, resolve, reject); /* callback form for older iOS Safari */
-          if (p && p.then) p.then(resolve, reject);
-        });
-      }).then(function (b) {
-        if (!b) throw new Error("ride-chime decode");
-        buf = b;
-        failedAt = 0;
-        loading = null;
-        if (alerting) startCtxLoop();
-        return b;
-      }).catch(function () {
-        failedAt = Date.now();
-        loading = null;
-        return null;
-      });
+        return new Promise(function (resolve, reject) { var p = c.decodeAudioData(ab, resolve, reject); if (p && p.then) p.then(resolve, reject); });
+      }).then(function (b) { buf = b; failedAt = 0; loading = null; return b; })
+        .catch(function () { failedAt = Date.now(); loading = null; return null; });
       return loading;
     }
-    function primeEl() {
-      var e = el;
-      if (!e || alerting || testing || !e.paused) return;
-      var p = null;
-      e.muted = true;
-      try { p = e.play(); } catch (x) { p = null; }
-      try { e.pause(); } catch (x2) {}
-      try { e.currentTime = 0; } catch (x3) {}
-      e.muted = false;
-      try { e.volume = 1; } catch (x4) {}
-      if (p && p.then) {
-        p.then(function () {
-          elPrimed = true;
-          if (!alerting && !testing) { try { e.pause(); e.currentTime = 0; } catch (x5) {} }
-        }, function (err) {
-          /* AbortError = our own pause() won the race: the gesture was accepted. NotAllowedError = not a real gesture. */
-          if (err && err.name === "NotAllowedError") return;
-          elPrimed = true;
-        });
-      } else {
-        elPrimed = true;
-      }
+    function track(list, last) {
+      list.forEach(function (n) { nodes.push(n); });
+      try { last.onended = function () { nodes = nodes.filter(function (n) { return list.indexOf(n) === -1; }); list.forEach(function (n) { try { n.disconnect(); } catch (e) {} }); }; } catch (e) {}
     }
-    /* Runs synchronously inside every user gesture. opts.noPrime: caller plays the element itself right after. */
-    function unlock(opts) {
-      stats.unlocks++;
-      setSession();
-      makeCtx();
-      if (ctx) {
-        resumeCtx();
-        try {
-          var s = ctx.createBufferSource();
-          s.buffer = ctx.createBuffer(1, 1, 22050);
-          s.connect(ctx.destination);
-          s.start(0);
-        } catch (e) {}
-        load();
-      }
-      makeEl();
-      if (alerting) {
-        /* a ride is ringing: this tap makes it audible right now */
-        if (el && (el.paused || blocked)) playEl(false);
-        startCtxLoop();
-      } else if (!(opts && opts.noPrime)) {
-        primeEl();
-      }
-    }
-    function onBlocked() {
-      blocked = true;
-      stats.blocked++;
-      ui();
-    }
-    function playEl(isTest) {
-      var e = makeEl();
-      if (!e) return null;
-      var gen = alertGen;
-      e.loop = !isTest;
-      e.muted = false;
-      try { e.volume = 1; } catch (x0) {}
-      try { e.currentTime = 0; } catch (x1) {}
-      var p = null;
-      try { p = e.play(); } catch (x2) { onBlocked(); return null; }
-      stats.elPlays++;
-      if (p && p.then) {
-        p.then(function () {
-          elPrimed = true;
-          elHeard = true;
-          blocked = false;
-          if (!isTest && (!alerting || gen !== alertGen)) { try { e.pause(); e.currentTime = 0; } catch (x3) {} }
-          ui();
-        }, function (err) {
-          if (err && err.name === "AbortError") return;
-          if (!isTest && (!alerting || gen !== alertGen)) return;
-          onBlocked();
-        });
-      } else {
-        elHeard = true;
-        ui();
-      }
-      return p;
-    }
-    function trackOsc(nodes, last) {
-      nodes.forEach(function (n) { oscNodes.push(n); });
-      try {
-        last.onended = function () {
-          oscNodes = oscNodes.filter(function (n) { return nodes.indexOf(n) === -1; });
-          nodes.forEach(function (n) { try { n.disconnect(); } catch (e) {} });
-        };
-      } catch (e) {}
-    }
-    /* Fallback (file not decoded yet / failed): same four bell notes from oscillators. Never the old sawtooth siren. */
-    function oscBurst(isTest) {
+    function oscBurst() {
       if (!ctx) return;
       try {
         var notes = [[1046.5, 0], [1318.5, 0.18], [1568, 0.36], [1318.5, 0.58]];
-        var now = ctx.currentTime + 0.01;
-        var master = ctx.createGain();
-        master.gain.value = 0.95;
-        master.connect(ctx.destination);
-        var nodes = [master];
-        var last = null;
+        var now = ctx.currentTime + 0.01, master = ctx.createGain(), list = [master], last = null;
+        master.gain.value = 0.95; master.connect(ctx.destination);
         notes.forEach(function (n, i) {
           var len = i === notes.length - 1 ? 0.67 : 0.5;
-          [[1, 0.85], [2, 0.12]].forEach(function (pt) {
-            var osc = ctx.createOscillator();
-            var g = ctx.createGain();
-            osc.type = "sine";
-            osc.frequency.value = n[0] * pt[0];
-            g.gain.setValueAtTime(0.0001, now + n[1]);
-            g.gain.exponentialRampToValueAtTime(pt[1], now + n[1] + 0.008);
-            g.gain.exponentialRampToValueAtTime(0.0001, now + n[1] + len);
-            osc.connect(g);
-            g.connect(master);
-            osc.start(now + n[1]);
-            osc.stop(now + n[1] + len + 0.02);
-            nodes.push(osc, g);
-            last = osc;
-          });
+          var osc = ctx.createOscillator(), g = ctx.createGain();
+          osc.type = "sine"; osc.frequency.value = n[0];
+          g.gain.setValueAtTime(0.0001, now + n[1]);
+          g.gain.exponentialRampToValueAtTime(0.85, now + n[1] + 0.008);
+          g.gain.exponentialRampToValueAtTime(0.0001, now + n[1] + len);
+          osc.connect(g); g.connect(master); osc.start(now + n[1]); osc.stop(now + n[1] + len + 0.02);
+          list.push(osc, g); last = osc;
         });
-        stats.oscBursts++;
-        if (!isTest) trackOsc(nodes, last);
+        stats.oscBursts++; track(list, last);
       } catch (e) {}
     }
-    /* Decoded chime looping on the AudioContext (gain 1.0). Same period as the looping <audio> element. */
-    function startCtxLoop() {
-      if (!alerting || !ctx || !buf) return;
-      if (loopSrc && (loopStartedRunning || ctx.state !== "running")) return;
-      if (loopSrc) { /* started while the context was not running: restart now that it is */
-        loopNodes.forEach(function (n) { try { if (n.stop) n.stop(); } catch (e0) {} try { n.disconnect(); } catch (e1) {} });
-        loopNodes = [];
-        loopSrc = null;
+    /* one short chime (decoded file, or the same four notes from oscillators) */
+    function chime() {
+      if (!ctx) return;
+      resumeCtx();
+      if (!buf) { load(); oscBurst(); }
+      else {
+        try {
+          var s = ctx.createBufferSource(), g = ctx.createGain();
+          s.buffer = buf; s.loop = false; g.gain.value = 1;
+          s.connect(g); g.connect(ctx.destination); s.start(0);
+          stats.chimes++; track([s, g], s);
+        } catch (e) {}
       }
-      try {
-        var src = ctx.createBufferSource();
-        var g = ctx.createGain();
-        src.buffer = buf;
-        src.loop = true;
-        g.gain.value = 1.0;
-        src.connect(g);
-        g.connect(ctx.destination);
-        src.start(0);
-        loopSrc = src;
-        loopStartedRunning = ctx.state === "running";
-        loopNodes = [src, g];
-        stats.bufStarts++;
-      } catch (e) { loopSrc = null; }
+      if (running()) { heard = true; blocked = false; }
+      else if (alerting && ctx.state !== "running") {
+        setTimeout(function () { if (alerting && !running()) { blocked = true; stats.blocked++; ui(); } }, 600);
+      }
+      ui();
     }
     function vibrate(p) {
       try { if (navigator.vibrate && (navigator.userActivation ? navigator.userActivation.hasBeenActive : true)) navigator.vibrate(p); } catch (e) {}
@@ -2094,61 +1938,49 @@
     function tickAlert() {
       if (!alerting) return;
       if (isMuted()) { stopAlert(); return; }
-      vibrate([220, 60, 220, 60, 220, 60, 320]);
-      buzzing = true;
-      resumeCtx();
-      if (el && el.paused && !blocked) playEl(false);
-      if (!buf) { load(); oscBurst(false); }
-      else startCtxLoop();
+      vibrate([220, 60, 220, 60, 320]); buzzing = true;
+      chime();
     }
-    /* Ride arrived: both paths at once, until stopAlert(). Idempotent while ringing. */
+    function unlock() {
+      stats.unlocks++;
+      setSession("ambient");
+      makeCtx();
+      if (ctx) {
+        resumeCtx(); unlockedOnce = true;
+        try { var s = ctx.createBufferSource(); s.buffer = ctx.createBuffer(1, 1, 22050); s.connect(ctx.destination); s.start(0); } catch (e) {}
+        load();
+      }
+      if (alerting) chime();
+      else if (!testing) goIdle();
+    }
     function startAlert() {
       if (isMuted()) { stopAlert(); return; }
       if (alerting) return;
-      alerting = true;
-      alertGen++;
-      testing = false;
-      setSession();
-      makeCtx();
-      makeEl();
-      resumeCtx();
-      playEl(false);
-      startCtxLoop();
-      tickAlert();
-      watch = setInterval(tickAlert, 1400);
+      alerting = true; testing = false;
+      if (idleTimer) { clearTimeout(idleTimer); idleTimer = null; }
+      setSession("ambient");
+      makeCtx(); tickAlert();
+      watch = setInterval(tickAlert, 2800);
       ui();
     }
     function stopAlert() {
       var was = alerting;
       alerting = false;
-      alertGen++;
       if (watch) { clearInterval(watch); watch = null; }
-      loopNodes.concat(oscNodes).forEach(function (n) {
-        try { if (n.stop) n.stop(); } catch (e) {}
-        try { if (n.disconnect) n.disconnect(); } catch (e2) {}
-      });
-      loopNodes = [];
-      oscNodes = [];
-      loopSrc = null;
-      if (el && !testing) {
-        try { el.pause(); } catch (e3) {}
-        try { el.currentTime = 0; } catch (e4) {}
-        el.loop = false;
-      }
+      nodes.forEach(function (n) { try { if (n.stop) n.stop(); } catch (e) {} try { n.disconnect(); } catch (e2) {} });
+      nodes = [];
       if (buzzing) { buzzing = false; vibrate(0); }
       if (blocked || was) { blocked = false; ui(); }
+      goIdle(400);
     }
-    /* Gold-bar test: plays NOW inside the tap via the primed element (works before the buffer is decoded). */
     function test() {
-      unlock({ noPrime: true });
+      unlock();
       if (alerting) return;
       testing = true;
-      vibrate(60);
-      var p = playEl(true);
-      if (!el || !p) oscBurst(true); /* no <audio> support: Web Audio only */
+      if (idleTimer) { clearTimeout(idleTimer); idleTimer = null; }
+      setSession("ambient"); vibrate(60); chime();
       if (testTimer) clearTimeout(testTimer);
-      testTimer = setTimeout(function () { testing = false; }, 1600);
-      ui();
+      testTimer = setTimeout(function () { testing = false; goIdle(300); }, 1600);
     }
     /* ---- UI: gold bar (until really heard) + red banner (blocked while ringing) ---- */
     function barStyle(bg, fg, z) {
@@ -2190,8 +2022,7 @@
         addBar("ride-sound-blocked", "\uD83D\uDD0A Tap here to hear the ride alarm", "#c0161b", "#fff", 12650, function () {
           unlock({ noPrime: true });
           if (!alerting) { test(); return; }
-          playEl(false);
-          startCtxLoop();
+          chime();
         });
       } else {
         removeEl("ride-sound-blocked");
@@ -2205,7 +2036,7 @@
     function onReturn() {
       if (document.visibilityState && document.visibilityState !== "visible") return;
       resumeCtx();
-      if (alerting && el && el.paused) playEl(false);
+      if (alerting) resumeCtx(); else if (ctx && ctx.state === "running") goIdle();
       ui();
       setTimeout(ui, 700);
     }
@@ -2239,9 +2070,8 @@
       onReturn: onReturn,
       info: function () {
         return {
-          ctxState: ctx ? ctx.state : "none", elPrimed: elPrimed, elHeard: elHeard, alerting: alerting, blocked: blocked,
-          bufReady: !!buf, elPaused: el ? el.paused : null, elLoop: el ? el.loop : null, elMuted: el ? el.muted : null,
-          elSrc: el ? el.src : "", stats: stats
+          ctxState: ctx ? ctx.state : "none", heard: heard, alerting: alerting, blocked: blocked,
+          bufReady: !!buf, session: sessionMode, unlockedOnce: unlockedOnce, audioElements: 0, stats: stats
         };
       },
       url: function () { return o.url; },
