@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0b1c33">
+  <meta name="robots" content="noindex, nofollow">
+  <meta name="referrer" content="no-referrer">
+  <title>Follow the ride · Private Car Services</title>
+  <link rel="stylesheet" href="../app/styles.css?v=46">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+  <style>
+    #fw-map{height:46vh;min-height:260px;border-radius:14px;margin:6px 0 10px}
+    .fw-big{font-size:44px;font-weight:800;color:#f0d48a;text-align:center;margin:4px 0;font-variant-numeric:tabular-nums}
+    .fw-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;text-align:center;margin:0 0 10px}
+    .fw-grid div{background:rgba(255,255,255,.04);border:1px solid rgba(212,177,90,.28);border-radius:12px;padding:8px 4px}
+    .fw-grid b{display:block;font-size:20px;font-variant-numeric:tabular-nums}
+    .fw-grid span{font-size:11px;opacity:.8;text-transform:uppercase}
+    .fw-row{margin:2px 0}.fw-c{text-align:center}
+  </style>
+</head>
+<body data-app="follow">
+  <div class="phone">
+    <header class="top"><div class="brand"><h1 style="margin:0;font-size:20px">Private Car Services · Follow the ride</h1></div></header>
+    <main id="app"><p class="lede" id="fw-loading">Loading the ride…</p></main>
+    <footer class="app-foot" style="text-align:center;padding:14px 12px 22px;font-size:14px">
+      <div id="fw-qr" style="background:#fff;display:inline-block;padding:8px;border-radius:10px;line-height:0" aria-label="QR code for www.PCSrides.com"></div>
+      <p style="margin:8px 0 0">Need a ride too? Scan or visit <a href="https://www.PCSrides.com" id="fw-site" style="color:#f0d48a;font-weight:700">www.PCSrides.com</a></p>
+    </footer>
+  </div>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="../app/qrcode.js?v=73"></script>
+  <script src="follow.js?v=73"></script>
+</body>
+</html>
