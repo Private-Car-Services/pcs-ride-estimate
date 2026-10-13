@@ -392,6 +392,10 @@
     approvedDriversForAssign().forEach(function (d) {
       if (d.id === driverId) driver = d;
     });
+    /* v74: any roster driver (offline, logged out, or Matthew himself) can be assigned; only rejected/fired are refused. */
+    if (!driver && state.roster && state.roster[driverId] && approvalOf(state.roster[driverId]) !== "rejected" && state.roster[driverId].active !== false) {
+      driver = { id: driverId, name: state.roster[driverId].name || driverId };
+    }
     if (!driver) return Promise.reject(new Error("driver"));
     var next = Object.assign({}, row, {
       assignedDriverId: driver.id,
@@ -402,7 +406,9 @@
     });
     return putCalendarRide(next).then(function () {
       state.boardNotice = "Assigned " + (next.rider || "ride") + " → " + (driver.name || driver.id);
-      return refresh();
+      /* v74: the save already succeeded; a failed board reload must not show "Could not assign". */
+      try { var p = refresh(); if (p && p.catch) p.catch(function () {}); } catch (e) {}
+      renderBoardLists();
     });
   }
 
@@ -1007,6 +1013,9 @@
           var row = data[id];
           if (!row || typeof row !== "object") return;
           var pres = presenceOf(row, now); /* v64g: background drivers stay listed */
+          if (row.driverOffline === true && row.loggedIn === true && now - (Number(row.at) || 0) <= 15 * 60000) { /* v73: Offline (logged in) */
+            row.id = id; row.offlineLoggedIn = true; row.online = false; row.presence = "offline-loggedin"; row.lastSeenAt = Number(row.at) || 0; out.push(row); return;
+          }
           if (pres.state === "offline") return;
           row.id = id;
           /* v64 driver: last known spot when lat/lng are empty */
@@ -2762,8 +2771,9 @@
     var driversP = rosterP.then(function () {
       return listOnlineDrivers().then(function (rows) {
         state.driversError = "";
+        state.offlineDrivers = (rows || []).filter(function (d) { return d && d.offlineLoggedIn && isRosterActive(d.id); }); /* v73: shown, never dispatchable */
         state.drivers = (rows || []).filter(function (d) {
-          return d && isRosterActive(d.id);
+          return d && !d.offlineLoggedIn && isRosterActive(d.id);
         });
       }).catch(function (err) {
         state.drivers = [];
@@ -3254,6 +3264,12 @@
       }
       byId[d.id] = prev;
     });
+    (state.offlineDrivers || []).forEach(function (d) { /* v73: logged in but Offline: not online, not dispatchable */
+      if (!d || !d.id || (byId[d.id] && byId[d.id].online)) return;
+      var prev = byId[d.id] || { id: d.id, name: d.name || d.id, phone: d.phone || "", email: "", fromRoster: false, active: true, online: false };
+      prev.online = false; prev.offlineLoggedIn = true; prev.lastSeenAt = d.at || 0;
+      byId[d.id] = prev;
+    });
     return Object.keys(byId).map(function (id) { return byId[id]; }).sort(function (a, b) {
       var aa = approvalOf(a);
       var ba = approvalOf(b);
@@ -3381,6 +3397,12 @@
     var t = e.target;
     if (!t || !t.closest) return;
     var oo = t.closest("[data-odo-ovr]");
+    var od = t.closest("[data-odo-dismiss]");
+    if (od) { /* v74: Ignore / Dismiss the alert (logged with who / when / reason); nothing is reset */
+      var did = od.getAttribute("data-odo-dismiss"), dr0 = (window.prompt("Reason for dismissing (logged, optional):") || "").trim() || "Dismissed";
+      hosOvrSave(did, { odoDismiss: { reason: dr0.slice(0, 200), by: godWho() } }).then(hosOvrLoad).catch(function (er) { window.alert((er && er.message) || "Couldn't dismiss. Try again."); });
+      return;
+    }
     if (oo) { /* v72u: God-only override for a lower opening odometer, reason logged */
       var oid = oo.getAttribute("data-odo-ovr"), reason = (window.prompt("Reason for allowing a lower opening odometer (logged):") || "").trim();
       if (reason.length < 3) return;
@@ -3476,11 +3498,12 @@
     (state.drivers || []).forEach(function (d) { if (d && d.id) ids[d.id] = d; });
     Object.keys(state.hosOvr || {}).forEach(function (id) { if (!ids[id]) ids[id] = { id: id, name: ((state.hosOvr[id] || {}).request || {}).name || id }; });
     /* v72u: lower-odometer requests (driver typed an opening odometer below the last reading) */
-    var odoHtml = Object.keys(state.hosOvr || {}).filter(function (id) { var o = state.hosOvr[id] || {}; return o.odoRequest && !(o.odoOverride && Number(o.odoOverride.grantedAt) >= Number(o.odoRequest.at)); }).map(function (id) {
-      var r = state.hosOvr[id].odoRequest;
+    var odoHtml = Object.keys(state.hosOvr || {}).filter(function (id) { var o = state.hosOvr[id] || {}; return o.odoRequest && !(o.odoOverride && Number(o.odoOverride.grantedAt) >= Number(o.odoRequest.at)) && !(o.odoDismissed && Number(o.odoDismissed.at) >= Number(o.odoRequest.at)); }).map(function (id) {
+      var r = state.hosOvr[id].odoRequest, zero = Number(r.entered) === 0;
       return '<div class="odo-req" style="background:#fee2e2;border:2px solid #b91c1c;border-radius:10px;padding:8px 10px;margin:8px 0;color:#7f1d1d">' + esc(displayName((ids[id] || {}).name || r.name || id, "Driver")) +
-        ": opening odometer <strong>" + esc(String(r.entered)) + "</strong> is lower than the last reading <strong>" + esc(String(r.last)) + "</strong> (" + esc(ctClock(Number(r.at))) + ") " +
-        '<button type="button" class="btn btn-gold" data-odo-ovr="' + esc(id) + '">Allow lower odometer</button></div>';
+        (zero ? ": logged a <strong>zero</strong> opening odometer (refused by the app; day miles were NOT reset)" : ": opening odometer <strong>" + esc(String(r.entered)) + "</strong> is lower than the last reading <strong>" + esc(String(r.last)) + "</strong>") + " (" + esc(ctClock(Number(r.at))) + ") " +
+        '<button type="button" class="btn btn-gold" data-odo-ovr="' + esc(id) + '">' + (zero ? "Allow (reset to this reading)" : "Allow lower odometer") + "</button> " +
+        '<button type="button" class="btn btn-ghost" data-odo-dismiss="' + esc(id) + '">Ignore / Dismiss</button></div>'; /* v74 */
     }).join("");
     gpsHtml = odoHtml + gpsHtml;
     var list = Object.keys(ids).map(function (k) { return ids[k]; }).filter(function (d) {
@@ -3813,6 +3836,7 @@
         else if (trip) badge = '<span class="badge on-trip">On trip' + (isBackgroundDriver(d) ? " · app in background" : "") + "</span>";
         else if (isBackgroundDriver(d)) badge = '<span class="badge bg-app" style="background:#4a3d12;color:#f0d48a;border:1px solid #f0d48a">Online · app in background · seen ' + esc(agoText(d.lastSeenAt)) + "</span>";
         else if (d.online) badge = '<span class="badge">Online · free</span>';
+        else if (d.offlineLoggedIn) badge = '<span class="badge off offline-loggedin">Offline (logged in) · not dispatchable</span>'; /* v73 */
         else badge = '<span class="badge off">Approved · offline</span>';
         var statusShort;
         if (approval === "pending") statusShort = '<span class="badge pending">Pending</span>';
@@ -3820,6 +3844,7 @@
         else if (approval === "fired" || !d.active) statusShort = '<span class="badge fired">Fired</span>';
         else if (isBackgroundDriver(d)) statusShort = '<span class="badge bg-app" style="background:#4a3d12;color:#f0d48a;border:1px solid #f0d48a">Online · app in background · seen ' + esc(agoText(d.lastSeenAt)) + "</span>";
         else if (d.online) statusShort = '<span class="badge">Online</span>';
+        else if (d.offlineLoggedIn) statusShort = '<span class="badge off offline-loggedin">Offline (logged in)</span>'; /* v73 */
         else statusShort = '<span class="badge off">Offline</span>';
         var speedTxt = driverSpeedLabel(d);
         var where = isCoord(d.lat) && isCoord(d.lng)
@@ -3865,6 +3890,7 @@
             '<div class="driver-card-body">' +
               locateBtn +
               '<button type="button" class="btn btn-gold" data-add-ride-driver="' + esc(d.id) + '">+ Add ride</button>' + /* v72d */
+              '<button type="button" class="btn btn-ghost" data-driver-log="' + esc(d.id) + '">Driver\u2019s Log (14 days)</button>' + /* v73 */
               '<p class="driver-speed"><strong>Speed</strong> ' + esc(speedTxt) + "</p>" +
               (d.online ? driverVersionHtml(d) : "") + /* v72r */
               (d.online ? driverHosHtml(d) : "") + /* v72r HOS */
@@ -4443,9 +4469,9 @@
         assignCalendarRide(id, driverId).then(function () {
           delete state.assignDrafts[id];
           btn.disabled = false;
-        }).catch(function () {
+        }).catch(function (err) {
           btn.disabled = false;
-          state.boardNotice = "Could not assign that ride.";
+          state.boardNotice = "Could not assign that ride" + (err && err.message === "driver" ? " (driver not on the roster)." : err && err.message ? " (" + err.message + ")." : ".");
           renderBoardLists();
         });
       });
@@ -6399,7 +6425,7 @@
   function gqAuth() { return gq.pw ? { godPassword: gq.pw } : { godToken: gqTok() }; }
   if (gqTok()) { gq.pw = ""; gq.tokOn = true; setTimeout(function () { gqLoad(); if (!gq.timer) gq.timer = setInterval(gqLoad, 6000); }, 0); }
   function gqMins(ms) { var m = Math.max(0, Math.round((Date.now() - (Number(ms) || Date.now())) / 60000)); return m < 1 ? "just now" : m + " min"; }
-  function gqName(id) { var d = (state.drivers || []).filter(function (x) { return x && x.id === id; })[0]; return (d && d.name) || id; }
+  function gqName(id) { var d = (state.drivers || []).concat(state.offlineDrivers || []).filter(function (x) { return x && x.id === id; })[0]; return (d && d.name) || ((state.roster || {})[id] || {}).name || id; }
   function gqRide(code) { return (state.rides || []).filter(function (r) { return r && String(r.code) === String(code); })[0] || {}; }
   function gqPanelHtml() {
     if (!gq.pw && !gq.tokOn) {
@@ -6501,4 +6527,123 @@
     chargeFareNow: chargeFareNow,
     payState: state
   };
+
+  /* v73 (Matthew 10/13): God mode view of a driver's 14-day Driver's Log (read-only; nothing is deleted, older days stay on file) */
+  function godDriverLogData(id, now) {
+    now = now || Date.now();
+    var j = function (u) { return fetch(u).then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }); };
+    return Promise.all([j(milesUrl(id)), j(baseUrl() + "/rides/DRVRHOSL/" + encodeURIComponent(id) + ".json"), j(rosterUrl(id))]).then(function (res) {
+      var miles = res[0] || {}, hl = res[1] || {}, ro = res[2] || {}, duty = [], drive = [], breaks = [], offline = [], overrides = [];
+      var iv = function (o, arr) { if (o && typeof o === "object") Object.keys(o).forEach(function (k) { var v = o[k] || {}; var s0 = Number(v.s), e0 = Number(v.e) || s0; if (v.open && !(e0 > s0)) e0 = now; if (s0 > 0 && e0 > s0) arr.push([s0, e0]); }); };
+      Object.keys(hl).forEach(function (k) { if (/^\d+$/.test(k)) { var v = hl[k] || {}; if (Number(v.s) > 0 && Number(v.e) > Number(v.s)) duty.push([Number(v.s), Number(v.e)]); } });
+      iv(hl.drive, drive); iv(hl.breaks, breaks); iv(hl.offline, offline);
+      if (hl.overrides && typeof hl.overrides === "object") Object.keys(hl.overrides).forEach(function (k) { var v = hl.overrides[k]; if (v && typeof v === "object") overrides.push(Object.assign({ at: Number(v.grantedAt || v.at || k) || 0 }, v)); });
+      Object.keys(miles).forEach(function (d) { var r = miles[d] || {}, sh = r.shifts || {};
+        Object.keys(sh).forEach(function (k) { var x = sh[k] || {}, a = Number(x.shiftStartedAt) || Number(k), b = Number(x.shiftEndedAt) || 0; if (!x.hosExcluded && a > 0 && b > a && !duty.some(function (g) { return g[0] < b && g[1] > a; })) duty.push([a, b]); }); });
+      var pres = (state.drivers || []).concat(state.offlineDrivers || []).filter(function (x) { return x && x.id === id; })[0] || {};
+      var sg = hl.signs || {}, dv = hl.dvir || {};
+      return { signOf: function (d) { return sg[d] || null; }, dvirOf: function (d, k) { return (dv[d] || {})[k] || null; }, now: now, days: Math.max(15, Number(state.dlDays && state.dlDays[id]) || 15), snapshots: hl.days && typeof hl.days === "object" ? hl.days : {},
+        more: function (n) { state.dlDays = state.dlDays || {}; state.dlDays[id] = n; godDriverLogData(id).then(function (d2) { window.PCSDriverLog.open(window.PCSDriverLog.build(d2), d2, "history:" + (n - 1)); }); },
+        duty: duty, drive: drive, breaks: breaks, offline: offline, rows: miles, overrides: overrides,
+        driver: ro.name || pres.name || id, vehicle: { year: ro.carYear || pres.carYear || "", make: ro.carMake || pres.carMake || "", model: ro.carModel || pres.carModel || "", plate: ro.carPlate || pres.carPlate || "" } };
+    });
+  }
+  document.addEventListener("click", function (e) {
+    var b = e.target && e.target.closest ? e.target.closest("[data-driver-log]") : null;
+    if (!b || !window.PCSDriverLog) return;
+    e.preventDefault();
+    godDriverLogData(b.getAttribute("data-driver-log")).then(function (d) { window.PCSDriverLog.open(window.PCSDriverLog.build(d), d, "all"); });
+  });
+  /* v73 DVIR: defects flagged in God mode; an "unsafe" defect blocks the driver from going Available until cleared here (reason logged) */
+  state.dvirFlags = [];
+  function dvirLoad() {
+    var ids = {}; Object.keys(state.roster || {}).forEach(function (k) { ids[k] = 1; }); (state.drivers || []).concat(state.offlineDrivers || []).forEach(function (d) { if (d && d.id) ids[d.id] = 1; });
+    var since = Date.now() - 15 * 86400000;
+    return Promise.all(Object.keys(ids).map(function (id) {
+      return fetch(baseUrl() + "/rides/DRVRHOSL/" + encodeURIComponent(id) + "/dvir.json").then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }).then(function (o) {
+        var out = []; Object.keys(o || {}).forEach(function (d) { ["pre", "post"].forEach(function (k) { var r = o[d] && o[d][k]; if (r && (r.defects > 0 || r.notes > 0 || r.motion === "unverified") && (Number(r.at) > since || (r.unsafe && !r.cleared))) out.push({ id: id, day: d, kind: k, r: r }); }); });
+        return out; });
+    })).then(function (lists) { state.dvirFlags = [].concat.apply([], lists).sort(function (a, b) { return Number(b.r.at) - Number(a.r.at); }); dvirPaint(); });
+  }
+  state.dvirVeh = {};
+  function dvirVehLoad() { return fetch(baseUrl() + "/rides/DVIRVEH.json").then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }).then(function (o) { state.dvirVeh = o || {}; dvirPaint(); }); }
+  function dvirVehHtml() { /* registration / insurance: red when expired, amber within 30 days */
+    var L = window.PCSDriverLog, rows = [];
+    if (!L) return "";
+    Object.keys(state.dvirVeh || {}).forEach(function (pl) { var v = state.dvirVeh[pl] || {}; [["regexp", "Registration"], ["insexp", "Insurance card"]].forEach(function (f) {
+      var st = L.expiryState(v[f[0]]); if (st === "expired" || st === "soon") rows.push('<div class="god-dvir-exp god-dvir-exp-' + st + '" style="padding:4px 0;color:' + (st === "expired" ? "#ff9b9b" : "#f0d48a") + '">' + esc(pl) + (v.vehicle ? " (" + esc(v.vehicle) + ")" : "") + " \u00b7 " + f[1] + (st === "expired" ? " EXPIRED " : " expires ") + esc(v[f[0]]) + "</div>"); }); });
+    return rows.length ? '<div class="card" style="border:2px solid #b45309;background:#2a2112;color:#fff;padding:10px;margin:8px 0"><b>Vehicle paperwork</b>' + rows.join("") + "</div>" : "";
+  }
+  function dvirPaint() {
+    var host = document.getElementById("god-dvir-alerts");
+    if (!host) { host = document.createElement("div"); host.id = "god-dvir-alerts"; var m = document.querySelector("main") || document.body; m.insertBefore(host, m.firstChild); }
+    var f = state.dvirFlags || [];
+    host.innerHTML = dvirVehHtml() + (!f.length ? "" : '<div class="card" style="border:2px solid #b91c1c;background:#2a1212;color:#fff;padding:10px;margin:8px 0"><b>Vehicle inspection defects (DVIR)</b>' + f.map(function (x) {
+      var defs = Object.keys(x.r.items || {}).filter(function (k) { var it = x.r.items[k]; return ((it.bad || it.s === "defect") && !it.optional) || it.noteFlag; }).map(function (k) { var it = x.r.items[k]; return esc((it.group ? it.group + " " : "") + (it.label || k)) + (it.answer ? " = " + esc(it.answer) : "") + (it.expiry === "expired" ? " EXPIRED " + esc(it.date || "") : "") + (it.needsApproval ? " (photo needs approval)" : it.stale ? " (over 48 h)" : it.blocking || it.safe === false ? " (NOT safe)" : "") + (it.noteFlag ? " (note, not unsafe)" : "") + (it.warn ? ' <b style="color:#ff9b9b">\u26a0 ' + esc(it.warn) + "</b>" : "") + (it.note ? ": " + esc(it.note) : "") + ((it.photos || []).length ? " \u00b7 " + it.photos.length + " photo(s)" : ""); }).join("; ");
+      return '<div class="god-dvir-flag" data-dvir-driver="' + esc(x.id) + '" style="border-top:1px solid #733;padding:6px 0">' + esc(gqName(x.id)) + " \u00b7 " + esc(x.day) + " " + (x.kind === "pre" ? "pre-trip" : "post-trip") + (x.r.startedAt ? ' <span class="fine god-dvir-dur">(' + esc(new Date(x.r.startedAt).toLocaleTimeString("en-US", { timeZone: "America/Chicago", hour: "numeric", minute: "2-digit" })) + "\u2013" + esc(new Date(x.r.finishedAt).toLocaleTimeString("en-US", { timeZone: "America/Chicago", hour: "numeric", minute: "2-digit" })) + ", took " + Math.floor(x.r.durationSec / 60) + "m " + ("0" + (x.r.durationSec % 60)).slice(-2) + "s)</span>" : "") + (x.r.motion === "unverified" ? ' <span class="badge" style="background:#7c5c00">motion unverified (no GPS)</span>' : "") + " \u00b7 " + defs +
+        (x.r.unsafe ? (x.r.cleared ? ' <span class="badge">Cleared by ' + esc(x.r.cleared.by) + ": " + esc(x.r.cleared.reason) + "</span>"
+          : ' <b style="color:#ff9b9b">UNSAFE \u2013 driver blocked from Available</b>' + ((x.r.blocks || []).length ? ' <span class="fine">(' + x.r.blocks.map(function (b) { return esc(b.label) + (b.why === "photo" ? " photo" : b.why !== "defect" ? " " + esc(b.why) : ""); }).join(", ") + ")</span>" : "") +
+            Object.keys(x.r.items || {}).filter(function (k) { return x.r.items[k].needsApproval; }).map(function (k) { return '<div class="god-dvir-photos">' + (x.r.items[k].photos || []).map(function (ph) { return /^data:image\//.test(ph) ? '<img src="' + esc(ph) + '" alt="Windshield photo" style="height:90px;margin:4px 4px 0 0;border-radius:4px">' : ""; }).join("") + "</div>"; }).join("") +
+            (x.r.rejected ? ' <span class="badge">Photo rejected by ' + esc(x.r.rejected.by) + ": " + esc(x.r.rejected.reason) + "</span>" : "") +
+            (Object.keys(x.r.items || {}).some(function (k) { return x.r.items[k].needsApproval; })
+              ? ' <button type="button" class="btn btn-gold" data-dvir-approve="' + esc(x.id + "|" + x.day + "|" + x.kind) + '">Approve photo' + ((x.r.blocks || []).length > 1 ? " & clear" : "") + '</button> <button type="button" class="btn btn-ghost" data-dvir-reject="' + esc(x.id + "|" + x.day + "|" + x.kind) + '">Reject photo</button>'
+              : ' <button type="button" class="btn btn-gold" data-dvir-clear="' + esc(x.id + "|" + x.day + "|" + x.kind) + '">Clear (override)</button>')) : "") + "</div>";
+    }).join("") + "</div>");
+  }
+  document.addEventListener("click", function (e) {
+    var b = e.target && e.target.closest ? e.target.closest("[data-dvir-clear],[data-dvir-approve],[data-dvir-reject]") : null; if (!b) return;
+    var ap = b.hasAttribute("data-dvir-approve"), rj = b.hasAttribute("data-dvir-reject");
+    var a = b.getAttribute(ap ? "data-dvir-approve" : rj ? "data-dvir-reject" : "data-dvir-clear").split("|"), reason = (window.prompt(ap ? "Approve the windshield photo. Note (logged):" : rj ? "Reason for rejecting the photo (logged; the driver stays blocked):" : "Reason for clearing this unsafe defect (logged):", ap ? "Photo approved" : "") || "").trim();
+    if (reason.length < 3) return;
+    if (rj) { var rr = { by: godWho(), at: Date.now(), reason: reason.slice(0, 200) }, ub = baseUrl() + "/rides/DRVRHOSL/" + encodeURIComponent(a[0]);
+      fetch(ub + "/dvir/" + a[1] + "/" + a[2] + "/rejected.json", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(rr) })
+        .then(function () { return fetch(ub + "/overrides/" + rr.at + ".json", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(Object.assign({ kind: "dvir-photo-rejected", day: a[1], inspection: a[2] }, rr)) }); })
+        .then(dvirLoad).catch(function () { window.alert("Couldn't save. Try again."); }); return; }
+    var rec = { by: godWho(), at: Date.now(), reason: reason.slice(0, 200) }; if (ap) rec.photoApproved = true;
+    var put = function (u, body) { return fetch(u, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }); };
+    put(baseUrl() + "/rides/DRVRHOSL/" + encodeURIComponent(a[0]) + "/dvir/" + a[1] + "/" + a[2] + "/cleared.json", rec)
+      .then(function () { return put(baseUrl() + "/rides/DRVRHOSL/" + encodeURIComponent(a[0]) + "/overrides/" + rec.at + ".json", Object.assign({ kind: ap ? "dvir-photo-approved" : "dvir-unsafe-cleared", day: a[1], inspection: a[2], grantedAt: rec.at }, rec)); })
+      .then(dvirLoad).catch(function () { window.alert("Couldn't clear it. Try again."); });
+  });
+  setTimeout(dvirLoad, 1500); setInterval(dvirLoad, 30000); setTimeout(dvirVehLoad, 1600); setInterval(dvirVehLoad, 60000);
+  /* v73: God-editable DVIR checklist (rides/DVIRCFG = { items: [{k, label, required}], updatedAt, by }). Optional items never flag or block. */
+  var DVIR_DEFAULT = window.PCSDriverLog ? window.PCSDriverLog.items({}) : [];
+  state.dvirCfg = null;
+  function dvirCfgLoad() { return fetch(baseUrl() + "/rides/DVIRCFG.json").then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }).then(function (o) {
+    if (!state.dvirCfgEditing) { state.dvirCfg = o && Array.isArray(o.items) && o.items.length ? o.items : DVIR_DEFAULT.slice(); state.dvirFluidsDays = (o && Number(o.fluidsDays) > 0) ? Math.round(Number(o.fluidsDays)) : 7; } dvirCfgPaint(); }); }
+  function dvirCfgPaint() {
+    var host = document.getElementById("god-dvir-cfg");
+    if (!host) { host = document.createElement("details"); host.id = "god-dvir-cfg"; host.className = "card"; var a = document.getElementById("god-dvir-alerts"); if (!a) { dvirPaint(); a = document.getElementById("god-dvir-alerts"); } a.parentNode.insertBefore(host, a.nextSibling); }
+    var open = host.open, list = state.dvirCfg || [];
+    host.innerHTML = "<summary><b>Vehicle inspection checklist (DVIR)</b> \u00b7 " + list.length + " items</summary>" +
+      '<p class="fine">Required items can be marked unsafe (blocks Available until cleared). Optional items are noted only and never flag or block.</p>' +
+      list.map(function (it, i) { return '<div class="dvir-cfg-row" data-i="' + i + '" style="display:flex;gap:6px;align-items:center;margin:4px 0">' + (it.group ? '<span class="fine" style="min-width:80px">' + esc(it.group) + "</span>" : "") + '<input type="text" class="dvir-cfg-label" data-i="' + i + '" value="' + esc(it.label) + '" maxlength="120" style="flex:1">' +
+        '<span class="fine">' + esc(it.type === "date" ? "date MM/DD/YYYY" + (it.expiry ? " (expiry)" : "") : (it.opts || []).map(function (o) { return o.label + (o.bad ? (it.noteOnly ? " (note)" : " (bad)") : ""); }).join(" / ") + (Array.isArray(it.kinds) && it.kinds.length === 1 ? " \u00b7 " + (it.kinds[0] === "post" ? "post-trip only" : "pre-trip only") : "")) + "</span>" +
+        '<label><input type="checkbox" class="dvir-cfg-req" data-i="' + i + '"' + (it.required !== false ? " checked" : "") + "> Required</label>" +
+        (it.noteOnly ? "" : '<label title="Driver can\u2019t go Available until God clears it"><input type="checkbox" class="dvir-cfg-block" data-i="' + i + '"' + (it.block ? " checked" : "") + "> Blocks</label>") +
+        '<button type="button" class="btn btn-ghost dvir-cfg-del" data-i="' + i + '">Remove</button></div>'; }).join("") +
+      ((window.PCSDriverLog && window.PCSDriverLog.EXTRAS) || []).filter(function (x) { return !list.some(function (it) { return it.k === x[0]; }); }).map(function (x) {
+        return '<button type="button" class="btn btn-ghost dvir-cfg-extra" data-k="' + esc(x[0]) + '">+ ' + esc(x[1]) + " (optional)</button> "; }).join("") +
+      '<p style="margin:8px 0"><label>Fluids check every <input type="number" id="dvir-cfg-fluids" min="1" max="60" step="1" inputmode="numeric" style="width:64px" value="' + esc(String(state.dvirFluidsDays || 7)) + '"> days</label> <span class="fine">(also due each Sat/Sun if not done that weekend)</span></p>' +
+      '<button type="button" class="btn btn-ghost" id="dvir-cfg-add">+ Add item</button> <button type="button" class="btn btn-gold" id="dvir-cfg-save">Save checklist</button> <span id="dvir-cfg-msg" class="fine"></span>';
+    host.open = open;
+  }
+  document.addEventListener("input", function (e) { var t = e.target; if (!t.classList) return;
+    if (t.classList.contains("dvir-cfg-label")) { state.dvirCfgEditing = true; state.dvirCfg[+t.getAttribute("data-i")].label = t.value; }
+    if (t.id === "dvir-cfg-fluids") { state.dvirCfgEditing = true; state.dvirFluidsDays = Math.max(1, Math.min(60, Math.round(Number(t.value) || 7))); }
+    if (t.classList.contains("dvir-cfg-req")) { state.dvirCfgEditing = true; state.dvirCfg[+t.getAttribute("data-i")].required = t.checked; } });
+  document.addEventListener("change", function (e) { var t = e.target; if (t.classList && t.classList.contains("dvir-cfg-block")) { state.dvirCfgEditing = true; state.dvirCfg[+t.getAttribute("data-i")].block = t.checked; } if (t.classList && t.classList.contains("dvir-cfg-req")) { state.dvirCfgEditing = true; state.dvirCfg[+t.getAttribute("data-i")].required = t.checked; } });
+  document.addEventListener("click", function (e) { var t = e.target; if (!t || !t.closest) return;
+    if (t.classList.contains("dvir-cfg-del")) { state.dvirCfgEditing = true; state.dvirCfg.splice(+t.getAttribute("data-i"), 1); dvirCfgPaint(); }
+    else if (t.classList.contains("dvir-cfg-extra")) { var ex = (window.PCSDriverLog.EXTRAS || []).filter(function (x) { return x[0] === t.getAttribute("data-k"); })[0]; if (ex) { state.dvirCfgEditing = true; state.dvirCfg.push({ k: ex[0], label: ex[1], required: false }); dvirCfgPaint(); } }
+    else if (t.id === "dvir-cfg-add") { state.dvirCfgEditing = true; state.dvirCfg.push({ k: "item" + Date.now().toString(36), label: "New item", type: "choice", opts: [{ label: "Yes", bad: false }, { label: "No", bad: true }], required: true }); dvirCfgPaint(); }
+    else if (t.id === "dvir-cfg-save") {
+      var items = state.dvirCfg.filter(function (x) { return x && String(x.label || "").trim(); }).map(function (x) { return Object.assign({}, x, { label: String(x.label).trim().slice(0, 120), required: x.required !== false }); });
+      fetch(baseUrl() + "/rides/DVIRCFG.json", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ items: items, fluidsDays: state.dvirFluidsDays || 7, updatedAt: Date.now(), by: godWho() }) })
+        .then(function (r) { if (!r.ok) throw new Error(); state.dvirCfgEditing = false; return dvirCfgLoad(); }).then(function () { var m = document.getElementById("dvir-cfg-msg"); if (m) m.textContent = "Saved."; })
+        .catch(function () { var m = document.getElementById("dvir-cfg-msg"); if (m) m.textContent = "Couldn't save. Try again."; });
+    } });
+  setTimeout(dvirCfgLoad, 1800);
+  window.__godDvir = { cfgLoad: function () { return dvirCfgLoad(); }, load: dvirLoad, flags: function () { return state.dvirFlags; } };
+  window.__godDriverLog = { data: godDriverLogData };
 })();
