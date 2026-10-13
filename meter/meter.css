@@ -30,3 +30,8 @@
 .rm-card-box{background:#fff;border-radius:12px;padding:10px;margin:6px 0;min-height:56px;color:#0b1f3a}
 #app label{display:block;margin:8px 0 4px}
 #app input{width:100%;box-sizing:border-box}
+.rm-share{margin:4px 0 12px;text-align:center}
+.rm-share-btn{width:100%;font-size:18px;font-weight:800}
+.rm-share-alt{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px}
+.rm-share-alt .btn{flex:1 1 30%;margin:0}
+.rm-share-alt p{flex-basis:100%;word-break:break-all}

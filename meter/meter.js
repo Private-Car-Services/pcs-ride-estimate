@@ -169,16 +169,65 @@
       '<p class="rm-eta" id="rm-eta"></p>' + /* v71: minutes + miles to the destination (if the driver set one) */
       '<p class="rm-updated" id="rm-updated"></p>' +
       '<p class="error" id="rm-net" role="status"></p>' +
-      ratesHtml(d) + formHtml(d);
+      shareHtml() + ratesHtml(d) + formHtml(d);
   }
+  /* v73 Share this ride: a read-only follow link for family (separate random token; it can't control this meter). */
+  function shareHtml() {
+    var sh = S.share || {};
+    return '<div class="rm-share" id="rm-share">' +
+      '<button type="button" class="btn rm-share-btn" id="rm-share-btn"' + (sh.busy ? " disabled" : "") + ">" + (sh.busy ? "Getting your link\u2026" : "Share this ride") + "</button>" +
+      '<p class="fine rm-share-note">Family can follow the map, ETA and fare. They can\u2019t see your card or contact info, and the link stops when the ride ends.</p>' +
+      (sh.url ? '<div class="rm-share-alt" id="rm-share-alt">' +
+        '<a class="btn ghost" id="rm-share-sms" href="sms:?&body=' + encodeURIComponent(shareText(sh.url)) + '">Send by text</a>' +
+        '<button type="button" class="btn ghost" id="rm-share-copy">Copy link</button>' +
+        '<button type="button" class="btn ghost" id="rm-share-stop">Stop sharing</button>' +
+        '<p class="fine" id="rm-share-msg" role="status">' + esc(sh.msg || "") + "</p></div>" : "") +
+      (sh.err ? '<p class="error" id="rm-share-err">' + esc(sh.err) + "</p>" : "") + "</div>";
+  }
+  function shareText(url) { return "Follow my Private Car Services ride live: " + url; }
+  function shareUrl(tok) { return new URL("../follow/?t=" + tok, window.location.href).href; }
+  function shareRedraw() { var el = $("rm-share"); if (el) { el.outerHTML = shareHtml(); bindShare(); } }
+  function shareOpen() {
+    var sh = S.share = S.share || {};
+    if (sh.busy) return;
+    sh.busy = true; sh.err = ""; sh.msg = ""; shareRedraw();
+    post("/share/create", { t: token }).then(function (data) {
+      sh.busy = false;
+      sh.url = shareUrl(String(data.token || ""));
+      shareRedraw();
+      if (navigator.share) {
+        navigator.share({ title: "Follow my ride", text: shareText(sh.url), url: sh.url }).catch(function () {});
+      }
+    }).catch(function (e) { sh.busy = false; sh.err = e.message || "We couldn\u2019t make a link right now. Try again in a moment."; shareRedraw(); });
+  }
+  function shareCopy() {
+    var sh = S.share || {};
+    var done = function () { sh.msg = "Link copied."; shareRedraw(); };
+    if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(sh.url).then(done, function () { sh.msg = sh.url; shareRedraw(); });
+    else { sh.msg = sh.url; shareRedraw(); }
+  }
+  function shareStop() {
+    var sh = S.share || {};
+    post("/share/revoke", { t: token }).then(function () { S.share = { msg: "" }; shareRedraw(); })
+      .catch(function (e) { sh.err = e.message; shareRedraw(); });
+  }
+  function bindShare() { on("rm-share-btn", shareOpen); on("rm-share-copy", shareCopy); on("rm-share-stop", shareStop); }
   function breakdownHtml(d) {
     var f = d.final || {};
     var r = d.rates;
     var incl = Number(r.includedMiles) || 0;
     var fees = (f.feeLines || []).reduce(function (t, l) { return t + (Number(l.cents) || 0); }, 0); /* v72t airport lines */
     var parts = (f.base || 0) + (f.mileCents || 0) + (f.waitCents || 0) + fees;
-    var diff = (f.sub || 0) - parts;
-    var minApplied = diff > 0 && r.minCents > 0 && f.sub === r.minCents && diff >= (r.stepCents || 1);
+    var disc = f.discount && Number(f.discount.cents) > 0 ? f.discount : null; /* v73: Senior / Military / owner-approved discount */
+    var diff = (disc && disc.grossSub ? disc.grossSub : (f.sub || 0)) - parts;
+    var minApplied = diff > 0 && r.minCents > 0 && (disc && disc.grossSub ? disc.grossSub : f.sub) === r.minCents && diff >= (r.stepCents || 1);
+    if (!disc && !fees && !(f.mileCents) && !(f.waitCents) && f.base > 0 && f.base === f.sub && f.base !== r.startCents) { /* v73: fare set before the ride */
+      return '<div class="card" id="rm-breakdown">' +
+        '<div class="money-row" id="rm-setfare-row"><span>Fare</span><span>' + money(f.sub) + "</span></div>" +
+        (f.tax ? '<div class="money-row" id="rm-tax-row"><span>Tax (' + pct(r.taxRate) + ")</span><span>" + money(f.tax) + "</span></div>" : "") +
+        '<div class="total-row"><span>Total</span><span id="rm-total">' + money(f.total) + "</span></div>" +
+        '<p class="fine">' + esc(Number(f.miles || 0).toFixed(2)) + " mi · " + esc(String(f.minutes || 0)) + " min</p></div>";
+    }
     return '<div class="card" id="rm-breakdown">' +
       '<div class="money-row" id="rm-start-row"><span>Start (incl. ' + (incl === 1 ? "first mile" : esc(String(incl)) + " mi") + ")</span><span>" + money(f.base) + "</span></div>" +
       '<div class="money-row" id="rm-miles-row"><span>Miles after first ' + esc(Number(f.afterMiles || 0).toFixed(2)) + " × " + money(r.perMileCents) + "</span><span>" + money(f.mileCents) + "</span></div>" +
@@ -186,7 +235,9 @@
       (d.live && d.live.freeUsed ? '<div class="money-row"><span>Free waiting at start ' + esc(String(d.live.freeUsed)) + " min</span><span>" + money(0) + "</span></div>" : "") +
       (f.feeLines || []).map(function (l) { return '<div class="money-row rm-fee-line"><span>' + esc(l.label) + "</span><span>" + money(l.cents) + "</span></div>"; }).join("") +
       (diff > 0 ? '<div class="money-row"><span>' + (minApplied ? "Minimum fare " + money(r.minCents) + " applied" : "Round up to " + money(r.stepCents) + " step") + "</span><span>" + money(diff) + "</span></div>" : "") +
-      (f.tax ? '<div class="money-row"><span>Fare</span><span id="rm-fare-sub">' + money(f.sub) + "</span></div>" +
+      (disc ? '<div class="money-row" id="rm-disc-row" style="color:#8fd0a8"><span>' + esc(disc.label || "Discount") + " \u00b7 you save</span><span>\u2212" + money(disc.cents) + "</span></div>" : "") +
+      (f.tax || disc ? '<div class="money-row"><span>Fare</span><span id="rm-fare-sub">' + money(f.sub) + "</span></div>" : "") +
+      (f.tax ? 
         '<div class="money-row" id="rm-tax-row"><span>Tax (' + pct(r.taxRate) + ")</span><span>" + money(f.tax) + "</span></div>" : "") +
       '<div class="total-row"><span>Total</span><span id="rm-total">' + money(f.total) + "</span></div>" +
       '<p class="fine">' + esc(d.mode.label || "") + " · " + esc(Number(f.miles || 0).toFixed(2)) + " mi · " + esc(String(f.minutes || 0)) + " min</p></div>";
@@ -301,6 +352,7 @@
   function on(id, fn) { var el = $(id); if (el) el.addEventListener("click", fn); }
   function bind() {
     on("rm-save-info", saveInfo);
+    bindShare();
     on("rm-add-card", function () { S.cardOpen = true; draw(true); mountCard(); });
     on("rm-save-card", saveCard);
     on("rm-pay", function () {
