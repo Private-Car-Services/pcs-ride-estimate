@@ -153,6 +153,42 @@
     return DATABASE_URL.replace(/\/+$/, "");
   }
 
+  /* v73 / Worker v69.8: EVERY God-mode database write goes through the Worker (POST /god/db) with the God device token, like the
+     HOS overrides: the live Firebase rules refuse unauthenticated writes. The Worker reads each write back; a refused write comes
+     back as an error instead of looking saved. Older Worker without /god/db (404) -> the direct write, as before. */
+  function godFakeRes(status, body) {
+    return { ok: status >= 200 && status < 300, status: status, json: function () { return Promise.resolve(body); }, text: function () { return Promise.resolve(body == null ? "null" : JSON.stringify(body)); } };
+  }
+  function godWriteAuth() {
+    var t = ""; try { t = gqTok(); } catch (e) {}
+    if (t) return { godToken: t };
+    if (typeof gq !== "undefined" && gq && gq.pw) return { godPassword: gq.pw };
+    var pw = window.prompt("God password (asked once on this device) to save changes:", "");
+    return pw ? { godPassword: pw } : null;
+  }
+  function godFetch(url, opts) {
+    opts = opts || {};
+    var m = String(opts.method || "GET").toUpperCase(), root = baseUrl() + "/rides/";
+    if (m === "GET" || String(url).indexOf(root) !== 0 || state.godDbOff) return fetch(url, opts);
+    var path = "/rides/" + String(url).slice(root.length).split("?")[0].replace(/\.json$/, "").split("/").map(function (x) { try { return decodeURIComponent(x); } catch (e) { return x; } }).join("/");
+    var auth = godWriteAuth();
+    if (!auth) { state.boardNotice = "Not saved: the God password is needed once on this device."; return Promise.resolve(godFakeRes(401, { ok: false, error: "God password needed." })); }
+    var value; try { value = opts.body != null ? JSON.parse(opts.body) : undefined; } catch (e) { value = undefined; }
+    return fetch(PAY_WORKER + "/god/db", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(Object.assign({ ops: [{ method: m, path: path, value: value }] }, auth)) })
+      .then(function (res) {
+        return res.json().catch(function () { return {}; }).then(function (d) {
+          if (res.status === 404 && d && d.error === "Not found") { state.godDbOff = true; return fetch(url, opts); } /* Worker before v69.8 */
+          if (d && d.godToken) { try { gqSetTok(d.godToken); gq.pw = ""; gq.tokOn = true; } catch (e) {} }
+          if (res.status === 401) { try { gqSetTok(""); gq.pw = ""; } catch (e) {} }
+          if (!res.ok || !d || d.ok !== true) {
+            state.boardNotice = "Not saved: " + ((d && d.error) || ("server answered " + res.status));
+            return godFakeRes(res.status || 502, d);
+          }
+          return godFakeRes(200, d.results && d.results[0] ? d.results[0].value : null);
+        });
+      });
+  }
+
   function driversUrl() {
     return baseUrl() + "/rides/" + encodeURIComponent(PRESENCE_HUB) + "/drivers.json";
   }
@@ -230,7 +266,12 @@
       commissionCents: raw.commissionCents != null ? Number(raw.commissionCents) : null,
       completedAt: raw.completedAt || null,
       source: String(raw.source || ""), payMethod: String(raw.payMethod || ""), stops: Array.isArray(raw.stops) ? raw.stops : [], /* v72d */
-      riderPhone: String(raw.riderPhone || ""), balance: raw.balance != null ? Number(raw.balance) : null
+      riderPhone: String(raw.riderPhone || ""), balance: raw.balance != null ? Number(raw.balance) : null,
+      tipCents: Number(raw.tipCents) || 0, tipVia: raw.tipVia ? String(raw.tipVia) : null, tipEdits: Array.isArray(raw.tipEdits) ? raw.tipEdits : [], /* v73 */
+      cancelledAt: Number(raw.cancelledAt) || null, cancelledBy: raw.cancelledBy ? String(raw.cancelledBy) : null, cancelReason: raw.cancelReason ? String(raw.cancelReason) : null,
+      cancelFee: raw.cancelFee ? String(raw.cancelFee) : null, cancelFeeStatus: raw.cancelFeeStatus ? String(raw.cancelFeeStatus) : null,
+      fixedFare: raw.fixedFare === true, completedEarly: raw.completedEarly === true, /* v73 fare-save fix */
+      meterReadingCents: raw.meterReadingCents != null ? Number(raw.meterReadingCents) : null, meterCode: raw.meterCode ? String(raw.meterCode) : ""
     };
   }
 
@@ -247,6 +288,7 @@
         try {
           var data = JSON.parse(text);
           if (!data || typeof data !== "object") return [];
+          state.calendarRaw = data; /* v73: full rows (manual-ride money fields) for the driver Earnings sheet */
           return Object.keys(data).map(function (id) {
             return normalizeCalendarRow(id, data[id]);
           }).filter(Boolean);
@@ -259,7 +301,7 @@
 
   function putCalendarRide(row) {
     if (!row || !row.id) return Promise.reject(new Error("calendar-id"));
-    return fetch(calendarUrl(row.id), {
+    return godFetch(calendarUrl(row.id), {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(row)
@@ -364,6 +406,52 @@
     });
   }
 
+  /* v73 fix (Matthew 2026-10-12, Hector PCSCLUD9): saving the fare ONLY saves the fare. Status, driver, earnings untouched.
+     PATCH through the God db (Worker read-back), so a refused save shows up instead of looking saved. fixedFare = account ride:
+     the driver app charges this set fare instead of the meter price. */
+  function saveCalendarFare(eventId, fareBeforeTax, fixedFare) {
+    var row = null;
+    (state.calendar || []).forEach(function (r) { if (r && r.id === eventId) row = r; });
+    if (!row) return Promise.reject(new Error("missing"));
+    var fare = Number(fareBeforeTax);
+    if (String(fareBeforeTax == null ? "" : fareBeforeTax).trim() === "" || !isFinite(fare) || fare < 0) return Promise.reject(new Error("fare"));
+    fare = Math.round(fare * 100) / 100;
+    var patch = { fareBeforeTax: fare, fixedFare: !!fixedFare, updatedAt: Date.now() };
+    return godFetch(calendarUrl(eventId), {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(patch)
+    }).then(function (res) {
+      if (!res.ok) throw new Error("fare-save");
+      return res.text().then(function (t) {
+        var back = null; try { back = JSON.parse(t); } catch (e) {}
+        if (back && typeof back === "object" && back.fareBeforeTax != null && Number(back.fareBeforeTax) !== fare) throw new Error("fare-readback");
+        row.fareBeforeTax = fare; row.fixedFare = !!fixedFare;
+        delete state.fareDrafts[eventId];
+        state.boardNotice = "Fare saved · " + fmtCents(Math.round(fare * 100)) + " for " + (row.rider || "ride") + (fixedFare ? " · driver app charges this fare" : "");
+        return refresh();
+      });
+    });
+  }
+  function rideStartMs(row) { var t = Date.parse(row && row.start || ""); return isFinite(t) ? t : 0; }
+  function completedEarly(row) { return !!row && row.status === "completed" && (row.completedEarly === true || (rideStartMs(row) && Number(row.completedAt) && Number(row.completedAt) < rideStartMs(row))); }
+  /* v73: Undo an early completion: back to "assigned", the driver's earnings entry for this ride is removed. */
+  function undoCalendarComplete(eventId) {
+    var row = null;
+    (state.calendar || []).forEach(function (r) { if (r && r.id === eventId) row = r; });
+    if (!row) return Promise.reject(new Error("missing"));
+    var drv = row.assignedDriverId, code = row.code;
+    var patch = { status: drv ? "assigned" : "open", completedAt: null, commissionCents: null, completedEarly: null, updatedAt: Date.now() };
+    return godFetch(calendarUrl(eventId), { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(patch) }).then(function (res) {
+      if (!res.ok) throw new Error("undo");
+      if (!drv || !code) return null;
+      return godFetch(historyUrl(drv, code), { method: "DELETE" }).then(function (r2) { if (r2 && !r2.ok) throw new Error("undo-history"); });
+    }).then(function () {
+      state.boardNotice = "Undone · " + (row.rider || "ride") + " is back to assigned; the early earnings entry was removed.";
+      return refresh();
+    });
+  }
+
   function completeCalendarRide(eventId, fareBeforeTax) {
     var row = null;
     (state.calendar || []).forEach(function (r) {
@@ -393,18 +481,20 @@
       commissionPct: pct,
       commissionCents: commissionCents,
       riderName: row.rider || "",
-      source: row.source === "manual" ? "manual" : "calendar"
+      source: row.source === "manual" ? "manual" : "calendar",
+      tipCents: Number(row.tipCents) || 0, tipVia: Number(row.tipCents) > 0 ? "card" : null, cardTipCents: Number(row.tipCents) || 0 /* v73: 100% driver, not in commission */
     };
     var next = Object.assign({}, row, {
       status: "completed",
       completedAt: Date.now(),
+      completedEarly: rideStartMs(row) > Date.now() ? true : null, /* v73: before its start time -> "Completed early – Undo" */
       code: code,
       fareBeforeTax: fare,
       commissionCents: commissionCents,
       updatedAt: Date.now()
     });
     return putCalendarRide(next).then(function () {
-      return fetch(historyUrl(row.assignedDriverId, code), {
+      return godFetch(historyUrl(row.assignedDriverId, code), {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(entry)
@@ -546,11 +636,20 @@
 
   function historyEntries(driverId) {
     var raw = (state.history && state.history[driverId]) || {};
-    return Object.keys(raw).map(function (code) {
+    var list = Object.keys(raw).map(function (code) {
       var row = raw[code] || {};
       row.code = row.code || code;
       return row;
-    }).sort(function (a, b) {
+    });
+    /* v73: a completed God-added (manual) ride counts for its driver even if its pay-week entry never landed in DRVRHSTY */
+    var have = {}; list.forEach(function (e) { have[e.code] = true; });
+    var cal = state.calendarRaw || {};
+    Object.keys(cal).forEach(function (id) {
+      var r = cal[id];
+      if (!r || r.source !== "manual" || r.status !== "completed" || r.assignedDriverId !== driverId || !r.code || have[r.code]) return;
+      try { var e = addRideHistoryEntry(r, r.completedAt); e.fromCalendar = true; list.push(e); have[r.code] = true; } catch (x) {}
+    });
+    return list.sort(function (a, b) {
       return Number(b.completedAt || 0) - Number(a.completedAt || 0);
     });
   }
@@ -954,7 +1053,7 @@
     ["pwHash", "pwSalt", "pwIter", "pwAlgo", "pwSetAt"].forEach(function (k) {
       if (row[k] == null && prevRow[k] != null) row[k] = prevRow[k];
     });
-    return fetch(rosterUrl(id), {
+    return godFetch(rosterUrl(id), {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(row)
@@ -971,7 +1070,7 @@
 
   function clearPresence(id) {
     if (!id) return Promise.resolve();
-    return fetch(presenceDriverUrl(id), { method: "DELETE" }).catch(function () {});
+    return godFetch(presenceDriverUrl(id), { method: "DELETE" }).catch(function () {});
   }
 
   function saveCommission(driverId, pctRaw) {
@@ -1195,7 +1294,7 @@
 
   function patchRide(code, partial) {
     if (!code) return Promise.reject(new Error("code"));
-    return fetch(rideUrl(code), {
+    return godFetch(rideUrl(code), {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(partial)
@@ -1240,7 +1339,7 @@
       updatedAt: Date.now(),
       requestedAt: (ride && (ride.requestedAt || ride.createdAt)) || Date.now()
     };
-    return fetch(openUrl().replace(/\.json$/, "/") + encodeURIComponent(code) + ".json", {
+    return godFetch(openUrl().replace(/\.json$/, "/") + encodeURIComponent(code) + ".json", {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(summary)
@@ -1407,7 +1506,7 @@
         updatedAt: when,
         denyReason: "Owner declined this booking"
       }).then(function () {
-        return fetch(openUrl().replace(/\.json$/, "/") + encodeURIComponent(code) + ".json", { method: "DELETE" }).catch(function () {});
+        return godFetch(openUrl().replace(/\.json$/, "/") + encodeURIComponent(code) + ".json", { method: "DELETE" }).catch(function () {});
       }).then(function () {
         state.actionNotice = "Denied booking " + code + ". Rider will see it in-app.";
         return true;
@@ -1801,7 +1900,7 @@
     if (!id) return Promise.resolve();
     if (state.safetyAlerts[id]) state.safetyAlerts[id].dismissed = true;
     state.shownSafetyPopup[id] = true;
-    return fetch(safetyUrl(id), {
+    return godFetch(safetyUrl(id), {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ dismissed: true, dismissedAt: Date.now() })
@@ -2734,7 +2833,8 @@
       state.paymentsError = err && err.denied ? "denied" : "error";
     });
 
-    Promise.all([rosterP, driversP, ridesP, milesP, historyP, calendarP, safetyP, paymentsP]).then(function () {
+    var discP = listDiscReqs().then(function (d) { state.discReqs = d; }).catch(function () {}); /* v73 */
+    Promise.all([rosterP, driversP, ridesP, milesP, historyP, calendarP, safetyP, paymentsP, discP]).then(function () {
       state.loading = false;
       state.lastRefreshAt = Date.now();
       renderBoardLists();
@@ -3539,10 +3639,13 @@
       list = entries.map(function (e) {
         return (
           '<article class="card">' +
-          "<h3>" + esc(e.code || "Ride") + (e.isTest === true || String(e.paidVia || "") === "test" ? ' <span class="badge" style="background:#7a1f1f;color:#fff;border:1px solid #fff">Test</span>' : "") + (String(e.rideType || "") === "metered" ? ' <span class="badge" style="background:#4a3d12;color:#f0d48a;border:1px solid #f0d48a">Metered</span>' : "") + "</h3>" +
+          "<h3>" + esc(e.code || "Ride") + (e.isTest === true || String(e.paidVia || "") === "test" ? ' <span class="badge" style="background:#7a1f1f;color:#fff;border:1px solid #fff">' + (String(e.paidVia || "") === "test" ? "Rate comparison" : "Test") + "</span>" : "") + (String(e.rideType || "") === "metered" ? ' <span class="badge" style="background:#4a3d12;color:#f0d48a;border:1px solid #f0d48a">Metered</span>' : "") + "</h3>" +
           '<p class="meta">' +
           "<strong>Rider</strong> " + esc(e.riderName || "—") + "<br>" +
           "<strong>Route</strong> " + esc(e.pickup || "") + " → " + esc(e.drop || "") + "<br>" +
+          (e.canceled || e.status === "canceled" ? '<strong style="color:#ff9b9b">CANCELED</strong> ' + esc(e.cancelFee === "charge" ? "(cancellation fee to charge)" : "(fee waived, no earnings)") + (e.cancelReason ? " \u00b7 " + esc(e.cancelReason) : "") + "<br>" : "") + /* v73 */
+          (Number(e.discountCents) > 0 ? '<strong style="color:#8fd0a8">Discount</strong> ' + esc(({ senior: "Senior 10%", military: "Military 10%", other: "Other" })[e.discountType] || "Discount") + " \u2212" + esc(fmtCents(e.discountCents)) +
+            (e.discountType === "other" ? " (from the driver\u2019s portion; PCS share on the full fare" + (e.discountReason ? "; reason: " + esc(e.discountReason) : "") + (e.discountApprovedBy ? "; approved by " + esc(e.discountApprovedBy) : "") + ")" : " (PCS share reduced in proportion)") + "<br>" : "") +
           "<strong>Ride total</strong> " + esc(fmtCents(e.fareTotal)) + "<br>" +
           "<strong>Commission</strong> " + esc(fmtCents(e.commissionCents)) +
           " (" + esc(String(e.commissionPct || "")) + "%)" +
@@ -3551,7 +3654,7 @@
             ? '<br><button type="button" class="btn btn-ghost" data-cardfail-toggle="' + esc(e.code || "") + '" data-driver="' + esc(driverId) + '" data-on="' + (isCardFailedCollect(e) ? "1" : "0") + '">' +
               (isCardFailedCollect(e) ? "Undo Card failed - collect" : "Mark Card failed - collect") + "</button>" : "") +
           (e.billedMiles != null ? "<br><strong>Miles</strong> " + esc(String(e.billedMiles)) : "") +
-          (Number(e.tipCents) > 0 ? "<br><strong>" + (isCashEntry(e) ? "Cash tip" : "Tip") + "</strong> " + esc(fmtCents(e.tipCents)) + (isCashEntry(e) ? " (driver kept it; not owed to PCS)" : " (100% to driver)") : "") +
+          (Number(e.tipCents) > 0 ? "<br><strong>" + (isCashEntry(e) ? "Cash tip" : e.tipVia === "card" ? "Card tip" : "Tip") + "</strong> " + esc(fmtCents(e.tipCents)) + (isCashEntry(e) ? " (driver kept it; not owed to PCS)" : " (100% to driver)") : "") +
           (e.cashReceivedCents != null ? "<br><strong>Cash received</strong> " + esc(fmtCents(e.cashReceivedCents)) + " · <strong>change</strong> " + esc(fmtCents(Number(e.changeCents) || 0)) : "") +
           (String(e.rideType || "") === "metered" && e.paymentStatus ? "<br><strong>Payment</strong> " + esc(meterPayWord(e.paymentStatus, e.paidVia)) : "") +
           "</p></article>"
@@ -3585,6 +3688,97 @@
       list
     );
   }
+
+  /* v73: Earnings & history sheet for one driver, inline in the expanded driver card. Same layout as the driver app
+     (pay week Mon-Sun, week ride total / commission / cash tips, per-day expandable rides, Prev / Next week) + Owed to PCS + ride details. */
+  state.earnWeek = state.earnWeek || {};
+  state.earnDayOpen = state.earnDayOpen || {};
+  function earnIsTest(e) { return e && (e.isTest === true || String(e.paidVia || "") === "test"); }
+  function earnPayWord(e) {
+    if (isCardFailedCollect(e)) return "Card failed - collect";
+    if (isCashEntry(e)) return "Cash";
+    var v = String(e.paidVia || e.payMethod || "").toLowerCase();
+    return v === "test" ? "Rate comparison" : v === "card" || v === "square" || v === "charged" || !v ? "Card" : v.replace(/_/g, " ");
+  }
+  function earnRideHtml(e) {
+    var cash = isCashEntry(e), tip = Number(e.tipCents) || 0;
+    var fare = e.fareGrossSub != null ? Number(e.fareGrossSub) : (Number(e.fareSub) || 0) + (Number(e.discountCents) || 0);
+    var row = function (k, v, cls) { return '<div class="money-row' + (cls ? " " + cls : "") + '" style="display:flex;justify-content:space-between;gap:8px"><span>' + k + "</span><span>" + v + "</span></div>"; };
+    return '<article class="card earn-ride" data-code="' + esc(e.code || "") + '" style="margin:6px 0;padding:8px 10px' + (earnIsTest(e) ? ";opacity:.6" : "") + '">' +
+      '<p class="tag" style="margin:0 0 2px">' + esc(e.code || "Ride") + (e.rideType === "metered" ? " · Metered" : "") + (e.source === "manual" ? " · Added in God mode" : "") +
+      (earnIsTest(e) ? ' <span class="badge earn-test" style="background:#7a1f1f;color:#fff">' + (String(e.paidVia || "") === "test" ? "Rate comparison" : "TEST") + " (not counted)</span>" : "") +
+      (e.status === "canceled" ? ' <span class="badge" style="color:#ff9b9b">CANCELED</span>' : "") + "</p>" +
+      "<p style=\"margin:0\"><strong>" + esc(e.riderName || "Rider") + "</strong> · " + esc(e.day || "") + "</p>" +
+      '<p class="fine" style="margin:0 0 4px">' + esc(e.pickup || "") + " \u2192 " + esc(e.drop || "") + "</p>" +
+      row("Fare (before discount)", esc(fmtCents(fare))) +
+      (Number(e.discountCents) > 0 ? row("Discount" + (e.discountType ? " (" + esc(({ senior: "Senior", military: "Military", other: "Other" })[e.discountType] || e.discountType) + ")" : ""), "\u2212" + esc(fmtCents(e.discountCents))) : "") +
+      row("Tax / fees", esc(fmtCents(e.fareTax || 0))) +
+      row("Ride total", esc(fmtCents(e.fareTotal || 0))) +
+      (tip ? row(cash ? "Cash tip (driver keeps)" : "Card tip (100% driver)", esc(fmtCents(tip))) : "") +
+      row("Driver commission" + (e.commissionPct ? " (" + esc(String(e.commissionPct)) + "%)" : ""), esc(fmtCents(e.commissionCents || 0))) +
+      row("Owed to PCS", esc(fmtCents(cashDriverOwesCents(e))), "earn-owed") +
+      row("Payment", esc(earnPayWord(e))) + "</article>";
+  }
+  function earningsSheetHtml(driverId) {
+    var today = chicagoToday();
+    var monday = state.earnWeek[driverId] || mondayOfWeek(today);
+    var days = []; for (var i = 0; i < 7; i += 1) days.push(addDaysYmd(monday, i));
+    var all = historyEntries(driverId);
+    var wk = { ride: 0, comm: 0, cashTips: 0, cardTips: 0, owed: 0, tests: 0 };
+    var cards = days.map(function (d) {
+      var rides = all.filter(function (e) { return e.day === d; });
+      var counted = rides.filter(function (e) { return !earnIsTest(e); });
+      var dc = 0;
+      counted.forEach(function (e) {
+        var tip = Number(e.tipCents) || 0;
+        wk.ride += Number(e.fareTotal) || 0; wk.comm += Number(e.commissionCents) || 0; dc += Number(e.commissionCents) || 0;
+        if (isCashEntry(e)) wk.cashTips += tip; else wk.cardTips += tip;
+        wk.owed += cashDriverOwesCents(e);
+      });
+      wk.tests += rides.length - counted.length;
+      var key = driverId + "|" + d, open = !!state.earnDayOpen[key];
+      return '<button type="button" class="btn btn-ghost earn-day-btn" data-earn-day="' + esc(d) + '" data-driver-id="' + esc(driverId) + '" aria-expanded="' + open + '" style="display:block;width:100%;text-align:left;margin:4px 0;font-weight:700">' +
+        esc(d === today ? d + " · today" : d) + " · " + counted.length + " rides · " + esc(fmtCents(dc)) + (rides.length > counted.length ? " (+" + (rides.length - counted.length) + " test)" : "") + "</button>" +
+        (open ? '<div class="earn-day-body">' + (rides.length ? rides.map(earnRideHtml).join("") : '<p class="fine">No completed rides logged this day.</p>') + "</div>" : "");
+    }).join("");
+    var weeks = []; var m0 = mondayOfWeek(today); for (var w = 0; w < 12; w += 1) weeks.push(addDaysYmd(m0, -7 * w));
+    if (weeks.indexOf(monday) < 0) weeks.push(monday);
+    var mrow = function (k, v, id) { return '<div class="money-row" style="display:flex;justify-content:space-between"><span>' + k + "</span><span" + (id ? ' id="' + id + '"' : "") + ">" + v + "</span></div>"; };
+    var did = esc(driverId);
+    return '<section class="earn-sheet" id="earn-' + did + '" data-driver-id="' + did + '" style="margin:8px 0;padding:10px;border:1px solid rgba(212,177,90,.35);border-radius:12px">' +
+      '<h4 style="margin:0 0 2px">Earnings &amp; history</h4>' +
+      '<p class="fine" style="margin:0 0 6px">Pay week ' + esc(monday) + " \u2192 " + esc(addDaysYmd(monday, 6)) + " (Mon\u2013Sun) " +
+      '<select class="earn-week-sel" data-driver-id="' + did + '" aria-label="Pay week">' + weeks.map(function (x) { return '<option value="' + esc(x) + '"' + (x === monday ? " selected" : "") + ">Week of " + esc(x) + "</option>"; }).join("") + "</select></p>" +
+      '<div class="card" style="padding:8px 10px">' +
+      mrow("Week ride total", esc(fmtCents(wk.ride)), "earn-wk-ride-" + did) +
+      mrow("Week commission", esc(fmtCents(wk.comm)), "earn-wk-comm-" + did) +
+      (wk.cardTips ? mrow("Card tips (100% driver)", esc(fmtCents(wk.cardTips))) : "") +
+      mrow("Cash tips received", esc(fmtCents(wk.cashTips))) +
+      mrow("<strong>Owed to PCS</strong>", "<strong>" + esc(fmtCents(wk.owed)) + "</strong>", "earn-wk-owed-" + did) +
+      (wk.tests ? '<p class="fine" style="margin:4px 0 0">' + wk.tests + " rate comparison / test ride" + (wk.tests === 1 ? "" : "s") + " shown, not counted ($0).</p>" : "") +
+      "</div>" + cards +
+      '<div style="display:flex;justify-content:space-between;margin-top:6px">' +
+      '<button type="button" class="btn btn-ghost earn-prev" data-driver-id="' + did + '">\u2190 Prev week</button>' +
+      '<button type="button" class="btn btn-ghost earn-next" data-driver-id="' + did + '">Next week \u2192</button></div></section>';
+  }
+  if (typeof document !== "undefined") {
+    document.addEventListener("click", function (ev) {
+      var t = ev.target && ev.target.closest ? ev.target.closest(".earn-day-btn,.earn-prev,.earn-next") : null;
+      if (!t) return;
+      ev.preventDefault();
+      var id = t.getAttribute("data-driver-id");
+      if (t.classList.contains("earn-day-btn")) { var k = id + "|" + t.getAttribute("data-earn-day"); if (state.earnDayOpen[k]) delete state.earnDayOpen[k]; else state.earnDayOpen[k] = 1; }
+      else state.earnWeek[id] = addDaysYmd(state.earnWeek[id] || mondayOfWeek(chicagoToday()), t.classList.contains("earn-prev") ? -7 : 7);
+      try { renderBoardLists(); } catch (e) {}
+    });
+    document.addEventListener("change", function (ev) {
+      var t = ev.target;
+      if (!t || !t.classList || !t.classList.contains("earn-week-sel")) return;
+      state.earnWeek[t.getAttribute("data-driver-id")] = t.value;
+      try { renderBoardLists(); } catch (e) {}
+    });
+  }
+  window.__pcsGodEarn = { html: earningsSheetHtml, entries: historyEntries };
 
   function driversPanelHtml() {
     if (state.selectedDriverId) {
@@ -3700,6 +3894,7 @@
               (hist.length
                 ? '<details class="miles-history"><summary>Last 14 days miles</summary><ul>' + hist.join("") + "</ul></details>"
                 : '<p class="fine">No mileage days saved yet.</p>') +
+              earningsSheetHtml(d.id) + /* v73: tap the driver's name -> this sheet, inline */
               '<button type="button" class="btn btn-ghost btn-open-driver" data-driver-id="' + esc(d.id) + '">Calendar & history</button>' +
               '<div class="commission-row">' +
                 '<label class="commission-label" for="comm-' + esc(d.id) + '">Commission %</label>' +
@@ -3860,7 +4055,7 @@
         cancelClientReason: "owner_cancelled", ownerCancelledAt: now, updatedAt: now };
       return (full ? patchRide(code, patch) : Promise.resolve()).then(function () {
         if (!row) return null;
-        return fetch(openRowUrl(code), { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(patch) })
+        return godFetch(openRowUrl(code), { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(patch) })
           .then(function (res) { if (!res.ok) throw new Error("open"); });
       }).then(function () {
         silenceRide(code);
@@ -4014,6 +4209,134 @@
     return safetyBannerHtml() + bookingAlertBannerHtml() + cards;
   }
 
+  /* ---------- v73 helpers ---------- */
+  function godFocusIn(el) {
+    var a = document.activeElement;
+    return !!(el && a && a !== document.body && el.contains(a) && /^(INPUT|SELECT|TEXTAREA)$/.test(a.tagName));
+  }
+  function dbFlushLater() {
+    setTimeout(function () {
+      var b = document.getElementById("day-board");
+      if (state.dbDirty && b && !godFocusIn(b) && !((state.dbHoldUntil || 0) > Date.now())) renderBoardLists();
+    }, 400);
+  }
+  if (typeof document !== "undefined") {
+    document.addEventListener("focusout", function (e) { if (e.target && e.target.closest && e.target.closest("#day-board")) dbFlushLater(); });
+    ["pointerdown", "touchstart", "mousedown"].forEach(function (ev) {
+      document.addEventListener(ev, function (e) { if (e.target && e.target.closest && e.target.closest("#day-board select")) { state.dbHoldUntil = Date.now() + 20000; } }, { passive: true, capture: true });
+    });
+    document.addEventListener("change", function (e) {
+      var t = e.target;
+      if (t && t.classList && t.classList.contains("day-assign")) { state.assignDrafts[t.getAttribute("data-event-id")] = t.value; state.dbHoldUntil = Date.now() + 1500; dbFlushLater(); }
+    }, true);
+  }
+  /* v73 (Matthew): cash-register money boxes. Digit keypad (inputmode numeric), digits fill from the right:
+     2,3,7,5 -> 23.75; backspace drops the last digit. Tapping the box selects it, so the first digit starts fresh. */
+  function moneyRegFmt(v) {
+    var dg = String(v == null ? "" : v).replace(/\D/g, "").replace(/^0+/, "");
+    if (!dg) return "";
+    if (dg.length > 7) dg = dg.slice(0, 7);
+    return (Number(dg) / 100).toFixed(2);
+  }
+  function moneyRegAttrs() { return ' type="text" inputmode="numeric" pattern="[0-9]*" autocomplete="off" data-money-reg="1"'; }
+  function moneyRegVal(n) { var x = Number(n); return n === "" || n == null || !isFinite(x) ? "" : x.toFixed(2); }
+  if (typeof document !== "undefined") {
+    document.addEventListener("input", function (e) {
+      var t = e.target;
+      if (!t || !t.getAttribute || t.getAttribute("data-money-reg") !== "1") return;
+      var f = moneyRegFmt(t.value);
+      if (t.value !== f) t.value = f;
+      try { t.setSelectionRange(f.length, f.length); } catch (x) {}
+    }, true);
+    /* keyboard digits / Backspace: the register works on the digits itself (first key after focus starts a new amount),
+       so a caret position or a click that drops the selection can't scramble it. Phones that send no key fall back to the input handler. */
+    document.addEventListener("keydown", function (e) {
+      var t = e.target;
+      if (!t || !t.getAttribute || t.getAttribute("data-money-reg") !== "1" || e.ctrlKey || e.metaKey || e.altKey) return;
+      var k = e.key;
+      if (!/^[0-9]$/.test(k) && k !== "Backspace") return;
+      e.preventDefault();
+      var dg = t.__regFresh ? "" : String(t.value || "").replace(/\D/g, "").replace(/^0+/, "");
+      t.__regFresh = false;
+      dg = k === "Backspace" ? dg.slice(0, -1) : (dg.length < 7 ? dg + k : dg);
+      t.value = moneyRegFmt(dg);
+      try { t.setSelectionRange(t.value.length, t.value.length); } catch (x) {}
+      t.dispatchEvent(new Event("input", { bubbles: true }));
+    }, true);
+    document.addEventListener("focusin", function (e) {
+      var t = e.target;
+      if (!t || !t.getAttribute || t.getAttribute("data-money-reg") !== "1") return;
+      t.__regFresh = true;
+      if (t.value && !/\.\d\d$/.test(t.value)) t.value = moneyRegVal(t.value);
+      setTimeout(function () { try { t.setSelectionRange(0, t.value.length); } catch (x) {} }, 0);
+    });
+  }
+  window.__pcsMoneyRegFmt = moneyRegFmt; /* test hook */
+
+  /* ---------- v73 discount requests ("Other" discount from a driver): Matthew sets $ or % or declines ---------- */
+  var DISC_HUB = "DSCNTRQS";
+  function discUrl(code) { return baseUrl() + "/rides/" + DISC_HUB + (code ? "/" + encodeURIComponent(code) : "") + ".json"; }
+  function listDiscReqs() {
+    /* v69.8: requests live in the Worker (KV); God token reads them. No token yet / old Worker -> the Firebase hub (v73 first cut) */
+    var t = ""; try { t = gqTok(); } catch (e) {}
+    var fb = function () { return fetch(discUrl()).then(function (r) { return r.ok ? r.json() : null; }).then(function (d) { return d && typeof d === "object" ? d : {}; }).catch(function () { return {}; }); };
+    if (!t || state.godDbOff) return fb();
+    return workerJson("/disc/list", { godToken: t }).then(function (d) {
+      if (d && d.godToken) gqSetTok(d.godToken);
+      var out = {}; (d && d.requests || []).forEach(function (q) { if (q && q.code) out[q.code] = Object.assign({ via: "worker" }, q); });
+      return fb().then(function (old) { Object.keys(old).forEach(function (k) { if (!out[k]) out[k] = old[k]; }); return out; });
+    }).catch(function () { return fb(); });
+  }
+  function discReqSync() {
+    var reqs = state.discReqs || {};
+    var pend = Object.keys(reqs).map(function (k) { return Object.assign({ code: k }, reqs[k]); })
+      .filter(function (q) { return q && q.status === "pending"; })
+      .sort(function (a, b) { return (Number(a.requestedAt) || 0) - (Number(b.requestedAt) || 0); });
+    var el = document.getElementById("god-disc-popup");
+    if (!pend.length) { if (el && !godFocusIn(el)) el.remove(); return; }
+    var q = pend[0];
+    if (el && el.getAttribute("data-code") === q.code) return; /* already showing: keep what Matthew typed */
+    if (el && godFocusIn(el)) return;
+    if (el) el.remove();
+    el = document.createElement("div");
+    el.id = "god-disc-popup"; el.setAttribute("data-code", q.code);
+    el.style.cssText = "position:fixed;inset:0;z-index:2147482500;background:rgba(0,0,0,.6);display:flex;align-items:center;justify-content:center;padding:14px";
+    el.innerHTML = '<div role="dialog" aria-modal="true" aria-labelledby="gd-title" style="background:#141414;color:#fff;border:2px solid #f0d48a;border-radius:16px;max-width:460px;width:100%;padding:16px">' +
+      '<h2 id="gd-title" style="margin:0 0 6px">Discount request \u00b7 ' + esc(q.code) + "</h2>" +
+      '<p class="meta" id="gd-who">' + esc(q.driverName || q.driverId || "Driver") + " \u00b7 fare " + esc(fmtCents(q.fareSubCents)) + " before tax" + (pend.length > 1 ? " \u00b7 " + (pend.length - 1) + " more waiting" : "") + "</p>" +
+      '<p id="gd-reason" style="font-weight:700">Reason: ' + esc(q.reason || "") + "</p>" +
+      '<div style="display:flex;gap:8px;align-items:end;flex-wrap:wrap"><div><label for="gd-amount">Amount off ($)</label><input id="gd-amount"' + moneyRegAttrs() + ' style="width:120px"></div>' +
+      '<div><label for="gd-pct">or percent off (%)</label><input id="gd-pct" type="text" inputmode="numeric" pattern="[0-9]*" autocomplete="off" style="width:90px"></div></div>' +
+      '<p class="fine">The whole discount comes out of the driver\u2019s portion; PCS\u2019s share stays on the full fare.</p>' +
+      '<p class="error" id="gd-err" role="alert" style="color:#ff6b6b"></p>' +
+      '<div style="display:flex;gap:8px"><button type="button" class="btn btn-gold" id="gd-approve">Approve</button><button type="button" class="btn btn-ghost" id="gd-decline">Decline</button></div></div>';
+    document.body.appendChild(el);
+    var go = function (status) {
+      var amt = Math.round(Number(String((document.getElementById("gd-amount") || {}).value || "").replace(/[^0-9.]/g, "")) * 100) || 0;
+      var pct = Math.round(Number(String((document.getElementById("gd-pct") || {}).value || "").replace(/\D/g, ""))) || 0;
+      var err = document.getElementById("gd-err");
+      if (status === "approved") {
+        if ((amt > 0) === (pct > 0)) { if (err) err.textContent = "Enter a dollar amount OR a percent (one of them)."; return; }
+        if (pct > 100 || (Number(q.fareSubCents) > 0 && amt > Number(q.fareSubCents))) { if (err) err.textContent = "That is more than the fare."; return; }
+      }
+      var now = Date.now();
+      var patch = { status: status, amountCents: status === "approved" ? amt : 0, pct: status === "approved" ? pct : 0, decidedBy: "Matthew", decidedAt: now, updatedAt: now };
+      var save = q.via === "worker"
+        ? (function () { var a = godWriteAuth(); if (!a) return Promise.reject(new Error("God password needed.")); return workerJson("/disc/decide", Object.assign({ code: q.code, decision: status === "approved" ? "approve" : "decline", amountCents: amt, pct: pct }, a)).then(function (d) { if (d && d.godToken) gqSetTok(d.godToken); if (d && d.request) Object.assign(patch, { decidedAt: d.request.decidedAt }); return { ok: true }; }); })()
+        : fetch(discUrl(q.code), { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(patch) });
+      save.then(function (r) {
+        if (!r.ok) throw new Error("Could not save. Try again.");
+        state.discReqs[q.code] = Object.assign({}, q, patch);
+        el.remove();
+        state.boardNotice = (status === "approved" ? "Approved discount " + (amt ? fmtCents(amt) : pct + "%") : "Declined discount") + " for " + q.code;
+        discReqSync();
+      }).catch(function (e) { if (err) err.textContent = (e && e.message && e.message !== "x" ? e.message : "Could not save. Try again."); });
+    };
+    document.getElementById("gd-approve").addEventListener("click", function () { go("approved"); });
+    document.getElementById("gd-decline").addEventListener("click", function () { go("declined"); });
+  }
+  window.__pcsGodDisc = { sync: function () { discReqSync(); } };
+
   function renderBoardLists() {
     var d = document.getElementById("drivers-list");
     var r = document.getElementById("rides-list");
@@ -4030,12 +4353,15 @@
         pl.removeAttribute("data-bound");
       }
     }
-    if (b) {
+    var dbFresh = false;
+    if (b && (godFocusIn(b) || (state.dbHoldUntil || 0) > Date.now())) state.dbDirty = true; /* v73: never rebuild under an open picker / typed box */
+    else if (b) {
       var wrap = document.createElement("div");
       wrap.innerHTML = dayBoardHtml();
       var next = wrap.firstChild;
-      if (next) b.replaceWith(next);
+      if (next) { b.replaceWith(next); dbFresh = true; state.dbDirty = false; }
     }
+    try { discReqSync(); } catch (eDisc) {}
     refreshDailyMiles(); /* v71m */
     mountAddRide(); /* v72d */
     bindDriverActions();
@@ -4043,7 +4369,7 @@
     bindPaymentActions();
     bindSafetyActions();
     bindLocateActions();
-    bindDayBoardActions();
+    if (dbFresh) bindDayBoardActions(); /* v73: a kept board keeps its listeners (no double binding) */
     bindOwnerRideActions();
     setFocusBar();
   }
@@ -4064,6 +4390,43 @@
         state.fareDrafts[id] = input.value;
       });
     });
+    state.tipDrafts = state.tipDrafts || {}; state.cancelOpen = state.cancelOpen || {};
+    Array.prototype.forEach.call(board.querySelectorAll(".day-tip-in"), function (input) {
+      input.addEventListener("input", function () { state.tipDrafts[input.getAttribute("data-event-id")] = input.value; });
+    });
+    Array.prototype.forEach.call(board.querySelectorAll(".btn-save-tip"), function (btn) {
+      btn.addEventListener("click", function () {
+        var id = btn.getAttribute("data-event-id"), inp = document.getElementById("tip-" + id);
+        btn.disabled = true;
+        saveCalendarTip(id, inp ? inp.value : state.tipDrafts[id]).catch(function () { btn.disabled = false; state.boardNotice = "Could not save the tip."; renderBoardLists(); });
+      });
+    });
+    Array.prototype.forEach.call(board.querySelectorAll(".btn-cancel-open,.btn-cancel-close"), function (btn) {
+      btn.addEventListener("click", function () {
+        var id = btn.getAttribute("data-event-id");
+        if (btn.classList.contains("btn-cancel-open")) state.cancelOpen[id] = { fee: "waive", reason: "" }; else delete state.cancelOpen[id];
+        if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
+        state.dbHoldUntil = 0; renderBoardLists();
+      });
+    });
+    Array.prototype.forEach.call(board.querySelectorAll(".day-cancel-reason"), function (input) {
+      input.addEventListener("input", function () { var o = state.cancelOpen[input.getAttribute("data-event-id")]; if (o) o.reason = input.value; });
+    });
+    Array.prototype.forEach.call(board.querySelectorAll('.day-cancel input[type="radio"]'), function (rb) {
+      rb.addEventListener("change", function () { var id = rb.name.replace(/^cfee-/, ""); if (state.cancelOpen[id]) state.cancelOpen[id].fee = rb.value; });
+    });
+    Array.prototype.forEach.call(board.querySelectorAll(".btn-cancel-go"), function (btn) {
+      btn.addEventListener("click", function () {
+        var id = btn.getAttribute("data-event-id"), o = state.cancelOpen[id] || {};
+        var ri = document.getElementById("creason-" + id), reason = String(ri ? ri.value : o.reason || "").trim();
+        var ch = board.querySelector('input[name="cfee-' + id + '"]:checked'), fee = ch ? ch.value : (o.fee || "waive");
+        var er = document.getElementById("cerr-" + id);
+        if (reason.length < 3) { o.err = "Type a short reason."; if (er) er.textContent = o.err; return; }
+        if (!window.confirm("Cancel this ride? " + (fee === "charge" ? "A cancellation fee will be charged." : "No fee (waived).") + " The driver is told and it leaves the board.")) return;
+        btn.disabled = true;
+        cancelCalendarRide(id, fee, reason.slice(0, 200)).catch(function () { btn.disabled = false; if (er) er.textContent = "Could not cancel. Try again."; });
+      });
+    });
     Array.prototype.forEach.call(board.querySelectorAll(".btn-assign-ride"), function (btn) {
       btn.addEventListener("click", function () {
         var id = btn.getAttribute("data-event-id");
@@ -4076,7 +4439,9 @@
           return;
         }
         btn.disabled = true;
+        state.dbHoldUntil = 0;
         assignCalendarRide(id, driverId).then(function () {
+          delete state.assignDrafts[id];
           btn.disabled = false;
         }).catch(function () {
           btn.disabled = false;
@@ -4085,13 +4450,39 @@
         });
       });
     });
+    Array.prototype.forEach.call(board.querySelectorAll(".btn-save-fare"), function (btn) {
+      btn.addEventListener("click", function () {
+        var id = btn.getAttribute("data-event-id");
+        if (!id) return;
+        var fi = document.getElementById("fare-" + id), fx = document.getElementById("fixed-" + id);
+        btn.disabled = true;
+        saveCalendarFare(id, fi ? fi.value : state.fareDrafts[id], !!(fx && fx.checked)).then(function () { btn.disabled = false; }).catch(function (err) {
+          btn.disabled = false;
+          state.boardNotice = err && err.message === "fare" ? "Type the fare before tax first." : "Fare NOT saved. Try again.";
+          renderBoardLists();
+        });
+      });
+    });
+    Array.prototype.forEach.call(board.querySelectorAll(".btn-undo-complete"), function (btn) {
+      btn.addEventListener("click", function () {
+        var id = btn.getAttribute("data-event-id");
+        if (!id || !window.confirm("Undo this completion? The ride goes back to assigned and the earnings entry is removed.")) return;
+        btn.disabled = true;
+        undoCalendarComplete(id).catch(function () { btn.disabled = false; state.boardNotice = "Could not undo that completion."; renderBoardLists(); });
+      });
+    });
     Array.prototype.forEach.call(board.querySelectorAll(".btn-complete-ride"), function (btn) {
       btn.addEventListener("click", function () {
         var id = btn.getAttribute("data-event-id");
         if (!id) return;
         var fareInput = document.getElementById("fare-" + id);
         var fare = fareInput ? fareInput.value : state.fareDrafts[id];
-        if (!window.confirm("Mark complete and credit commission into this driver's Mon–Sun pay week?")) return;
+        var crow = null; (state.calendar || []).forEach(function (r) { if (r && r.id === id) crow = r; });
+        var startMs = rideStartMs(crow);
+        if (startMs && startMs > Date.now()) {
+          if (!window.confirm("This ride doesn't start until " + fmtBoardWhen(crow.start) + ". Completing it now hides it from the driver app. Complete it early anyway?")) return;
+        }
+        if (!window.confirm("Complete this ride and credit commission into this driver's Mon–Sun pay week?")) return;
         btn.disabled = true;
         completeCalendarRide(id, fare).then(function () {
           btn.disabled = false;
@@ -4250,7 +4641,7 @@
   function meterPayWord(ps, via) {
     ps = String(ps || "").toLowerCase();
     if (ps === "charged") return "Paid (Square)";
-    if (ps === "paid_other" && String(via || "") === "test") return "TEST ride (no money)"; /* v72x.1 */
+    if (ps === "paid_other" && String(via || "") === "test") return "Rate comparison ($0)"; /* v72x.1; v73 label */
     if (ps === "paid_other") return "Paid another way" + (via ? " (" + String(via).replace("_", " ") + ")" : "");
     return "NOT PAID";
   }
@@ -4519,7 +4910,7 @@
       '<p class="meta">' + esc(p.name || "Rider") + " · up to " + esc(fmtCents(left)) + " can be refunded" +
       (String(p.env || "") === "sandbox" ? " (TEST)" : "") + ".</p>" +
       '<label for="pp-amount">Amount ($)</label>' +
-      '<input id="pp-amount" type="text" inputmode="decimal" autocomplete="off" value="' + esc((left / 100).toFixed(2)) + '">' +
+      '<input id="pp-amount"' + moneyRegAttrs() + ' value="' + esc((left / 100).toFixed(2)) + '">' +
       '<label for="pp-password">God password</label>' +
       '<input id="pp-password" type="password" autocomplete="off" autocapitalize="off" spellcheck="false">' +
       '<p class="pp-err" id="pp-err" role="alert"></p>' +
@@ -4685,6 +5076,31 @@
   function dbBindOnce() {
     if (window.__pcsDbBound) return;
     window.__pcsDbBound = true;
+    try { /* v73: collapsed Scheduled rides = a single ~44px header row, no empty body */
+      var st = document.createElement("style"); st.id = "db-collapsed-css";
+      st.textContent = ".day-board.db-collapsed{padding:0 14px!important;min-height:0!important;height:auto!important;max-height:none!important;flex:0 0 auto!important;align-self:start!important}" +
+        ".day-board.db-collapsed h2{margin:0!important;font-size:20px!important;line-height:1!important}" +
+        ".day-board.db-collapsed #day-board-toggle{min-height:44px!important;box-sizing:border-box}" +
+        ".day-board.db-collapsed .board-notice,.day-board.db-collapsed #day-board-body{display:none!important}" +
+        /* v73 layout: the day board was taking the shell's 1fr row (the "huge empty box"); give it auto height and let the page scroll */
+        ".shell{grid-template-rows:auto auto 1fr!important;height:auto!important;min-height:100dvh}" +
+        ".day-board.db-collapsed{margin:0 12px 8px!important}" +
+        /* iPad / iPhone (one column): sections stack above, the map is at least half the screen; opening a section pushes it down */
+        "@media (max-width:860px){.workspace{grid-template-rows:auto minmax(50vh,auto)!important}" +
+        ".side{overflow:visible!important;padding:8px 12px 10px!important;border-right:0!important}" +
+        ".side h2{margin:0 0 4px!important;font-size:13px!important}.side-section+.side-section{margin-top:8px!important}" +
+        "#add-ride-box .fine{display:none}#add-ride-box .btn{min-height:36px!important;padding:6px 12px!important}" +
+        "details.driver-card>summary.driver-card-summary{padding-top:3px!important;padding-bottom:3px!important;min-height:0!important}" +
+        ".side .card,.side details{margin-top:4px!important;margin-bottom:4px!important}" +
+        ".map-pane{min-height:50vh!important;height:50vh}" +
+        /* map right under Add ride + Drivers; Riders, queue, payments, miles go below the map */
+        ".workspace{display:flex!important;flex-direction:column}.side{display:contents!important}" +
+        ".side>.side-section{order:4;padding:0 12px;margin:8px 0 0!important;background:var(--panel)}" +
+        ".side>#add-ride-section{order:1}.side>.side-section.drivers-section{order:2}.map-pane{order:3;flex:0 0 auto;margin-top:8px}}" +
+        /* legend: small and tucked in the corner so it covers little of the map */
+        ".map-hint{max-width:min(240px,calc(100% - 24px))!important;font-size:10.5px!important;padding:4px 7px!important;opacity:.85;left:8px!important;bottom:22px!important}";
+      document.head.appendChild(st);
+    } catch (e) {}
     document.addEventListener("click", function (ev) {
       var t = ev.target && ev.target.closest ? ev.target.closest("#day-board-toggle,[data-day-card-toggle]") : null;
       if (!t) return;
@@ -4694,6 +5110,7 @@
         try { localStorage.setItem(DB_COLLAPSE_KEY, c ? "1" : "0"); } catch (e) {}
         var body = document.getElementById("day-board-body");
         if (body) body.style.display = c ? "none" : "";
+        var sec = document.getElementById("day-board"); if (sec) sec.classList.toggle("db-collapsed", c); /* v73: compact one-row header when collapsed */
         t.setAttribute("aria-expanded", c ? "false" : "true");
         var car = t.querySelector(".db-caret"); if (car) car.textContent = c ? "\u25B6" : "\u25BC";
         return;
@@ -4711,6 +5128,60 @@
   }
   window.__pcsGodDayBoard = { collapsed: dbBoardCollapsed, cards: dbCardSet };
 
+  /* v73: Tip (paid in Square), 100% to the driver, never in the commission; editable before and after Complete; edits logged */
+  function dbTipHtml(r) {
+    var v = state.tipDrafts && state.tipDrafts[r.id] != null ? state.tipDrafts[r.id] : (Number(r.tipCents) > 0 ? (Number(r.tipCents) / 100).toFixed(2) : "");
+    return '<div class="day-tip" style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin:4px 0"><label for="tip-' + esc(r.id) + '">Tip (paid in Square) $</label>' +
+      '<input id="tip-' + esc(r.id) + '" class="day-tip-in" data-event-id="' + esc(r.id) + '"' + moneyRegAttrs() + ' value="' + esc(v) + '" style="width:110px">' +
+      '<button type="button" class="btn btn-ghost btn-save-tip" data-event-id="' + esc(r.id) + '">Save tip</button>' +
+      (Number(r.tipCents) > 0 ? '<span class="fine" id="tip-saved-' + esc(r.id) + '">Saved ' + esc(fmtCents(r.tipCents)) + " card tip</span>" : "") + "</div>";
+  }
+  function saveCalendarTip(eventId, val) {
+    var row = null; (state.calendar || []).forEach(function (r) { if (r && r.id === eventId) row = r; });
+    if (!row) return Promise.reject(new Error("missing"));
+    var cents = Math.max(0, Math.round(Number(String(val || "").replace(/[^0-9.]/g, "")) * 100) || 0);
+    var now = Date.now();
+    var edits = Array.isArray(row.tipEdits) ? row.tipEdits.slice(-20) : [];
+    edits.push({ at: now, cents: cents, prevCents: Number(row.tipCents) || 0, by: "Matthew" });
+    var next = Object.assign({}, row, { tipCents: cents, tipVia: "card", tipEdits: edits, updatedAt: now });
+    return putCalendarRide(next).then(function () {
+      if (row.status === "completed" && row.assignedDriverId) {
+        return godFetch(historyUrl(row.assignedDriverId, next.code || makeScheduleCode(eventId)), { method: "PATCH", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ tipCents: cents, tipVia: "card", cardTipCents: cents, tipEditedAt: now }) });
+      }
+    }).then(function () { if (state.tipDrafts) delete state.tipDrafts[eventId]; state.boardNotice = "Card tip " + fmtCents(cents) + " saved (100% to the driver)"; return refresh(); });
+  }
+  /* v73: Cancel ride from God mode: Waive fee (default) or Charge cancellation fee, required reason, confirm */
+  function dbCancelHtml(r) {
+    var o = (state.cancelOpen || {})[r.id];
+    if (!o) return '<button type="button" class="btn btn-ghost btn-cancel-open" data-event-id="' + esc(r.id) + '" style="color:#ff9b9b">Cancel ride</button>';
+    return '<div class="day-cancel" id="cancel-' + esc(r.id) + '" style="border:1px solid #ff9b9b;border-radius:10px;padding:8px;margin:6px 0">' +
+      '<p style="margin:0 0 4px;font-weight:800">Cancel this ride</p>' +
+      '<label><input type="radio" name="cfee-' + esc(r.id) + '" value="waive"' + (o.fee !== "charge" ? " checked" : "") + "> Waive fee (no charge)</label><br>" +
+      '<label><input type="radio" name="cfee-' + esc(r.id) + '" value="charge"' + (o.fee === "charge" ? " checked" : "") + "> Charge cancellation fee</label><br>" +
+      '<label for="creason-' + esc(r.id) + '">Reason (required)</label><input id="creason-' + esc(r.id) + '" class="day-cancel-reason" data-event-id="' + esc(r.id) + '" type="text" maxlength="200" value="' + esc(o.reason || "") + '">' +
+      '<p class="error" id="cerr-' + esc(r.id) + '" style="color:#ff6b6b">' + esc(o.err || "") + "</p>" +
+      '<button type="button" class="btn btn-gold btn-cancel-go" data-event-id="' + esc(r.id) + '">Cancel ride</button> <button type="button" class="btn btn-ghost btn-cancel-close" data-event-id="' + esc(r.id) + '">Keep ride</button></div>';
+  }
+  function cancelCalendarRide(eventId, fee, reason) {
+    var row = null; (state.calendar || []).forEach(function (r) { if (r && r.id === eventId) row = r; });
+    if (!row) return Promise.reject(new Error("missing"));
+    var now = Date.now(), code = row.code || makeScheduleCode(eventId);
+    var next = Object.assign({}, row, { status: "cancelled", cancelledAt: now, cancelledBy: "owner", cancelReason: reason, cancelFee: fee === "charge" ? "charge" : "waived",
+      cancelFeeStatus: fee === "charge" ? "to_charge" : "waived", code: code, updatedAt: now });
+    return putCalendarRide(next).then(function () {
+      if (!row.assignedDriverId) return null;
+      return godFetch(historyUrl(row.assignedDriverId, code), { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({
+        code: code, day: boardDayKey(row.start) || chicagoToday(), completedAt: now, when: fmtBoardWhen(row.start), pickup: row.pickup || "", drop: row.dropoff || "",
+        riderName: row.rider || "", status: "canceled", canceled: true, cancelReason: reason, cancelFee: next.cancelFee, fareSub: 0, fareTax: 0, fareTotal: 0,
+        commissionPct: commissionPctFor(row.assignedDriverId), commissionCents: 0, tipCents: 0, source: row.source === "manual" ? "manual" : "calendar" }) });
+    }).then(function () {
+      if (state.cancelOpen) delete state.cancelOpen[eventId];
+      state.boardNotice = "Canceled " + (row.rider || "ride") + " (" + (fee === "charge" ? "cancellation fee to charge" : "fee waived") + ")" + (row.assignedDriverName ? "; " + row.assignedDriverName + " is notified" : "");
+      return refresh();
+    });
+  }
+  window.__pcsGodCancel = cancelCalendarRide;
   function dayBoardHtml() {
     var rows = upcomingCalendarRides();
     var drivers = approvedDriversForAssign();
@@ -4742,7 +5213,7 @@
     var dbBodyStyle = dbBoardCollapsed() ? ' style="display:none"' : "";
     if (!rows.length && !err) {
       return (
-        '<section class="day-board" id="day-board">' +
+        '<section class="day-board' + (dbBoardCollapsed() ? " db-collapsed" : "") + '" id="day-board">' +
         dbHeaderHtml(0) +
         '<div id="day-board-body"' + dbBodyStyle + ">" + howBlock + "</div>" + notice +
         "</section>"
@@ -4757,7 +5228,7 @@
           ? '<span class="badge online">Assigned</span>'
           : '<span class="badge pending">Open</span>');
       var options = ['<option value="">Assign driver…</option>'].concat(drivers.map(function (d) {
-        var sel = d.id === r.assignedDriverId ? " selected" : "";
+        var sel = d.id === (state.assignDrafts[r.id] != null ? state.assignDrafts[r.id] : r.assignedDriverId) ? " selected" : ""; /* v73: keep the picked name */
         return '<option value="' + esc(d.id) + '"' + sel + ">" + esc(d.name || d.id) + "</option>";
       }));
       var fareVal = state.fareDrafts[r.id] != null
@@ -4779,8 +5250,10 @@
           (r.assignedDriverName
             ? '<p class="day-line"><span>Driver</span> ' + esc(r.assignedDriverName) + "</p>"
             : "") +
+          (r.assignedDriverId ? dbTipHtml(r) : "") + /* v73 Tip (paid in Square) */
           (st === "completed"
-            ? '<p class="day-line"><span>Commission</span> ' + esc(fmtCents(r.commissionCents)) + "</p>"
+            ? '<p class="day-line"><span>Commission</span> ' + esc(fmtCents(r.commissionCents)) + "</p>" +
+              (completedEarly(r) ? '<p class="day-line db-early" style="color:#ffb35c;font-weight:700">Completed early – <button type="button" class="btn btn-ghost btn-undo-complete" data-event-id="' + esc(r.id) + '" style="min-height:0;padding:2px 10px">Undo</button></p>' : "")
             : (
               '<div class="day-actions">' +
                 '<label class="sr-only" for="assign-' + esc(r.id) + '">Assign driver</label>' +
@@ -4789,16 +5262,19 @@
                 "</select>" +
                 '<button type="button" class="btn btn-gold btn-assign-ride" data-event-id="' + esc(r.id) + '"' + assignDisabled + ">Assign</button>" +
                 '<label class="fare-label" for="fare-' + esc(r.id) + '">Fare before tax $</label>' +
-                '<input id="fare-' + esc(r.id) + '" class="day-fare" data-event-id="' + esc(r.id) + '" type="number" inputmode="decimal" min="0" step="0.01" value="' + esc(fareVal) + '"' + completeDisabled + ">" +
-                '<button type="button" class="btn btn-ghost btn-complete-ride" data-event-id="' + esc(r.id) + '"' + completeDisabled + ">Complete + credit</button>" +
-              "</div>"
+                '<input id="fare-' + esc(r.id) + '" class="day-fare" data-event-id="' + esc(r.id) + '"' + moneyRegAttrs() + ' value="' + esc(moneyRegVal(fareVal)) + '"' + assignDisabled + ">" +
+                '<label class="fine day-fixed-lbl" style="display:inline-flex;gap:4px;align-items:center"><input type="checkbox" class="day-fixed" id="fixed-' + esc(r.id) + '" data-event-id="' + esc(r.id) + '"' + (r.fixedFare ? " checked" : "") + assignDisabled + "> Account ride: driver app charges this fare</label>" +
+                '<button type="button" class="btn btn-gold btn-save-fare" data-event-id="' + esc(r.id) + '"' + assignDisabled + ">Save fare</button>" +
+                (r.fareBeforeTax != null ? '<span class="fine" id="fare-saved-' + esc(r.id) + '">Saved ' + esc(fmtCents(Math.round(Number(r.fareBeforeTax) * 100))) + (r.fixedFare ? " · set fare" : "") + "</span>" : "") +
+                '<button type="button" class="btn btn-ghost btn-complete-ride" data-event-id="' + esc(r.id) + '"' + completeDisabled + ">Complete ride…</button>" +
+              "</div>" + dbCancelHtml(r)
             )) +
           "</div>" +
         "</article>"
       );
     }).join("");
     return (
-      '<section class="day-board" id="day-board">' +
+      '<section class="day-board' + (dbBoardCollapsed() ? " db-collapsed" : "") + '" id="day-board">' +
         dbHeaderHtml(rows.length) + notice +
         '<div id="day-board-body"' + dbBodyStyle + ">" +
         howBlock + err +
@@ -5090,6 +5566,11 @@
     d = Object.assign({}, d || {});
     touched = touched || {};
     if (!touched.commissionPct && (d.commissionPct == null || d.commissionPct === "")) d.commissionPct = String(defaultPct != null ? defaultPct : 70);
+    var fare0 = arNum(d.fare);
+    if (fare0 != null && !isNaN(fare0) && fare0 > 0) { /* v73: Discount (%) <-> Discount ($), whichever Matthew typed last */
+      if (touched.discMode === "pct") { var dp = arNum(d.discountPct); if (dp != null && !isNaN(dp)) d.discount = ar2(fare0 * Math.min(100, Math.max(0, dp)) / 100).toFixed(2); }
+      else if (touched.discMode === "usd") { var du = arNum(d.discount); if (du != null && !isNaN(du)) d.discountPct = String(Math.round(du / fare0 * 10000) / 100); }
+    }
     var fare = arNum(d.fare), disc = arNum(d.discount) || 0, tax = arNum(d.taxFees) || 0, pct = arNum(d.commissionPct);
     if (fare == null || isNaN(fare) || isNaN(disc) || isNaN(tax) || pct == null || isNaN(pct)) return d;
     var net = ar2(fare - disc);
@@ -5148,6 +5629,10 @@
       notes: notes,
       fareBeforeTax: ar2(nums.fare - nums.discount), /* day board / driver app read this */
       fare: nums.fare, discount: nums.discount, taxFees: nums.taxFees, total: nums.total,
+      discountPct: nums.fare > 0 ? Math.round(nums.discount / nums.fare * 10000) / 100 : 0, /* v73 */
+      pickupLat: isFinite(+f.pickupLat) && f.pickupLat !== "" && f.pickupLat != null ? +f.pickupLat : null, pickupLng: isFinite(+f.pickupLng) && f.pickupLng != null && f.pickupLng !== "" ? +f.pickupLng : null,
+      dropoffLat: isFinite(+f.dropoffLat) && f.dropoffLat != null && f.dropoffLat !== "" ? +f.dropoffLat : null, dropoffLng: isFinite(+f.dropoffLng) && f.dropoffLng != null && f.dropoffLng !== "" ? +f.dropoffLng : null,
+      stopsGeo: Array.isArray(f.stopsArr) ? f.stopsArr.filter(function (x) { return x && String(x.text || "").trim(); }).slice(0, 5).map(function (x) { return { address: String(x.text).trim().slice(0, 400), lat: isFinite(+x.lat) && x.lat != null ? +x.lat : null, lng: isFinite(+x.lng) && x.lng != null ? +x.lng : null }; }) : [],
       commissionPct: nums.commissionPct, commissionDollars: nums.commission,
       balance: nums.balance, balanceDir: arCollects(pay) ? "driver_owes" : "owed_to_driver",
       flatPrice: !!f.flat,
@@ -5201,12 +5686,12 @@
   }
 
   function arHistoryPut(driverId, code, entry) {
-    return fetch(historyUrl(driverId, code), { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(entry) })
+    return godFetch(historyUrl(driverId, code), { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(entry) })
       .then(function (res) { if (!res.ok) throw new Error("Saved the ride, but the pay-week entry failed."); });
   }
   function arHistoryDelete(driverId, code) {
     if (!driverId || !code) return Promise.resolve();
-    return fetch(historyUrl(driverId, code), { method: "DELETE" }).then(function (res) { if (!res.ok) throw new Error("Could not remove the old pay-week entry."); });
+    return godFetch(historyUrl(driverId, code), { method: "DELETE" }).then(function (res) { if (!res.ok) throw new Error("Could not remove the old pay-week entry."); });
   }
 
   function arDriverChoices(includeId) {
@@ -5239,6 +5724,11 @@
       steps = steps.then(function () { return arHistoryDelete(prev.assignedDriverId, prev.code); });
     }
     return steps.then(function () { return putCalendarRide(row); }).then(function () {
+      /* v73: read it back; a refused write must not look saved (Brian Gipson Oct 9 never reached the database) */
+      return fetch(calendarUrl(row.id), { cache: "no-store" }).then(function (res) { return res.ok ? res.json() : null; }).then(function (back) {
+        if (!back || back.code !== row.code) throw new Error("Not saved: the database did not keep this ride. Nothing changed. Try again or tell support.");
+      });
+    }).then(function () {
       if (row.status !== "completed") return null;
       return arHistoryPut(row.assignedDriverId, row.code, addRideHistoryEntry(row, now));
     }).then(function () {
@@ -5280,6 +5770,8 @@
     var s2 = function (v) { return v == null || v === "" ? "" : Number(v).toFixed(2); };
     return { driverId: r.assignedDriverId, status: r.status === "deleted" ? "cancelled" : (r.status || "assigned"), name: r.rider || "", phone: r.riderPhone || "",
       pickup: r.pickup || "", stops: (r.stops || []).join("\n"), dropoff: r.dropoff || "",
+      pickupLat: r.pickupLat, pickupLng: r.pickupLng, dropoffLat: r.dropoffLat, dropoffLng: r.dropoffLng, discountPct: r.discountPct != null ? String(r.discountPct) : "",
+      stopsArr: (Array.isArray(r.stopsGeo) && r.stopsGeo.length ? r.stopsGeo.map(function (x) { return { text: x.address, lat: x.lat, lng: x.lng }; }) : (r.stops || []).map(function (t) { return { text: t }; })),
       date: parts.year ? parts.year + "-" + parts.month + "-" + parts.day : "", time: parts.hour ? (parts.hour === "24" ? "00" : parts.hour) + ":" + parts.minute : "",
       fare: s2(r.fare != null ? r.fare : r.fareBeforeTax), discount: s2(r.discount || 0), taxFees: s2(r.taxFees || 0), total: s2(r.total),
       commissionPct: r.commissionPct != null ? String(r.commissionPct) : "", commission: s2(r.commissionDollars), balance: s2(r.balance),
@@ -5302,6 +5794,82 @@
     return Promise.resolve();
   }
 
+  /* v73: stops = one Google Places address search per stop, "+ Add a stop" (max 5) */
+  function arStopsHtml(d) {
+    var arr = Array.isArray(d.stopsArr) ? d.stopsArr : [];
+    return '<label class="ar-l">Stops (optional)</label>' + arr.map(function (x, i) {
+      return '<div style="position:relative;display:flex;gap:6px;margin:0 0 4px"><input id="ar-stop-' + i + '" class="ar-stop" data-stop-i="' + i + '" data-places="stop:' + i + '" type="text" autocomplete="off" placeholder="Stop ' + (i + 1) + ' address" value="' + esc(x.text || "") + '" style="flex:1">' +
+        '<button type="button" class="btn btn-ghost ar-stop-x" data-stop-i="' + i + '" aria-label="Remove stop ' + (i + 1) + '" style="min-height:0;padding:4px 10px">\u00d7</button></div>';
+    }).join("") + (arr.length < 5 ? '<button type="button" class="btn btn-ghost" id="ar-stop-add">+ Add a stop</button>' : "");
+  }
+  function arStopsToText() { var d = state.addRideDraft || {}; d.stops = (d.stopsArr || []).map(function (x) { return String(x.text || "").trim(); }).filter(Boolean).join("\n"); }
+  var arPlaces = { sess: "", timer: 0, seq: 0 };
+  function arPlacesPost(path, body) {
+    return fetch(PAY_WORKER + "/places" + path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) })
+      .then(function (r) { return r.json(); }).then(function (d) { return d && d.ok && !d.capped && !d.fallback ? d : null; }).catch(function () { return null; });
+  }
+  function arPlacesClose() { var l = document.getElementById("ar-places-list"); if (l) l.remove(); }
+  function arPlacesSet(field, text, lat, lng) {
+    var d = state.addRideDraft = state.addRideDraft || {};
+    if (field.indexOf("stop:") === 0) { var i = +field.slice(5); d.stopsArr = d.stopsArr || []; d.stopsArr[i] = { text: text, lat: lat, lng: lng }; arStopsToText(); }
+    else { d[field] = text; d[field + "Lat"] = lat; d[field + "Lng"] = lng; }
+  }
+  function arPlacesSearch(input) {
+    var field = input.getAttribute("data-places"), q = String(input.value || "").trim(), my = ++arPlaces.seq;
+    if (q.length < 3) { arPlacesClose(); return; }
+    if (!arPlaces.sess) arPlaces.sess = "god-" + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+    arPlacesPost("/autocomplete", { input: q, sessionToken: arPlaces.sess, lat: 29.7604, lng: -95.3698, radius: 80000 }).then(function (d) { /* Houston-area bias, like the apps */
+      if (my !== arPlaces.seq || document.activeElement !== input) return;
+      var preds = d && Array.isArray(d.predictions) ? d.predictions.slice(0, 6) : [];
+      arPlacesClose();
+      if (!preds.length) return;
+      var l = document.createElement("div");
+      l.id = "ar-places-list"; l.setAttribute("role", "listbox");
+      l.style.cssText = "position:absolute;left:0;right:0;top:100%;z-index:5;background:#1f1f1f;border:1px solid #f0d48a;border-radius:10px;max-height:240px;overflow:auto";
+      preds.forEach(function (pr) {
+        var b = document.createElement("button");
+        b.type = "button"; b.className = "ar-place-item"; b.setAttribute("role", "option");
+        b.style.cssText = "display:block;width:100%;text-align:left;background:none;border:0;border-bottom:1px solid #333;color:#fff;padding:8px 10px;min-height:0;margin:0";
+        b.innerHTML = "<strong>" + esc(pr.main || "") + '</strong><br><span style="opacity:.75;font-size:13px">' + esc(pr.sub || "") + "</span>";
+        b.addEventListener("mousedown", function (ev) { ev.preventDefault(); }); /* keep focus in the box */
+        b.addEventListener("click", function () {
+          arPlacesPost("/details", { placeId: pr.placeId, sessionToken: arPlaces.sess }).then(function (dd) {
+            arPlaces.sess = "";
+            var pl = dd && dd.place;
+            var text = pl && pl.formatted ? String(pl.formatted) : [pr.main, pr.sub].filter(Boolean).join(", ");
+            var lat = pl && isFinite(+pl.lat) ? +pl.lat : null, lng = pl && isFinite(+pl.lng) ? +pl.lng : null;
+            input.__placePicked = true; input.value = text; input.__pickedText = text; input.__placePicked = false;
+            arPlacesSet(field, text, lat, lng);
+            arPlacesClose();
+          });
+        });
+        l.appendChild(b);
+      });
+      (input.parentNode).appendChild(l);
+    });
+  }
+  if (typeof document !== "undefined") {
+    document.addEventListener("input", function (e) {
+      var t = e.target;
+      if (!t || !t.getAttribute || !t.getAttribute("data-places") || !t.closest("#add-ride-modal")) return;
+      var f = t.getAttribute("data-places");
+      if (f.indexOf("stop:") === 0) arPlacesSet(f, t.value, null, null);
+      clearTimeout(arPlaces.timer);
+      arPlaces.timer = setTimeout(function () { arPlacesSearch(t); }, 250);
+    });
+    document.addEventListener("focusout", function (e) { if (e.target && e.target.getAttribute && e.target.getAttribute("data-places")) setTimeout(arPlacesClose, 200); });
+    document.addEventListener("click", function (e) {
+      var t = e.target && e.target.closest ? e.target.closest("#ar-stop-add,.ar-stop-x") : null;
+      if (!t || !t.closest("#add-ride-modal")) return;
+      var d = state.addRideDraft = state.addRideDraft || {};
+      d.stopsArr = Array.isArray(d.stopsArr) ? d.stopsArr : [];
+      if (t.id === "ar-stop-add") { if (d.stopsArr.length < 5) d.stopsArr.push({ text: "" }); }
+      else d.stopsArr.splice(+t.getAttribute("data-stop-i"), 1);
+      arStopsToText();
+      var box = document.getElementById("ar-stops-box");
+      if (box) { box.innerHTML = arStopsHtml(d); var last = box.querySelector(".ar-stop:last-of-type"); var ins = box.querySelectorAll(".ar-stop"); if (t.id === "ar-stop-add" && ins.length) ins[ins.length - 1].focus(); }
+    });
+  }
   function addRideFormHtml() {
     var d = state.addRideDraft || {};
     var drivers = arDriverChoices(d.driverId);
@@ -5314,7 +5882,7 @@
       return '<label class="ar-l" for="ar-' + id + '">' + label + "</label>" +
         '<input id="ar-' + id + '" data-ar="' + id + '" type="' + (type || "text") + '" value="' + esc(d[id] == null ? "" : d[id]) + '"' + (extra || "") + ">";
     };
-    var money = ' inputmode="decimal" autocomplete="off"';
+    var money = ' inputmode="numeric" pattern="[0-9]*" autocomplete="off" data-money-reg="1"'; /* v73 cash-register entry */
     var cash = arCollects(d.payMethod);
     return (
       '<div class="add-ride-sheet" role="dialog" aria-modal="true" aria-labelledby="ar-title" style="background:#141414;color:#fff;border:2px solid #f0d48a;border-radius:16px;max-width:560px;width:100%;max-height:92vh;overflow:auto;padding:16px 18px">' +
@@ -5324,15 +5892,16 @@
       '<div><label class="ar-l" for="ar-driverId">Driver</label>' + sel("driverId", drivers.map(function (x) { return [x.id, x.name || x.id]; }), "Pick a driver…") + "</div>" +
       '<div><label class="ar-l" for="ar-status">Status</label>' + sel("status", ADD_RIDE_STATUS, "Status…") + "</div>" +
       "<div>" + inp("name", "Client name") + "</div><div>" + inp("phone", "Client phone", "tel") + "</div>" +
-      '<div style="grid-column:1/3">' + inp("pickup", "Pickup") + "</div>" +
-      '<div style="grid-column:1/3"><label class="ar-l" for="ar-stops">Stops (optional, one per line)</label><textarea id="ar-stops" data-ar="stops" rows="2" style="width:100%">' + esc(d.stops || "") + "</textarea></div>" +
-      '<div style="grid-column:1/3">' + inp("dropoff", "Drop-off") + "</div>" +
+      '<div style="grid-column:1/3;position:relative">' + inp("pickup", "Pickup (search an address)", "text", ' autocomplete="off" data-places="pickup"') + "</div>" +
+      '<div style="grid-column:1/3" id="ar-stops-box">' + arStopsHtml(d) + "</div>" + /* v73: one address search per stop */
+      '<div style="grid-column:1/3;position:relative">' + inp("dropoff", "Drop-off (search an address)", "text", ' autocomplete="off" data-places="dropoff"') + "</div>" +
       "<div>" + inp("date", "Date", "date") + "</div><div>" + inp("time", "Time", "time") + "</div>" +
       '<div><label class="ar-l" for="ar-payMethod">Payment method</label>' + sel("payMethod", ADD_RIDE_PAY, "Cash or card…") + "</div>" +
       '<div><label class="ar-c" style="display:block;margin-top:22px"><input type="checkbox" id="ar-flat" data-ar="flat"' + (d.flat ? " checked" : "") + "> Flat price</label></div>" +
       "<div>" + inp("fare", "Fare ($)", "text", money) + "</div><div>" + inp("discount", "Discount ($)", "text", money) + "</div>" +
+      "<div>" + inp("discountPct", "Discount (%)", "text", ' inputmode="numeric" pattern="[0-9]*" autocomplete="off"') + '</div><div class="fine" style="align-self:end;opacity:.8">% fills $ on the pretax fare, and $ fills %.</div>' + /* v73 */
       "<div>" + inp("taxFees", "Tax / fees ($)", "text", money) + "</div><div>" + inp("total", "Total charged ($)", "text", money) + "</div>" +
-      "<div>" + inp("commissionPct", "Commission %", "text", money) + "</div><div>" + inp("commission", "Driver commission ($)", "text", money) + "</div>" +
+      "<div>" + inp("commissionPct", "Commission %", "text", ' inputmode="numeric" pattern="[0-9]*" autocomplete="off"') + "</div><div>" + inp("commission", "Driver commission ($)", "text", money) + "</div>" +
       '<div style="grid-column:1/3">' + inp("balance", cash ? "Driver owes PCS ($) — driver collects" : "PCS owes driver ($)", "text", money + ' style="font-weight:800;font-size:18px"') + "</div>" +
       '<div style="grid-column:1/3"><label class="ar-l" for="ar-notes">Notes</label><textarea id="ar-notes" data-ar="notes" rows="2" style="width:100%">' + esc(d.notes || "") + "</textarea></div>" +
       '<div style="grid-column:1/3">' + inp("audit", state.addRideEditId ? "Audit note (required): what changed and why" : "Audit note (optional)") + "</div>" +
@@ -5353,6 +5922,7 @@
     });
     var bl = document.querySelector('label[for="ar-balance"]');
     if (bl) bl.textContent = arCollects(state.addRideDraft.payMethod) ? "Driver owes PCS ($) — driver collects" : "PCS owes driver ($)";
+    ["discount", "discountPct"].forEach(function (k) { var el = document.getElementById("ar-" + k); if (el && document.activeElement !== el && el.value !== String(state.addRideDraft[k] == null ? "" : state.addRideDraft[k])) el.value = state.addRideDraft[k] == null ? "" : state.addRideDraft[k]; });
     var pe = document.getElementById("ar-commissionPct");
     if (pe && document.activeElement !== pe && pe.value !== String(state.addRideDraft.commissionPct || "")) pe.value = state.addRideDraft.commissionPct || "";
   }
@@ -5375,8 +5945,11 @@
         state.addRideDraft = state.addRideDraft || {};
         state.addRideDraft[key] = el.type === "checkbox" ? el.checked : el.value;
         if (key === "total" || key === "commission" || key === "balance" || key === "commissionPct") state.addRideTouched[key] = true;
+        if (key === "discountPct") state.addRideTouched.discMode = "pct";
+        if (key === "discount") state.addRideTouched.discMode = "usd";
+        if ((key === "pickup" || key === "dropoff") && !el.__placePicked && el.value !== el.__pickedText) { delete state.addRideDraft[key + "Lat"]; delete state.addRideDraft[key + "Lng"]; } /* typed by hand: no pin */
         if (key === "driverId" && !state.addRideTouched.commissionPct && el.value) state.addRideDraft.commissionPct = String(commissionPctFor(el.value));
-        if (["fare", "discount", "taxFees", "commissionPct", "payMethod", "driverId", "total", "commission"].indexOf(key) >= 0) {
+        if (["fare", "discount", "discountPct", "taxFees", "commissionPct", "payMethod", "driverId", "total", "commission"].indexOf(key) >= 0) {
           state.addRideDraft = addRidePrefill(state.addRideDraft, state.addRideTouched, DEFAULT_COMMISSION_PCT);
           arSyncDerivedDom();
         }
@@ -5408,14 +5981,16 @@
     var head = '<button type="button" class="btn btn-gold" data-add-ride-driver="">+ Add ride</button>' +
       '<p class="fine" style="opacity:.75;margin:6px 0">Tip: open a driver and tap Add ride to pre-pick them.</p>';
     if (!rows.length) return head;
-    return head + rows.map(function (r) {
+    /* v73: the added-rides list folds into one row so the map stays in view on iPad / iPhone; remembers open / closed */
+    return head + '<details class="manual-list"' + (state.manualListOpen ? " open" : "") + ' style="margin:4px 0"><summary style="cursor:pointer;padding:6px 0;font-weight:700">Added rides (' + rows.length + ")</summary>" + rows.map(function (r) {
       return '<article class="card manual-ride" data-manual-id="' + esc(r.id) + '" style="padding:8px 10px;margin:6px 0">' +
         "<strong>" + esc(r.rider) + "</strong> · " + esc(fmtBoardWhen(r.start)) + " · " + esc(r.assignedDriverName || "") + " · " + esc(r.status) + "<br>" +
         '<span class="fine">' + esc(r.pickup) + " → " + esc(r.dropoff) + "</span> " +
         '<button type="button" class="btn btn-ghost" data-ar-edit="' + esc(r.id) + '">Edit</button> ' +
         '<button type="button" class="btn btn-ghost" data-ar-delete="' + esc(r.id) + '">Delete</button></article>';
-    }).join("");
+    }).join("") + "</details>";
   }
+  if (typeof document !== "undefined") document.addEventListener("toggle", function (e) { if (e.target && e.target.classList && e.target.classList.contains("manual-list")) state.manualListOpen = e.target.open; }, true);
 
   /* Pure: patch for a pay-week entry when God sets / clears Card failed - collect (driver owes 30% + taxes = total - commission). */
   function cardFailPatch(e, on) {
@@ -5429,7 +6004,7 @@
     if (note === null) return;
     var patch = cardFailPatch(e, on);
     patch.cardFailAudit = { at: Date.now(), by: state.sessionEmail || "god", on: on, note: String(note).slice(0, 500) };
-    fetch(historyUrl(driverId, code), { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(patch) }).then(function (res) {
+    godFetch(historyUrl(driverId, code), { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(patch) }).then(function (res) {
       if (!res.ok) throw new Error("x");
       Object.assign(e, patch);
       state.boardNotice = on ? code + ": Card failed - collect · driver owes " + fmtCents(patch.driverOwesCents) : code + ": back to card (owed to driver)";
@@ -5488,7 +6063,7 @@
               "<h2>Add ride</h2>" +
               '<div id="add-ride-box"></div>' +
             "</section>" +
-            '<section class="side-section">' +
+            '<section class="side-section drivers-section">' +
               "<h2>Drivers</h2>" +
               hireBlockHtml() +
               '<div id="hos-box-god"></div>' + /* v72r HOS */
