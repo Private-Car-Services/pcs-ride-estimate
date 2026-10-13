@@ -833,6 +833,8 @@
   /* Free for a new ride: map board, Home menu pages, or a finished trip. Never mid-ride (one ride at a time). */
   function driverCanTakeNew() {
     if (ROLE !== "driver" || !signedIn()) return false;
+    try { if (qOffline()) return false; } catch (e) {} /* v73: Offline = no ride offers / chimes */
+    try { if (dvirBlock()) return false; } catch (e) {} /* v73 DVIR: unsafe defect not cleared */
     if (hosLimitReached()) return false; /* v72r hours of service: no new offers at the limit (an in-progress ride can finish) */
     if (meterActive()) return false; /* v70: busy with a metered ride */
     if (qManualBusy()) return false; /* v72q: driver set On a ride (offers pause) */
@@ -3136,6 +3138,7 @@
   /* v72x: the one row the GPS miles writers may add to: a signed-in driver's OPEN shift (opening odometer + start time). */
   function milesWritableRow() {
     if (ROLE !== "driver" || !signedIn() || state.milesNeedStart || state.shiftClosedElsewhere) return null;
+    try { if (qOffline()) return null; } catch (e) {} /* v73: miles while Offline are personal (not counted) */
     var row = todayMilesRow();
     if (!row || typeof row !== "object") return null;
     if (shiftClosed(row) || !(Number(row.shiftStartAt) > 0) || row.startOdometer == null || !isFinite(Number(row.startOdometer))) {
@@ -3231,6 +3234,7 @@
     if (ROLE !== "driver" || !signedIn()) return false;
     /* v72w (Matthew): HOS rest blocks ride OFFERS only (driverCanTakeNew/hosLimitReached), never login, shift start or tracking */
     if (driverMidRide()) return true;
+    try { if (qOffline()) return false; } catch (e) {} /* v73 Offline: logged in, not online (no shift, presence, offers) */
     return hasCompleteCar(readDriverAccount()) && !state.milesNeedStart && isDriverApproved();
   }
 
@@ -3498,6 +3502,138 @@
     if (!on && open) { open.e = now; open.open = false; hosWriteBrk(log); hosBrkPush(open); return; }
     if (on && open) { open.e = now; hosWriteBrk(log); if (now - hosBrkPushAt > 60000) { hosBrkPushAt = now; hosBrkPush(open); } }
   }
+  /* v73 (Matthew 10/13): Offline intervals (logged in, not online) = OFF duty: Shift and Cycle don't run, and they count
+     toward the 10 h reset. Logged locally and at rides/DRVRHOSL/{driver}/offline/{s} ({s, e, open}). Never deleted by the app. */
+  function hosOffKey() { return hosKey() + "-off"; }
+  function hosReadOff() { try { var o = JSON.parse(localStorage.getItem(hosOffKey()) || "{}"); return o && typeof o === "object" ? o : {}; } catch (e) { return {}; } }
+  var hosOffPushAt = 0;
+  function hosOffPush(r) {
+    if (!syncOn() || !signedIn()) return;
+    authFetch(databaseURL() + "/rides/DRVRHOSL/" + encodeURIComponent(driverPresenceId()) + "/offline/" + r.s + ".json", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(r) }).catch(function () {});
+  }
+  function hosOffSync(now) {
+    if (ROLE !== "driver" || !signedIn()) return;
+    now = now || Date.now();
+    var on = false; try { on = qOffline(); } catch (e) {}
+    var log = hosReadOff(), open = null;
+    Object.keys(log).forEach(function (k) { if (log[k] && log[k].open) open = log[k]; });
+    var save = function () { try { localStorage.setItem(hosOffKey(), JSON.stringify(log)); } catch (e) {} };
+    if (on && !open) { open = { s: now, e: now, open: true }; log[String(now)] = open; save(); hosOffPush(open); hosOffPushAt = now; return; }
+    if (!on && open) { open.e = now; open.open = false; save(); hosOffPush(open); return; }
+    if (on && open) { open.e = now; save(); if (now - hosOffPushAt > 60000) { hosOffPushAt = now; hosOffPush(open); } }
+  }
+  function hosOffline(now) {
+    var out = {}, add = function (r) { if (!r || !(Number(r.s) > 0)) return; var e = Number(r.e) || Number(r.s); var x = out[r.s]; if (!x || e > x[1]) out[r.s] = [Number(r.s), e]; };
+    var l = hosReadOff(); Object.keys(l).forEach(function (k) { var r = l[k]; if (r && r.open) { try { if (qOffline()) r = Object.assign({}, r, { e: now }); } catch (e) {} } add(r); });
+    (hosReadHist().off || []).forEach(add);
+    return hosMerge(Object.keys(out).map(function (k) { return out[k]; }).filter(function (x) { return x[1] > x[0]; }));
+  }
+  /* v73 (Matthew 10/13): Driver's Log (driverlog.js): last 10 days of this driver's HOS records as a RODS-style grid.
+     Built from the same records as the clocks (duty pieces, driving, Break, Offline) + server history + miles rows. */
+  function driverLogData(now) {
+    now = now || Date.now();
+    var acc = readDriverAccount() || {}, hist = hosReadHist(), rows = Object.assign({}, hist.rows || {}), loc = readMilesLocal() || {};
+    Object.keys(loc).forEach(function (d) { if (/^\d{4}-\d{2}-\d{2}$/.test(d) && loc[d] && typeof loc[d] === "object") rows[d] = Object.assign({}, rows[d] || {}, loc[d]); });
+    var cur = "off"; try { var hs = hosStatus(now); if (!qOffline() && hs.onShift && !qOnBreak()) cur = hosDrvPrev && hosDrvPrev.moving ? "drv" : "on"; } catch (e) {}
+    var snaps = Object.assign({}, hist.days || {}); try { Object.assign(snaps, JSON.parse(localStorage.getItem(dlKey("days")) || "{}") || {}); } catch (e) {}
+    return { now: now, days: Math.max(15, Number(state.dlDays) || 15), snapshots: snaps, more: function (n) { state.dlDays = n; openDriverLog("history:" + (n - 1)); }, currentStatus: cur, currentNote: qOffline() ? "Offline (logged in)" : qOnBreak() ? "On break" : "",
+      fluidsDays: (function () { try { return Number(localStorage.getItem("pcs-dvir-fluids-days")) || 7; } catch (e) { return 7; } })(), /* v74: God-editable fluids interval */
+      dvirItems: (function () { try { return JSON.parse(localStorage.getItem("pcs-dvir-cfg") || "null"); } catch (e) { return null; } })(), /* God-mode checklist (rides/DVIRCFG) */
+      cityAt: dlCityAt, canSign: true, odoNow: state.milesStartOdo,
+      signOf: function (d) { return dlRec("signs")[d] || (hist.signs || {})[d] || null; },
+      onSign: function (d, rec) { dlPut("signs", d, rec); },
+      dvirOf: function (d, k) { var a = dlRec("dvir")[d] || {}, b2 = (hist.dvir || {})[d] || {}; var r = a[k] || b2[k] || null; if (r && b2[k] && b2[k].cleared) r = Object.assign({}, r, { cleared: b2[k].cleared }); return r; },
+      vehDates: function () { var pl = normalizePlate(acc.carPlate || "") || "car"; try { return (JSON.parse(localStorage.getItem("pcs-dvir-veh") || "{}") || {})[pl] || ((hist.veh || {})[pl]) || {}; } catch (e) { return {}; } },
+      onDvir: function (d, k, rec) { /* registration / insurance / car-wash dates remembered per vehicle (plate): local + rides/DVIRVEH/{plate} */
+        try { var pl = normalizePlate(acc.carPlate || "") || "car", vm = JSON.parse(localStorage.getItem("pcs-dvir-veh") || "{}") || {}; vm[pl] = Object.assign({}, vm[pl] || {}, rec.vehDates || {}, { updatedAt: Date.now(), driver: driverPresenceId(), vehicle: [acc.carYear, acc.carMake, acc.carModel].filter(Boolean).join(" ") }); localStorage.setItem("pcs-dvir-veh", JSON.stringify(vm));
+          if (syncOn()) authFetch(databaseURL() + "/rides/DVIRVEH/" + encodeURIComponent(pl) + ".json", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(vm[pl]) }).catch(function () {}); } catch (e) {}
+        rec.plate = normalizePlate(acc.carPlate || "");
+        var all = dlRec("dvir"); all[d] = all[d] || {}; all[d][k] = rec; try { localStorage.setItem(dlKey("dvir"), JSON.stringify(all)); } catch (e) {}
+        if (syncOn()) authFetch(databaseURL() + "/rides/DRVRHOSL/" + encodeURIComponent(driverPresenceId()) + "/dvir/" + d + "/" + k + ".json", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(rec) }).catch(function () {});
+        try { render(); } catch (e) {} },
+      duty: hosDutySegs(now), drive: hosAllDrive(now), breaks: hosBreaks(now), offline: hosOffline(now), rows: rows,
+      overrides: (hist.ovr || []).concat(hosOvr && hosOvr.override ? [hosOvr.override] : []),
+      driver: acc.name || state.driverName || "", vehicle: { year: acc.carYear || "", make: acc.carMake || "", model: acc.carModel || "", plate: normalizePlate(acc.carPlate || ""), vin: acc.carVin || acc.vin || "" } };
+  }
+  /* Driver's Log places: a GPS point every 5 min (and at every status change) + a city cache from reverse geocoding */
+  /* v73 Driver's Log: signatures (rides/DRVRHOSL/{driver}/signs/{day}) and DVIR inspections (.../dvir/{day}/{pre|post}); kept permanently */
+  function dlRec(k) { try { return JSON.parse(localStorage.getItem(dlKey(k)) || "{}") || {}; } catch (e) { return {}; } }
+  function dlPut(k, d, rec) {
+    var m = dlRec(k); m[d] = rec; try { localStorage.setItem(dlKey(k), JSON.stringify(m)); } catch (e) {}
+    if (syncOn()) authFetch(databaseURL() + "/rides/DRVRHOSL/" + encodeURIComponent(driverPresenceId()) + "/" + k + "/" + d + ".json", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(rec) }).catch(function () {});
+  }
+  /* an inspection with a defect marked NOT safe to operate blocks Available until God mode clears it (logged) */
+  function dvirBlock() {
+    var loc = dlRec("dvir"), srv = hosReadHist().dvir || {}, hit = null;
+    [loc, srv].forEach(function (m) { Object.keys(m || {}).forEach(function (d) { ["pre", "post"].forEach(function (k) {
+      var r = m[d] && m[d][k]; if (!r || !r.unsafe) return;
+      var cl = (srv[d] && srv[d][k] && srv[d][k].cleared) || r.cleared; if (!cl) hit = { day: d, kind: k, at: r.at, blocks: r.blocks || [], rejected: (srv[d] && srv[d][k] && srv[d][k].rejected) || r.rejected || null };
+    }); }); });
+    return hit;
+  }
+  function dvirCfgPull() {
+    if (!syncOn()) return Promise.resolve();
+    return authFetch(databaseURL() + "/rides/DVIRCFG.json").then(function (r) { return r.ok ? r.json() : null; }).then(function (o) {
+      if (o && Array.isArray(o.items) && o.items.length) try { localStorage.setItem("pcs-dvir-cfg", JSON.stringify(o.items)); } catch (e) {}
+      try { if (o && Number(o.fluidsDays) > 0) localStorage.setItem("pcs-dvir-fluids-days", String(Math.round(Number(o.fluidsDays)))); else localStorage.removeItem("pcs-dvir-fluids-days"); } catch (e) {}
+    }).catch(function () {});
+    var pl = normalizePlate((readDriverAccount() || {}).carPlate || ""); /* this car's remembered registration / insurance / car-wash dates */
+    if (pl) authFetch(databaseURL() + "/rides/DVIRVEH/" + encodeURIComponent(pl) + ".json").then(function (r) { return r.ok ? r.json() : null; }).then(function (v) {
+      if (!v || typeof v !== "object") return; try { var vm = JSON.parse(localStorage.getItem("pcs-dvir-veh") || "{}") || {}; if (!vm[pl] || Number(v.updatedAt) > Number(vm[pl].updatedAt || 0)) { vm[pl] = v; localStorage.setItem("pcs-dvir-veh", JSON.stringify(vm)); } } catch (e) {}
+    }).catch(function () {});
+  }
+  function dvirRefresh() {
+    if (!syncOn() || !signedIn()) return Promise.resolve();
+    return authFetch(databaseURL() + "/rides/DRVRHOSL/" + encodeURIComponent(driverPresenceId()) + "/dvir.json").then(function (r) { return r.ok ? r.json() : null; }).then(function (o) {
+      if (!o || typeof o !== "object") return; var h = hosReadHist(); h.dvir = o; try { localStorage.setItem(hosHistKey(), JSON.stringify(h)); } catch (e) {}
+    }).catch(function () {});
+  }
+  function dlKey(k) { var id = ""; try { id = driverPresenceId(); } catch (e) {} return "pcs-dl-" + k + "-" + id; }
+  function dlPts() { try { var a = JSON.parse(localStorage.getItem(dlKey("pts")) || "[]"); return Array.isArray(a) ? a : []; } catch (e) { return []; } }
+  var dlLastAt = 0, dlLastSt = "";
+  function dlNotePoint(now) {
+    if (ROLE !== "driver" || !signedIn() || !isCoord(state.hereLat) || !isCoord(state.hereLng)) return;
+    now = now || Date.now();
+    var st = qOffline() ? "x" : qOnBreak() ? "b" : (hosDrvPrev && hosDrvPrev.moving ? "d" : "o");
+    if (now - dlLastAt < 5 * 60000 && st === dlLastSt) return;
+    dlLastAt = now; dlLastSt = st;
+    var a = dlPts(); a.push([now, Math.round(state.hereLat * 1e4) / 1e4, Math.round(state.hereLng * 1e4) / 1e4]);
+    while (a.length > 20000) a.shift(); /* location cache for city names only (~70 days); duty records are never trimmed */
+    try { localStorage.setItem(dlKey("pts"), JSON.stringify(a)); } catch (e) {}
+  }
+  function dlCities() { try { return JSON.parse(localStorage.getItem("pcs-dl-cities") || "{}") || {}; } catch (e) { return {}; } }
+  var dlGeoQ = {};
+  function dlCityAt(t) {
+    var a = dlPts(), best = null, bd = 45 * 60000;
+    a.forEach(function (p) { var d = Math.abs(p[0] - t); if (d < bd) { bd = d; best = p; } });
+    if (!best) return "";
+    var k = best[1].toFixed(2) + "," + best[2].toFixed(2), c = dlCities()[k];
+    if (c) return c;
+    if (!dlGeoQ[k]) { dlGeoQ[k] = 1; reverseGeocode(best[1], best[2]).then(function (pl) {
+      if (!pl || !pl.city) return; var m = dlCities(); m[k] = pl.city + (pl.state ? ", " + pl.state : ""); try { localStorage.setItem("pcs-dl-cities", JSON.stringify(m)); } catch (e) {}
+      var o = document.getElementById("dl-overlay"); if (o && o.getAttribute("data-mode")) openDriverLog(o.getAttribute("data-mode"));
+    }).catch(function () {}); }
+    return "";
+  }
+  /* v73: every finished day is saved permanently (local + rides/DRVRHOSL/{driver}/days/{YYYY-MM-DD}); never deleted */
+  function dlSaveDays(days) {
+    var m = {}; try { m = JSON.parse(localStorage.getItem(dlKey("days")) || "{}") || {}; } catch (e) {}
+    var changed = false;
+    days.forEach(function (d, i) {
+      if (i === 0 || m[d.day]) return; /* today is still running */
+      var sn = window.PCSDriverLog.snapshot(d); m[d.day] = sn; changed = true;
+      if (syncOn()) authFetch(databaseURL() + "/rides/DRVRHOSL/" + encodeURIComponent(driverPresenceId()) + "/days/" + d.day + ".json", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(sn) }).catch(function () {});
+    });
+    if (changed) try { localStorage.setItem(dlKey("days"), JSON.stringify(m)); } catch (e) {}
+  }
+  function openDriverLog(mode) {
+    if (!window.PCSDriverLog) return;
+    try { dvirCfgPull(); } catch (e) {} /* God-mode checklist for the next inspection */
+    var paint = function () { var d = driverLogData(), days = window.PCSDriverLog.build(d); dlSaveDays(days); window.PCSDriverLog.open(days, d, mode); };
+    paint();
+    try { hosPullHistory().then(function () { if (document.getElementById("dl-overlay")) paint(); }); } catch (e) {}
+  }
+  window.__pcsDriverLog = { data: driverLogData, open: openDriverLog };
   /* break intervals [s, e] from this phone + the server copy; an open break on another device runs to its last heartbeat */
   function hosBreaks(now) {
     var out = {}, add = function (r) { if (!r || !(Number(r.s) > 0)) return; var e = Number(r.e) || Number(r.s); var x = out[r.s]; if (!x || e > x[1]) out[r.s] = [Number(r.s), e]; };
@@ -3651,7 +3787,7 @@
   }
   /* GPS speed fix -> driving intervals [s, e] (only while the shift is open; gaps > 60 s between fixes are not counted) */
   function hosDriveNote(now, mph, lat, lng) {
-    if (ROLE !== "driver" || !signedIn() || !hosShiftStart()) { hosDrvPrev = { at: 0, moving: false }; return; }
+    if (ROLE !== "driver" || !signedIn() || !hosShiftStart() || qOffline()) { hosDrvPrev = { at: 0, moving: false }; return; } /* v73: Offline driving is off duty */
     var moving = Number(mph) > HOS_MOVING_MPH;
     var a = hosReadDrv();
     var last = a[a.length - 1];
@@ -3666,8 +3802,7 @@
     if (jumped || (moving && hosDrvPrev.moving && hosDrvPrev.at && gap <= 60000)) {
       if (last && Math.abs(Number(last[1]) - hosDrvPrev.at) < 1500) last[1] = now; else a.push([hosDrvPrev.at, now]);
       if (jumped) a[a.length - 1][2] = 1; /* marks a counted GPS gap */
-      var cut = now - 8 * 86400000;
-      while (a.length && Number(a[0][1]) < cut) a.shift();
+      /* v73: driving intervals kept permanently (Driver's Log); HOS only reads the last 8 days */
       hosWriteDrv(a);
       if (syncOn() && now - hosDrvPushAt > 5 * 60000) hosPushDrive(a[a.length - 1]);
     } else if (!moving && hosDrvPrev.moving && last && syncOn()) {
@@ -3686,18 +3821,23 @@
     if (ROLE !== "driver" || !signedIn()) return;
     now = now || Date.now();
     try { hosBrkSync(now); } catch (e) {} /* v72x: open/close the Break interval (accepting a ride / driving off ends it) */
+    try { hosOffSync(now); } catch (e) {} /* v73: Offline interval log */
+    try { dlNotePoint(now); } catch (e) {} /* v73 Driver's Log places */
     var st = hosShiftStart();
     if (!st) return;
     var log = hosReadLog();
+    if (qOffline()) { if (!log.__off) { log.__off = now; hosWriteLog(log); } return; } /* v73: Offline = off duty: no on-duty heartbeat */
+    var resumed = !!log.__off; if (resumed) delete log.__off;
     var k = log.__cur && log[log.__cur] && Number(log[log.__cur].shift || log.__cur) === st ? String(log.__cur) : String(st);
     var seg = log[k] || { s: st, day: milesDay(), shift: st };
+    if (resumed && seg.e) { log[k] = seg; k = String(now); seg = { s: now, day: milesDay(), shift: st }; } /* back from Offline: new on-duty piece */
     if (now - (Number(seg.e) || st) > SHIFT_STALE_MS) return; /* woke after 18 h+ idle: don't mark the stale shift active */
     /* v72v: no heartbeat (app closed / no GPS) for > 30 min = NOT on duty: the gap is left out and a new piece starts now */
     if (seg.e && now - Number(seg.e) > HOS_HEARTBEAT_GAP_MS) { log[k] = seg; k = String(now); seg = { s: now, day: milesDay(), shift: st }; }
     log.__cur = k;
     seg.e = now;
     log[k] = seg;
-    Object.keys(log).forEach(function (x) { if (x !== "__cur" && Number(log[x].e || x) < now - 14 * 86400000) delete log[x]; });
+    /* v73 (Matthew 10/13): duty records are kept permanently (Driver's Log); nothing is pruned */
     hosWriteLog(log);
     if (syncOn() && now - hosLastPush > 5 * 60000) {
       hosLastPush = now;
@@ -3741,19 +3881,29 @@
   function hosPullHistory() {
     if (ROLE !== "driver" || !syncOn() || !signedIn()) return Promise.resolve(false);
     var today = chicagoToday(), days = [], i;
-    for (i = 8; i >= 0; i -= 1) days.push(addDaysYmd(today, -i));
+    for (i = 14; i >= 0; i -= 1) days.push(addDaysYmd(today, -i)); /* v73: today + 14 days (Driver's Log) */
     var id = driverPresenceId();
     return Promise.all(days.map(function (d) { return authFetch(milesUrl(id, d)).then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }); }).concat([
       authFetch(databaseURL() + "/rides/DRVRHOSL/" + encodeURIComponent(id) + "/drive.json").then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }),
-      authFetch(databaseURL() + "/rides/DRVRHOSL/" + encodeURIComponent(id) + "/breaks.json").then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }) /* v72x */
+      authFetch(databaseURL() + "/rides/DRVRHOSL/" + encodeURIComponent(id) + "/breaks.json").then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }), /* v72x */
+      authFetch(databaseURL() + "/rides/DRVRHOSL/" + encodeURIComponent(id) + "/offline.json").then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }), /* v73 */
+      authFetch(databaseURL() + "/rides/DRVRHOSL/" + encodeURIComponent(id) + "/overrides.json").then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }), /* v73 log */
+      authFetch(databaseURL() + "/rides/DRVRHOSL/" + encodeURIComponent(id) + "/days.json").then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }), /* v73 saved days */
+      authFetch(databaseURL() + "/rides/DRVRHOSL/" + encodeURIComponent(id) + "/signs.json").then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }),
+      authFetch(databaseURL() + "/rides/DRVRHOSL/" + encodeURIComponent(id) + "/dvir.json").then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; })
     ])).then(function (res) {
-      var brkObj = res.pop(), drvObj = res.pop(), loc = readMilesLocal() || {};
+      var dvObj = res.pop(), sgObj = res.pop(), daysObj = res.pop(), ovrObj = res.pop(), offObj = res.pop(), brkObj = res.pop(), drvObj = res.pop(), loc = readMilesLocal() || {};
       days.forEach(function (d, j) { if (!res[j] && loc[d]) res[j] = loc[d]; });
       var drv = [];
       if (drvObj && typeof drvObj === "object") Object.keys(drvObj).forEach(function (k) { var v = drvObj[k] || {}; if (Number(v.e) > Number(v.s)) drv.push([Number(v.s), Number(v.e)]); });
       var brk = [];
       if (brkObj && typeof brkObj === "object") Object.keys(brkObj).forEach(function (k) { var v = brkObj[k] || {}; if (Number(v.s) > 0) brk.push({ s: Number(v.s), e: Number(v.e) || Number(v.s), open: !!v.open }); });
-      var h = { segs: hosHistFromRows(res), drv: drv, brk: brk, at: Date.now() };
+      var off = [];
+      if (offObj && typeof offObj === "object") Object.keys(offObj).forEach(function (k) { var v = offObj[k] || {}; if (Number(v.s) > 0) off.push({ s: Number(v.s), e: Number(v.e) || Number(v.s), open: !!v.open }); });
+      var ovr = [];
+      if (ovrObj && typeof ovrObj === "object") Object.keys(ovrObj).forEach(function (k) { var v = ovrObj[k]; if (v && typeof v === "object") ovr.push(Object.assign({ at: Number(v.grantedAt || v.at || k) || 0 }, v)); });
+      var rowsByDay = {}; days.forEach(function (d, j) { if (res[j]) rowsByDay[d] = res[j]; });
+      var h = { segs: hosHistFromRows(res), drv: drv, brk: brk, off: off, ovr: ovr, rows: rowsByDay, days: daysObj && typeof daysObj === "object" ? daysObj : {}, signs: sgObj || {}, dvir: dvObj || {}, at: Date.now() };
       try { localStorage.setItem(hosHistKey(), JSON.stringify(h)); } catch (e) {}
       return true;
     });
@@ -3781,8 +3931,8 @@
     var segs = hist.filter(function (g) { return !g[3] && g[1] > g[0]; }).map(function (g) { return [g[0], Math.min(g[1], now)]; });
     Object.keys(log).forEach(function (k) {
       var g = log[k];
-      if (k === "__cur" || !g || typeof g !== "object" || g.rest) return;
-      var mine = st && Number(g.shift || k) === st && (k === String(log.__cur || st));
+      if (k === "__cur" || k === "__off" || !g || typeof g !== "object" || g.rest) return;
+      var mine = st && !log.__off && Number(g.shift || k) === st && (k === String(log.__cur || st)); /* v73: not while Offline */
       var e1 = Number(g.e) || s0;
       var s0 = Number(g.s) || 0;
       e1 = Number(g.e) || s0;
@@ -3811,15 +3961,19 @@
     var dutyStart = 0, cycleFrom = now - c.cycleDays * 24 * H, i, gapEnd;
     var lastEnd = segs.length ? segs[segs.length - 1][1] : 0;
     var offNow = !st && lastEnd ? now - lastEnd : (st ? 0 : Infinity);
+    var offl = hosOffline(now), offlineNow = false; try { offlineNow = qOffline(); } catch (e) {}
+    if (st && offlineNow && offl.length) offNow = Math.max(0, now - offl[offl.length - 1][0]); /* v73: Offline mid-shift counts toward the 10 h reset */
     if (offNow >= c.resetHours * H) dutyStart = 0;
     else {
       dutyStart = segs.length ? segs[0][0] : 0;
       for (i = segs.length - 1; i > 0; i -= 1) { if (segs[i][0] - segs[i - 1][1] >= c.resetHours * H) { dutyStart = segs[i][0]; break; } }
+      /* v73: a past Offline stretch of resetHours+ is a 10 h reset too */
+      offl.forEach(function (o) { if (o[1] - o[0] >= c.resetHours * H && o[1] <= now && o[1] > dutyStart) { var nx = 0; segs.forEach(function (g) { if (!nx && g[1] > o[1]) nx = Math.max(g[0], o[1]); }); dutyStart = nx || 0; } });
     }
     if (offNow >= c.restartHours * H) cycleFrom = now;
     else for (i = segs.length - 1; i > 0; i -= 1) { if (segs[i][0] - segs[i - 1][1] >= c.restartHours * H) { gapEnd = segs[i][0]; if (gapEnd > cycleFrom) cycleFrom = gapEnd; break; } }
     var brks = hosBreaks(now); /* v72x: Break status = off duty for Shift + Cycle */
-    var shiftMs = dutyStart ? Math.max(0, now - dutyStart - hosOverlap(brks, dutyStart, now)) : 0;
+    var shiftMs = dutyStart ? Math.max(0, now - dutyStart - hosOverlap(brks, dutyStart, now) - hosOverlap(offl, dutyStart, now) + hosOverlap2(brks, offl, dutyStart, now)) : 0; /* v73: Offline pauses Shift */
     var driveMs = dutyStart ? hosOverlap(drv, dutyStart, now) : 0;
     /* BREAK: driving since the last 30+ min without driving (a 10 h reset counts too) */
     var lastDrvEnd = drv.length ? Number(drv[drv.length - 1][1]) : 0;
@@ -3845,7 +3999,7 @@
     if (!lastDrvEnd) brkAnchor = now;
     else if (qEnd) brkAnchor = Math.max(brkAnchor, qEnd);
     var sinceBreakMs = hosOverlap(drv, brkAnchor, now);
-    var cycleMs = Math.max(0, hosOverlap(segs, cycleFrom, now) - hosOverlap2(segs, brks, cycleFrom, now));
+    var cycleMs = Math.max(0, hosOverlap(segs, cycleFrom, now) - hosOverlap2(segs, hosMerge(brks.concat(offl)), cycleFrom, now)); /* v73: Offline pauses Cycle */
     var clocks = {
       break: c.breakAfterDriveHours > 0 ? c.breakAfterDriveHours * H - sinceBreakMs : Infinity,
       drive: c.maxDriveHours > 0 ? c.maxDriveHours * H - driveMs : Infinity,
@@ -3865,7 +4019,7 @@
       for (var j = k; j < drv.length; j += 1) contMs += Math.max(0, Math.min(Number(drv[j][1]), now) - Number(drv[j][0]));
     })();
     var exhausted = left <= 0;
-    var level = !st ? "off" : exhausted ? "limit" : left <= 30 * 60000 ? "30m" : left <= H ? "1h" : "ok";
+    var level = !st || offlineNow ? "off" : exhausted ? "limit" : left <= 30 * 60000 ? "30m" : left <= H ? "1h" : "ok";
     var ovr = hosOverrideActive(now);
     if (st && exhausted) { try { localStorage.setItem(hosKey() + "-hit-" + st, "1"); } catch (e) {} }
     if (ovr && (level === "limit" || level === "30m" || level === "1h")) level = "override";
@@ -3893,7 +4047,7 @@
     if (statusBreak) { try { var lb2 = hosReadBrk(), bs2 = 0; Object.keys(lb2).forEach(function (k) { if (lb2[k] && lb2[k].open) bs2 = Number(lb2[k].s) || 0; }); brkEarly = !brkQual(bs2 || now); } catch (e) {} }
     return { clocks: clocks, onBreak: onBreak, breakTakenMs: breakTakenMs, breakEarly: brkEarly, breakNeedMs: BRK, statusBreak: statusBreak, restUntil: restUntil, dutyStart: dutyStart, cycleFrom: cycleFrom, sinceBreakMs: sinceBreakMs,
       streakAt: streakAt, contMs: contMs, needBreak: needBreak, override: ovr ? hosOvr.override : null, onShift: !!st,
-      driveMs: driveMs, shiftMs: shiftMs, windowMs: cycleMs, cycleMs: cycleMs, leftMs: left, level: level, by: by, cfg: c };
+      offline: offlineNow, driveMs: driveMs, shiftMs: shiftMs, windowMs: cycleMs, cycleMs: cycleMs, leftMs: left, level: level, by: by, cfg: c };
   }
   /* GPS health: ms since the last GPS fix while a shift is open and > 5 min (0 = healthy) */
   function hosGpsStale(now) {
@@ -4279,6 +4433,7 @@
 
   function milesStartCard() {
     if (ROLE !== "driver" || !signedIn() || !state.milesNeedStart) return "";
+    try { if (qOffline()) return ""; } catch (e) {} /* v73: no odometer prompt while Offline (asked when he taps Available) */
     var restNote = hosRestUntil() ? hosRestCard() : ""; /* v72w: shown as a notice; the shift can still start */
     if (!hasCompleteCar(readDriverAccount())) return "";
     if (driverMidRide()) return "";
@@ -4300,10 +4455,10 @@
       (stale
         ? '<p class="fine" id="miles-stale-note">Your shift from ' + esc(stale.day) + " was never closed. Enter its ending odometer first.</p>" +
           '<label for="miles-stale-end-odo">Ending odometer (shift from ' + esc(stale.day) + ")</label>" +
-          '<input id="miles-stale-end-odo" type="text" readonly inputmode="none" autocomplete="off" autocorrect="off" spellcheck="false" class="meter-pad-input" data-npad="milesStaleDraft" required value="' + esc(state.milesStaleDraft || "") + '">' + numPadHtml("miles-stale-end-odo")
+          '<input id="miles-stale-end-odo" type="text" readonly inputmode="none" autocomplete="off" autocorrect="off" spellcheck="false" pattern="[0-9]*" class="meter-pad-input" data-npad="milesStaleDraft" required value="' + esc(state.milesStaleDraft || "") + '">' + numPadHtml("miles-stale-end-odo")
         : "") +
       '<label for="miles-start-odo">Opening odometer</label>' +
-      '<input id="miles-start-odo" name="odo" type="text" readonly inputmode="none" autocomplete="off" autocorrect="off" spellcheck="false" class="meter-pad-input" data-npad="milesOdoDraft" required value="' +
+      '<input id="miles-start-odo" name="odo" type="text" readonly inputmode="none" autocomplete="off" autocorrect="off" spellcheck="false" pattern="[0-9]*" class="meter-pad-input" data-npad="milesOdoDraft" required value="' +
       esc(state.milesOdoDraft || "") + '">' + numPadHtml("miles-start-odo") + /* v72u: in-app pad, the system keyboard never opens */
       '<p class="error" id="miles-odo-error" role="alert">' + esc(state.milesOdoError || "") + "</p>" +
       '<button class="btn" type="submit">Save and go online</button>' +
@@ -4324,7 +4479,7 @@
         : "") +
       '<form id="miles-end-form" autocomplete="off">' +
       '<label for="miles-end-odo">Ending odometer</label>' +
-      '<input id="miles-end-odo" name="odo" type="text" readonly inputmode="none" autocomplete="off" autocorrect="off" spellcheck="false" class="meter-pad-input" data-npad="milesEndDraft" required value="' +
+      '<input id="miles-end-odo" name="odo" type="text" readonly inputmode="none" autocomplete="off" autocorrect="off" spellcheck="false" pattern="[0-9]*" class="meter-pad-input" data-npad="milesEndDraft" required value="' +
       esc(state.milesEndDraft || "") + '">' + numPadHtml("miles-end-odo") +
       '<p class="error" id="miles-end-error" role="alert">' + esc(state.milesEndError || "") + "</p>" +
       '<div class="row-actions">' +
@@ -6219,7 +6374,8 @@
   function numPadHtml(forId) {
     try { ensureMeterSplitStyle(); } catch (e) {}
     return '<div class="meter-pad num-pad" data-npad-for="' + esc(forId) + '" role="group" aria-label="Number pad">' +
-      ["1", "2", "3", "4", "5", "6", "7", "8", "9", ".", "0", "back"].map(function (k) {
+      ["1", "2", "3", "4", "5", "6", "7", "8", "9", "", "0", "back"].map(function (k) {
+        if (k === "") return '<span class="meter-pad-key" aria-hidden="true" style="visibility:hidden"></span>'; /* v74: whole-number odometer, no decimal key */
         return '<button type="button" class="meter-pad-key" data-npad-key="' + k + '" aria-label="' + (k === "back" ? "Delete" : k === "." ? "Decimal point" : k) + '">' + (k === "back" ? "\u232b" : k) + "</button>";
       }).join("") + "</div>";
   }
@@ -6231,8 +6387,7 @@
     if (!inp) return;
     var v = String(inp.value || ""), k = b.getAttribute("data-npad-key");
     if (k === "back") v = v.slice(0, -1);
-    else if (k === ".") { if (v.indexOf(".") < 0) v = (v || "0") + "."; }
-    else if (!(/\.\d$/.test(v)) && v.replace(".", "").length < 8) v = (v === "0" ? "" : v) + k;
+    else if (/^\d$/.test(k) && v.replace(/\D/g, "").length < 8) v = (v.replace(/\D/g, "") === "0" ? "" : v.replace(/\D/g, "")) + k;
     inp.value = v;
     var dk = inp.getAttribute("data-npad"); if (dk) state[dk] = v;
     try { inp.dispatchEvent(new Event("input", { bubbles: true })); } catch (er) {}
@@ -9037,6 +9192,12 @@
   function publishDriverPresence() {
     if (!syncOn() || ROLE !== "driver" || !signedIn()) return Promise.resolve();
     if (state.milesEndPrompt) return Promise.resolve();
+    if (qOffline()) { /* v73: God mode sees "Offline (logged in)"; online:false keeps him out of dispatch, rider lists and the queue */
+      var acc0 = readDriverAccount() || {};
+      return authFetch(driversUrl(driverPresenceId()), { method: "PUT", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ online: false, shiftOnline: false, driverOffline: true, loggedIn: true, at: Date.now(), name: acc0.name || state.driverName || "", phone: acc0.phone || state.driverPhone || "", appVersion: window.PCS_APP_VERSION || "" })
+      }).catch(function () {});
+    }
     if (!canGoOnline()) return Promise.resolve();
     var account = readDriverAccount() || {};
     var speedFresh = !!(state.speedAt && (Date.now() - state.speedAt <= 20000));
@@ -12656,6 +12817,8 @@
       '<button class="btn" type="button" id="hub-today">Today</button>' +
       '<button class="btn secondary" type="button" id="hub-meter">Metered ride</button>' +
       '<button class="btn secondary" type="button" id="hub-history">Earnings & history</button>' +
+      '<button class="btn secondary" type="button" id="hub-driverlog">Driver\u2019s Log</button>' + /* v73 */
+      '<button class="btn secondary" type="button" id="hub-inspector">Show inspector</button>' + /* v73: today + previous day, full screen */
       '<a class="btn secondary" href="signup/?v=60">Profile</a>' +
       chimeVolHtml() + /* v72f */
       logoutLine()
@@ -12803,7 +12966,7 @@
       accountNav() +
       meterBarHtml() + /* v70 */
       milesTodayHtml() +
-      (gated ? "" : qDriverSliderHtml()) + /* v72q: Available / On a ride / Break (v72t) */
+      (gated && !qOffline() ? "" : qDriverSliderHtml()) + /* v72q: Available / On a ride / Break (v72t) */
       (state.driverNotice
         ? '<div class="card notice-card" role="status"><p class="lede">' + esc(state.driverNotice) + "</p>" +
           '<button class="btn ghost" type="button" id="dismiss-driver-notice">OK</button></div>'
@@ -13255,6 +13418,7 @@
             /* v50: pull the saved car details + photos from the server (or back them up if only here). */
             syncDriverProfile().then(function () { render(); });
             noteFreshLogin(); /* v72w */
+            try { if (!driverMidRide() && !meterActive()) localStorage.setItem(qOffKey(), "1"); } catch (e) {} /* v73: every login lands on Offline */
             mergeMidnightSplit(); /* v72r */
             ensureMilesDayReady();
             try { hosPullHistory().then(function () { hosCheck(); render(); }); } catch (e) {} /* v72x: HOS history (incl. breaks / PCS resets) right at login */
@@ -13397,6 +13561,7 @@
             /* v50: pull the saved car details + photos from the server (or back them up if only here). */
             syncDriverProfile().then(function () { render(); });
             noteFreshLogin(); /* v72w */
+            try { if (!driverMidRide() && !meterActive()) localStorage.setItem(qOffKey(), "1"); } catch (e) {} /* v73: every login lands on Offline */
             mergeMidnightSplit(); /* v72r */
             ensureMilesDayReady();
             try { hosPullHistory().then(function () { hosCheck(); render(); }); } catch (e) {} /* v72x: HOS history (incl. breaks / PCS resets) right at login */
@@ -13519,7 +13684,16 @@
       milesStartForm.addEventListener("submit", function (event) {
         event.preventDefault();
         var raw = document.getElementById("miles-start-odo").value;
+        if (/[^0-9\s]/.test(String(raw))) { state.milesOdoError = "Whole miles only (no decimal point)."; state.milesOdoDraft = String(raw).replace(/\..*$/, "").replace(/\D/g, ""); render(); return; } /* v74 */
         var odo = Number(raw);
+        if (isFinite(odo) && odo === 0 && String(raw).trim() !== "" && !odoOverrideActive()) { /* v74 (Matthew): a 0 opening odometer is never recorded */
+          state.milesOdoError = "0 isn't a valid odometer reading. Enter the number on your dashboard. If it really reads 0, God mode can allow it.";
+          state.milesOdoDraft = "";
+          try { var lz0 = lastKnownOdometer(); if (syncOn()) authFetch(hosOvrUrl(), { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ odoRequest: { at: Date.now(), entered: 0, last: lz0 == null ? null : lz0, name: readSession() || "" } }) }).catch(function () {}); } catch (e) {}
+          try { var lz = lastKnownOdometer(), tkz = qToken(); if (tkz) qWorker("/hos/ovr/ask", { token: tkz, odoRequest: { entered: 0, last: lz == null ? null : lz, name: readSession() || "", zero: true } }).catch(function () {}); } catch (e) {}
+          render();
+          return;
+        }
         if (!isFinite(odo) || odo < 0 || String(raw).trim() === "") {
           state.milesOdoError = "Enter the starting odometer for today.";
           state.milesOdoDraft = raw;
@@ -13545,6 +13719,7 @@
           var sStart = Number(staleInfo.row.startOdometer);
           state.milesStaleDraft = sRaw;
           state.milesOdoDraft = raw;
+          if (/[^0-9\s]/.test(String(sRaw))) { state.milesOdoError = "Whole miles only (no decimal point)."; state.milesStaleDraft = String(sRaw).replace(/\..*$/, "").replace(/\D/g, ""); render(); return; } /* v74 */
           if (String(sRaw).trim() === "" || !isFinite(sOdo) || sOdo < 0) { state.milesOdoError = "Enter the ending odometer for your shift from " + staleInfo.day + "."; render(); return; }
           if (isFinite(sStart) && sOdo < sStart) { state.milesOdoError = "That ending odometer is less than that shift's opening odometer (" + sStart.toFixed(1) + ")."; render(); return; }
           if (odo < sOdo) { state.milesOdoError = "The opening odometer can't be less than the last shift's ending odometer (" + sOdo.toFixed(1) + ")."; render(); return; }
@@ -13624,6 +13799,7 @@
         if (state.milesEndSaving) return;
         var raw = document.getElementById("miles-end-odo").value;
         state.milesEndDraft = raw;
+        if (/[^0-9\s]/.test(String(raw))) { state.milesEndError = "Whole miles only (no decimal point)."; state.milesEndDraft = String(raw).replace(/\..*$/, "").replace(/\D/g, ""); render(); return; } /* v74 */
         /* v64: the ending odometer is required, and can't be below the starting odometer. */
         /* v72v: nor below the last real reading (a start of 0 no longer lets any number through) */
         var endFloor = 0; try { endFloor = odoOverrideActive() ? 0 : (lastKnownOdometer() || 0); } catch (eF) {}
@@ -13634,6 +13810,7 @@
           return;
         }
         var odo = Number(raw);
+        if (odo === 0 && !odoOverrideActive()) { state.milesEndError = "0 isn't a valid odometer reading. Enter the number on your dashboard."; render(); return; } /* v74 */
         if (!isFinite(odo) || odo < 0) {
           state.milesEndError = "Enter a valid ending odometer.";
           render();
@@ -14267,6 +14444,10 @@
         render();
       });
     }
+    var hubLog = document.getElementById("hub-driverlog");
+    if (hubLog) hubLog.addEventListener("click", function () { openDriverLog("all"); });
+    var hubInsp = document.getElementById("hub-inspector");
+    if (hubInsp) hubInsp.addEventListener("click", function () { openDriverLog("inspector"); });
     var hubHistory = document.getElementById("hub-history");
     if (hubHistory) {
       hubHistory.addEventListener("click", function () {
@@ -15965,6 +16146,33 @@
   function brkAvailInMs(now) {
     try { var h = hosStatus(now), need = (Number(hosCfg.breakMinOnDutyHours) || 0) * 3600000; if (!need || !h.onShift) return 0; return Math.max(0, need - (Number(h.shiftMs) || 0)); } catch (e) { return 0; }
   }
+  /* v73 (Matthew 10/13): Offline = logged in without going online. No shift start, no odometer prompt, no offers/chimes,
+     off duty for HOS; schedule / earnings / history / messages still open. Tapping Available goes online (odometer if needed).
+     A ride in progress or a running/unpaid meter always wins (never Offline mid-ride). */
+  function qOffKey() { return qBusyKey() + "-offline"; }
+  var qOffTest = null; /* test hook */
+  function qOffline() {
+    if (ROLE !== "driver" || !signedIn()) return false;
+    var on = false; try { on = localStorage.getItem(qOffKey()) === "1"; } catch (e) {}
+    if (!on) return false;
+    try { if (driverMidRide() || meterActive()) return false; } catch (e) {}
+    return true;
+  }
+  function qSetOffline(on) {
+    if (ROLE !== "driver") return;
+    try {
+      if (on) { localStorage.setItem(qOffKey(), "1"); localStorage.removeItem(qBusyKey()); localStorage.removeItem(qBusyKey() + "-prev"); }
+      else localStorage.removeItem(qOffKey());
+    } catch (e) {}
+    qd.lastPub = null; qd.brkMsg = "";
+    try { hosBrkSync(Date.now()); } catch (e) {}
+    try { hosTick(Date.now()); } catch (e) {}
+    try { if (!on) ensureMilesDayReady(); } catch (e) {} /* back online: normal opening-odometer gate when a shift is needed */
+    try { publishDriverPresence(); } catch (e) {}
+    try { if (on) qWorker("/driver/status", { token: qToken(), onRide: false, onBreak: false, source: "manual" }).catch(function () {}); } catch (e) {}
+    render();
+    try { syncOpenRideAlert(); } catch (e) {}
+  }
   function qOnBreak() {
     if (ROLE !== "driver") return false;
     try { return localStorage.getItem(qBusyKey()) === "b" && !qAutoBusy(); } catch (e) { return false; }
@@ -16079,22 +16287,25 @@
   function qDriverSliderHtml() {
     if (ROLE !== "driver" || !signedIn()) return "";
     ensureQueueStyle();
-    var auto = qAutoBusy(), brk = qOnBreak(), busy = auto || qManualBusy();
+    var auto = qAutoBusy(), off = qOffline(), brk = !off && qOnBreak(), busy = !off && (auto || qManualBusy());
     var tok = qToken();
     var brkEarly = false; try { brkEarly = brk && !!hosStatus(Date.now()).breakEarly; } catch (e) {} /* v72y */
     return (
-      '<div class="card q-avail q-three' + (busy ? " q-busy" : "") + (brk ? " q-break" : "") + '" id="q-avail">' +
+      '<div class="card q-avail q-three q-four' + (busy ? " q-busy" : "") + (brk ? " q-break" : "") + (off ? " q-offline" : "") + '" id="q-avail">' +
       '<p class="tag">Your status</p>' +
       '<div class="q-switch" role="radiogroup" aria-label="Your status">' +
       '<span class="q-knob" aria-hidden="true"></span>' +
-      '<button type="button" role="radio" class="q-opt" id="q-set-available" aria-checked="' + (busy || brk ? "false" : "true") + '"' + (auto || !tok ? " disabled" : "") + ">Available</button>" +
-      '<button type="button" role="radio" class="q-opt" id="q-set-onride" aria-checked="' + (busy ? "true" : "false") + '"' + (auto || !tok ? " disabled" : "") + ">On a ride</button>" +
-      '<button type="button" role="radio" class="q-opt" id="q-set-break" aria-checked="' + (brk ? "true" : "false") + '"' + (auto || !tok ? " disabled" : "") + ">Break</button>" + /* v72y: Break always selectable (owner 7:38 AM) */
+      '<button type="button" role="radio" class="q-opt" id="q-set-available" aria-checked="' + (busy || brk || off ? "false" : "true") + '"' + (auto || (!tok && !off) ? " disabled" : "") + ">Available</button>" +
+      '<button type="button" role="radio" class="q-opt" id="q-set-onride" aria-checked="' + (busy ? "true" : "false") + '"' + (auto || !tok || off ? " disabled" : "") + ">On a ride</button>" +
+      '<button type="button" role="radio" class="q-opt" id="q-set-break" aria-checked="' + (brk ? "true" : "false") + '"' + (auto || !tok || off ? " disabled" : "") + ">Break</button>" + /* v72y: Break always selectable (owner 7:38 AM); v73: not while Offline (already off duty) */
+      '<button type="button" role="radio" class="q-opt" id="q-set-offline" aria-checked="' + (off ? "true" : "false") + '"' + (auto ? " disabled" : "") + ">Offline</button>" + /* v73 */
       "</div>" +
-      (tok ? "" : qDriverAuthHtml()) +
+      (tok || off ? "" : qDriverAuthHtml()) +
       (qd.brkMsg ? '<p class="fine" id="q-break-msg" role="alert" style="color:#b91c1c;font-weight:700">' + esc(qd.brkMsg) + "</p>" : "") +
       (brk && brkEarly ? '<p class="fine" id="q-break-early">Won\u2019t count as your 30-min break until ' + esc(String(hosCfg.breakMinOnDutyHours)) + " h on duty since your last break. Shift and Cycle are paused.</p>" : "") +
-      '<p class="fine" id="q-avail-note">' + esc(auto
+      '<p class="fine" id="q-avail-note">' + esc(off
+        ? "Offline: you are logged in but not online. No ride offers, and your Shift and Cycle clocks are stopped (off duty). Tap Available to go online."
+        : auto
         ? "Set automatically during your PCS ride. You switch back to Available when it ends."
         : brk ? "On break: your Break clock is running. Ride offers still come in; accepting one ends the break. 30 minutes of break resets your Break clock."
         : (busy
@@ -16271,7 +16482,7 @@
     if (want) qPaintHosts();
   }
   function qClick(ev) {
-    var t = ev.target && ev.target.closest ? ev.target.closest("#q-join,#q-unjoin,#q-leave,#q-leave-yes,#q-leave-no,#q-set-available,#q-set-onride,#q-set-break,#q-auth-go") : null;
+    var t = ev.target && ev.target.closest ? ev.target.closest("#q-join,#q-unjoin,#q-leave,#q-leave-yes,#q-leave-no,#q-set-available,#q-set-onride,#q-set-break,#q-set-offline,#q-auth-go") : null;
     if (!t || t.disabled) return;
     if (t.id === "q-auth-go") {
       var pass = (document.getElementById("q-auth-pass") || {}).value || "";
@@ -16282,7 +16493,12 @@
       }).catch(function (e) { qd.authBusy = false; qd.authErr = e.message || "Couldn't confirm your password."; render(); });
       return;
     }
-    if (t.id === "q-set-available") { if (qManualBusy() || qOnBreak()) qSetManualBusy(false); return; }
+    if (t.id === "q-set-offline") { if (!qOffline()) { if (qOnBreak()) qSetBreak(false); qSetOffline(true); } return; }
+    if (t.id === "q-set-available" && dvirBlock()) { /* v73 DVIR: unsafe defect -> God mode must clear it first */
+      dvirRefresh().then(function () { if (dvirBlock()) { var bk = dvirBlock(), bl = (bk && bk.blocks || []).map(function (b) { return b.label + (b.why === "photo" ? " (photo waiting for God approval)" : b.why !== "defect" ? " (" + b.why + ")" : ""); }).join(", "); qd.brkMsg = "Unsafe vehicle defect reported" + (bl ? ": " + bl : "") + ". You can\u2019t go Available until God mode clears it." + (bk && bk.rejected ? " God mode rejected the photo: " + bk.rejected.reason + ". Do a new inspection with a new photo." : ""); render(); } else { qd.brkMsg = ""; if (qOffline()) qSetOffline(false); else qSetManualBusy(false); } });
+      return;
+    }
+    if (t.id === "q-set-available") { if (qOffline()) { qSetOffline(false); return; } if (qManualBusy() || qOnBreak()) qSetManualBusy(false); return; }
     if (t.id === "q-set-onride") { if (!qManualBusy() || qOnBreak()) qSetManualBusy(true); return; }
     if (t.id === "q-set-break") { if (!qOnBreak()) { if (brkStoppedOk(Date.now())) { qd.brkMsg = ""; qSetBreak(true); } else { qd.brkMsg = "Pull over and stop to start a break"; render(); } } return; }
     if (t.id === "q-join") {
@@ -16332,6 +16548,7 @@
       ".q-avail .q-opt[aria-checked=true]{color:#fff}" +
       ".q-avail.q-busy .q-knob{transform:translateX(100%);background:#c27a12}" +
       ".q-avail.q-three .q-knob{width:calc(33.333% - 2.67px)}.q-avail.q-three .q-opt{font-size:15px;padding:11px 4px}.q-avail.q-break .q-knob{transform:translateX(200%);background:#3f6a3b}" +
+      ".q-avail.q-four .q-knob{width:calc(25% - 2px)}.q-avail.q-four .q-opt{font-size:14px;padding:11px 2px}.q-avail.q-offline .q-knob{transform:translateX(300%);background:#5b6472}" + /* v73 Offline */
       ".q-line-count{margin:4px 0 0;font-weight:600;color:#7fe09a}" +
       ".q-paused{color:#f0b35a;font-weight:600}" +
       ".q-prompt,.q-place{border:2px solid #2e9d4f;background:rgba(46,157,79,.12)}" +
@@ -16341,7 +16558,7 @@
   }
   window.__pcsQueue = {
     state: function () { return { join: qr.join, place: qr.place, inLine: qr.inLine, queued: !!state.qQueued, allBusy: qAllBusy(), ws: qr.ws, order: qd.order, token: !!qToken() }; },
-    manualBusy: function () { return qManualBusy(); }, onBreak: function () { return qOnBreak(); }, brkMotion: function (mph, now) { brkNoteMotion(mph, now); }, brkReset: function () { brkMotion = { stillSince: 0, fastSince: 0, lastAt: 0 }; }, autoBusy: function () { return qAutoBusy(); }, testLiveRide: function (v) { brkTestLive = v == null ? null : !!v; }, liveRide: function () { return brkLiveRide(); },
+    dvirBlock: function () { return dvirBlock(); }, manualBusy: function () { return qManualBusy(); }, offline: function () { return qOffline(); }, setOffline: qSetOffline, onBreak: function () { return qOnBreak(); }, brkMotion: function (mph, now) { brkNoteMotion(mph, now); }, brkReset: function () { brkMotion = { stillSince: 0, fastSince: 0, lastAt: 0 }; }, autoBusy: function () { return qAutoBusy(); }, testLiveRide: function (v) { brkTestLive = v == null ? null : !!v; }, liveRide: function () { return brkLiveRide(); },
     offers: function () { return alertableOpenRides().map(function (r) { return r.code; }); }, poll: function () { qd.pollAt = 0; qDriverPoll(); qRiderPollOnce(); }, setOnRide: qSetManualBusy
   };
 
