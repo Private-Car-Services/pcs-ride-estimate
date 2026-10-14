@@ -1,4 +1,4 @@
-/* PCS Monthly Goal (Matthew) - v75s: tappable goal overrides, adjustment re-dating/repair, goals never negative. v75r: goal cascade + YTD totals. v75g: runs INSIDE God mode as its own Home panel (God Home > Monthly Goal).
+/* PCS Monthly Goal (Matthew) - v75t: every money/number box opens the number pad (numPad helper after each render). v75s: tappable goal overrides, adjustment re-dating/repair, goals never negative. v75r: goal cascade + YTD totals. v75g: runs INSIDE God mode as its own Home panel (God Home > Monthly Goal).
    Own password + PIN, separate from God sign-in. Data stays on this device only (never Firebase, no network calls).
    Ported from the former standalone /ledger/ app; same IndexedDB vault.
    Local-first: all data lives on this device in IndexedDB, AES-GCM encrypted with a key derived from Matthew's own
@@ -39,7 +39,14 @@
   function pinValid() { return kvGet("pin").then(function (p) { if (!p) return null; if (!(Number(p.exp) > Date.now()) || (p.fails || 0) >= PIN_TRIES) return kvDel("pin").then(function () { return null; }); return p; }); }
 
   /* ---------- lock ---------- */
-  function shell(inner, msg) { app.innerHTML = '<div class="lock card"><h1>Monthly Goal</h1>' + inner + '<p class="err" id="gl-err">' + (msg || "") + "</p></div>"; return document.getElementById("gl-err"); }
+  /* v75t: number pad on every money/number box. decimal = dollars (keypad with a point), numeric = whole counts (days left, PIN). */
+  function numPad(root) { if (!root || !root.querySelectorAll) return 0; var n = 0; [].forEach.call(root.querySelectorAll("input"), function (el) {
+    if (el.readOnly || /^(password|checkbox|radio|date|time|file|hidden)$/.test(el.type) && !(el.type === "password" && el.getAttribute("inputmode") === "numeric")) return;
+    var im = el.getAttribute("inputmode"), whole = el.id === "gl-s-days" || im === "numeric", money = whole || im === "decimal" || el.type === "number";
+    if (!money) return; if (el.type === "number") el.type = "text";
+    el.setAttribute("inputmode", whole ? "numeric" : "decimal"); el.setAttribute("pattern", whole ? "[0-9]*" : "[0-9]*[.]?[0-9]*");
+    el.setAttribute("autocomplete", "off"); el.setAttribute("autocorrect", "off"); el.setAttribute("spellcheck", "false"); n++; }); return n; }
+  function shell(inner, msg) { app.innerHTML = '<div class="lock card"><h1>Monthly Goal</h1>' + inner + '<p class="err" id="gl-err">' + (msg || "") + "</p></div>"; numPad(app); return document.getElementById("gl-err"); }
   function lockNow(msg) { dek = null; D = null; if (!app) return; kvGet("vault").then(function (v) { if (!v) return firstRun(); pinValid().then(function (p) { if (p) pinScreen(p, msg); else pwScreen(msg); }); }); }
   function firstRun(msg) {
     var err = shell('<p>Create your ledger password (not your God mode password), at least ' + MINPW + ' characters, and a 4-digit PIN. ' +
@@ -189,11 +196,11 @@
       '<br><button class="btn" type="submit">Save goals</button> <span class="fine" id="gl-set-msg">Saves automatically as you type.</span></form>';
     h += ADJHTML(c);
     h += REST(c);
-    app.innerHTML = h; bind(); bindAdj(); updGoalTags(c);
+    app.innerHTML = h; bind(); bindAdj(); updGoalTags(c); numPad(app);
     var qa = document.getElementById("gl-q-amt"); if (qa && paint.focusQ) { qa.focus(); paint.focusQ = false; }
   }
   /* v75l: everything above the Goals form; re-rendered on each goal keystroke without touching the Goals inputs (keeps the keyboard up) */
-  function paintTop() { var top = document.getElementById("gl-top"); if (!top || !D) return; var c = calc(); top.innerHTML = topHtml(c); bindTop(); updGoalTags(c); updYtd(c); }
+  function paintTop() { var top = document.getElementById("gl-top"); if (!top || !D) return; var c = calc(); top.innerHTML = topHtml(c); bindTop(); numPad(top); updGoalTags(c); updYtd(c); }
   function updGoalTags(c) { function t(id, ov, auto, cents) { var el = document.getElementById(id); if (el) el.textContent = ov != null ? "override (auto " + $m(auto, cents) + ")" : "auto " + $m(auto, cents); }
     t("gl-t-month", c.monthOv, c.monthAuto); t("gl-t-week", c.weekOv, c.weekAuto); t("gl-t-day", c.dayOv, c.dailyAuto, true);
     var f = document.getElementById("gl-formula"); if (f) f.innerHTML = "Monthly = (year goal \u2212 year income before this month " + $m(c.yBefore) + ") \u00f7 " + c.mLeft + " months left \u00b7 Weekly = (monthly \u2212 month income before this week " + $m(c.mBefore) + ") \u00f7 " + c.wLeft + " weeks left \u00b7 Today = (weekly \u2212 week income before today " + $m(c.wBefore, true) + ") \u00f7 days left. Adjustments count as income."; }
