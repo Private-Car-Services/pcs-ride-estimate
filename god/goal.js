@@ -1,4 +1,4 @@
-/* PCS Monthly Goal (Matthew) - v75r: goal cascade + YTD totals. v75g: runs INSIDE God mode as its own Home panel (God Home > Monthly Goal).
+/* PCS Monthly Goal (Matthew) - v75s: tappable goal overrides, adjustment re-dating/repair, goals never negative. v75r: goal cascade + YTD totals. v75g: runs INSIDE God mode as its own Home panel (God Home > Monthly Goal).
    Own password + PIN, separate from God sign-in. Data stays on this device only (never Firebase, no network calls).
    Ported from the former standalone /ledger/ app; same IndexedDB vault.
    Local-first: all data lives on this device in IndexedDB, AES-GCM encrypted with a key derived from Matthew's own
@@ -7,7 +7,7 @@
    cannot decrypt. No network calls (CSP connect-src 'none'). Back up with "Export encrypted backup". */
 (function () {
   "use strict";
-  var GL_CSS = '#gl-screen{--bg:#0b1f0b;--card:#102810;--line:#2e5a2e;--green:#3fae5a;--lite:#7ee08f;--gold:#d4af37;--goldt:#f0d48a;--red:#ff8a80;--txt:#eef5ee}#gl-screen,#gl-screen *{box-sizing:border-box}#gl-screen,#gl-screen{margin:0;background:var(--bg);color:var(--txt);font:16px/1.35 -apple-system,system-ui,Segoe UI,Roboto,sans-serif}#gl-screen main{max-width:760px;margin:0 auto;padding:14px 14px 80px}#gl-screen h1{color:var(--goldt);font-size:24px;margin:6px 0 10px}#gl-screen .card{border:1px solid var(--line);border-radius:14px;padding:12px;margin:10px 0;background:var(--card)}#gl-screen .card.hero{border:2px solid var(--gold)}#gl-screen .card.day{border:2px solid var(--green);text-align:center;background:#0f300f}#gl-screen .card b.t{color:var(--goldt);font-size:17px}#gl-screen .grid{display:flex;flex-wrap:wrap;gap:8px;margin-top:6px}#gl-screen .big{flex:1 1 30%;min-width:110px;background:#163a16;border:1px solid var(--green);border-radius:10px;padding:8px}#gl-screen .big .v{font-size:22px;font-weight:900}#gl-screen .neg{color:var(--red)}#gl-screen .pos{color:var(--lite)}#gl-screen .fine{font-size:13px;color:#b9cdb9}#gl-screen table{width:100%;border-collapse:collapse}#gl-screen td,#gl-screen th{padding:4px 3px}#gl-screen td.r,#gl-screen th.r{text-align:right}#gl-screen tr.b{border-top:1px solid var(--line)}#gl-screen input,#gl-screen select{font-size:16px;padding:9px;border-radius:10px;border:1px solid #9ab79a;background:#fff;color:#000}#gl-screen .btn{font-weight:800;border-radius:12px;padding:10px 16px;border:2px solid var(--gold);background:linear-gradient(#f0d48a,#d4af37);color:#0b1f0b;cursor:pointer;font-size:16px}#gl-screen .btn.ghost{background:transparent;color:var(--goldt)}#gl-screen .total{font-size:42px;font-weight:900;color:var(--lite)}#gl-screen #gl-q-amt{font-size:28px;width:170px;text-align:right}#gl-screen label{display:inline-block;margin:4px 8px 4px 0}#gl-screen label span{display:block}#gl-screen .lock{max-width:420px;margin:12vh auto;padding:20px}#gl-screen .err{color:var(--red);min-height:1.2em}#gl-screen .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;justify-content:center}#gl-screen .btn.ghost{background:#f3f4f6;color:#1a1a1a;border:2px solid #6b7280}#gl-screen .lock{color:#eef5ee}#gl-screen summary{cursor:pointer}#gl-close{position:fixed;top:max(40px,calc(10px + env(safe-area-inset-top)));right:max(16px,env(safe-area-inset-right));z-index:9101;min-height:52px;min-width:120px;font-size:20px;font-weight:900;border-radius:14px;border:2px solid #fff;background:#1f8a3b;color:#fff;cursor:pointer}#gl-screen main{padding-top:100px}';
+  var GL_CSS = '#gl-screen{--bg:#0b1f0b;--card:#102810;--line:#2e5a2e;--green:#3fae5a;--lite:#7ee08f;--gold:#d4af37;--goldt:#f0d48a;--red:#ff8a80;--txt:#eef5ee}#gl-screen,#gl-screen *{box-sizing:border-box}#gl-screen,#gl-screen{margin:0;background:var(--bg);color:var(--txt);font:16px/1.35 -apple-system,system-ui,Segoe UI,Roboto,sans-serif}#gl-screen main{max-width:760px;margin:0 auto;padding:14px 14px 80px}#gl-screen h1{color:var(--goldt);font-size:24px;margin:6px 0 10px}#gl-screen .card{border:1px solid var(--line);border-radius:14px;padding:12px;margin:10px 0;background:var(--card)}#gl-screen .card.hero{border:2px solid var(--gold)}#gl-screen .card.day{border:2px solid var(--green);text-align:center;background:#0f300f}#gl-screen .card b.t{color:var(--goldt);font-size:17px}#gl-screen .grid{display:flex;flex-wrap:wrap;gap:8px;margin-top:6px}#gl-screen .big{flex:1 1 30%;min-width:110px;background:#163a16;border:1px solid var(--green);border-radius:10px;padding:8px}#gl-screen .big .v{font-size:22px;font-weight:900}#gl-screen .neg{color:var(--red)}#gl-screen .pos{color:var(--lite)}#gl-screen .fine{font-size:13px;color:#b9cdb9}#gl-screen table{width:100%;border-collapse:collapse}#gl-screen td,#gl-screen th{padding:4px 3px}#gl-screen td.r,#gl-screen th.r{text-align:right}#gl-screen tr.b{border-top:1px solid var(--line)}#gl-screen input,#gl-screen select{font-size:16px;padding:9px;border-radius:10px;border:1px solid #9ab79a;background:#fff;color:#000}#gl-screen .btn{font-weight:800;border-radius:12px;padding:10px 16px;border:2px solid var(--gold);background:linear-gradient(#f0d48a,#d4af37);color:#0b1f0b;cursor:pointer;font-size:16px}#gl-screen .btn.ghost{background:transparent;color:var(--goldt)}#gl-screen .total{font-size:42px;font-weight:900;color:var(--lite)}#gl-screen #gl-q-amt{font-size:28px;width:170px;text-align:right}#gl-screen label{display:inline-block;margin:4px 8px 4px 0}#gl-screen label span{display:block}#gl-screen .lock{max-width:420px;margin:12vh auto;padding:20px}#gl-screen .err{color:var(--red);min-height:1.2em}#gl-screen .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;justify-content:center}#gl-screen .btn.ghost{background:#f3f4f6;color:#1a1a1a;border:2px solid #6b7280}#gl-screen .lock{color:#eef5ee}#gl-screen summary{cursor:pointer}#gl-screen input,#gl-screen .gl-ovin{pointer-events:auto;touch-action:manipulation;-webkit-user-select:text;user-select:text;position:relative;z-index:2}#gl-screen .gl-ovin::placeholder{color:#555;opacity:1}#gl-close{position:fixed;top:max(40px,calc(10px + env(safe-area-inset-top)));right:max(16px,env(safe-area-inset-right));z-index:9101;min-height:52px;min-width:120px;font-size:20px;font-weight:900;border-radius:14px;border:2px solid #fff;background:#1f8a3b;color:#fff;cursor:pointer}#gl-screen main{padding-top:100px}';
   var ITER = 600000, LOCK_MS = 5 * 60000, MINPW = 10;
   var LINES = [["uber", "Uber"], ["lyft", "Lyft"], ["pcs", "PCS (private clients)"], ["ofc", "Officiating (Football/Softball)"], ["va", "VA"], ["cash", "Cash"]];
   var EXP = [["exp", "Fuel & expenses"]];
@@ -83,9 +83,9 @@
   }
   function val(id) { return document.getElementById(id).value; }
   function lockScreen(first, msg) { lockNow(msg); } /* kept for callers */
-  function start() { lastAct = Date.now(); paint(); }
+  function start() { lastAct = Date.now(); var fixed = 0; try { fixed = repair(); } catch (e) {} paint(); if (fixed) save(); }
   ["click", "keydown", "touchstart", "input"].forEach(function (t) { document.addEventListener(t, function () { lastAct = Date.now(); }, true); });
-  setInterval(function () { if (app && dek && Date.now() - lastAct > LOCK_MS) lockNow("Locked after 5 minutes of no activity."); }, 15000);
+  setInterval(function () { if (app && dek && Date.now() - lastAct > LOCK_MS) lockNow("Locked after 5 quiet minutes."); }, 15000);
   document.addEventListener("visibilitychange", function () { if (document.hidden) lastAct = Math.min(lastAct, Date.now()); else if (app && dek && Date.now() - lastAct > LOCK_MS) lockNow("Locked."); });
 
   /* ---------- math (same rules as the Monthly Goal tracker) ---------- */
@@ -101,7 +101,7 @@
     function add(k, v) { sum[k] = (sum[k] || 0) + v; }
     Object.keys(D.entries).forEach(function (id) { var e = D.entries[id], d = String(e.date || ""), a = Number(e.amount) || 0, l = e.line;
       var adj = e.type === "adjustment", inW = d >= wk0 && d <= t && (!adj || e.scope === "w"), inD = d === t && !adj; /* v75q: month/year adjustments never touch Today or the week */
-      var bm = adj ? e.scope === "y" : d < m1, bw = adj ? (e.scope === "y" || e.scope === "m") : d < wk0; /* v75r: income before this month / before this week */
+      var bm = d < m1 || (adj && e.scope === "y"), bw = d < wk0 || (adj && (e.scope === "y" || e.scope === "m")); /* v75s: older adjustments count by date too */ /* v75r: income before this month / before this week */
       if (d.slice(0, 4) === y && bm) add("yb:" + l, a); if (d.slice(0, 7) === m && bw && !(adj && e.scope === "y")) add("mb:" + l, a);
       if (d.slice(0, 4) === y) add("y:" + l, a); if (d.slice(0, 7) === m) add("m:" + l, a); if (inW) add("w:" + l, a); if (inD) add("d:" + l, a); if (d === yday && !adj) add("y1:" + l, a);
       if (e.tip) { if (d.slice(0, 4) === y) add("y:tip:" + l, a); if (d.slice(0, 7) === m) add("m:tip:" + l, a); if (inW) add("w:tip:" + l, a); if (inD) add("d:tip:" + l, a); } });
@@ -114,8 +114,8 @@
     var dTyped = goal(s.daysLeft), dSet = String(s.daysLeftSet || "");
     var passed = dSet && dSet <= t ? Math.round((Date.parse(t + "T12:00:00Z") - Date.parse(dSet + "T12:00:00Z")) / 86400000) : 0;
     var dLeft = dTyped == null ? null : Math.max(1, dTyped - passed);
-    var before = inc("w") - inc("d"), dailyAuto = weekGoal == null || dLeft == null ? null : (weekGoal - before) / dLeft, dayOv = goal(s.dayOv), daily = dayOv != null ? dayOv : dailyAuto;
-    var rolled = null; if (weekGoal != null && dLeft != null && yday >= wk0) { var yi = inc("y1"); rolled = (weekGoal - (before - yi)) / (dLeft + 1) - yi; }
+    var before = inc("w") - inc("d"), dailyAuto = weekGoal == null || dLeft == null ? null : Math.max(0, (weekGoal - before) / dLeft), dayOv = goal(s.dayOv), daily = dayOv != null ? dayOv : dailyAuto;
+    var rolled = null; if (weekGoal != null && dLeft != null && yday >= wk0) { var yi = inc("y1"); rolled = Math.max(0, (weekGoal - (before - yi)) / (dLeft + 1)) - yi; }
     var uberG = goal(s.uber), uberDaily = uberG == null || dLeft == null ? null : (uberG - (g("w", "uber") - g("d", "uber"))) / dLeft;
     return { monthAuto: monthAuto, monthOv: monthOv, weekAuto: weekAuto, weekOv: weekOv, dailyAuto: dailyAuto, dayOv: dayOv, mLeft: mLeft, wLeft: wLeft, yBefore: inc("yb"), mBefore: inc("mb"), wBefore: before, t: t, wk0: wk0, g: g, inc: inc, weekGoal: weekGoal, dLeft: dLeft, daily: daily, rolled: rolled, dayGross: inc("d"), expD: g("d", "exp"),
       todayRem: sub(daily, inc("d")), weekTotal: inc("w"), weekRem: sub(weekGoal, inc("w")), expW: g("w", "exp"),
@@ -135,10 +135,21 @@
     t = t || today(); at = at || Date.now(); var out = [], n = 0, m1 = t.slice(0, 7) + "-01", y1 = t.slice(0, 4) + "-01-01";
     [["w", "week"], ["m", "month"], ["y", "year"]].forEach(function (p) {
       ADJ.forEach(function (r, i) { var v = inputs[i] && inputs[i][p[0]]; if (v == null) return;
-        var c = calc(t), date = p[0] === "w" ? c.wk0 : p[0] === "m" ? m1 : y1, amt = Math.round((v - adjCur(c, p[0], r)) * 100) / 100; if (!amt) return;
+        if (p[0] === "m" && inputs[i].y != null && v > inputs[i].y) return; var c = calc(t), date = p[0] === "w" ? c.wk0 : p[0] === "m" ? m1 : y1, amt = Math.round((v - adjCur(c, p[0], r)) * 100) / 100; if (!amt) return;
         var id = "adj-" + newId(at + n); D.entries[id] = { date: date, line: r[0], amount: amt, tip: r[2], type: "adjustment", scope: p[0], note: "Manual adjustment (" + p[1] + " to date)", at: at + n++ }; out.push(id); }); });
     return out;
   }
+  /* v75s: repair saved adjustments on load. Year = Jan 1, month = the 1st, week = its Monday. A month adjustment that pushes
+     a source's month above its year total was really a year figure: it becomes part of the year remainder (Jan 1). */
+  function repair(t) { t = t || today(); var ch = 0, E = D.entries;
+    Object.keys(E).forEach(function (k) { var e = E[k]; if (e.type !== "adjustment") return; var d = String(e.date || ""); if (!/^\d{4}-\d{2}-\d{2}$/.test(d)) d = t;
+      var nd = e.scope === "y" ? d.slice(0, 4) + "-01-01" : e.scope === "m" ? d.slice(0, 7) + "-01" : e.scope === "w" ? addDays(d, -((new Date(d + "T12:00:00Z").getUTCDay() + 6) % 7)) : d;
+      if (nd !== e.date) { e.date = nd; ch++; } });
+    var c = calc(t), m = t.slice(0, 7);
+    ADJ.forEach(function (r) { if (ytdTotal(c, r) >= -0.005 && mtd(c, r) <= ytdTotal(c, r) + 0.005) return;
+      Object.keys(E).forEach(function (k) { var e = E[k]; if (e.type === "adjustment" && e.scope === "m" && e.line === r[0] && !!e.tip === !!r[2] && String(e.date).slice(0, 7) === m) { e.scope = "y"; e.date = t.slice(0, 4) + "-01-01"; e.note = "Manual adjustment (year to date, moved from month)"; ch++; } }); });
+    return ch; }
+  function mtd(c, r) { return r[2] ? c.g("m", "tip:" + r[0]) : c.g("m", r[0]) - (r[0] === "pcs" ? c.g("m", "tip:pcs") : 0); }
   function ytdTotal(c, r) { return r[2] ? c.g("y", "tip:" + r[0]) : c.g("y", r[0]) - (r[0] === "pcs" ? c.g("y", "tip:pcs") : 0); }
   function updYtd(c) { ADJ.forEach(function (r, i) { var el = document.getElementById("gl-adj-t" + i); if (el) el.value = $m(ytdTotal(c, r), true); }); }
   function ADJHTML(c) { var open = paint.adjOpen ? " open" : "";
@@ -172,7 +183,7 @@
     var c = calc(), s = D.settings, h = "";
     h += '<div id="gl-top">' + topHtml(c) + '</div>';
     function f(id, l, v) { return '<label><span class="fine">' + l + '</span><input id="' + id + '" type="text" ' + (id === "gl-s-days" ? 'inputmode="numeric" pattern="[0-9]*"' : 'inputmode="decimal"') + ' autocomplete="off" value="' + esc(v == null ? "" : v) + '" style="width:130px"></label>'; }
-    function o(id, l, v, tag) { return '<label><span class="fine">' + l + ' <b id="' + tag + '" style="color:var(--lite)"></b></span><input id="' + id + '" type="text" inputmode="decimal" autocomplete="off" placeholder="auto" value="' + esc(v == null ? "" : v) + '" style="width:130px"></label>'; }
+    function o(id, l, v, tag) { return '<div class="gl-ov" style="display:inline-block;margin:4px 8px 4px 0;position:relative;z-index:2"><span class="fine" style="display:block">' + l + ' <b id="' + tag + '" style="color:var(--lite)"></b></span><input id="' + id + '" class="gl-ovin" type="text" inputmode="decimal" enterkeyhint="done" autocomplete="off" autocorrect="off" spellcheck="false" placeholder="auto" aria-label="' + esc(l) + ' (blank = auto)" value="' + esc(v == null ? "" : v) + '" style="width:130px"></div>'; }
     h += '<form class="card" id="gl-f-set"><b class="t">Goals</b><br>' + f("gl-s-year", "Year goal $", s.year) + o("gl-s-month", "Monthly goal $", s.monthOv, "gl-t-month") + o("gl-s-week", "Weekly goal $", s.weekOv, "gl-t-week") + o("gl-s-day", "Today's goal $", s.dayOv, "gl-t-day") + f("gl-s-days", "Days left in week", c.dLeft) + f("gl-s-uber", "Uber week goal $", s.uber) +
       '<p class="fine">Leave Monthly / Weekly / Today blank for <b>auto</b>; type a number to override, clear it to go back to auto.</p><p class="fine" id="gl-formula"></p>' +
       '<br><button class="btn" type="submit">Save goals</button> <span class="fine" id="gl-set-msg">Saves automatically as you type.</span></form>';
@@ -189,13 +200,13 @@
   function topHtml(c) {
     var g = c.g, h = "";
     h += '<div class="row" style="justify-content:space-between"><h1>Monthly Goal</h1><button class="btn ghost" id="gl-b-lock">Lock</button></div>';
-    var roll = c.rolled != null && Math.abs(c.rolled) >= 0.01 ? '<div class="fine ' + (c.rolled > 0 ? "neg" : "pos") + '">Rolled over from yesterday: ' + (c.rolled > 0 ? "+" : "\u2212") + "$" + Math.abs(c.rolled).toFixed(2) + (c.rolled > 0 ? " short" : " ahead") + "</div>" : "";
+    var roll = c.rolled != null && Math.abs(c.rolled) >= 0.01 ? '<div class="fine ' + (c.rolled > 0 ? "neg" : "pos") + '">Rolled over from yesterday: ' + (c.rolled > 0 ? "+$" + c.rolled.toFixed(2) + " short" : "ahead by $" + Math.abs(c.rolled).toFixed(2)) + "</div>" : "";
     h += '<div class="card hero"><b class="t">TODAY \u00b7 ' + esc(c.t) + '</b><div class="grid">' + big("Weekly goal", $m(c.weekGoal)) + big("Days left in week", c.dLeft == null ? "\u2014" : String(c.dLeft), '<div class="fine">counts down daily</div>') +
       big("Today's goal", $m(c.daily, true), roll) + big("Today remaining", $m(left(c.todayRem), true)) + big("Week remaining", $m(left(c.weekRem))) + big("Month remaining", $m(left(c.monthRem))) +
       '</div><p class="fine">Today\'s goal = (weekly goal \u2212 week income before today) \u00f7 days left. Week = Mon\u2013Sun (Sunday optional).</p></div>';
     var ids = Object.keys(D.entries).filter(function (k) { return D.entries[k].date === c.t && D.entries[k].line !== "exp"; }).sort(function (a, b) { return (D.entries[a].at || 0) - (D.entries[b].at || 0); });
     var run = 0, tape = ids.map(function (k) { var e = D.entries[k]; run += Number(e.amount) || 0; var rem = c.daily == null ? null : c.daily - run;
-      return '<tr class="b"><td style="text-align:left">' + esc(name(e.line).replace(/ \(.*\)/, "") + (e.line === "exp" ? "" : e.tip ? " tip" : " ride")) + '</td><td class="r">+' + $m(e.amount, true) + '</td><td class="r pos">' + $m(run, true) + '</td><td class="r" style="color:' + (rem != null && rem <= 0 ? "var(--lite)" : "var(--goldt)") + '">' + $m(rem, true) + '</td><td class="r"><button class="btn ghost" data-del="' + esc(k) + '">Undo</button></td></tr>'; }).reverse().join("");
+      return '<tr class="b"><td style="text-align:left">' + esc(name(e.line).replace(/ \(.*\)/, "") + (e.line === "exp" ? "" : e.tip ? " tip" : " ride")) + '</td><td class="r">+' + $m(e.amount, true) + '</td><td class="r pos">' + $m(run, true) + '</td><td class="r" style="color:' + (rem != null && rem <= 0 ? "var(--lite)" : "var(--goldt)") + '">' + (rem != null && rem < 0 ? "ahead by " + $m(-rem, true) : $m(rem, true)) + '</td><td class="r"><button class="btn ghost" data-del="' + esc(k) + '">Undo</button></td></tr>'; }).reverse().join("");
     h += '<div class="card day"><div class="fine">DAILY TOTAL</div><div class="total">' + $m(c.dayGross, true) + '</div>' +
       '<form id="gl-f-q" class="row"><input id="gl-q-amt" type="text" inputmode="decimal" autocomplete="off" placeholder="Ride 0.00" aria-label="Ride amount"><input id="gl-q-tip" type="text" inputmode="decimal" autocomplete="off" placeholder="Tip" aria-label="Tip (optional)" style="font-size:28px;width:120px;text-align:right"><select id="gl-q-line" aria-label="Source">' +
       LINES.concat(EXP).map(function (l) { return '<option value="' + l[0] + '"' + (l[0] === D.lastLine ? " selected" : "") + ">" + l[1] + "</option>"; }).join("") + '</select><button class="btn" type="submit" style="font-size:20px;padding:10px 26px">Add</button></form>' +
@@ -233,6 +244,8 @@
     fs.onsubmit = function (e) { e.preventDefault(); clearTimeout(setTimer); readGoals(); paint(); save().then(function () { goalsSaved("Saved."); }); };
     fs.oninput = function () { readGoals(); paintTop(); goalsSaved("Saving\u2026"); clearTimeout(setTimer); setTimer = setTimeout(function () { save().then(function () { goalsSaved("Saved."); }); }, 600); };
     fs.onchange = function () { readGoals(); paintTop(); clearTimeout(setTimer); save().then(function () { goalsSaved("Saved."); }); };
+    Array.prototype.forEach.call(document.querySelectorAll("#gl-screen .gl-ovin"), function (el) { el.readOnly = false; el.disabled = false; el.removeAttribute("readonly"); el.removeAttribute("disabled");
+      el.addEventListener("touchend", function () { if (document.activeElement !== el) el.focus(); }); });
     bindRest();
   }
   function bindTop() {
@@ -304,7 +317,7 @@
     idb().then(function () { lockNow(); }).catch(function () { app.innerHTML = '<p class="err">This browser cannot store the ledger (private browsing?).</p>'; });
   }
   function glClose() { dek = null; D = null; app = null; var ov = document.getElementById("gl-screen"); if (ov) ov.remove(); }
-  if (typeof module !== "undefined" && module.exports) module.exports = { _set: function (d) { D = d; }, calc: calc, planAdjust: planAdjust, ytdTotal: ytdTotal, ADJ: ADJ, weeksLeft: weeksLeft };
+  if (typeof module !== "undefined" && module.exports) module.exports = { repair: repair, _set: function (d) { D = d; }, calc: calc, planAdjust: planAdjust, ytdTotal: ytdTotal, ADJ: ADJ, weeksLeft: weeksLeft };
   window.__pcsGoalOpen = glOpen; window.__pcsGoalClose = glClose;
   document.addEventListener("click", function (e) { var t = e.target.closest ? e.target.closest("[data-god-menu=goal]") : null; if (t) { e.stopPropagation(); glOpen(); } }, true);
 })();
