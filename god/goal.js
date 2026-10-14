@@ -1,4 +1,4 @@
-/* PCS Monthly Goal (Matthew) - v75w: foolproof month repair - per source, if Month > Year, or Month > 40% of Year (March on), every adjustment dated this month (any scope) moves to Jan 1 and merges; a single non-adjustment entry this month bigger than 40% of Year moves too; visible 'goal v75w' label. v75v: robust repair - a month-to-date adjustment that is really a year figure (>40% of that source's YTD from March on, or >2x a plausible month) is re-dated to Jan 1 and netted with Apply's negative year remainder; Apply treats MTD >= 90% of YTD as YTD only. v75u: big on-screen 9-key pad (1-9 . 0 del, Clear, Done) on every money/number box; 'Use iPad keyboard' fallback. v75t: every money/number box opens the number pad (numPad helper after each render). v75s: tappable goal overrides, adjustment re-dating/repair, goals never negative. v75r: goal cascade + YTD totals. v75g: runs INSIDE God mode as its own Home panel (God Home > Monthly Goal).
+/* PCS Monthly Goal (Matthew) - v75y: Adjustments are SET values (YTD and Month to date replace, never add); one-time migration of old adjustment entries keeping totals; Adjustments list + Past entries with Undo; month > year blocked; old heuristic repair removed. v75w: foolproof month repair - per source, if Month > Year, or Month > 40% of Year (March on), every adjustment dated this month (any scope) moves to Jan 1 and merges; a single non-adjustment entry this month bigger than 40% of Year moves too; visible 'goal v75w' label. v75v: robust repair - a month-to-date adjustment that is really a year figure (>40% of that source's YTD from March on, or >2x a plausible month) is re-dated to Jan 1 and netted with Apply's negative year remainder; Apply treats MTD >= 90% of YTD as YTD only. v75u: big on-screen 9-key pad (1-9 . 0 del, Clear, Done) on every money/number box; 'Use iPad keyboard' fallback. v75t: every money/number box opens the number pad (numPad helper after each render). v75s: tappable goal overrides, adjustment re-dating/repair, goals never negative. v75r: goal cascade + YTD totals. v75g: runs INSIDE God mode as its own Home panel (God Home > Monthly Goal).
    Own password + PIN, separate from God sign-in. Data stays on this device only (never Firebase, no network calls).
    Ported from the former standalone /ledger/ app; same IndexedDB vault.
    Local-first: all data lives on this device in IndexedDB, AES-GCM encrypted with a key derived from Matthew's own
@@ -131,7 +131,7 @@
   }
   function val(id) { return document.getElementById(id).value; }
   function lockScreen(first, msg) { lockNow(msg); } /* kept for callers */
-  function start() { lastAct = Date.now(); var fixed = 0; try { fixed = repair(); } catch (e) {} paint(); if (fixed) save(); }
+  function start() { lastAct = Date.now(); var fixed = 0; try { fixed = migrate(); } catch (e) {} paint(); if (fixed) save(); }
   ["click", "keydown", "touchstart", "input"].forEach(function (t) { document.addEventListener(t, function () { lastAct = Date.now(); }, true); });
   setInterval(function () { if (app && dek && Date.now() - lastAct > LOCK_MS) lockNow("Locked after 5 quiet minutes."); }, 15000);
   document.addEventListener("visibilitychange", function () { if (document.hidden) lastAct = Math.min(lastAct, Date.now()); else if (app && dek && Date.now() - lastAct > LOCK_MS) lockNow("Locked."); });
@@ -147,7 +147,8 @@
     t = t || today(); var s = D.settings || {}, dow = (new Date(t + "T12:00:00Z").getUTCDay() + 6) % 7, wk0 = addDays(t, -dow), yday = addDays(t, -1);
     var y = t.slice(0, 4), m = t.slice(0, 7), m1 = m + "-01", sum = {};
     function add(k, v) { sum[k] = (sum[k] || 0) + v; }
-    Object.keys(D.entries).forEach(function (id) { var e = D.entries[id], d = String(e.date || ""), a = Number(e.amount) || 0, l = e.line;
+    var LIST = Object.keys(D.entries).map(function (k) { return D.entries[k]; }).concat(derived(t)); /* v75y: set adjustments are virtual */
+    LIST.forEach(function (e) { var d = String(e.date || ""), a = Number(e.amount) || 0, l = e.line;
       var adj = e.type === "adjustment", inW = d >= wk0 && d <= t && (!adj || e.scope === "w"), inD = d === t && !adj; /* v75q: month/year adjustments never touch Today or the week */
       var bm = d < m1 || (adj && e.scope === "y"), bw = d < wk0 || (adj && (e.scope === "y" || e.scope === "m")); /* v75s: older adjustments count by date too */ /* v75r: income before this month / before this week */
       if (d.slice(0, 4) === y && bm) add("yb:" + l, a); if (d.slice(0, 7) === m && bw && !(adj && e.scope === "y")) add("mb:" + l, a);
@@ -172,82 +173,82 @@
   }
 
 
-  /* ---------- v75q: Adjustments ---------- */
+  /* ---------- v75y: Adjustments = SET values (deterministic). ----------
+     Per source D.adj[key] = { y, yThru, m, mThru, mMonth }. "YTD entered" SETS the source's total Jan 1 .. yThru (yesterday when applied);
+     "Month to date" SETS this month's total 1st .. mThru. Nothing is ever added on top: each Apply REPLACES the earlier value.
+     The adjustment amounts are worked out live from those set values minus the real entries in the same dates, so a past entry
+     added later inside those dates does not double count. Entries after the "through" date (today's tape) add on top. */
   var ADJ = [["uber", "Uber", false], ["lyft", "Lyft", false], ["pcs", "PCS (rides)", false], ["pcs", "PCS tips", true], ["ofc", "Officiating", false], ["va", "VA", false], ["cash", "Cash", false], ["exp", "Fuel & expenses", false]];
-  /* current period amount for an ADJ row, EXCLUDING today's (non-adjustment) entries */
-  function adjCur(c, sc, r) { var g = c.g;
-    function v(x) { return r[2] ? g(x, "tip:" + r[0]) : g(x, r[0]) - (r[0] === "pcs" ? g(x, "tip:pcs") : 0); }
-    return v(sc) - v("d"); }
-  /* inputs: [{w,m,y}] per ADJ row (null = leave alone). Week first, then month, then year, so each lands exactly. */
-  function planAdjust(inputs, t, at) {
-    t = t || today(); at = at || Date.now(); var out = [], n = 0, m1 = t.slice(0, 7) + "-01", y1 = t.slice(0, 4) + "-01-01";
-    [["w", "week"], ["m", "month"], ["y", "year"]].forEach(function (p) {
-      ADJ.forEach(function (r, i) { var v = inputs[i] && inputs[i][p[0]]; if (v == null) return;
-        if (p[0] === "m" && inputs[i].y != null && v >= 0.9 * inputs[i].y && inputs[i].y > 0) return; /* v75v: MTD >= 90% of YTD = a year figure, use YTD only */
-        if (p[0] === "m" && inputs[i].y == null && looksYearly(calc(t), r, v, t)) { inputs[i].y = v; return; } /* v75v: a year figure typed in Month goes to the year */ var c = calc(t), date = p[0] === "w" ? c.wk0 : p[0] === "m" ? m1 : y1, amt = Math.round((v - adjCur(c, p[0], r)) * 100) / 100; if (!amt) return;
-        var id = "adj-" + newId(at + n); D.entries[id] = { date: date, line: r[0], amount: amt, tip: r[2], type: "adjustment", scope: p[0], note: "Manual adjustment (" + p[1] + " to date)", at: at + n++ }; out.push(id); }); });
-    return out;
-  }
-  /* v75s: repair saved adjustments on load. Year = Jan 1, month = the 1st, week = its Monday. A month adjustment that pushes
-     a source's month above its year total was really a year figure: it becomes part of the year remainder (Jan 1). */
-  /* v75v: is a month-to-date figure really a year figure? (Jan/Feb can legitimately be most of the year) */
-  function looksYearly(c, r, v, t) { var mo = Number(t.slice(5, 7)), ytd = ytdTotal(c, r), yg = goal((D.settings || {}).year), cap = yg != null ? 2 * yg / 12 : null;
-    if (v <= 0) return false; if (mo >= 3 && ytd > 0 && v > 0.4 * ytd) return true; if (cap != null && v > cap) return true; return mo >= 2 && ytd > 0 && v > ytd + 0.005; }
-  /* v75s+v75v: repair saved adjustments on load. Year = Jan 1, month = the 1st, week = its Monday. Then, per source, if this
-     month's MONTH adjustments add up to a year-sized figure, they become year adjustments (Jan 1) and every year adjustment
-     for that source (including Apply's negative "year remainder") is netted into ONE Jan 1 entry, so YTD stays exactly
-     what was typed and the month only counts real rides in this month. */
-  function repair(t) { t = t || today(); var ch = 0, E = D.entries, m = t.slice(0, 7), y1 = t.slice(0, 4) + "-01-01";
-    Object.keys(E).forEach(function (k) { var e = E[k]; if (e.type !== "adjustment") return; var d = String(e.date || ""); if (!/^\d{4}-\d{2}-\d{2}$/.test(d)) d = t;
-      var nd = e.scope === "y" ? d.slice(0, 4) + "-01-01" : e.scope === "m" ? d.slice(0, 7) + "-01" : e.scope === "w" ? addDays(d, -((new Date(d + "T12:00:00Z").getUTCDay() + 6) % 7)) : d;
-      if (nd !== e.date) { e.date = nd; ch++; } });
-    var mo = Number(t.slice(5, 7));
-    ADJ.forEach(function (r) {
-      function mine(e) { return e.line === r[0] && !!e.tip === !!r[2]; }
-      function bad() { var c = calc(t), mm = mtd(c, r), yy = ytdTotal(c, r); return mm > 0.005 && (mm > yy + 0.005 || (mo >= 3 && mm > 0.4 * yy) || (mo >= 2 && looksYearly(c, r, mm, t) && yy <= 0)); }
-      if (!bad()) return;
-      var moved = 0;
-      /* 1) every adjustment dated this month, whatever its scope (m, w, missing), is a year figure */
-      Object.keys(E).forEach(function (k) { var e = E[k]; if (e.type === "adjustment" && mine(e) && String(e.date).slice(0, 7) === m) { e.scope = "y"; e.date = y1; moved++; } });
-      /* 2) still wrong: a single typed entry this month bigger than 40% of the year (or than the whole year) is a year figure too */
-      if (bad()) { var yy = ytdTotal(calc(t), r), yg = goal((D.settings || {}).year), floor = Math.max(1500, yg != null ? yg / 12 : 0); /* a real single ride/day is never this big */
-        Object.keys(E).forEach(function (k) { var e = E[k], a = Number(e.amount) || 0; if (e.type !== "adjustment" && mine(e) && String(e.date).slice(0, 7) === m && a >= floor && (a > 0.4 * yy || a > yy)) {
-          E[k] = { date: y1, line: e.line, amount: a, tip: e.tip ? true : undefined, type: "adjustment", scope: "y", note: "Manual adjustment (year to date, moved from " + String(e.date) + ")", at: e.at || Date.now() }; moved++; } }); }
-      /* 3) merge all Jan 1 year adjustments for this source (including Apply's negative remainder) into one */
-      var yk = Object.keys(E).filter(function (k) { var e = E[k]; return e.type === "adjustment" && mine(e) && e.scope === "y" && String(e.date) === y1; });
-      if (yk.length) { var net = Math.round(yk.reduce(function (a, k) { return a + (Number(E[k].amount) || 0); }, 0) * 100) / 100, keep = yk[0];
-        yk.slice(1).forEach(function (k) { delete E[k]; });
-        if (net) { E[keep].amount = net; E[keep].note = "Manual adjustment (year to date, fixed from month)"; } else delete E[keep]; }
-      /* 4) still Month > Year (Apply's negative year remainder is bigger than what came before this month): lift the Jan 1 entry so Year = at least Month */
-      var c4 = calc(t), gap = Math.round((mtd(c4, r) - ytdTotal(c4, r)) * 100) / 100;
-      if (gap > 0.005) { var jk = Object.keys(E).filter(function (k) { var e = E[k]; return e.type === "adjustment" && mine(e) && e.scope === "y" && String(e.date) === y1; })[0];
-        if (jk) { E[jk].amount = Math.round(((Number(E[jk].amount) || 0) + gap) * 100) / 100; if (!E[jk].amount) delete E[jk]; else E[jk].note = "Manual adjustment (year to date, fixed from month)"; }
-        else E["adj-fix-" + newId(Date.now())] = { date: y1, line: r[0], amount: gap, tip: r[2], type: "adjustment", scope: "y", note: "Manual adjustment (year to date, fixed from month)", at: Date.now() };
-        moved++; }
-      if (moved || yk.length > 1) ch++; });
-    return ch; }
-  function mtd(c, r) { return r[2] ? c.g("m", "tip:" + r[0]) : c.g("m", r[0]) - (r[0] === "pcs" ? c.g("m", "tip:pcs") : 0); }
+  function akey(r) { return r[0] + (r[2] ? ":tip" : ""); }
+  function inRow(e, r) { return e.line === r[0] && !!e.tip === !!r[2]; }
+  function r2(n) { return Math.round(n * 100) / 100; }
+  /* virtual adjustment entries for calc(); t = today */
+  function derived(t) { var out = [], A = D.adj || {}, y = t.slice(0, 4), m = t.slice(0, 7), m1 = m + "-01", y1 = y + "-01-01";
+    ADJ.forEach(function (r) { var s = A[akey(r)]; if (!s) return;
+      var Y = s.y != null && String(s.yThru || "").slice(0, 4) === y ? Number(s.y) : null, M = s.m != null && s.mMonth === m ? Number(s.m) : null; if (Y == null && M == null) return;
+      var eY = 0, eM = 0; Object.keys(D.entries).forEach(function (k) { var e = D.entries[k], d = String(e.date || ""); if (e.type === "adjustment" || !inRow(e, r)) return; var a = Number(e.amount) || 0;
+        if (Y != null && d.slice(0, 4) === y && d <= s.yThru) eY += a; if (M != null && d.slice(0, 7) === m && d <= s.mThru) eM += a; });
+      var mAdj = M != null ? r2(M - eM) : 0, yAdj = Y != null ? r2(Y - eY - (M != null && m1 <= s.yThru ? mAdj : 0)) : 0;
+      if (yAdj) out.push({ date: y1, line: r[0], amount: yAdj, tip: r[2] || undefined, type: "adjustment", scope: "y", virtual: true });
+      if (mAdj) out.push({ date: m1, line: r[0], amount: mAdj, tip: r[2] || undefined, type: "adjustment", scope: "m", virtual: true });
+      s._calc = { eY: r2(eY), eM: r2(eM), yAdj: yAdj, mAdj: mAdj }; });
+    return out; }
   function ytdTotal(c, r) { return r[2] ? c.g("y", "tip:" + r[0]) : c.g("y", r[0]) - (r[0] === "pcs" ? c.g("y", "tip:pcs") : 0); }
+  function mtd(c, r) { return r[2] ? c.g("m", "tip:" + r[0]) : c.g("m", r[0]) - (r[0] === "pcs" ? c.g("m", "tip:pcs") : 0); }
+  /* one-time migration of the old added-on adjustment entries into set values that keep today's totals exactly */
+  function migrate(t) { t = t || today(); if (D.adjV === "75y") return 0; D.adj = D.adj || {}; var yday = addDays(t, -1), y = t.slice(0, 4), m = t.slice(0, 7), log = {}, ch = 0;
+    ADJ.forEach(function (r) { var ks = Object.keys(D.entries).filter(function (k) { var e = D.entries[k]; return e.type === "adjustment" && inRow(e, r); }); if (!ks.length) return;
+      var Y = 0, M = 0, hasM = false, oldY = 0, oldM = 0;
+      Object.keys(D.entries).forEach(function (k) { var e = D.entries[k], d = String(e.date || ""), a = Number(e.amount) || 0; if (!inRow(e, r) || d.slice(0, 4) !== y) return;
+        if (e.type === "adjustment") { Y += a; if (d.slice(0, 7) === m) { M += a; hasM = true; oldM += a; } else oldY += a; }
+        else if (d <= yday) { Y += a; if (d.slice(0, 7) === m) M += a; } });
+      D.adj[akey(r)] = { y: r2(Y), yThru: yday, m: hasM ? r2(M) : null, mThru: hasM ? yday : null, mMonth: hasM ? m : null, at: Date.now(), migrated: true };
+      log[akey(r)] = { name: r[1], ytd: r2(Y), mtd: hasM ? r2(M) : null, oldYearAdj: r2(oldY), oldMonthAdj: r2(oldM), count: ks.length };
+      ks.forEach(function (k) { delete D.entries[k]; }); ch++; });
+    D.adjV = "75y"; if (ch) D.adjMig = { at: t, rows: log }; return ch || 1; }
+  /* Apply: inputs [{y,m}] per ADJ row (blank = leave alone). Returns {ok, bad:[names]} ; nothing is applied if any row has month > year */
+  function applySets(inputs, t) { t = t || today(); D.adj = D.adj || {}; var yday = addDays(t, -1), m = t.slice(0, 7), bad = [], n = 0;
+    ADJ.forEach(function (r, i) { var o = inputs[i] || {}, s = D.adj[akey(r)] || {}; if (o.y == null && o.m == null) return;
+      var Y = o.y != null ? o.y : (String(s.yThru || "").slice(0, 4) === t.slice(0, 4) ? s.y : null), M = o.m != null ? o.m : (s.mMonth === m ? s.m : null);
+      if (Y != null && M != null && M > Y + 0.005) bad.push(r[1] + " (month " + $m(M, true) + " is more than year " + $m(Y, true) + ")"); });
+    if (bad.length) return { ok: false, bad: bad };
+    ADJ.forEach(function (r, i) { var o = inputs[i] || {}, k = akey(r), s = D.adj[k] = D.adj[k] || {};
+      if (o.y != null) { s.y = r2(o.y); s.yThru = yday; n++; } if (o.m != null) { s.m = r2(o.m); s.mThru = yday; s.mMonth = m; n++; } if (n) { s.at = Date.now(); delete s.migrated; } });
+    return { ok: true, n: n }; }
   function updYtd(c) { ADJ.forEach(function (r, i) { var el = document.getElementById("gl-adj-t" + i); if (el) el.value = $m(ytdTotal(c, r), true); }); }
-  function ADJHTML(c) { var open = paint.adjOpen ? " open" : "";
-    function inp(i, k) { return '<td><input id="gl-adj-' + k + i + '" type="text" inputmode="decimal" autocomplete="off" style="width:110px;background:#fff;color:#000"></td>'; }
-    var ids = Object.keys(D.entries).filter(function (k) { return D.entries[k].type === "adjustment"; }).sort(function (a, b) { return (D.entries[b].at || 0) - (D.entries[a].at || 0); });
-    return '<details class="card" id="gl-adj"' + open + '><summary><b class="t">Adjustments</b> <span class="fine">set your real to-date totals</span></summary>' +
-      '<p class="fine">Type your actual totals through yesterday (leave a box blank to leave it alone). Apply adds a dated "Manual adjustment" so Month and Year match. Month to date is dated the 1st, year remainder Jan 1. Today and this week stay the same unless you fill in Week to date. YTD total (green) is fixed: everything this year, rides, tips and adjustments, and updates on its own.</p>' +
-      '<table><tr class="fine"><th style="text-align:left">Source</th><th>YTD entered</th><th>YTD total</th><th>Month to date</th><th>Week to date (before today)</th></tr>' +
-      ADJ.map(function (r, i) { return "<tr><td>" + esc(r[1]) + "</td>" + inp(i, "y") + '<td><input id="gl-adj-t' + i + '" type="text" readonly tabindex="-1" aria-label="YTD total" value="' + esc($m(ytdTotal(c, r), true)) + '" style="width:120px;background:#163a16;color:#7ee08f;border-color:#3fae5a;font-weight:800"></td>' + inp(i, "m") + inp(i, "w") + "</tr>"; }).join("") + "</table>" +
-      '<button class="btn" id="gl-b-adj" type="button">Apply adjustments</button> <span class="fine" id="gl-adj-msg"></span>' +
-      (ids.length ? '<table style="margin-top:8px"><tr class="fine"><th style="text-align:left">Date</th><th style="text-align:left">Source</th><th class="r">Amount</th><th style="text-align:left">For</th><th></th></tr>' + ids.map(function (k) { var e = D.entries[k];
-        return '<tr class="b"><td>' + esc(e.date) + "</td><td>" + esc(name(e.line).replace(/ \(.*\)/, "") + (e.tip ? " tip" : "")) + '</td><td class="r">' + $m(e.amount, true) + '</td><td class="fine">' + ({ w: "week", m: "month", y: "year" }[e.scope] || "") + '</td><td class="r"><button class="btn ghost" data-adjdel="' + esc(k) + '">Undo</button></td></tr>'; }).join("") + "</table>" : "") + "</details>";
-  }
+  function fmtD(d) { return d ? Number(d.slice(5, 7)) + "/" + Number(d.slice(8, 10)) : ""; }
+  function ADJHTML(c) { var open = paint.adjOpen ? " open" : "", A = D.adj || {}, m = c.t.slice(0, 7), yr = c.t.slice(0, 4);
+    function inp(i, k, ph) { return '<td><input id="gl-adj-' + k + i + '" type="text" inputmode="decimal" autocomplete="off" placeholder="' + esc(ph || "") + '" style="width:110px;background:#fff;color:#000"></td>'; }
+    var warn = ADJ.filter(function (r) { return mtd(c, r) > ytdTotal(c, r) + 0.005; }).map(function (r) { return r[1]; });
+    var h = '<details class="card" id="gl-adj"' + open + '><summary><b class="t">Adjustments</b> <span class="fine">set your real to-date totals</span></summary>' +
+      '<p class="fine">Type your real totals <b>through yesterday</b>. Each number you Apply <b>replaces</b> the one before it (it never adds on top). Blank = leave it as it is. Month to date has to be the same as or less than YTD. Today\u2019s entries add on top. YTD total (green) is everything this year.</p>' +
+      (warn.length ? '<p class="err">Month is more than Year for: ' + esc(warn.join(", ")) + '. Check the list below and Undo the entry that does not belong.</p>' : "") +
+      '<table><tr class="fine"><th style="text-align:left">Source</th><th>YTD entered</th><th>YTD total</th><th>Month to date</th></tr>' +
+      ADJ.map(function (r, i) { var s = A[akey(r)] || {}; return "<tr><td>" + esc(r[1]) + "</td>" + inp(i, "y", s.y != null && String(s.yThru || "").slice(0, 4) === yr ? "set " + $m(s.y, true) : "") + '<td><input id="gl-adj-t' + i + '" type="text" readonly tabindex="-1" aria-label="YTD total" value="' + esc($m(ytdTotal(c, r), true)) + '" style="width:120px;background:#163a16;color:#7ee08f;border-color:#3fae5a;font-weight:800"></td>' + inp(i, "m", s.m != null && s.mMonth === m ? "set " + $m(s.m, true) : "") + "</tr>"; }).join("") + "</table>" +
+      '<button class="btn" id="gl-b-adj" type="button">Apply adjustments</button> <span class="fine" id="gl-adj-msg"></span>';
+    /* Adjustments list: every set value with its math, plus past entries, each with Undo */
+    var rows = []; ADJ.forEach(function (r) { var k = akey(r), s = A[k], x = s && s._calc; if (!s || !x) return;
+      if (s.y != null && String(s.yThru || "").slice(0, 4) === yr) rows.push('<tr class="b"><td>' + esc(r[1]) + '</td><td>Year to date through ' + fmtD(s.yThru) + '</td><td class="r">' + $m(s.y, true) + '</td><td class="fine">entries ' + $m(x.eY, true) + (x.mAdj && s.m != null ? " + month adj. " + $m(x.mAdj, true) : "") + " + adjustment " + $m(x.yAdj, true) + '</td><td class="r"><button class="btn ghost" data-setdel="' + esc(k) + '|y">Undo</button></td></tr>');
+      if (s.m != null && s.mMonth === m) rows.push('<tr class="b"><td>' + esc(r[1]) + '</td><td>Month to date through ' + fmtD(s.mThru) + '</td><td class="r">' + $m(s.m, true) + '</td><td class="fine">entries ' + $m(x.eM, true) + " + adjustment " + $m(x.mAdj, true) + '</td><td class="r"><button class="btn ghost" data-setdel="' + esc(k) + '|m">Undo</button></td></tr>'); });
+    var past = Object.keys(D.entries).filter(function (k) { var e = D.entries[k], d = String(e.date || ""); return e.type !== "adjustment" && d < c.t && d.slice(0, 4) === yr && (d.slice(0, 7) === m || e.source === "manual"); })
+      .sort(function (a, b) { var x = D.entries[a], y = D.entries[b]; return x.date < y.date ? 1 : x.date > y.date ? -1 : (y.at || 0) - (x.at || 0); }).slice(0, 150);
+    h += '<p style="margin-top:10px"><b class="t">Adjustments list</b></p>' + (rows.length ? '<table><tr class="fine"><th style="text-align:left">Source</th><th style="text-align:left">Set</th><th class="r">Amount</th><th style="text-align:left">How it adds up</th><th></th></tr>' + rows.join("") + "</table>" : '<p class="fine">Nothing set yet.</p>');
+    h += '<p style="margin-top:10px"><b class="t">Past entries</b> <span class="fine">this month, and any typed in by hand this year</span></p>' + (past.length ? '<table><tr class="fine"><th style="text-align:left">Date</th><th style="text-align:left">Source</th><th class="r">Amount</th><th style="text-align:left">Note</th><th></th></tr>' + past.map(function (k) { var e = D.entries[k];
+        return '<tr class="b"><td>' + esc(fmtD(e.date)) + "</td><td>" + esc(name(e.line).replace(/ \(.*\)/, "") + (e.tip ? " tip" : "")) + '</td><td class="r">' + $m(Number(e.amount) || 0, true) + '</td><td class="fine">' + esc(e.note || e.source || "") + '</td><td class="r"><button class="btn ghost" data-pastdel="' + esc(k) + '">Undo</button></td></tr>'; }).join("") + "</table>" : '<p class="fine">None.</p>');
+    if (D.adjMig && D.adjMig.rows) { var mr = D.adjMig.rows; h += '<p class="fine" style="margin-top:10px"><b>Moved from the old adjustments on ' + esc(fmtD(D.adjMig.at)) + ' (totals unchanged):</b><br>' + Object.keys(mr).map(function (k) { var x = mr[k];
+      return esc(x.name) + ": YTD set " + $m(x.ytd, true) + (x.mtd != null ? ", month to date set " + $m(x.mtd, true) : "") + " (old year adjustments " + $m(x.oldYearAdj, true) + ", old month adjustments " + $m(x.oldMonthAdj, true) + ", " + x.count + " entries)"; }).join("<br>") + "</p>"; }
+    return h + "</details>"; }
   function bindAdj() { var d = document.getElementById("gl-adj"); if (!d) return; d.ontoggle = function () { paint.adjOpen = d.open; };
     document.getElementById("gl-b-adj").onclick = function () { var bad = false, any = false;
-      var inputs = ADJ.map(function (r, i) { var o = {}; ["y", "m", "w"].forEach(function (k) { var el = document.getElementById("gl-adj-" + k + i), raw = el.value.trim(); if (!raw) return; var v = num(raw); if (v == null) bad = true; else { o[k] = v; any = true; } }); return o; });
-      var msg = document.getElementById("gl-adj-msg"); if (bad) { msg.textContent = "Check the numbers."; return; } if (!any) { msg.textContent = "Nothing entered."; return; }
-      if (!confirm("Set these to-date totals? Adjustment entries will be added (you can Undo them).")) return;
-      var ids = planAdjust(inputs); paint.adjOpen = true; paint(); save(); var m = document.getElementById("gl-adj-msg"); if (m) m.textContent = ids.length ? ids.length + " adjustment(s) added." : "Already matched; nothing to add."; };
-    Array.prototype.forEach.call(document.querySelectorAll("#gl-adj [data-adjdel]"), function (b) { b.onclick = function () { if (confirm("Undo this adjustment?")) { delete D.entries[b.getAttribute("data-adjdel")]; paint.adjOpen = true; paint(); save(); } }; });
+      var inputs = ADJ.map(function (r, i) { var o = {}; ["y", "m"].forEach(function (k) { var el = document.getElementById("gl-adj-" + k + i), raw = el.value.trim(); if (!raw) return; var v = num(raw); if (v == null || v < 0) bad = true; else { o[k] = v; any = true; } }); return o; });
+      var msg = document.getElementById("gl-adj-msg"); if (bad) { msg.textContent = "Check the numbers."; return; } if (!any) { msg.textContent = "Type a number first."; return; }
+      var res = applySets(inputs); if (!res.ok) { msg.innerHTML = '<span class="err">Not applied. Month to date has to be the same as or less than YTD: ' + esc(res.bad.join("; ")) + "</span>"; return; }
+      paint.adjOpen = true; paint(); save(); var mm = document.getElementById("gl-adj-msg"); if (mm) mm.textContent = "Set. Earlier numbers for those boxes were replaced."; };
+    Array.prototype.forEach.call(document.querySelectorAll("#gl-adj [data-setdel]"), function (b) { b.onclick = function () { var p = b.getAttribute("data-setdel").split("|"), s = (D.adj || {})[p[0]]; if (!s || !confirm("Undo this set total?")) return;
+      if (p[1] === "y") { s.y = null; s.yThru = null; } else { s.m = null; s.mThru = null; s.mMonth = null; } paint.adjOpen = true; paint(); save(); }; });
+    Array.prototype.forEach.call(document.querySelectorAll("#gl-adj [data-pastdel]"), function (b) { b.onclick = function () { if (confirm("Undo this past entry?")) { delete D.entries[b.getAttribute("data-pastdel")]; paint.adjOpen = true; paint(); save(); } }; });
   }
+
 
   /* ---------- UI ---------- */
   function esc(s) { return String(s == null ? "" : s).replace(/[&<>"]/g, function (c) { return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]; }); }
@@ -277,7 +278,7 @@
   function topHtml(c) {
     var g = c.g, h = "";
     h += '<div class="row" style="justify-content:space-between"><h1>Monthly Goal</h1><button class="btn ghost" id="gl-b-lock">Lock</button></div>';
-    h += '<div class="fine" id="gl-ver" style="text-align:right;opacity:.7">goal v75w</div>';
+    h += '<div class="fine" id="gl-ver" style="text-align:right;opacity:.7">goal v75y</div>';
     var roll = c.rolled != null && Math.abs(c.rolled) >= 0.01 ? '<div class="fine ' + (c.rolled > 0 ? "neg" : "pos") + '">Rolled over from yesterday: ' + (c.rolled > 0 ? "+$" + c.rolled.toFixed(2) + " short" : "ahead by $" + Math.abs(c.rolled).toFixed(2)) + "</div>" : "";
     h += '<div class="card hero"><b class="t">TODAY \u00b7 ' + esc(c.t) + '</b><div class="grid">' + big("Weekly goal", $m(c.weekGoal)) + big("Days left in week", c.dLeft == null ? "\u2014" : String(c.dLeft), '<div class="fine">counts down daily</div>') +
       big("Today's goal", $m(c.daily, true), roll) + big("Today remaining", $m(left(c.todayRem), true)) + big("Week remaining", $m(left(c.weekRem))) + big("Month remaining", $m(left(c.monthRem))) +
@@ -395,7 +396,7 @@
     idb().then(function () { lockNow(); }).catch(function () { app.innerHTML = '<p class="err">This browser cannot store the ledger (private browsing?).</p>'; });
   }
   function glClose() { kpClose(); kpEl = null; dek = null; D = null; app = null; var ov = document.getElementById("gl-screen"); if (ov) ov.remove(); }
-  if (typeof module !== "undefined" && module.exports) module.exports = { looksYearly: looksYearly, repair: repair, _set: function (d) { D = d; }, calc: calc, planAdjust: planAdjust, ytdTotal: ytdTotal, ADJ: ADJ, weeksLeft: weeksLeft, numPad: numPad, kpPress: kpPress, glOpen: glOpen };
+  if (typeof module !== "undefined" && module.exports) module.exports = { migrate: migrate, applySets: applySets, derived: derived, mtd: mtd, _set: function (d) { D = d; }, calc: calc, ytdTotal: ytdTotal, ADJ: ADJ, weeksLeft: weeksLeft, numPad: numPad, kpPress: kpPress, glOpen: glOpen };
   window.__pcsGoalOpen = glOpen; window.__pcsGoalClose = glClose;
   document.addEventListener("click", function (e) { var t = e.target.closest ? e.target.closest("[data-god-menu=goal]") : null; if (t) { e.stopPropagation(); glOpen(); } }, true);
 })();
