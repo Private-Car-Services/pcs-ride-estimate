@@ -4130,6 +4130,17 @@
     list.forEach(function (iv) { t += Math.max(0, Math.min(Number(iv[1]), to) - Math.max(Number(iv[0]), from)); });
     return t;
   }
+  /* v75h1: server-side God reset of Drive + Shift (rides/DRVRHOSL/{id}/hosReset = {at, by, reason}); polled with forceLogout */
+  function hosResetKey() { return hosKey() + "-reset"; }
+  function hosResetAt() { try { return Number(localStorage.getItem(hosResetKey())) || 0; } catch (e) { return 0; } }
+  function hosResetCheck() {
+    if (ROLE !== "driver" || !signedIn() || !syncOn()) return Promise.resolve();
+    return authFetch(databaseURL() + "/rides/DRVRHOSL/" + encodeURIComponent(driverPresenceId()) + "/hosReset.json").then(function (r) { return r.ok ? r.json() : null; }).then(function (rs) {
+      var at = Number(rs && rs.at) || 0;
+      if (at > hosResetAt()) { try { localStorage.setItem(hosResetKey(), String(at)); } catch (e) {} hosWarned = {}; try { render(); } catch (e) {} }
+    }).catch(function () {});
+  }
+  if (typeof window !== "undefined" && ROLE === "driver") { setTimeout(function () { hosResetCheck(); }, 3000); setInterval(function () { hosResetCheck(); }, 20000); }
   function hosStatus(now) {
     now = now || Date.now();
     var c = hosCfg, H = 3600000;
@@ -4155,7 +4166,11 @@
     if (offNow < c.restartHours * H) offl.forEach(function (o) { if (o[1] - o[0] >= c.restartHours * H && o[1] <= now && o[1] > cycleFrom) cycleFrom = o[1]; });
     if (cycleFrom > dutyStart && dutyStart) { var nx2 = 0; segs.forEach(function (g) { if (!nx2 && g[1] > cycleFrom) nx2 = Math.max(g[0], cycleFrom); }); dutyStart = nx2 || dutyStart; }
     var brks = hosBreaks(now); /* v72x: Break status = off duty for Shift + Cycle */
-    var shiftMs = dutyStart ? Math.max(0, now - dutyStart - hosOverlap(brks, dutyStart, now) - hosOverlap(offl, dutyStart, now) + hosOverlap2(brks, offl, dutyStart, now)) : 0; /* v73: Offline pauses Shift */
+    /* v75h1 (Matthew 10/14): God reset (rides/DRVRHOSL/{id}/hosReset.at): Drive + Shift count only from the reset; Cycle untouched */
+    var hosRs = hosResetAt(); if (hosRs && hosRs <= now && dutyStart && dutyStart < hosRs) dutyStart = hosRs;
+    /* v75h1 (Matthew 10/14): logged-out time (gaps between duty pieces) is OFF duty like Break/Offline: it pauses Shift.
+       Only 10 h off in a row resets; a shorter logout no longer burns the 14 h window. Same basis as Cycle. */
+    var shiftMs = dutyStart ? Math.max(0, hosOverlap(segs, dutyStart, now) - hosOverlap2(segs, hosMerge(brks.concat(offl)), dutyStart, now)) : 0;
     var driveMs = dutyStart ? hosOverlap(drv, dutyStart, now) : 0;
     /* BREAK: driving since the last 30+ min without driving (a 10 h reset counts too) */
     var lastDrvEnd = drv.length ? Number(drv[drv.length - 1][1]) : 0;
