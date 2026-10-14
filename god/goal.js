@@ -1,4 +1,4 @@
-/* PCS Monthly Goal (Matthew) - v76a: matches Matthew's morning math. Weeks left = whole Monday weeks left in the month (this week counts 1); weekly = month remaining at the start of this week / weeks left, optional round up (weekRound, e.g. 100); days left = Mon-Sat left this week including today (typed days only count on the day typed); today = week remaining before today / days left, rounded UP to the cent; month pace line; migrated month sets built from old year adjustments are dropped (doubling fix); week income comes from real entries only. v75z: weeks left prorated by working days (Mon-Sat) in the month; 'How today's goal was figured' line with every number; warning when month income before this week already passes the monthly goal; Adjustments show which past entries sit inside a YTD set. v75y: Adjustments are SET values (YTD and Month to date replace, never add); one-time migration of old adjustment entries keeping totals; Adjustments list + Past entries with Undo; month > year blocked; old heuristic repair removed. v75w: foolproof month repair - per source, if Month > Year, or Month > 40% of Year (March on), every adjustment dated this month (any scope) moves to Jan 1 and merges; a single non-adjustment entry this month bigger than 40% of Year moves too; visible 'goal v75w' label. v75v: robust repair - a month-to-date adjustment that is really a year figure (>40% of that source's YTD from March on, or >2x a plausible month) is re-dated to Jan 1 and netted with Apply's negative year remainder; Apply treats MTD >= 90% of YTD as YTD only. v75u: big on-screen 9-key pad (1-9 . 0 del, Clear, Done) on every money/number box; 'Use iPad keyboard' fallback. v75t: every money/number box opens the number pad (numPad helper after each render). v75s: tappable goal overrides, adjustment re-dating/repair, goals never negative. v75r: goal cascade + YTD totals. v75g: runs INSIDE God mode as its own Home panel (God Home > Monthly Goal).
+/* PCS Monthly Goal (Matthew) - v76b: today's goal is SNAPSHOT once a day {date, goal, weekly, weekBeforeToday, daysLeft} on first open/unlock and stays fixed all day; big Recalculate today button; 'Set today's goal' box counts for today only; Today remaining shows 'ahead by'; 'Rolled over from yesterday' removed; Week check card lists every entry Mon..yesterday so extra past entries are easy to spot. v76a: matches Matthew's morning math. Weeks left = whole Monday weeks left in the month (this week counts 1); weekly = month remaining at the start of this week / weeks left, optional round up (weekRound, e.g. 100); days left = Mon-Sat left this week including today (typed days only count on the day typed); today = week remaining before today / days left, rounded UP to the cent; month pace line; migrated month sets built from old year adjustments are dropped (doubling fix); week income comes from real entries only. v75z: weeks left prorated by working days (Mon-Sat) in the month; 'How today's goal was figured' line with every number; warning when month income before this week already passes the monthly goal; Adjustments show which past entries sit inside a YTD set. v75y: Adjustments are SET values (YTD and Month to date replace, never add); one-time migration of old adjustment entries keeping totals; Adjustments list + Past entries with Undo; month > year blocked; old heuristic repair removed. v75w: foolproof month repair - per source, if Month > Year, or Month > 40% of Year (March on), every adjustment dated this month (any scope) moves to Jan 1 and merges; a single non-adjustment entry this month bigger than 40% of Year moves too; visible 'goal v75w' label. v75v: robust repair - a month-to-date adjustment that is really a year figure (>40% of that source's YTD from March on, or >2x a plausible month) is re-dated to Jan 1 and netted with Apply's negative year remainder; Apply treats MTD >= 90% of YTD as YTD only. v75u: big on-screen 9-key pad (1-9 . 0 del, Clear, Done) on every money/number box; 'Use iPad keyboard' fallback. v75t: every money/number box opens the number pad (numPad helper after each render). v75s: tappable goal overrides, adjustment re-dating/repair, goals never negative. v75r: goal cascade + YTD totals. v75g: runs INSIDE God mode as its own Home panel (God Home > Monthly Goal).
    Own password + PIN, separate from God sign-in. Data stays on this device only (never Firebase, no network calls).
    Ported from the former standalone /ledger/ app; same IndexedDB vault.
    Local-first: all data lives on this device in IndexedDB, AES-GCM encrypted with a key derived from Matthew's own
@@ -131,7 +131,10 @@
   }
   function val(id) { return document.getElementById(id).value; }
   function lockScreen(first, msg) { lockNow(msg); } /* kept for callers */
-  function start() { lastAct = Date.now(); var fixed = 0; try { fixed = migrate(); } catch (e) {} paint(); if (fixed) save(); }
+  /* v76b: once-a-day snapshot of today's goal */
+  function snapToday(force) { var s = D.settings = D.settings || {}, t = today(); if (!force && s.daySnap && s.daySnap.date === t) return false; var c = calc(t);
+    if (c.dailyAuto == null) return false; s.daySnap = { date: t, goal: c.dailyAuto, weekly: c.weekGoal, weekBeforeToday: r2(c.wBefore), daysLeft: c.dLeft, at: Date.now() }; return true; }
+  function start() { lastAct = Date.now(); var fixed = 0; try { fixed = migrate(); } catch (e) {} if (snapToday()) fixed = 1; paint(); if (fixed) save(); }
   ["click", "keydown", "touchstart", "input"].forEach(function (t) { document.addEventListener(t, function () { lastAct = Date.now(); }, true); });
   setInterval(function () { if (app && dek && Date.now() - lastAct > LOCK_MS) lockNow("Locked after 5 quiet minutes."); }, 15000);
   document.addEventListener("visibilitychange", function () { if (document.hidden) lastAct = Math.min(lastAct, Date.now()); else if (app && dek && Date.now() - lastAct > LOCK_MS) lockNow("Locked."); });
@@ -168,11 +171,10 @@
     var passed = dSet && dSet <= t ? Math.round((Date.parse(t + "T12:00:00Z") - Date.parse(dSet + "T12:00:00Z")) / 86400000) : 0;
     var autoD = Math.max(1, 6 - dow); /* v76a: Mon-Sat left this week, today included (Sunday off: counts 1 if you work it) */
     var dLeft = dTyped != null && dSet === t ? Math.max(1, dTyped) : autoD; void passed;
-    var before = inc("w") - inc("d"), dailyAuto = weekGoal == null || dLeft == null ? null : ceilC(Math.max(0, (weekGoal - before) / dLeft)), dayOv = goal(s.dayOv), daily = dayOv != null ? dayOv : dailyAuto;
-    var rolled = null; if (weekGoal != null && dLeft != null && yday >= wk0) { var yi = inc("y1"); rolled = Math.max(0, (weekGoal - (before - yi)) / (dLeft + 1)) - yi; }
+    var before = inc("w") - inc("d"), dailyAuto = weekGoal == null || dLeft == null ? null : ceilC(Math.max(0, (weekGoal - before) / dLeft)), dayOv = s.dayOvDate === t ? goal(s.dayOv) : null, snap = s.daySnap && s.daySnap.date === t ? s.daySnap : null, daily = dayOv != null ? dayOv : snap ? snap.goal : dailyAuto; /* v76b: fixed for the day */
     var uberG = goal(s.uber), uberDaily = uberG == null || dLeft == null ? null : (uberG - (g("w", "uber") - g("d", "uber"))) / dLeft;
     var mBeforeToday = inc("m") - inc("d"), mdLeft = monthDaysLeft(t), monthRemBefore = monthGoal == null ? null : monthGoal - mBeforeToday, monthPace = monthRemBefore == null ? null : r2(Math.max(0, monthRemBefore) / mdLeft);
-    return { weekRaw: weekRaw, wRound: wRound, autoD: autoD, mBeforeToday: mBeforeToday, mdLeft: mdLeft, monthRemBefore: monthRemBefore, monthPace: monthPace, weekRemBefore: weekGoal == null ? null : weekGoal - before, monthAuto: monthAuto, monthOv: monthOv, weekAuto: weekAuto, weekOv: weekOv, dailyAuto: dailyAuto, dayOv: dayOv, mLeft: mLeft, wLeft: wLeft, yBefore: inc("yb"), mBefore: inc("mb"), wBefore: before, t: t, wk0: wk0, g: g, inc: inc, weekGoal: weekGoal, dLeft: dLeft, daily: daily, rolled: rolled, dayGross: inc("d"), expD: g("d", "exp"),
+    return { weekRaw: weekRaw, wRound: wRound, autoD: autoD, mBeforeToday: mBeforeToday, mdLeft: mdLeft, monthRemBefore: monthRemBefore, monthPace: monthPace, weekRemBefore: weekGoal == null ? null : weekGoal - before, monthAuto: monthAuto, monthOv: monthOv, weekAuto: weekAuto, weekOv: weekOv, dailyAuto: dailyAuto, dayOv: dayOv, mLeft: mLeft, wLeft: wLeft, yBefore: inc("yb"), mBefore: inc("mb"), wBefore: before, t: t, wk0: wk0, g: g, inc: inc, weekGoal: weekGoal, dLeft: dLeft, daily: daily, snap: snap, dayGross: inc("d"), expD: g("d", "exp"),
       todayRem: sub(daily, inc("d")), weekTotal: inc("w"), weekRem: sub(weekGoal, inc("w")), expW: g("w", "exp"),
       monthGoal: monthGoal, monthTotal: inc("m"), expM: g("m", "exp"), monthRem: sub(monthGoal, inc("m")),
       yearGoal: yearGoal, yearTotal: inc("y"), expY: g("y", "exp"), yearRem: sub(yearGoal, inc("y")), uberG: uberG, uberDaily: uberDaily, uberRem: sub(uberG, g("w", "uber")) };
@@ -223,6 +225,10 @@
     return { ok: true, n: n }; }
   function updYtd(c) { ADJ.forEach(function (r, i) { var el = document.getElementById("gl-adj-t" + i); if (el) el.value = $m(ytdTotal(c, r), true); }); }
   function fmtD(d) { return d ? Number(d.slice(5, 7)) + "/" + Number(d.slice(8, 10)) : ""; }
+  /* v76b: every entry Mon..yesterday, so an extra past entry is easy to find */
+  function WEEKCHK(c) { var ks = Object.keys(D.entries).filter(function (k) { var e = D.entries[k], d = String(e.date || ""); return e.type !== "adjustment" && e.line !== "exp" && d >= c.wk0 && d < c.t; }).sort(function (a, b) { var x = D.entries[a], y = D.entries[b]; return x.date < y.date ? -1 : x.date > y.date ? 1 : (x.at || 0) - (y.at || 0); });
+    var tot = 0, rows = ks.map(function (k) { var e = D.entries[k]; tot += Number(e.amount) || 0; return "<tr><td>" + esc(fmtD(e.date)) + "</td><td>" + esc(name(e.line)) + (e.tip ? " tip" : "") + '</td><td class="r">' + $m(Number(e.amount), true) + "</td><td>" + esc(e.source || "") + (e.at ? " \u00b7 added " + esc(new Date(e.at).toLocaleString("en-US", { timeZone: "America/Chicago", month: "numeric", day: "numeric", hour: "numeric", minute: "2-digit" })) : "") + "</td><td>" + esc(e.note || "") + '</td><td><button type="button" class="btn ghost" data-pastdel="' + esc(k) + '">Undo</button></td></tr>'; }).join("");
+    return '<details class="card" id="gl-wk"><summary><b class="t">Week check</b> <span class="fine">every entry this week before today: ' + $m(tot, true) + "</span></summary>" + (rows ? '<table><tr class="fine"><th style="text-align:left">Date</th><th style="text-align:left">Source</th><th class="r">Amount</th><th style="text-align:left">Added</th><th style="text-align:left">Note</th><th></th></tr>' + rows + "</table>" : '<p class="fine">Nothing yet this week.</p>') + "</details>"; }
   function ADJHTML(c) { var open = paint.adjOpen ? " open" : "", A = D.adj || {}, m = c.t.slice(0, 7), yr = c.t.slice(0, 4);
     function inp(i, k, ph) { return '<td><input id="gl-adj-' + k + i + '" type="text" inputmode="decimal" autocomplete="off" placeholder="' + esc(ph || "") + '" style="width:110px;background:#fff;color:#000"></td>'; }
     var warn = ADJ.filter(function (r) { return mtd(c, r) > ytdTotal(c, r) + 0.005; }).map(function (r) { return r[1]; });
@@ -252,7 +258,7 @@
       paint.adjOpen = true; paint(); save(); var mm = document.getElementById("gl-adj-msg"); if (mm) mm.textContent = "Set. Earlier numbers for those boxes were replaced."; };
     Array.prototype.forEach.call(document.querySelectorAll("#gl-adj [data-setdel]"), function (b) { b.onclick = function () { var p = b.getAttribute("data-setdel").split("|"), s = (D.adj || {})[p[0]]; if (!s || !confirm("Undo this set total?")) return;
       if (p[1] === "y") { s.y = null; s.yThru = null; } else { s.m = null; s.mThru = null; s.mMonth = null; } paint.adjOpen = true; paint(); save(); }; });
-    Array.prototype.forEach.call(document.querySelectorAll("#gl-adj [data-pastdel]"), function (b) { b.onclick = function () { if (confirm("Undo this past entry?")) { delete D.entries[b.getAttribute("data-pastdel")]; paint.adjOpen = true; paint(); save(); } }; });
+    Array.prototype.forEach.call(document.querySelectorAll("#gl-adj [data-pastdel], #gl-wk [data-pastdel]"), function (b) { b.onclick = function () { if (confirm("Undo this past entry?")) { delete D.entries[b.getAttribute("data-pastdel")]; paint.adjOpen = true; paint(); save(); } }; });
   }
 
 
@@ -264,20 +270,23 @@
   function big(l, v, extra) { return '<div class="big"><div class="fine">' + l + '</div><div class="v">' + v + "</div>" + (extra || "") + "</div>"; }
   function row(l, v, gap) { return "<tr><td>" + l + '</td><td class="r"><b>' + v + "</b></td><td class=\"r " + (gap == null ? "" : gap >= 0 ? "pos" : "neg") + '">' + (gap == null ? "" : $m(gap)) + "</td></tr>"; }
   /* v75z: every number behind today's goal, in plain words */
-  function howToday(c) { var mg = c.monthGoal, h = '<p class="fine" id="gl-how"><b>How today\u2019s goal was figured:</b> ';
+  function howToday(c) { if (c.snap && c.dayOv == null) { var sn = c.snap; return '<p class="fine" id="gl-how"><b>How today\u2019s goal was figured</b> (fixed this morning): weekly ' + $m(sn.weekly, true) + " \u2212 week income before today " + $m(sn.weekBeforeToday, true) + " = " + $m(Math.max(0, sn.weekly - sn.weekBeforeToday), true) + " \u00f7 " + sn.daysLeft + " days left = today " + $m(sn.goal, true) + "." + (Math.abs(c.wBefore - sn.weekBeforeToday) >= 0.01 ? " Week income before today has changed to " + $m(c.wBefore, true) + " since then (an earlier day was edited); tap Recalculate today to use it." : "") + "</p>" + howAll(c); } return howAll(c); }
+  function howAll(c) { var mg = c.monthGoal, h = '<p class="fine" id="gl-how"><b>How today\u2019s goal was figured:</b> ';
     h += "Monthly goal " + $m(mg) + (c.monthOv != null ? " (you typed it)" : " (auto)") + " \u2212 October income before this week " + $m(c.mBefore) + " = " + $m(mg == null ? null : Math.max(0, mg - c.mBefore)) + " \u00f7 " + c.wLeft + " weeks left = " + $m(c.weekRaw, true) + (c.wRound ? ", rounded up to " + $m(c.weekAuto) : "") + " = weekly (auto)";
     if (c.weekOv != null) h += "; you typed weekly " + $m(c.weekOv) + ", so that is used";
     h += ". Weekly " + $m(c.weekGoal) + " \u2212 week income before today " + $m(c.wBefore, true) + " = " + $m(c.weekGoal == null ? null : Math.max(0, c.weekGoal - c.wBefore), true) + " \u00f7 " + (c.dLeft == null ? "?" : c.dLeft) + " days left = today " + $m(c.dailyAuto, true) + (c.dayOv != null ? "; you typed today " + $m(c.dayOv, true) + ", so that is used" : "") + ".</p>";
     if (mg != null && c.mBefore > mg) h += '<p class="err">October income before this week (' + $m(c.mBefore) + ') is already more than the monthly goal, so the weekly auto shows $0. If that number looks too big, open Adjustments and check the list for an entry counted twice.</p>';
     return h; }
   function paint() {
+    if (snapToday()) save(); /* first open after midnight, or once goals are set */
     var c = calc(), s = D.settings, h = "";
     h += '<div id="gl-top">' + topHtml(c) + '</div>';
     function f(id, l, v) { return '<label><span class="fine">' + l + '</span><input id="' + id + '" type="text" ' + (id === "gl-s-days" ? 'inputmode="numeric" pattern="[0-9]*"' : 'inputmode="decimal"') + ' autocomplete="off" value="' + esc(v == null ? "" : v) + '" style="width:130px"></label>'; }
     function o(id, l, v, tag) { return '<div class="gl-ov" style="display:inline-block;margin:4px 8px 4px 0;position:relative;z-index:2"><span class="fine" style="display:block">' + l + ' <b id="' + tag + '" style="color:var(--lite)"></b></span><input id="' + id + '" class="gl-ovin" type="text" inputmode="decimal" enterkeyhint="done" autocomplete="off" autocorrect="off" spellcheck="false" placeholder="auto" aria-label="' + esc(l) + ' (blank = auto)" value="' + esc(v == null ? "" : v) + '" style="width:130px"></div>'; }
-    h += '<form class="card" id="gl-f-set"><b class="t">Goals</b><br>' + f("gl-s-year", "Year goal $", s.year) + o("gl-s-month", "Monthly goal $", s.monthOv, "gl-t-month") + o("gl-s-week", "Weekly goal $", s.weekOv, "gl-t-week") + o("gl-s-day", "Today's goal $", s.dayOv, "gl-t-day") + f("gl-s-days", "Days left in week", c.dLeft) + f("gl-s-wround", "Round weekly up to $ (e.g. 100)", s.weekRound) + f("gl-s-uber", "Uber week goal $", s.uber) +
+    h += '<form class="card" id="gl-f-set"><b class="t">Goals</b><br>' + f("gl-s-year", "Year goal $", s.year) + o("gl-s-month", "Monthly goal $", s.monthOv, "gl-t-month") + o("gl-s-week", "Weekly goal $", s.weekOv, "gl-t-week") + o("gl-s-day", "Set today\u2019s goal $ (today only)", s.dayOvDate === c.t ? s.dayOv : null, "gl-t-day") + f("gl-s-days", "Days left in week", c.dLeft) + f("gl-s-wround", "Round weekly up to $ (e.g. 100)", s.weekRound) + f("gl-s-uber", "Uber week goal $", s.uber) +
       '<p class="fine">Leave Monthly / Weekly / Today blank for <b>auto</b>; type a number to override, clear it to go back to auto.</p><p class="fine" id="gl-formula"></p>' +
       '<br><button class="btn" type="submit">Save goals</button> <span class="fine" id="gl-set-msg">Saves automatically as you type.</span></form>';
+    h += WEEKCHK(c);
     h += ADJHTML(c);
     h += REST(c);
     app.innerHTML = h; bind(); bindAdj(); updGoalTags(c); numPad(app);
@@ -291,10 +300,10 @@
   function topHtml(c) {
     var g = c.g, h = "";
     h += '<div class="row" style="justify-content:space-between"><h1>Monthly Goal</h1><button class="btn ghost" id="gl-b-lock">Lock</button></div>';
-    h += '<div class="fine" id="gl-ver" style="text-align:right;opacity:.7">goal v76a</div>';
-    var roll = c.rolled != null && Math.abs(c.rolled) >= 0.01 ? '<div class="fine ' + (c.rolled > 0 ? "neg" : "pos") + '">Rolled over from yesterday: ' + (c.rolled > 0 ? "+$" + c.rolled.toFixed(2) + " short" : "ahead by $" + Math.abs(c.rolled).toFixed(2)) + "</div>" : "";
+    h += '<div class="fine" id="gl-ver" style="text-align:right;opacity:.7">goal v76b</div>';
+    var roll = '<div class="fine">' + (c.dayOv != null ? "you set it for today" : c.snap ? "fixed for today" : "") + '</div>', tr = c.todayRem;
     h += '<div class="card hero"><b class="t">TODAY \u00b7 ' + esc(c.t) + '</b><div class="grid">' + big("Weekly goal", $m(c.weekGoal)) + big("Days left in week", c.dLeft == null ? "\u2014" : String(c.dLeft), '<div class="fine">counts down daily</div>') +
-      big("Today's goal", $m(c.daily, true), roll) + big("Today remaining", $m(left(c.todayRem), true)) + big("Week remaining", $m(left(c.weekRem), true), '<div class="fine">before today ' + $m(c.weekRemBefore, true) + '</div>') + big("Month remaining", $m(left(c.monthRem), true), '<div class="fine">before today ' + $m(c.monthRemBefore, true) + '</div>') + big("Month daily pace", $m(c.monthPace, true), '<div class="fine">' + c.mdLeft + ' days, 7 a week</div>') +
+      big("Today's goal", $m(c.daily, true), roll + '<button type="button" class="btn" id="gl-b-recalc" style="font-size:20px;padding:12px 22px;margin-top:6px">Recalculate today</button>') + big("Today remaining", tr != null && tr < 0 ? "ahead by " + $m(-tr, true) : $m(tr, true)) + big("Week remaining", $m(left(c.weekRem), true), '<div class="fine">before today ' + $m(c.weekRemBefore, true) + '</div>') + big("Month remaining", $m(left(c.monthRem), true), '<div class="fine">before today ' + $m(c.monthRemBefore, true) + '</div>') + big("Month daily pace", $m(c.monthPace, true), '<div class="fine">' + c.mdLeft + ' days, 7 a week</div>') +
       '</div>' + howToday(c) + '</div>';
     var ids = Object.keys(D.entries).filter(function (k) { return D.entries[k].date === c.t && D.entries[k].line !== "exp"; }).sort(function (a, b) { return (D.entries[a].at || 0) - (D.entries[b].at || 0); });
     var run = 0, tape = ids.map(function (k) { var e = D.entries[k]; run += Number(e.amount) || 0; var rem = c.daily == null ? null : c.daily - run;
@@ -327,7 +336,8 @@
      so the typed value counts for today and then counts down one per day. */
   var setTimer = null;
   function readGoals() { var s = D.settings;
-    [["gl-s-week", "weekOv"], ["gl-s-day", "dayOv"], ["gl-s-uber", "uber"], ["gl-s-month", "monthOv"], ["gl-s-year", "year"], ["gl-s-wround", "weekRound"]].forEach(function (p) { var el = document.getElementById(p[0]); if (el) s[p[1]] = num(el.value); });
+    [["gl-s-week", "weekOv"], ["gl-s-uber", "uber"], ["gl-s-month", "monthOv"], ["gl-s-year", "year"], ["gl-s-wround", "weekRound"]].forEach(function (p) { var el = document.getElementById(p[0]); if (el) s[p[1]] = num(el.value); });
+    var dy = document.getElementById("gl-s-day"); if (dy) { s.dayOv = num(dy.value); s.dayOvDate = s.dayOv == null ? null : today(); }
     var de = document.getElementById("gl-s-days"); if (de) { var d = num(de.value); var cc = calc(); if (d == null || d === cc.autoD) { s.daysLeft = null; s.daysLeftSet = null; } else if (d !== cc.dLeft) { s.daysLeft = d; s.daysLeftSet = today(); } } }
   function goalsSaved(m) { var x = document.getElementById("gl-set-msg"); if (x) x.textContent = m; }
   function bind() {
@@ -341,6 +351,7 @@
     bindRest();
   }
   function bindTop() {
+    var rc = document.getElementById("gl-b-recalc"); if (rc) rc.onclick = function () { if (!confirm("Recalculate today\u2019s goal from the numbers right now?")) return; snapToday(true); paint(); save(); };
     document.getElementById("gl-b-lock").onclick = function () { lockNow("Locked."); };
     document.getElementById("gl-f-q").onsubmit = function (e) { e.preventDefault(); var a = num(document.getElementById("gl-q-amt").value), l = document.getElementById("gl-q-line").value;
       var tp = num(document.getElementById("gl-q-tip").value);
