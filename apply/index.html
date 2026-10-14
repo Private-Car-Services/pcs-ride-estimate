@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#20371d">
+  <meta name="robots" content="noindex, nofollow">
+  <title>Drive with Private Car Services — Driver Application</title>
+  <link rel="icon" href="../icon-rider.png">
+  <link rel="stylesheet" href="apply.css?v=1">
+</head>
+<body>
+  <div class="wrap">
+    <header class="top">
+      <h1 class="wm-h"><svg class="pcs-wm" viewBox="0 0 390 96" role="img" aria-label="Private Car Services driver application" xmlns="http://www.w3.org/2000/svg"><defs><pattern id="wmg-ap" width="16" height="16" patternUnits="userSpaceOnUse"><path d="M16 0H0V16" fill="none" stroke="#2c4a2a" stroke-width=".6"/></pattern></defs><rect width="390" height="96" fill="#20371d"/><rect width="390" height="96" fill="url(#wmg-ap)"/><text x="195" y="44" text-anchor="middle" font-family="Poppins,Montserrat,Helvetica,Arial,sans-serif" font-style="italic" font-size="21" letter-spacing="1.5" font-weight="300" fill="#cdeccd">PRIVATE CAR SERVICES</text><path d="M28 54H350" stroke="#cdeccd" stroke-width="3"/><path d="M348 48L362 54L348 60Z" fill="#cdeccd"/><text x="195" y="76" text-anchor="middle" font-family="Poppins,Helvetica,Arial,sans-serif" font-style="italic" font-size="14" letter-spacing="1" fill="#a9c9a9">driver application</text></svg></h1>
+      <div class="progress" aria-hidden="true"><div id="bar"></div></div>
+      <p id="stepname" class="stepname"></p>
+    </header>
+    <main id="app" aria-live="polite"></main>
+    <footer class="foot">
+      <a href="../policies/" target="_blank" rel="noopener">Terms and Policies</a> · <a href="https://www.PCSrides.com">www.PCSrides.com</a>
+      <div class="ver">apply v2</div>
+    </footer>
+  </div>
+  <div id="modal" class="modal" hidden></div>
+  <div id="cam" class="cam" hidden>
+    <div class="camtop"><b id="camtitle"></b><p id="camtip"></p></div>
+    <video id="camvideo" playsinline autoplay muted></video>
+    <div class="camerr" id="camerr" hidden></div>
+    <div class="cambar"><button type="button" id="camcancel" class="btn ghost">Cancel</button><button type="button" id="camsnap" class="snap" aria-label="Take photo"></button><button type="button" id="camflip" class="btn ghost">Flip</button></div>
+  </div>
+  <script>window.PCS_APPLY_API = window.PCS_APPLY_API || "https://pcs-pay.pcsrides.workers.dev";</script>
+  <script src="apply.js?v=2"></script>
+</body>
+</html>
