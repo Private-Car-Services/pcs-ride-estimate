@@ -5533,7 +5533,7 @@
   var vm = { list: {}, loaded: false, err: "", screen: "", editId: "" };
   function vmUrl(p) { return baseUrl() + "/rides/" + VM_HUB + (p ? "/" + p : "") + ".json"; }
   function vmLoad() {
-    return fetch(vmUrl(""), { cache: "no-store" }).then(function (r) { return r.ok ? r.json() : Promise.reject(new Error("HTTP " + r.status)); })
+    return Promise.race([fetch(vmUrl(""), { cache: "no-store" }), new Promise(function (_, rej) { setTimeout(function () { rej(new Error("timed out after 15 s. Check the connection and tap Home, then reopen.")); }, 15000); })]).then(function (r) { return r.ok ? r.json() : Promise.reject(new Error("HTTP " + r.status)); })
       .then(function (d) { vm.list = d || {}; vm.loaded = true; vm.err = ""; vmPaint(); })
       .catch(function (e) { vm.err = String(e && e.message || e); vmPaint(); });
   }
@@ -5692,7 +5692,13 @@
       '<button type="button" style="' + b + '" data-god-menu="goal">\uD83D\uDCB0 Monthly Goal</button>' + /* v75g: goal.js, own password/PIN, local only */
       '</section>';
   }
-  document.addEventListener("click", function (e) { var t = e.target.closest ? e.target.closest("[data-god-menu]") : null; if (t) vmOpen(t.getAttribute("data-god-menu")); });
+  document.addEventListener("click", function (e) { var t = e.target.closest ? e.target.closest("[data-god-menu]") : null; if (!t) return;
+    var which = t.getAttribute("data-god-menu");
+    if (which === "goal") { /* v75i: Monthly Goal is goal.js's own panel, never the maintenance overlay */
+      if (document.getElementById("gl-screen")) return;
+      if (typeof window.__pcsGoalOpen === "function") window.__pcsGoalOpen(); else alert("Monthly Goal did not load. Close and reopen God mode.");
+      return; }
+    if (which === "maint") vmOpen("maint"); });
   window.__pcsVmCalc = vmCalc; /* test hook */
   window.__pcsVmOpen = vmOpen;
 
