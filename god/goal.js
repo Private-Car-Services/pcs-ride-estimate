@@ -1,4 +1,4 @@
-/* PCS Monthly Goal (Matthew) - v75v: robust repair - a month-to-date adjustment that is really a year figure (>40% of that source's YTD from March on, or >2x a plausible month) is re-dated to Jan 1 and netted with Apply's negative year remainder; Apply treats MTD >= 90% of YTD as YTD only. v75u: big on-screen 9-key pad (1-9 . 0 del, Clear, Done) on every money/number box; 'Use iPad keyboard' fallback. v75t: every money/number box opens the number pad (numPad helper after each render). v75s: tappable goal overrides, adjustment re-dating/repair, goals never negative. v75r: goal cascade + YTD totals. v75g: runs INSIDE God mode as its own Home panel (God Home > Monthly Goal).
+/* PCS Monthly Goal (Matthew) - v75w: foolproof month repair - per source, if Month > Year, or Month > 40% of Year (March on), every adjustment dated this month (any scope) moves to Jan 1 and merges; a single non-adjustment entry this month bigger than 40% of Year moves too; visible 'goal v75w' label. v75v: robust repair - a month-to-date adjustment that is really a year figure (>40% of that source's YTD from March on, or >2x a plausible month) is re-dated to Jan 1 and netted with Apply's negative year remainder; Apply treats MTD >= 90% of YTD as YTD only. v75u: big on-screen 9-key pad (1-9 . 0 del, Clear, Done) on every money/number box; 'Use iPad keyboard' fallback. v75t: every money/number box opens the number pad (numPad helper after each render). v75s: tappable goal overrides, adjustment re-dating/repair, goals never negative. v75r: goal cascade + YTD totals. v75g: runs INSIDE God mode as its own Home panel (God Home > Monthly Goal).
    Own password + PIN, separate from God sign-in. Data stays on this device only (never Firebase, no network calls).
    Ported from the former standalone /ledger/ app; same IndexedDB vault.
    Local-first: all data lives on this device in IndexedDB, AES-GCM encrypted with a key derived from Matthew's own
@@ -201,17 +201,30 @@
     Object.keys(E).forEach(function (k) { var e = E[k]; if (e.type !== "adjustment") return; var d = String(e.date || ""); if (!/^\d{4}-\d{2}-\d{2}$/.test(d)) d = t;
       var nd = e.scope === "y" ? d.slice(0, 4) + "-01-01" : e.scope === "m" ? d.slice(0, 7) + "-01" : e.scope === "w" ? addDays(d, -((new Date(d + "T12:00:00Z").getUTCDay() + 6) % 7)) : d;
       if (nd !== e.date) { e.date = nd; ch++; } });
-    ADJ.forEach(function (r) { var c = calc(t);
-      function mine(e) { return e.type === "adjustment" && e.line === r[0] && !!e.tip === !!r[2]; }
-      var mk = Object.keys(E).filter(function (k) { var e = E[k]; return mine(e) && e.scope === "m" && String(e.date).slice(0, 7) === m; });
-      var madj = mk.reduce(function (a, k) { return a + (Number(E[k].amount) || 0); }, 0);
-      if (!mk.length || !(madj > 0) || !(looksYearly(c, r, madj, t) || mtd(c, r) > ytdTotal(c, r) + 0.005)) return;
-      mk.forEach(function (k) { E[k].scope = "y"; E[k].date = y1; });
-      var yk = Object.keys(E).filter(function (k) { var e = E[k]; return mine(e) && e.scope === "y" && String(e.date) === y1; });
-      var net = Math.round(yk.reduce(function (a, k) { return a + (Number(E[k].amount) || 0); }, 0) * 100) / 100, keep = yk[0];
-      yk.slice(1).forEach(function (k) { delete E[k]; });
-      if (net) { E[keep].amount = net; E[keep].note = "Manual adjustment (year to date, fixed from month)"; } else delete E[keep];
-      ch++; });
+    var mo = Number(t.slice(5, 7));
+    ADJ.forEach(function (r) {
+      function mine(e) { return e.line === r[0] && !!e.tip === !!r[2]; }
+      function bad() { var c = calc(t), mm = mtd(c, r), yy = ytdTotal(c, r); return mm > 0.005 && (mm > yy + 0.005 || (mo >= 3 && mm > 0.4 * yy) || (mo >= 2 && looksYearly(c, r, mm, t) && yy <= 0)); }
+      if (!bad()) return;
+      var moved = 0;
+      /* 1) every adjustment dated this month, whatever its scope (m, w, missing), is a year figure */
+      Object.keys(E).forEach(function (k) { var e = E[k]; if (e.type === "adjustment" && mine(e) && String(e.date).slice(0, 7) === m) { e.scope = "y"; e.date = y1; moved++; } });
+      /* 2) still wrong: a single typed entry this month bigger than 40% of the year (or than the whole year) is a year figure too */
+      if (bad()) { var yy = ytdTotal(calc(t), r), yg = goal((D.settings || {}).year), floor = Math.max(1500, yg != null ? yg / 12 : 0); /* a real single ride/day is never this big */
+        Object.keys(E).forEach(function (k) { var e = E[k], a = Number(e.amount) || 0; if (e.type !== "adjustment" && mine(e) && String(e.date).slice(0, 7) === m && a >= floor && (a > 0.4 * yy || a > yy)) {
+          E[k] = { date: y1, line: e.line, amount: a, tip: e.tip ? true : undefined, type: "adjustment", scope: "y", note: "Manual adjustment (year to date, moved from " + String(e.date) + ")", at: e.at || Date.now() }; moved++; } }); }
+      /* 3) merge all Jan 1 year adjustments for this source (including Apply's negative remainder) into one */
+      var yk = Object.keys(E).filter(function (k) { var e = E[k]; return e.type === "adjustment" && mine(e) && e.scope === "y" && String(e.date) === y1; });
+      if (yk.length) { var net = Math.round(yk.reduce(function (a, k) { return a + (Number(E[k].amount) || 0); }, 0) * 100) / 100, keep = yk[0];
+        yk.slice(1).forEach(function (k) { delete E[k]; });
+        if (net) { E[keep].amount = net; E[keep].note = "Manual adjustment (year to date, fixed from month)"; } else delete E[keep]; }
+      /* 4) still Month > Year (Apply's negative year remainder is bigger than what came before this month): lift the Jan 1 entry so Year = at least Month */
+      var c4 = calc(t), gap = Math.round((mtd(c4, r) - ytdTotal(c4, r)) * 100) / 100;
+      if (gap > 0.005) { var jk = Object.keys(E).filter(function (k) { var e = E[k]; return e.type === "adjustment" && mine(e) && e.scope === "y" && String(e.date) === y1; })[0];
+        if (jk) { E[jk].amount = Math.round(((Number(E[jk].amount) || 0) + gap) * 100) / 100; if (!E[jk].amount) delete E[jk]; else E[jk].note = "Manual adjustment (year to date, fixed from month)"; }
+        else E["adj-fix-" + newId(Date.now())] = { date: y1, line: r[0], amount: gap, tip: r[2], type: "adjustment", scope: "y", note: "Manual adjustment (year to date, fixed from month)", at: Date.now() };
+        moved++; }
+      if (moved || yk.length > 1) ch++; });
     return ch; }
   function mtd(c, r) { return r[2] ? c.g("m", "tip:" + r[0]) : c.g("m", r[0]) - (r[0] === "pcs" ? c.g("m", "tip:pcs") : 0); }
   function ytdTotal(c, r) { return r[2] ? c.g("y", "tip:" + r[0]) : c.g("y", r[0]) - (r[0] === "pcs" ? c.g("y", "tip:pcs") : 0); }
@@ -264,6 +277,7 @@
   function topHtml(c) {
     var g = c.g, h = "";
     h += '<div class="row" style="justify-content:space-between"><h1>Monthly Goal</h1><button class="btn ghost" id="gl-b-lock">Lock</button></div>';
+    h += '<div class="fine" id="gl-ver" style="text-align:right;opacity:.7">goal v75w</div>';
     var roll = c.rolled != null && Math.abs(c.rolled) >= 0.01 ? '<div class="fine ' + (c.rolled > 0 ? "neg" : "pos") + '">Rolled over from yesterday: ' + (c.rolled > 0 ? "+$" + c.rolled.toFixed(2) + " short" : "ahead by $" + Math.abs(c.rolled).toFixed(2)) + "</div>" : "";
     h += '<div class="card hero"><b class="t">TODAY \u00b7 ' + esc(c.t) + '</b><div class="grid">' + big("Weekly goal", $m(c.weekGoal)) + big("Days left in week", c.dLeft == null ? "\u2014" : String(c.dLeft), '<div class="fine">counts down daily</div>') +
       big("Today's goal", $m(c.daily, true), roll) + big("Today remaining", $m(left(c.todayRem), true)) + big("Week remaining", $m(left(c.weekRem))) + big("Month remaining", $m(left(c.monthRem))) +
