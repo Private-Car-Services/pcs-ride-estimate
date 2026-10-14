@@ -270,7 +270,7 @@
         '<details class="rm-tip-box" id="rm-tip-box"' + (S.tip === "custom" || (S.tipOpen != null ? S.tipOpen : S.tip === "") ? " open" : "") + '>' +
         '<summary id="rm-tip-sum" style="cursor:pointer;padding:4px 0"><strong>Tip:</strong> ' + esc(S.tip === "" ? "pick one" : S.tip === "0" ? "No tip" : money(tip)) + ' <span class="fine">(tap to open/close)</span></summary>' +
         '<div class="rm-tips" role="group" aria-label="Tip">' + chips + "</div>" +
-        (S.tip === "custom" ? '<label for="rm-tip-custom">Tip amount</label><input id="rm-tip-custom" inputmode="decimal" placeholder="0.00" value="' + esc(S.tipCustom) + '">' : "") + "</details>" +
+        (S.tip === "custom" ? '<label for="rm-tip-custom">Tip amount</label><input id="rm-tip-custom" type="text" inputmode="decimal" pattern="[0-9]*[.]?[0-9]{0,2}" placeholder="0.00" value="' + esc(S.tipCustom) + '">' : "") + "</details>" +
         '<p class="error" id="rm-pay-err" role="alert">' + esc(S.payErr || (d.pay && d.pay.error ? "The last try didn\u2019t go through: " + d.pay.error : "")) + "</p>" +
         (c
           ? '<div id="rm-confirm" role="alertdialog" aria-labelledby="rm-confirm-q" style="border:2px solid #f0d48a;border-radius:14px;padding:12px;margin:10px 0">' +
