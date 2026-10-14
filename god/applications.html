@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="robots" content="noindex, nofollow"><meta name="theme-color" content="#20371d"><title>PCS God mode — Driver applications</title>
+<link rel="stylesheet" href="../apply/apply.css?v=1">
+<style>
+.appl{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px;margin:8px 0;cursor:pointer}
+.appl b{color:var(--mint)}.tag{display:inline-block;font-size:12px;padding:2px 8px;border-radius:10px;margin:3px 4px 0 0;background:#2d3f2a}
+.tag.red{background:#5a1f1a;color:#ffd2cc}.tag.amb{background:#4a3d14;color:#f6e2a6}.tag.st{background:#20371d;border:1px solid var(--mint2)}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:8px}.grid figure{margin:0;background:#0b150a;border-radius:8px;overflow:hidden}
+.grid img{width:100%;aspect-ratio:4/3;object-fit:cover;display:block}.grid figcaption{font-size:12px;padding:5px;color:var(--mint2)}
+.ai{font-size:13px;padding:4px 6px}.ai.flag{color:#ffd2cc}.ai.pass{color:#9be29b}
+.filters{display:flex;gap:6px;flex-wrap:wrap;margin:8px 0}
+</style></head>
+<body><div class="wrap">
+<header class="top"><h1 class="wm-h"><svg class="pcs-wm" viewBox="0 0 390 96" role="img" aria-label="Private Car Services God mode" xmlns="http://www.w3.org/2000/svg"><rect width="390" height="96" fill="#20371d"/><text x="195" y="44" text-anchor="middle" font-family="Poppins,Montserrat,Helvetica,Arial,sans-serif" font-style="italic" font-size="21" letter-spacing="1.5" font-weight="300" fill="#cdeccd">PRIVATE CAR SERVICES</text><path d="M28 54H350" stroke="#cdeccd" stroke-width="3"/><path d="M348 48L362 54L348 60Z" fill="#cdeccd"/><text x="195" y="76" text-anchor="middle" font-family="Poppins,Helvetica,Arial,sans-serif" font-style="italic" font-size="14" letter-spacing="1" fill="#a9c9a9">God mode · driver applications</text></svg></h1></header>
+<main id="g"></main>
+<footer class="foot"><a href="./">Back to God mode</a> · www.PCSrides.com<div class="ver">apply v1</div></footer>
+</div>
+<script>
+(function () {
+  var API = String(window.PCS_PAY_WORKER || window.PCS_APPLY_API || "https://pcs-pay.pcsrides.workers.dev").replace(/\/+$/, "");
+  var TK = "pcs-god-queue-token"; /* same 30-day device token the queue panel already uses: no extra password */
+  var g = document.getElementById("g"), st = { pw: "", apps: [], filter: "all", cur: null };
+  function tok() { try { var t = localStorage.getItem(TK) || ""; return Number(t.split(".")[1]) > Date.now() + 60000 ? t : ""; } catch (e) { return ""; } }
+  function auth() { return st.pw ? { godPassword: st.pw } : { godToken: tok() }; }
+  function esc(s) { return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) { return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]; }); }
+  function call(path, body) {
+    return fetch(API + path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(Object.assign(auth(), body || {})) })
+      .then(function (r) { return r.json().then(function (d) { if (r.status === 401 || r.status === 403) { st.pw = ""; localStorage.removeItem(TK); } if (!d.ok) throw new Error(d.error || "Error"); if (d.godToken) { localStorage.setItem(TK, d.godToken); st.pw = ""; } return d; }); });
+  }
+  function dt(ms) { return new Date(ms).toLocaleString("en-US", { timeZone: "America/Chicago", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) + " CT"; }
+  function md(s) { if (!s) return ""; var p = s.split("-"); return p[1] + "/" + p[2] + "/" + p[0]; }
+  function tags(a) {
+    return "<span class='tag st'>" + esc(a.status) + "</span>" + (a.flags || []).map(function (f) { return "<span class='tag " + (/^Info:/.test(f) ? "" : /EXPIRED|DISQUALIFIED|No limo/.test(f) ? "red" : "amb") + "'>" + esc(f) + "</span>"; }).join("") +
+      (a.ai ? "<span class='tag " + (a.aiRec === "looks_good" ? "" : a.aiRec === "reject_suggested" ? "red" : "amb") + "'>" + esc(a.ai) + "</span>" : "");
+  }
+  function signIn(msg) {
+    g.innerHTML = "<div class='card'><h2>Driver applications</h2><p class='muted'>" + esc(msg || "Enter the God-mode password once on this device.") + "</p><input id='pw' type='password' autocomplete='current-password'><div class='nav'><button class='btn' id='go'>Sign in</button></div></div>";
+    document.getElementById("go").onclick = function () { st.pw = document.getElementById("pw").value; list(); };
+  }
+  function list() {
+    g.innerHTML = "<p class='muted'>Loading…</p>";
+    call("/god/apply/list").then(function (d) { st.apps = d.apps; drawList(); call("/god/apply/config").then(function (c) { st.cfg = c.cfg; var x = document.getElementById("cfgLeather"); if (x) x.checked = c.cfg.leatherRequired !== false; }).catch(function () {}); }).catch(function (e) { signIn(e.message); });
+  }
+  function inviteCard() {
+    return "<div class='card'><h3>Send application</h3><p class='muted'>Invite-only: each link works for one person, for 14 days.</p>" +
+      "<label>Name</label><input id='ivn' autocomplete='off'><div class='row'><div><label>Mobile phone</label><input id='ivp' type='tel' inputmode='tel'></div><div><label>Email</label><input id='ive' type='email' inputmode='email'></div></div>" +
+      "<div class='nav'><button class='btn' id='ivgo'>Create invite link</button></div><div id='ivout'></div><div class='err' id='iverr'></div></div>";
+  }
+  function invitesHtml() {
+    if (!st.invites) return "";
+    return "<h3>Invites sent</h3>" + (st.invites.length ? st.invites.map(function (v) {
+      var cls = v.status === "submitted" ? "" : v.status === "expired" || v.status === "revoked" ? "red" : "amb";
+      return "<div class='card' style='padding:10px'><b>" + esc(v.name) + "</b> <span class='tag " + cls + "'>" + esc(v.status) + "</span><div class='muted'>" + esc([v.phone, v.email].filter(Boolean).join(" · ")) + " · sent " + dt(v.at) + " · expires " + dt(v.exp) + "</div>" +
+        (v.status === "pending" || v.status === "started" ? "<button class='btn small ghost' data-revoke='" + v.inviteId + "'>Revoke</button>" : "") + "</div>"; }).join("") : "<p class='muted'>No invites yet.</p>");
+  }
+  function smsLink(phone, body) { var ios = /iPhone|iPad|iPod/.test(navigator.userAgent); return "sms:" + String(phone).replace(/[^\d+]/g, "") + (ios ? "&" : "?") + "body=" + encodeURIComponent(body); }
+  function wireInvite() {
+    var go = document.getElementById("ivgo"); if (!go) return;
+    go.onclick = function () {
+      var name = document.getElementById("ivn").value.trim(), phone = document.getElementById("ivp").value.trim(), email = document.getElementById("ive").value.trim();
+      go.disabled = true; document.getElementById("iverr").textContent = "";
+      call("/god/apply/invite", { name: name, phone: phone, email: email }).then(function (d) {
+        var link = new URL("../apply/?i=" + encodeURIComponent(d.token), location.href).href;
+        var first = name.split(/\s+/)[0];
+        var msg = "Hi " + first + ", this is Matthew with Private Car Services. Here is your personal link to apply to drive with PCS (works for 14 days): " + link;
+        var out = "<p class='ok'>Link created. Nothing has been sent; tap one to open your Messages or Mail with it filled in, then press send yourself.</p><div class='nav'>" +
+          (phone ? "<a class='btn' href='" + esc(smsLink(phone, msg)) + "'>Text it</a>" : "") +
+          (email ? "<a class='btn' href='mailto:" + esc(email) + "?subject=" + encodeURIComponent("Your Private Car Services driver application") + "&body=" + encodeURIComponent(msg) + "'>Email it</a>" : "") +
+          (navigator.share ? "<button class='btn ghost' id='ivshare'>Share…</button>" : "") + "<button class='btn ghost' id='ivcopy'>Copy link</button></div>";
+        document.getElementById("ivout").innerHTML = out; go.disabled = false;
+        var sh = document.getElementById("ivshare"); if (sh) sh.onclick = function () { navigator.share({ text: msg }).catch(function () {}); };
+        document.getElementById("ivcopy").onclick = function () { navigator.clipboard && navigator.clipboard.writeText(link); this.textContent = "Copied"; };
+        loadInvites();
+      }).catch(function (e) { go.disabled = false; document.getElementById("iverr").textContent = e.message; });
+    };
+  }
+  function loadInvites() { call("/god/apply/invites").then(function (d) { st.invites = d.invites; var b = document.getElementById("invbox"); if (b) b.innerHTML = invitesHtml(); }).catch(function () {}); }
+  function drawList() {
+    var f = st.filter, apps = st.apps.filter(function (a) { return f === "all" || (f === "flagged" ? a.flags.length || (a.aiRec && a.aiRec !== "looks_good") : a.status === f); });
+    var fb = ["all", "new", "flagged", "disqualified", "reviewing", "interview", "approved", "hired", "declined"].map(function (x) { return "<button class='btn small " + (x === f ? "" : "ghost") + "' data-f='" + x + "'>" + x + "</button>"; }).join("");
+    g.innerHTML = "<div class='card'><h3>Application settings</h3><label class='check'><input type='checkbox' id='cfgLeather'" + (st.cfg && st.cfg.leatherRequired === false ? "" : " checked") + "><span>Leather interior required (a No ends the pre-screen politely)</span></label><div class='muted' id='cfgMsg'></div></div><h2>Driver applications (" + st.apps.length + ")</h2><div class='filters'>" + fb + "</div>" +
+      (apps.length ? apps.map(function (a) { return "<div class='appl' data-id='" + a.appId + "'><b>" + esc(a.name) + "</b> <span class='muted'>· " + dt(a.at) + "</span><div class='muted'>" + esc(a.phone) + " · " + esc(a.city) + " · " + esc(a.vehicle) + "</div><div>" + tags(a) + "</div></div>"; }).join("") : "<p class='muted'>No applications here yet.</p>");
+  }
+  function open(id) {
+    g.innerHTML = "<p class='muted'>Loading…</p>";
+    call("/god/apply/get", { appId: id }).then(function (d) { st.cur = d; drawApp(); }).catch(function (e) { g.innerHTML = "<p class='err'>" + esc(e.message) + "</p>"; });
+  }
+  var NAMES = ["", "Limo license", "Driver's license", "Headshot", "Front", "Driver side", "Rear", "Passenger side", "Driver seat", "Front passenger seat", "Driver-side rear", "Passenger-side rear", "Third row", "Cargo", "Insurance certificate"];
+  function drawApp() {
+    if (st.cur.app.form.partial) { var q = st.cur.app, pp = q.form.personal; g.innerHTML = "<div class='nav'><button class='btn ghost' id='bk'>&larr; All applications</button></div><h2>" + esc(pp.first + " " + pp.last) + "</h2><div>" + tags({ status: q.status, flags: q.flags.map(function (f) { return f.t; }) }) + "</div><div class='card'>Stopped at the criminal history step. " + esc(pp.phone) + " · " + esc(pp.email) + " · DOB " + md(pp.dob) + " · " + dt(q.at) + "</div>" + declineCard(q); document.getElementById("bk").onclick = list; wireDecline(q); return; }
+    var a = st.cur.app, f = a.form, p = f.personal, d = f.docs, v = f.vehicle, ai = a.ai || {}, aiBy = {};
+    (ai.items || []).forEach(function (x) { aiBy[x.slot] = x; });
+    var lf = a.liveFlags || [];
+    var h = "<div class='nav'><button class='btn ghost' id='bk'>&larr; All applications</button></div><h2>" + esc(p.first + " " + (p.middle ? p.middle + " " : "") + p.last) + "</h2>" +
+      "<div>" + tags({ status: a.status, flags: lf }) + "</div>";
+    h += "<div class='card'><h3>AI pre-review <span class='muted'>(advice only, you decide)</span></h3>" + (ai.status === "done" ?
+      "<p><b>" + esc(ai.recommendation.replace(/_/g, " ")) + "</b> · exterior " + ai.exteriorScore + "/5 · interior " + ai.interiorScore + "/5</p>" + (ai.insFlags && ai.insFlags.length ? "<p>" + ai.insFlags.map(function (f) { return "<span class='tag'>" + esc(f) + "</span>"; }).join("") + "</p>" : "<p class='ok'>Insurance: commercial · limits OK</p>") + "<p>" + esc(ai.summary) + "</p><p class='muted'>" + esc(ai.model) + " · " + dt(ai.at) + "</p>"
+      : "<p class='muted'>" + (ai.status === "error" ? "AI review failed: " + esc(ai.error) : ai.status === "off" ? "AI review is off." : "AI review pending…") + "</p>") + "<button class='btn small ghost' id='rerun'>Run AI review again</button></div>";
+    h += "<div class='card'><dl class='rev'><dt>DOB</dt><dd>" + md(p.dob) + "</dd><dt>Contact</dt><dd>" + esc(p.phone) + " · " + esc(p.email) + "</dd><dt>Address</dt><dd>" + esc(p.street + " " + (p.unit || "") + ", " + p.city + ", " + p.state + " " + p.zip) + "</dd>" +
+      (function (G) { G = G || {}; var yn = function (x) { return x === "yes" ? "Yes" : x === "no" ? "No" : "—"; }; return "<dt>Pre-screen</dt><dd>Texas driver's license: <b>" + yn(G.txdl) + "</b> · Limo/chauffeur license: <b>" + yn(G.limo) + "</b>" + (G.limo === "no" ? " · Can obtain before hire: <b>" + yn(G.limoObtain) + "</b>" : "") + " · 4-door luxury vehicle 10 yrs or newer: <b>" + yn(G.vehicle) + "</b> · Leather interior: <b>" + yn(G.leather) + "</b> (" + esc([G.year, G.make, G.model].filter(Boolean).join(" ")) + ")</dd>"; })(f.gate) +
+      "<dt>Limo license</dt><dd>" + (d.limo.has === "no" ? "<b>None yet</b> · says they can obtain one before hire" : esc(d.limo.number) + " (" + esc(d.limo.cityOther || d.limo.city) + ") · exp " + md(d.limo.exp)) + "</dd><dt>Driver's license</dt><dd>" + esc(d.dl.number) + " (" + esc(d.dl.state) + ") · exp " + md(d.dl.exp) + "</dd>" +
+      "<dt>Insurance (optional at application)</dt><dd>" + (d.ins.has === "no" ? "None yet" : esc((d.ins.carrier || "") + " " + d.ins.number) + " · exp " + md(d.ins.exp)) + "</dd><dt>Vehicle</dt><dd>" + esc([v.year, v.color, v.make, v.model].join(" ")) + " · " + esc(v.plate) + " · " + esc(v.seats) + " seats</dd>" +
+      "<dt>Criminal history answers</dt><dd>DV " + f.elig.dv + " · DWI/DUI 7y " + f.elig.dwi + " · felony 7y " + f.elig.felony + " · sex offense " + f.elig.sex + " · crime vs child " + f.elig.child + " · kidnapping " + f.elig.kidnap + "</dd><dt>Consents</dt><dd>Background/MVR " + (f.elig.bgConsent ? "yes" : "no") + " · Sex offender registry " + (f.elig.sorConsent ? "yes" : "no") + " · <a style='color:#f0d48a' href='https://www.nsopw.gov/' target='_blank' rel='noopener'>search NSOPW</a></dd><dt>Signed</dt><dd>" + esc(f.agree.signature) + " · " + dt(a.at) + " · no smoking/vaping ✓ · Additional Insured ✓</dd></dl></div>";
+    h += "<h3>Photos</h3><div class='grid'>";
+    for (var s = 1; s <= 14; s++) {
+      var x = aiBy[s], url = st.cur.photos[s];
+      h += "<figure>" + (url ? "<a href='" + esc(url) + "' target='_blank' rel='noopener'><img loading='lazy' src='" + esc(url) + "' alt=''></a>" : "<div style='aspect-ratio:4/3;display:flex;align-items:center;justify-content:center' class='muted'>N/A</div>") +
+        "<figcaption>" + s + ". " + NAMES[s] + "</figcaption>" + (x ? "<div class='ai " + x.result + "'>" + (x.result === "pass" ? "✓ " : "⚑ ") + esc(x.reason) + "</div>" : "") + "</figure>";
+    }
+    h += "</div><h3>Work history</h3>" + f.work.jobs.map(function (j) { return "<div class='card'><b>" + esc(j.employer) + "</b> · " + esc(j.role) + (j.rideshare ? " <span class='tag'>rideshare</span>" : "") + "<div class='muted'>" + esc(j.start) + " – " + (j.current ? "present" : esc(j.end)) + " · " + esc(j.contact) + (j.reason ? " · left: " + esc(j.reason) : "") + "</div></div>"; }).join("") +
+      (f.work.gapNote ? "<div class='card'><b>Gaps explained:</b> " + esc(f.work.gapNote) + "</div>" : "");
+    if (a.onboarding) {
+      var ob = a.onboarding;
+      h += "<div class='card'><h3>Onboarding " + (ob.complete ? "<span class='tag'>complete · can go online</span>" : "<span class='tag red'>driver can't go online yet</span>") + "</h3>";
+      Object.keys(ob.items).forEach(function (k) { var it = ob.items[k], url = st.cur.photos["onb-" + k];
+        h += "<label class='check'><input type='checkbox' data-onb='" + k + "'" + (it.done ? " checked" : "") + (it.photo ? "" : " disabled") + "><span>" + esc(it.label) + (it.photo ? "" : " <span class='muted'>(take a photo of the new certificate first)</span>") + "</span></label>" +
+          (url ? "<a href='" + esc(url) + "' target='_blank' rel='noopener'><img src='" + esc(url) + "' alt='' style='max-width:160px;border-radius:8px'></a><br>" : "") +
+          "<input type='file' accept='image/*' capture='environment' data-onbphoto='" + k + "' hidden><button class='btn small ghost' data-onbcam='" + k + "'>" + (it.photo ? "Retake photo" : "Take live photo of certificate") + "</button>"; });
+      h += "<div class='err' id='onberr'></div></div>";
+    }
+    var bg = a.bg || {};
+    h += "<div class='card'><h3>Background check</h3>" + (bg.provider ? "<p>" + esc(bg.provider) + " · " + esc(bg.status) + (bg.result ? " · result: <b>" + esc(bg.result) + "</b>" : "") + "</p><p class='muted'>Candidate " + esc(bg.candidateId) + (bg.reportId ? " · report " + esc(bg.reportId) : "") + "</p>" :
+      "<p class='muted'>Not started. Sends the applicant a secure link from the background check provider, where they enter their SSN and sign the authorization. PCS never sees or stores the SSN.</p><button class='btn small' id='bginv'>Send background check invite</button><div class='err' id='bgerr'></div>") + "</div>";
+    h += declineCard(a);
+    h += "<div class='card'><h3>Decision</h3><select id='stt'>" + ["disqualified", "new", "reviewing", "interview", "approved", "hired", "declined"].map(function (x) { return "<option" + (x === a.status ? " selected" : "") + ">" + x + "</option>"; }).join("") + "</select><label>Note</label><textarea id='nt' rows='2'></textarea>" +
+      (a.notes || []).map(function (n) { return "<p class='muted'>" + dt(n.at) + ": " + esc(n.t) + "</p>"; }).join("") + "<div class='nav'><button class='btn' id='sv'>Save</button></div><p class='muted'>Approved drivers must list Private Taxi Services LLC as Additional Insured and send the updated certificate before their first ride.</p></div>";
+    g.innerHTML = h;
+    document.getElementById("bk").onclick = list; wireDecline(a);
+    var bi = document.getElementById("bginv"); if (bi) bi.onclick = function () { bi.disabled = true; call("/god/apply/bg-invite", { appId: a.appId }).then(function () { open(a.appId); }).catch(function (e) { bi.disabled = false; document.getElementById("bgerr").textContent = e.message; }); };
+    g.querySelectorAll("[data-onbcam]").forEach(function (b) { b.onclick = function () { g.querySelector("[data-onbphoto='" + b.getAttribute("data-onbcam") + "']").click(); }; });
+    g.querySelectorAll("[data-onbphoto]").forEach(function (inp) { inp.onchange = function () { var f = inp.files[0]; if (!f) return; toJpeg(f).then(function (blob) { return fetch(API + "/god/apply/onboard-photo?app=" + a.appId + "&item=" + inp.getAttribute("data-onbphoto"), { method: "POST", headers: Object.assign({ "Content-Type": "image/jpeg" }, st.pw ? { "X-God-Password": st.pw } : { "X-God-Token": tok() }), body: blob }); }).then(function (r) { return r.json(); }).then(function (d) { if (!d.ok) throw new Error(d.error); open(a.appId); }).catch(function (e) { document.getElementById("onberr").textContent = e.message; }); }; });
+    g.querySelectorAll("[data-onb]").forEach(function (c) { c.onchange = function () { call("/god/apply/onboard", { appId: a.appId, item: c.getAttribute("data-onb"), done: c.checked }).then(function () { open(a.appId); }).catch(function (e) { c.checked = false; document.getElementById("onberr").textContent = e.message; }); }; });
+    document.getElementById("sv").onclick = function () { call("/god/apply/status", { appId: a.appId, status: document.getElementById("stt").value, note: document.getElementById("nt").value }).then(function () { open(a.appId); }); };
+    document.getElementById("rerun").onclick = function () { this.disabled = true; call("/god/apply/ai-rerun", { appId: a.appId }).then(function () { open(a.appId); }); };
+  }
+  /* God-side photo: re-encode to JPEG <=1600 px so the Worker's JPEG check passes */
+  function toJpeg(file) { return new Promise(function (res, rej) { var im = new Image(); im.onload = function () { var k = Math.min(1, 1600 / Math.max(im.width, im.height)), c = document.createElement("canvas"); c.width = Math.round(im.width * k); c.height = Math.round(im.height * k); c.getContext("2d").drawImage(im, 0, 0, c.width, c.height); c.toBlob(res, "image/jpeg", 0.85); }; im.onerror = rej; im.src = URL.createObjectURL(file); }); }
+  function declineCard(a) {
+    var dc = a.decline, pv = st.cur.app.declinePreview;
+    if (!dc && a.status !== "declined") return "<div class='card'><h3>Decline letter</h3><p class='muted'>Not queued.</p><button class='btn small ghost' id='dqueue'>Prepare decline letter</button><div id='dprev'></div></div>";
+    if (dc && dc.status === "sent") return "<div class='card'><h3>Decline letter</h3><p class='ok'>Sent " + dt(dc.sentAt) + " to " + esc(dc.to) + "</p></div>";
+    return "<div class='card'><h3>Decline letter <span class='tag amb'>queued · " + esc(dc ? dc.why : "manual") + "</span></h3><p class='muted'>Nothing is sent until you tap Send. To: " + esc(a.form.personal.email) + "</p>" +
+      (pv ? "<div style='background:#fff;border-radius:8px;overflow:hidden'>" + pv.html + "</div>" : "") + "<div class='nav'><button class='btn' id='dsend'>Send decline letter</button></div><div class='err' id='derr'></div></div>";
+  }
+  function wireDecline(a) {
+    var s = document.getElementById("dsend"), q = document.getElementById("dqueue");
+    if (q) q.onclick = function () { st.cur.app.decline = { status: "queued", why: "manual", at: Date.now() }; st.cur.app.form.partial ? open(a.appId) : drawApp(); };
+    if (s) s.onclick = function () { if (!confirm("Send the decline email to " + a.form.personal.email + "?")) return; s.disabled = true; call("/god/apply/decline-send", { appId: a.appId }).then(function () { open(a.appId); }).catch(function (e) { s.disabled = false; document.getElementById("derr").textContent = e.message; }); };
+  }
+  g.addEventListener("change", function (e) { if (e.target.id !== "cfgLeather") return; var on = e.target.checked, m = document.getElementById("cfgMsg"); call("/god/apply/config", { leatherRequired: on }).then(function (c) { st.cfg = c.cfg; m.textContent = "Saved: leather " + (c.cfg.leatherRequired ? "required" : "not required (shown as a flag)"); }).catch(function (er) { e.target.checked = !on; m.textContent = er.message; }); });
+  g.addEventListener("click", function (e) { var rv = e.target.closest("[data-revoke]"); if (rv) { if (confirm("Revoke this invite? The link will stop working.")) call("/god/apply/invite-revoke", { inviteId: rv.getAttribute("data-revoke") }).then(loadInvites); return; } var f = e.target.closest("[data-f]"); if (f) { st.filter = f.getAttribute("data-f"); drawList(); return; } var c = e.target.closest("[data-id]"); if (c) open(c.getAttribute("data-id")); });
+  if (tok()) list(); else signIn();
+})();
+</script></body></html>
