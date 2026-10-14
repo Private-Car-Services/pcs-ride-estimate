@@ -2812,17 +2812,19 @@
     var minute = Number(hm[1] || 0);
     var mins = hour * 60 + minute;
     if (dow === 0 || dow === 6) {
-      if (!isFinite(nowMs) || ms - nowMs < 48 * 60 * 60 * 1000) {
-        return "Weekend rides need at least 48 hours' notice (America/Chicago), or choose ASAP.";
-      }
+      /* v74d.1: never a hard "No" — short-notice weekend rides go to the owner as pending. */
       return "";
-    }
-    if (dow < 1 || dow > 5) return "Could not check the weekday for that date.";
-    if (mins < 8 * 60 || mins > 18 * 60) {
-      return "Weekday scheduled rides are Mon–Fri 8:00 am–6:00 pm America/Chicago. Use ASAP for other hours, or call " + BUSINESS_PHONE + ".";
     }
     return "";
   }
+
+  /* v74d.1: soft (non-blocking) note for scheduled rides outside standard hours.
+     Owner already confirms every booking (status pending_owner), so these stay requestable. */
+  function scheduleSoftNote() {
+    if (state.asap || isAsapValue(state.time)) return "";
+    return "Requests any day, any time; the owner confirms your booking.";
+  }
+
 
   function bookingWebhookUrl() {
     try {
@@ -3460,15 +3462,15 @@
 
   /* ===== v72r hours of service (HOS) =====
      PCS company policy (Matthew 2026-10-11; his CDL / Motive ELD "USA Property 70 hour / 8 day"), editable in God mode
-     (rides/HOSLIMIT): DRIVE 11 h moving time (GPS speed > 3 mph during a shift); SHIFT 14 h window from coming on duty;
+     (rides/HOSLIMIT): DRIVE 12 h moving time (v74b; was 11) (GPS speed > 3 mph during a shift); SHIFT 14 h window from coming on duty;
      BREAK 30 min required after 8 h of driving; CYCLE 70 h on duty in a rolling 8 days; 10 h off resets DRIVE + SHIFT,
-     34 h off restarts the CYCLE. Four countdown clocks; warnings at 1 h and 30 min left (banner + chime); at a limit new
+     34 h off (Offline / logged out / off duty) resets ALL clocks incl. the CYCLE (v74b, Matthew). Four countdown clocks; warnings at 1 h and 30 min left (banner + chime); at a limit new
      ride offers stop (a ride in progress can finish) until the off-duty reset or a God override (logged).
      GPS health: no fix for > 5 min during a shift shows a red banner (Location "Always", keep the app open); a GPS gap
      where the position jumped is counted as driving time (conservative).
      Records: on-duty segments {s,e} at rides/DRVRHOSL/{driver}/{shiftStart}, driving intervals at .../drive/{start},
      alert events at .../events/{at}, overrides at .../overrides/{at}, rest periods at .../rest/{at}. */
-  var HOS_DEFAULTS = { maxDriveHours: 11, shiftWindowHours: 14, breakAfterDriveHours: 8, breakMinutes: 30, cycleHours: 70, cycleDays: 8, resetHours: 10, restartHours: 34, breakAfterMin: 150, breakMinOnDutyHours: 3 };
+  var HOS_DEFAULTS = { maxDriveHours: 12, shiftWindowHours: 14, breakAfterDriveHours: 8, breakMinutes: 30, cycleHours: 70, cycleDays: 8, resetHours: 10, restartHours: 34, breakAfterMin: 150, breakMinOnDutyHours: 3 };
   var HOS_BREAK_GAP_MS = 15 * 60000; /* a stop of 15 min+ counts as a break */
   var HOS_MOVING_MPH = 3;
   var hosCfg = Object.assign({}, HOS_DEFAULTS);
@@ -3492,10 +3494,14 @@
     if (!syncOn() || !signedIn()) return;
     authFetch(databaseURL() + "/rides/DRVRHOSL/" + encodeURIComponent(driverPresenceId()) + "/breaks/" + r.s + ".json", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(r) }).catch(function () {});
   }
+  /* v74c (Matthew 10/13): Offline and Break count the same for downtime. Offline during an open shift opens the same Break
+     interval (30-min break countdown, credit toward the break after 8 h driving, pauses Shift/Cycle, counts toward 10 h / 34 h).
+     Going Available ends it. Offline login with no shift (view history) opens nothing. */
+  function hosOffDutyBreak() { var b = false; try { b = qOnBreak(); } catch (e) {} if (!b) try { b = qOffline(); } catch (e) {} if (!b) try { b = qAutoBreak(); } catch (e) {} return !!b; } /* v74d: + auto-break */
   function hosBrkSync(now) {
     if (ROLE !== "driver" || !signedIn()) return;
     now = now || Date.now();
-    var on = false; try { on = qOnBreak() && !!hosShiftStart(); } catch (e) {}
+    var on = false; try { on = hosOffDutyBreak() && !!hosShiftStart(); } catch (e) {} /* v74c: Offline mid-shift = Break */
     var log = hosReadBrk(), open = null;
     Object.keys(log).forEach(function (k) { if (log[k] && log[k].open) open = log[k]; });
     if (on && !open) { open = { s: now, e: now, open: true }; log[String(now)] = open; hosWriteBrk(log); hosBrkPush(open); hosBrkPushAt = now; return; }
@@ -3534,9 +3540,9 @@
     now = now || Date.now();
     var acc = readDriverAccount() || {}, hist = hosReadHist(), rows = Object.assign({}, hist.rows || {}), loc = readMilesLocal() || {};
     Object.keys(loc).forEach(function (d) { if (/^\d{4}-\d{2}-\d{2}$/.test(d) && loc[d] && typeof loc[d] === "object") rows[d] = Object.assign({}, rows[d] || {}, loc[d]); });
-    var cur = "off"; try { var hs = hosStatus(now); if (!qOffline() && hs.onShift && !qOnBreak()) cur = hosDrvPrev && hosDrvPrev.moving ? "drv" : "on"; } catch (e) {}
+    var cur = "off"; try { var hs = hosStatus(now); if (!qOffline() && hs.onShift && !qOnBreak() && !qAutoBreak()) cur = hosDrvPrev && hosDrvPrev.moving ? "drv" : "on"; } catch (e) {}
     var snaps = Object.assign({}, hist.days || {}); try { Object.assign(snaps, JSON.parse(localStorage.getItem(dlKey("days")) || "{}") || {}); } catch (e) {}
-    return { now: now, days: Math.max(15, Number(state.dlDays) || 15), snapshots: snaps, more: function (n) { state.dlDays = n; openDriverLog("history:" + (n - 1)); }, currentStatus: cur, currentNote: qOffline() ? "Offline (logged in)" : qOnBreak() ? "On break" : "",
+    return { now: now, days: Math.max(15, Number(state.dlDays) || 15), snapshots: snaps, more: function (n) { state.dlDays = n; openDriverLog("history:" + (n - 1)); }, currentStatus: cur, currentNote: qOffline() ? "Offline (logged in)" : qOnBreak() ? "On break" : qAutoBreak() ? "Break (auto, available)" : "",
       fluidsDays: (function () { try { return Number(localStorage.getItem("pcs-dvir-fluids-days")) || 7; } catch (e) { return 7; } })(), /* v74: God-editable fluids interval */
       dvirItems: (function () { try { return JSON.parse(localStorage.getItem("pcs-dvir-cfg") || "null"); } catch (e) { return null; } })(), /* God-mode checklist (rides/DVIRCFG) */
       cityAt: dlCityAt, canSign: true, odoNow: state.milesStartOdo,
@@ -3550,9 +3556,18 @@
         rec.plate = normalizePlate(acc.carPlate || "");
         var all = dlRec("dvir"); all[d] = all[d] || {}; all[d][k] = rec; try { localStorage.setItem(dlKey("dvir"), JSON.stringify(all)); } catch (e) {}
         if (syncOn()) authFetch(databaseURL() + "/rides/DRVRHOSL/" + encodeURIComponent(driverPresenceId()) + "/dvir/" + d + "/" + k + ".json", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(rec) }).catch(function () {});
-        try { render(); } catch (e) {} },
+        try { render(); } catch (e) {}
+        if (k === "pre" && state.availAfterPre) { state.availAfterPre = false; setTimeout(function () { /* v74b: pre-trip done -> odometer -> Available */
+          if (dvirBlock() || vehAvailBlocks().length) { qd.brkMsg = availBlockMsg(dvirBlock() || { blocks: vehAvailBlocks() }); render(); return; }
+          var o = document.getElementById("dl-overlay"); if (o) o.remove(); qSetOffline(false); }, 300); }
+        if (k === "post" && state.availAfterMissed === d) { state.availAfterMissed = null; /* v74b: missed post-trip done -> resolve the flag, then today's pre-trip */
+          var mm = dlRec("missed"); if (mm[d]) { mm[d].resolvedAt = Date.now(); try { localStorage.setItem(dlKey("missed"), JSON.stringify(mm)); } catch (e) {} }
+          if (syncOn()) { var rz = { resolvedAt: Date.now(), resolvedBy: "late post-trip" }; authFetch(databaseURL() + "/rides/DRVRHOSL/" + encodeURIComponent(driverPresenceId()) + "/missedPost/" + d + ".json", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(rz) }).catch(function () {});
+            authFetch(databaseURL() + "/rides/DVIRMISS/" + encodeURIComponent(driverPresenceId() + "_" + d) + ".json", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(rz) }).catch(function () {}); }
+          setTimeout(function () { var o = document.getElementById("dl-overlay"); if (o) o.remove(); availFlow(); }, 300); }
+        if (k === "post" && state.logoutAfterPost) { state.logoutAfterPost = false; setTimeout(endOfDayOdo, 300); } },
       duty: hosDutySegs(now), drive: hosAllDrive(now), breaks: hosBreaks(now), offline: hosOffline(now), rows: rows,
-      overrides: (hist.ovr || []).concat(hosOvr && hosOvr.override ? [hosOvr.override] : []),
+      overrides: (hist.ovr || []).concat(hosOvr && hosOvr.override ? [hosOvr.override] : []).concat(hosRestarts(now)),
       driver: acc.name || state.driverName || "", vehicle: { year: acc.carYear || "", make: acc.carMake || "", model: acc.carModel || "", plate: normalizePlate(acc.carPlate || ""), vin: acc.carVin || acc.vin || "" } };
   }
   /* Driver's Log places: a GPS point every 5 min (and at every status change) + a city cache from reverse geocoding */
@@ -3565,11 +3580,115 @@
   /* an inspection with a defect marked NOT safe to operate blocks Available until God mode clears it (logged) */
   function dvirBlock() {
     var loc = dlRec("dvir"), srv = hosReadHist().dvir || {}, hit = null;
-    [loc, srv].forEach(function (m) { Object.keys(m || {}).forEach(function (d) { ["pre", "post"].forEach(function (k) {
+    [loc, srv].forEach(function (m) { Object.keys(m || {}).forEach(function (d) { ["pre", "post", "avail"].forEach(function (k) {
       var r = m[d] && m[d][k]; if (!r || !r.unsafe) return;
       var cl = (srv[d] && srv[d][k] && srv[d][k].cleared) || r.cleared; if (!cl) hit = { day: d, kind: k, at: r.at, blocks: r.blocks || [], rejected: (srv[d] && srv[d][k] && srv[d][k].rejected) || r.rejected || null };
     }); }); });
     return hit;
+  }
+  /* v74b (Matthew): first Available tap each day (driver + vehicle) opens the pre-trip; car-wash 48 h and fluids
+     checks are re-run at every Available tap (not only at inspection submit). A block is written to dvir/{day}/avail so
+     God mode sees it and can clear it (logged), exactly like an inspection block. */
+  /* v74b: 34 h restarts (all clocks reset) for the Driver's Log: duty gaps and Offline stretches of restartHours+ */
+  function hosRestarts(now) {
+    var H = 3600000, rh = (hosCfg && hosCfg.restartHours || 34) * H, out = [], segs = [], offl = [];
+    try { segs = hosDutySegs(now); offl = hosOffline(now); } catch (e) {}
+    var note = function (end, len) { if (out.some(function (o) { return Math.abs(o.at - end) < 60000; })) return; out.push({ at: end, auto: true, kind: (hosCfg && hosCfg.restartHours || 34) + " h restart: all HOS clocks reset (Drive, Shift, Break, " + (hosCfg && hosCfg.cycleHours || 70) + " h Cycle) after " + Math.floor(len / H) + " h off", by: "HOS", reason: "Matthew\u2019s rule" }); };
+    for (var i = 1; i < segs.length; i += 1) if (segs[i][0] - segs[i - 1][1] >= rh) note(segs[i][0], segs[i][0] - segs[i - 1][1]);
+    offl.forEach(function (o) { if (o[1] - o[0] >= rh && o[1] <= now) note(o[1], o[1] - o[0]); });
+    return out;
+  }
+  function dlToday() { return new Intl.DateTimeFormat("en-CA", { timeZone: "America/Chicago", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date()); }
+  function dlPlate() { return normalizePlate((readDriverAccount() || {}).carPlate || ""); }
+  function dlDvirRec(d, k) { var a = (dlRec("dvir")[d] || {})[k], b = ((hosReadHist().dvir || {})[d] || {})[k]; if (a && b && b.cleared) a = Object.assign({}, a, { cleared: b.cleared }); return a || b || null; }
+  function preTripDoneToday() { var r = dlDvirRec(dlToday(), "pre"); return !!(r && Number(r.at) > 0 && (!r.plate || !dlPlate() || r.plate === dlPlate())); }
+  function vehAvailBlocks(now) {
+    var L = window.PCSDriverLog; if (!L) return [];
+    now = now || Date.now();
+    var pl = dlPlate() || "car", vd = {}; try { vd = (JSON.parse(localStorage.getItem("pcs-dvir-veh") || "{}") || {})[pl] || ((hosReadHist().veh || {})[pl]) || {}; } catch (e) {}
+    var cfg = null; try { cfg = JSON.parse(localStorage.getItem("pcs-dvir-cfg") || "null"); } catch (e) {}
+    var its = L.items({ dvirItems: cfg }), out = [];
+    var cw = its.filter(function (i) { return i.k === "carwash"; })[0];
+    if (cw && cw.block && cw.maxAgeHours && vd.carwash) { var t = L.parseMdy(vd.carwash); if (t != null && (now - t) / 3600000 - 24 > Number(cw.maxAgeHours)) out.push({ k: "carwash", label: cw.label, why: "older than " + cw.maxAgeHours + " h" }); }
+    if (its.some(function (i) { return i.group === "Fluids" && i.block; })) { var days = Number(localStorage.getItem("pcs-dvir-fluids-days")) || 7, fd = L.fluidsDue(vd.fluids, now, days);
+      if (fd.due && fd.why !== "weekend") out.push({ k: "fluids", label: "Fluids check", why: fd.why === "never" ? "never checked" : "not checked in " + fd.days + " days" }); }
+    var av = dlDvirRec(dlToday(), "avail"); /* God already cleared these exact blocks today */
+    if (av && av.cleared && out.every(function (b) { return (av.blocks || []).some(function (x) { return x.k === b.k; }); })) return [];
+    return out;
+  }
+  function availBlockMsg(bk) { var bl = (bk && bk.blocks || []).map(function (b) { return b.label + (b.why === "photo" ? " (photo waiting for God approval)" : b.why !== "defect" ? " (" + b.why + ")" : ""); }).join(", ");
+    return "Unsafe vehicle defect reported" + (bl ? ": " + bl : "") + ". You can\u2019t go Available until God mode clears it." + (bk && bk.rejected ? " God mode rejected the photo: " + bk.rejected.reason + ". Do a new inspection with a new photo." : ""); }
+  /* v74b: a missed post-trip (flagged by the Worker's midnight check) must be completed first, then today's pre-trip */
+  function missedPostDay() { var m = dlRec("missed"), ds = Object.keys(m).filter(function (d) { var x = m[d]; if (!x || !x.at || x.resolvedAt) return false; var p = dlDvirRec(d, "post"); return !(p && Number(p.at) >= Number(x.at)); }).sort(); return ds[0] || null; }
+  function availFlow() {
+    return dvirRefresh().then(function () {
+      if (dvirBlock()) { qd.brkMsg = availBlockMsg(dvirBlock()); render(); return; }
+      var md = missedPostDay();
+      if (md) { state.availAfterMissed = md; state.availAfterPre = false; qd.brkMsg = "You ended the " + md + " shift without a post-trip inspection. Complete it now, then today\u2019s pre-trip, to go Available."; render(); openDriverLog("day:" + md + ":insp-post"); return; }
+      if (!preTripDoneToday()) { state.availAfterPre = true; qd.brkMsg = "Complete today\u2019s pre-trip inspection to go Available."; render(); openDriverLog("day:" + dlToday() + ":insp"); return; }
+      var vb = vehAvailBlocks();
+      if (vb.length) {
+        var d = dlToday(), rec = { at: Date.now(), kind: "avail", unsafe: true, defects: 0, blocks: vb, items: {}, plate: dlPlate(), driver: (readDriverAccount() || {}).name || "" };
+        var all = dlRec("dvir"); all[d] = all[d] || {}; all[d].avail = rec; try { localStorage.setItem(dlKey("dvir"), JSON.stringify(all)); } catch (e) {}
+        if (syncOn()) authFetch(databaseURL() + "/rides/DRVRHOSL/" + encodeURIComponent(driverPresenceId()) + "/dvir/" + d + "/avail.json", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(rec) }).catch(function () {});
+        qd.brkMsg = availBlockMsg({ blocks: vb }); render(); return;
+      }
+      state.availAfterPre = false; qSetOffline(false);
+    });
+  }
+  /* v74b: God mode "Log out driver" (rides/DRVRHOSL/{id}/forceLogout). Seen on the next sync -> shift ends, back to login. */
+  function forceLogoutCheck() {
+    if (ROLE !== "driver" || !signedIn() || !syncOn()) return Promise.resolve(false);
+    return authFetch(databaseURL() + "/rides/DRVRHOSL/" + encodeURIComponent(driverPresenceId()) + "/forceLogout.json").then(function (r) { return r.ok ? r.json() : null; }).then(function (fl) {
+      var at = fl && Number(fl.at) || 0, since = Number(localStorage.getItem("pcs-login-at")) || 0, ack = Number(localStorage.getItem("pcs-force-ack-" + driverPresenceId())) || 0;
+      if (!at || at <= since || at <= ack) return false;
+      try { localStorage.setItem("pcs-force-ack-" + driverPresenceId(), String(at)); } catch (e) {}
+      forceDriverLogout(fl); return true;
+    }).catch(function () { return false; });
+  }
+  function forceDriverLogout(fl) {
+    try { localStorage.setItem(qOffKey(), "1"); localStorage.removeItem(qBusyKey()); } catch (e) {}
+    try { hosTick(Date.now()); } catch (e) {}
+    try { stopOpenRideAlert(); } catch (e) {}
+    try { var openRow = todayMilesRow(); if (openRow && Number(openRow.shiftStartAt) > 0) { closeOnlineSegment(openRow, Date.now()); openRow.lastUpdate = Date.now(); openRow.forcedLogout = { at: fl.at, by: fl.by || "God mode", reason: fl.reason || "" }; persistMilesRow(openRow); } } catch (e) {}
+    try { releaseWakeLock(); } catch (e) {}
+    try { clearDriverPresence(); } catch (e) {}
+    try { var o = document.getElementById("dl-overlay"); if (o) o.remove(); } catch (e) {}
+    state.milesEndPrompt = false; state.milesTrackLat = null; state.milesTrackLng = null; state.milesTrackAt = 0;
+    try { clearMilesAnchor(); } catch (e) {}
+    try { writeShift(null); } catch (e) {}
+    state.hubOpen = false; state.hubView = "menu"; state.meterOpen = false; state.milesNeedStart = true;
+    writeSession("");
+    try { var a = pcsAuth(); if (a && a.signOut) a.signOut(); } catch (e) {}
+    state.loginError = "God mode logged you out" + (fl.reason ? ": " + fl.reason : "") + ". Log in again when you\u2019re ready.";
+    state.gateStep = ""; state.screen = "home"; state.isTest = false; state.onlineDrivers = []; state.onlineStamp = "";
+    render();
+  }
+  if (typeof window !== "undefined" && ROLE === "driver") setInterval(function () { forceLogoutCheck(); }, 20000);
+  /* v74b (Matthew): Offline asks "Are you logging out for the day?" Yes -> post-trip inspection -> ending odometer -> log out. No -> just Offline. */
+  function goOfflineNow() { qSetOffline(true); /* v74c: Break -> Offline keeps the same break interval running (qSetOffline clears Break status) */ }
+  function offlineAsk() {
+    var old = document.getElementById("q-off-ask"); if (old) old.remove();
+    var m = document.createElement("div"); m.id = "q-off-ask"; m.setAttribute("role", "dialog"); m.setAttribute("aria-modal", "true");
+    m.style.cssText = "position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;padding:20px";
+    m.innerHTML = '<div style="background:#fff;color:#111;border-radius:12px;padding:18px;max-width:340px;width:100%;text-align:center;font-size:17px"><p style="margin:0 0 14px;font-weight:700">Are you logging out for the day?</p>' +
+      '<div style="display:flex;gap:10px"><button type="button" id="q-off-no" class="btn ghost" style="flex:1">No</button><button type="button" id="q-off-yes" class="btn" style="flex:1">Yes</button></div></div>';
+    document.body.appendChild(m);
+    m.addEventListener("click", function (e) { var b = e.target.closest && e.target.closest("button"); if (!b) return; m.remove();
+      if (b.id === "q-off-no") { goOfflineNow(); return; }
+      goOfflineNow(); endOfDay(); });
+  }
+  function endOfDay() {
+    var r = dlDvirRec(dlToday(), "post");
+    if (!(r && Number(r.at) > 0 && (!r.plate || !dlPlate() || r.plate === dlPlate()))) { state.logoutAfterPost = true; openDriverLog("day:" + dlToday() + ":insp-post"); return; }
+    endOfDayOdo();
+  }
+  function endOfDayOdo() {
+    var o = document.getElementById("dl-overlay"); if (o) o.remove();
+    if (!state.milesNeedStart && (todayMilesRow() || readShift())) { /* same as Log out: ending odometer, then log out */
+      clearDriverPresence(); state.milesEndPrompt = true; state.milesEndDraft = ""; state.milesEndError = ""; state.milesEndWarnedFor = ""; state.milesEndSaving = false; state.hubOpen = false; render(); return; }
+    var lo = document.getElementById("log-out"); if (lo) { lo.click(); return; }
+    forceDriverLogout({ at: Date.now(), reason: "" }); state.loginError = ""; render();
   }
   function dvirCfgPull() {
     if (!syncOn()) return Promise.resolve();
@@ -3586,7 +3705,9 @@
     if (!syncOn() || !signedIn()) return Promise.resolve();
     return authFetch(databaseURL() + "/rides/DRVRHOSL/" + encodeURIComponent(driverPresenceId()) + "/dvir.json").then(function (r) { return r.ok ? r.json() : null; }).then(function (o) {
       if (!o || typeof o !== "object") return; var h = hosReadHist(); h.dvir = o; try { localStorage.setItem(hosHistKey(), JSON.stringify(h)); } catch (e) {}
-    }).catch(function () {});
+    }).catch(function () {}).then(function () { /* v74b: midnight check flags (rides/DRVRHOSL/{id}/missedPost/{day}) */
+      return authFetch(databaseURL() + "/rides/DRVRHOSL/" + encodeURIComponent(driverPresenceId()) + "/missedPost.json").then(function (r) { return r.ok ? r.json() : null; }).then(function (m) {
+        try { localStorage.setItem(dlKey("missed"), JSON.stringify(m && typeof m === "object" ? m : {})); } catch (e) {} }).catch(function () {}); });
   }
   function dlKey(k) { var id = ""; try { id = driverPresenceId(); } catch (e) {} return "pcs-dl-" + k + "-" + id; }
   function dlPts() { try { var a = JSON.parse(localStorage.getItem(dlKey("pts")) || "[]"); return Array.isArray(a) ? a : []; } catch (e) { return []; } }
@@ -3594,7 +3715,7 @@
   function dlNotePoint(now) {
     if (ROLE !== "driver" || !signedIn() || !isCoord(state.hereLat) || !isCoord(state.hereLng)) return;
     now = now || Date.now();
-    var st = qOffline() ? "x" : qOnBreak() ? "b" : (hosDrvPrev && hosDrvPrev.moving ? "d" : "o");
+    var st = qOffline() ? "x" : (qOnBreak() || qAutoBreak()) ? "b" : (hosDrvPrev && hosDrvPrev.moving ? "d" : "o");
     if (now - dlLastAt < 5 * 60000 && st === dlLastSt) return;
     dlLastAt = now; dlLastSt = st;
     var a = dlPts(); a.push([now, Math.round(state.hereLat * 1e4) / 1e4, Math.round(state.hereLng * 1e4) / 1e4]);
@@ -3629,7 +3750,7 @@
   function openDriverLog(mode) {
     if (!window.PCSDriverLog) return;
     try { dvirCfgPull(); } catch (e) {} /* God-mode checklist for the next inspection */
-    var paint = function () { var d = driverLogData(), days = window.PCSDriverLog.build(d); dlSaveDays(days); window.PCSDriverLog.open(days, d, mode); };
+    var paint = function () { var d = driverLogData(); d.inspDay = state.availAfterMissed || null; var days = window.PCSDriverLog.build(d); dlSaveDays(days); window.PCSDriverLog.open(days, d, mode); };
     paint();
     try { hosPullHistory().then(function () { if (document.getElementById("dl-overlay")) paint(); }); } catch (e) {}
   }
@@ -3637,7 +3758,7 @@
   /* break intervals [s, e] from this phone + the server copy; an open break on another device runs to its last heartbeat */
   function hosBreaks(now) {
     var out = {}, add = function (r) { if (!r || !(Number(r.s) > 0)) return; var e = Number(r.e) || Number(r.s); var x = out[r.s]; if (!x || e > x[1]) out[r.s] = [Number(r.s), e]; };
-    var l = hosReadBrk(); Object.keys(l).forEach(function (k) { var r = l[k]; if (r && r.open) { try { if (qOnBreak()) r = Object.assign({}, r, { e: now }); } catch (e) {} } add(r); });
+    var l = hosReadBrk(); Object.keys(l).forEach(function (k) { var r = l[k]; if (r && r.open) { try { if (hosOffDutyBreak()) r = Object.assign({}, r, { e: now }); } catch (e) {} } add(r); });
     (hosReadHist().brk || []).forEach(add);
     return hosMerge(Object.keys(out).map(function (k) { return out[k]; }).filter(function (x) { return x[1] > x[0]; }));
   }
@@ -3650,7 +3771,7 @@
   function hosApplyCfg(c) {
     c = c || {};
     hosCfg = {
-      maxDriveHours: hosNum(c.maxDriveHours, 11, 0, 24), shiftWindowHours: hosNum(c.shiftWindowHours, 14, 0, 24),
+      maxDriveHours: hosNum(c.rule === "v74b" || Number(c.maxDriveHours) !== 11 ? c.maxDriveHours : 12, 12, 0, 24), /* v74b (Matthew): 12 h drive; an old stored 11 (pre-v74b default) reads as 12 */ shiftWindowHours: hosNum(c.shiftWindowHours, 14, 0, 24),
       breakAfterDriveHours: hosNum(c.breakAfterDriveHours, 8, 0, 24), breakMinutes: hosNum(c.breakMinutes, 30, 5, 120), breakMinOnDutyHours: hosNum(c.breakMinOnDutyHours, 3, 0, 14), /* v72x */
       cycleHours: hosNum(c.cycleHours, 70, 0, 200), cycleDays: hosNum(c.cycleDays, 8, 1, 14),
       resetHours: hosNum(c.resetHours, 10, 1, 48), restartHours: hosNum(c.restartHours, 34, 1, 96), breakAfterMin: hosNum(c.breakAfterMin, 150, 0, 600)
@@ -3848,9 +3969,9 @@
     }
   }
   /* v72r PCS HOS policy (Matthew, CDL / Motive ELD "USA Property 70 hour / 8 day"), all editable in God mode:
-     DRIVE  11 h of moving time after 10 h off;  SHIFT 14 h window from coming on duty after 10 h off (does not pause);
+     DRIVE  12 h of moving time after 10 h off;  SHIFT 14 h window from coming on duty after 10 h off (does not pause);
      BREAK  a 30-min break (30 consecutive minutes not driving) is required after 8 h of driving;
-     CYCLE  70 h on duty in any rolling 8 days; 10 h off resets DRIVE + SHIFT; 34 h off restarts the CYCLE. */
+     CYCLE  70 h on duty in any rolling 8 days; 10 h off resets DRIVE + SHIFT; 34 h off (Offline / logged out / off duty) resets ALL clocks incl. the CYCLE (v74b, Matthew). */
   /* v72u (Matthew): HOS comes from the FULL duty history, not just what this phone/session logged. Every shift saved in
      Firebase (rides/DRVRMLES/{id}/{day}/shifts: start/end/miles, last 9 days) and the server drive log are merged in, so a
      logout, reinstall, Home Screen vs Safari copy, a new shift or an odometer entry can never reset the clocks.
@@ -3972,6 +4093,9 @@
     }
     if (offNow >= c.restartHours * H) cycleFrom = now;
     else for (i = segs.length - 1; i > 0; i -= 1) { if (segs[i][0] - segs[i - 1][1] >= c.restartHours * H) { gapEnd = segs[i][0]; if (gapEnd > cycleFrom) cycleFrom = gapEnd; break; } }
+    /* v74b (Matthew): 34 consecutive hours Offline / logged out / off duty fully resets ALL clocks (Drive, Shift, Break, 70 h Cycle) */
+    if (offNow < c.restartHours * H) offl.forEach(function (o) { if (o[1] - o[0] >= c.restartHours * H && o[1] <= now && o[1] > cycleFrom) cycleFrom = o[1]; });
+    if (cycleFrom > dutyStart && dutyStart) { var nx2 = 0; segs.forEach(function (g) { if (!nx2 && g[1] > cycleFrom) nx2 = Math.max(g[0], cycleFrom); }); dutyStart = nx2 || dutyStart; }
     var brks = hosBreaks(now); /* v72x: Break status = off duty for Shift + Cycle */
     var shiftMs = dutyStart ? Math.max(0, now - dutyStart - hosOverlap(brks, dutyStart, now) - hosOverlap(offl, dutyStart, now) + hosOverlap2(brks, offl, dutyStart, now)) : 0; /* v73: Offline pauses Shift */
     var driveMs = dutyStart ? hosOverlap(drv, dutyStart, now) : 0;
@@ -4034,7 +4158,7 @@
     var needBreak = !!st && c.breakAfterMin > 0 && contMs >= c.breakAfterMin * 60000;
     /* v72t (Matthew): "On break" while stationary (2+ min not moving) or on Break status; counts the break UP; 30 min resets "Break due in" */
     var movingNow = !!(hosDrvPrev && hosDrvPrev.moving && now - Number(hosDrvPrev.at || 0) < 120000);
-    var statusBreak = false; try { statusBreak = qOnBreak(); } catch (e) {}
+    var statusBreak = false; try { statusBreak = qOnBreak() || qAutoBreak() || (offlineNow && !!st); } catch (e) {} /* v74c: Offline = Break; v74d: auto-break too */
     var stillMs = movingNow ? 0 : (lastDrvEnd ? now - lastDrvEnd : (st ? now - st : 0));
     /* v72y (Matthew 7:33 AM): "On break" ONLY when the driver tapped Break. Being stopped is not a break on screen
        (a 30+ min stop still resets "Break due in" through the driving-gap rule above). */
@@ -4057,7 +4181,7 @@
     var d = now - last;
     return d > 5 * 60000 ? d : 0;
   }
-  function hosClockName(k) { return { break: "BREAK (30-min break after 8 h driving)", drive: "DRIVE (11 h)", shift: "SHIFT (14 h window)", cycle: "CYCLE (70 h / 8 days)" }[k] || "HOS"; }
+  function hosClockName(k) { return { break: "BREAK (30-min break after 8 h driving)", drive: "DRIVE (" + (hosCfg && hosCfg.maxDriveHours || 12) + " h)", shift: "SHIFT (14 h window)", cycle: "CYCLE (70 h / 8 days)" }[k] || "HOS"; }
   /* v72t: logo colors (dark green #20371d, mint #cdeccd); a clock turns RED in its last 45 min.
      Break clock: "Break due in" (counts down with driving) / "On break" (counts the break up to 30 min). */
   var HOS_RED_MS = 45 * 60000;
@@ -5688,7 +5812,7 @@
       '<p class="fine" style="margin:4px 0">Add a tip for your driver? <span id="tip-pick-hint">' + esc(tipPicked() ? "You can change it any time before you pay." : "Tap one to continue. No tip is fine.") + "</span></p>" +
       '<div class="tip-chips" style="display:flex;flex-wrap:wrap;gap:8px;margin:6px 0">' + chips + "</div>" +
       (state.tipChoice === "custom"
-        ? '<label for="tip-custom">Tip amount ($)</label><input id="tip-custom" type="text" inputmode="decimal" maxlength="7" value="' + esc(state.tipCustom || "") + '" placeholder="5.00">'
+        ? '<label for="tip-custom">Tip amount ($)</label><input id="tip-custom" type="text" inputmode="decimal" pattern="[0-9]*[.]?[0-9]{0,2}" maxlength="7" value="' + esc(state.tipCustom || "") + '" placeholder="5.00">'
         : "") + "</details>" +
       '<div class="money-row"><span>Tip</span><span id="pay-tip-amt">' + esc(tipPicked() ? money(tip) : "pick one") + "</span></div>" +
       '<div class="total-row"><span>Total</span><span id="pay-total-amt">' + esc(money(total)) + "</span></div>" +
@@ -9223,6 +9347,7 @@
     };
     Object.assign(body, presenceShiftFields()); /* v64 */
     try { Object.assign(body, hosPresenceFields()); } catch (e) {} /* v72r */
+    try { body.autoBreak = qAutoBreak(); body.autoBreakSince = body.autoBreak ? autoBrk.since : 0; } catch (e) {} /* v74d: God shows Break (auto, available) */
     return authFetch(driversUrl(driverPresenceId()), {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
@@ -9857,7 +9982,7 @@
 
   function accountGate() {
     return (
-      (ROLE === "driver" ? '<svg class="welcome-logo pcs-wm" viewBox="0 0 390 96" role="img" aria-label="Private Car Services driver" style="display:block;width:100%;max-width:420px;height:auto;max-height:120px;border-radius:8px" xmlns="http://www.w3.org/2000/svg"><defs><pattern id="wmg-ld" width="16" height="16" patternUnits="userSpaceOnUse"><path d="M16 0H0V16" fill="none" stroke="#2c4a2a" stroke-width=".6"/></pattern></defs><rect width="390" height="96" fill="#20371d"/><rect width="390" height="96" fill="url(#wmg-ld)"/><text x="195" y="44" text-anchor="middle" font-family="Poppins,Montserrat,Helvetica,Arial,sans-serif" font-style="italic" font-size="21" letter-spacing="1.5" font-weight="300" fill="#cdeccd">PRIVATE CAR SERVICES</text><path d="M28 54H350" stroke="#cdeccd" stroke-width="3"/><path d="M348 48L362 54L348 60Z" fill="#cdeccd"/><text x="195" y="76" text-anchor="middle" font-family="Poppins,Helvetica,Arial,sans-serif" font-style="italic" font-size="14" letter-spacing="1" fill="#a9c9a9">driver</text></svg>' : '<svg class="welcome-logo pcs-wm" viewBox="0 0 390 96" role="img" aria-label="Private Car Services rider" style="display:block;width:100%;max-width:420px;height:auto;max-height:120px;border-radius:8px" xmlns="http://www.w3.org/2000/svg"><defs><pattern id="wmg-lr" width="16" height="16" patternUnits="userSpaceOnUse"><path d="M16 0H0V16" fill="none" stroke="#2c4a2a" stroke-width=".6"/></pattern></defs><rect width="390" height="96" fill="#20371d"/><rect width="390" height="96" fill="url(#wmg-lr)"/><text x="195" y="44" text-anchor="middle" font-family="Poppins,Montserrat,Helvetica,Arial,sans-serif" font-style="italic" font-size="21" letter-spacing="1.5" font-weight="300" fill="#cdeccd">PRIVATE CAR SERVICES</text><path d="M28 54H350" stroke="#cdeccd" stroke-width="3"/><path d="M348 48L362 54L348 60Z" fill="#cdeccd"/><text x="195" y="76" text-anchor="middle" font-family="Poppins,Helvetica,Arial,sans-serif" font-style="italic" font-size="14" letter-spacing="1" fill="#a9c9a9">rider</text></svg>') + /* v72e: slim wordmark (SVG) */
+      (ROLE === "driver" ? '<svg class="welcome-logo pcs-wm" viewBox="0 0 390 96" role="img" aria-label="Private Car Services driver" style="display:block;width:100%;max-width:420px;height:auto;max-height:120px;border-radius:8px" xmlns="http://www.w3.org/2000/svg"><defs><pattern id="wmg-ld" width="16" height="16" patternUnits="userSpaceOnUse"><path d="M16 0H0V16" fill="none" stroke="#2c4a2a" stroke-width=".6"/></pattern></defs><rect width="390" height="96" fill="#20371d"/><rect width="390" height="96" fill="url(#wmg-ld)"/><text class="pcs-wm-name" x="28" y="44" text-anchor="start" textLength="334" lengthAdjust="spacingAndGlyphs" font-family="Poppins,Montserrat,Helvetica,Arial,sans-serif" font-style="italic" font-size="21" font-weight="300" fill="#cdeccd">PRIVATE CAR SERVICES</text><path d="M28 54H350" stroke="#cdeccd" stroke-width="3"/><path d="M348 48L362 54L348 60Z" fill="#cdeccd"/><text x="195" y="76" text-anchor="middle" font-family="Poppins,Helvetica,Arial,sans-serif" font-style="italic" font-size="14" letter-spacing="1" fill="#a9c9a9">driver</text></svg>' : '<svg class="welcome-logo pcs-wm" viewBox="0 0 390 96" role="img" aria-label="Private Car Services rider" style="display:block;width:100%;max-width:420px;height:auto;max-height:120px;border-radius:8px" xmlns="http://www.w3.org/2000/svg"><defs><pattern id="wmg-lr" width="16" height="16" patternUnits="userSpaceOnUse"><path d="M16 0H0V16" fill="none" stroke="#2c4a2a" stroke-width=".6"/></pattern></defs><rect width="390" height="96" fill="#20371d"/><rect width="390" height="96" fill="url(#wmg-lr)"/><text class="pcs-wm-name" x="28" y="44" text-anchor="start" textLength="334" lengthAdjust="spacingAndGlyphs" font-family="Poppins,Montserrat,Helvetica,Arial,sans-serif" font-style="italic" font-size="21" font-weight="300" fill="#cdeccd">PRIVATE CAR SERVICES</text><path d="M28 54H350" stroke="#cdeccd" stroke-width="3"/><path d="M348 48L362 54L348 60Z" fill="#cdeccd"/><text x="195" y="76" text-anchor="middle" font-family="Poppins,Helvetica,Arial,sans-serif" font-style="italic" font-size="14" letter-spacing="1" fill="#a9c9a9">rider</text></svg>') + /* v72e: slim wordmark (SVG) */
       '<form id="login-form" autocomplete="off" novalidate>' +
       '<label for="login-email">Email</label>' +
       '<input id="login-email" name="email" type="email" autocapitalize="none" autocomplete="email" spellcheck="false" required value="' + esc(state.loginSetupDraft || "") + '">' +
@@ -10006,7 +10131,8 @@
         field("ride-date", "Date", state.date, 'type="date" min="' + chicagoParts(new Date()).date + '"') +
         '</div><div class="city">' +
         field("ride-time", "Time", state.time, 'type="time"') +
-        "</div></div>")
+        "</div></div>" +
+        (scheduleSoftNote() ? '<p class="note schedule-soft-note" role="status">' + esc(scheduleSoftNote()) + "</p>" : ""))
       : "";
     return (
       '<div class="app-nav">' +
@@ -13418,7 +13544,7 @@
             /* v50: pull the saved car details + photos from the server (or back them up if only here). */
             syncDriverProfile().then(function () { render(); });
             noteFreshLogin(); /* v72w */
-            try { if (!driverMidRide() && !meterActive()) localStorage.setItem(qOffKey(), "1"); } catch (e) {} /* v73: every login lands on Offline */
+            try { if (!driverMidRide() && !meterActive()) localStorage.setItem(qOffKey(), "1"); localStorage.setItem("pcs-login-at", String(Date.now())); } catch (e) {} /* v73: every login lands on Offline; v74b login time (forced logouts before it are ignored) */
             mergeMidnightSplit(); /* v72r */
             ensureMilesDayReady();
             try { hosPullHistory().then(function () { hosCheck(); render(); }); } catch (e) {} /* v72x: HOS history (incl. breaks / PCS resets) right at login */
@@ -13561,7 +13687,7 @@
             /* v50: pull the saved car details + photos from the server (or back them up if only here). */
             syncDriverProfile().then(function () { render(); });
             noteFreshLogin(); /* v72w */
-            try { if (!driverMidRide() && !meterActive()) localStorage.setItem(qOffKey(), "1"); } catch (e) {} /* v73: every login lands on Offline */
+            try { if (!driverMidRide() && !meterActive()) localStorage.setItem(qOffKey(), "1"); localStorage.setItem("pcs-login-at", String(Date.now())); } catch (e) {} /* v73: every login lands on Offline; v74b login time (forced logouts before it are ignored) */
             mergeMidnightSplit(); /* v72r */
             ensureMilesDayReady();
             try { hosPullHistory().then(function () { hosCheck(); render(); }); } catch (e) {} /* v72x: HOS history (incl. breaks / PCS resets) right at login */
@@ -15085,6 +15211,7 @@
 
   function acceptRideOnce(code, account, attempt) {
     try { if (qOnBreak() || (ROLE === "driver" && localStorage.getItem(qBusyKey()) === "b")) { localStorage.removeItem(qBusyKey()); localStorage.removeItem(qBusyKey() + "-prev"); qd.lastPub = null; } } catch (e) {} /* v72u: accepting ends the break; the trip sets On a ride */
+    try { if (ROLE === "driver" && localStorage.getItem(autoBrkKey()) === "1") { localStorage.removeItem(autoBrkKey()); hosBrkSync(Date.now()); } } catch (e) {} /* v74d: accepting ends the auto-break */
     return getRideWithEtag(code).then(function (pack) {
       var ride = pack && pack.ride;
       var etag = pack && pack.etag;
@@ -15153,6 +15280,9 @@
         throw e;
       }).then(function (r) {
         if (r === "retried") return;
+        /* v74d (Matthew 10/13): tell the pcs-pay Worker to watch this ride (driver cancel / un-accept / late > 5 min alerts
+           to God mode). Fire-and-forget; the Worker re-reads Firebase and its cron also finds every ride on its own. */
+        try { fetch(METER_WORKER + "/notify/ride-watch", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ rideCode: code }), keepalive: true }).catch(function () {}); } catch (wErr) {}
         return deleteOpenRide(code).catch(function () {});
       });
     });
@@ -15782,6 +15912,7 @@
       noteSpeed(pos);
       try { navNoteHeading(pos); } catch (e) {} /* v72u */
       try { brkNoteMotion(state.speedMph, Date.now()); } catch (e) {} /* v72u */
+      try { autoBrkTick(Date.now()); } catch (e) {} /* v74d */
       noteAutoWait(pos); /* v57: 4:30 OK check; 5:00 stop ask; police assist if not OK */
       trackDailyMiles(pos);
       refreshMilesTodayDom();
@@ -16160,6 +16291,7 @@
   }
   function qSetOffline(on) {
     if (ROLE !== "driver") return;
+    try { autoBrkClear(); } catch (e) {} /* v74d */
     try {
       if (on) { localStorage.setItem(qOffKey(), "1"); localStorage.removeItem(qBusyKey()); localStorage.removeItem(qBusyKey() + "-prev"); }
       else localStorage.removeItem(qOffKey());
@@ -16222,6 +16354,7 @@
   }
   function qSetBreak(on) {
     if (ROLE !== "driver") return;
+    try { autoBrkClear(); } catch (e) {} /* v74d */
     try {
       if (on) { localStorage.setItem(qBusyKey() + "-prev", localStorage.getItem(qBusyKey()) || ""); localStorage.setItem(qBusyKey(), "b"); }
       else { localStorage.removeItem(qBusyKey()); localStorage.removeItem(qBusyKey() + "-prev"); }
@@ -16233,6 +16366,55 @@
     try { syncOpenRideAlert(); } catch (e) {}
     try { refreshOpenRides(true); } catch (e) {}
   }
+  /* v74d (Matthew 10/13): AUTO-BREAK. Available (not Offline, not On a ride, not manual Break, no PCS ride/meter) and the GPS has
+     stayed within 100 m and under walking speed (3.5 mph) for 10 minutes -> Break (auto, available): the break interval is
+     back-dated to when he first stopped (45 min still = 45 min of break; counts toward the 30-min break after 8 h driving and
+     pauses Shift/Cycle like Break/Offline). He STAYS Available: qBusyKey is untouched, so offers + dispatch are unaffected.
+     Ends when he moves > 100 m or above walking speed, accepts a ride, or picks another status. Flag: {qBusyKey}-autob. */
+  var AUTO_BRK_STILL_MS = 10 * 60000, AUTO_BRK_RADIUS_MI = 0.0621, AUTO_BRK_WALK_MPH = 3.5;
+  var autoBrk = { lat: null, lng: null, since: 0 };
+  function autoBrkKey() { return qBusyKey() + "-autob"; }
+  function autoBrkEligible() {
+    if (ROLE !== "driver" || !signedIn()) return false;
+    try { if (qOffline() || qOnBreak() || qManualBusy() || qAutoBusy() || !hosShiftStart()) return false; } catch (e) { return false; }
+    return true;
+  }
+  function qAutoBreak() {
+    if (ROLE !== "driver") return false;
+    var on = false; try { on = localStorage.getItem(autoBrkKey()) === "1"; } catch (e) {}
+    return on && autoBrkEligible();
+  }
+  function autoBrkSet(on, now, since) {
+    try { if (on) localStorage.setItem(autoBrkKey(), "1"); else localStorage.removeItem(autoBrkKey()); } catch (e) {}
+    if (on) { /* back-date: open the break interval at the moment he stopped */
+      var log = hosReadBrk(), open = null;
+      Object.keys(log).forEach(function (k) { if (log[k] && log[k].open) open = log[k]; });
+      if (!open) { open = { s: since, e: now, open: true, auto: true }; log[String(since)] = open; hosWriteBrk(log); try { hosBrkPush(open); } catch (e) {} }
+    }
+    try { hosBrkSync(now); } catch (e) {}
+    try { hosTick(now); } catch (e) {}
+    qd.lastPub = null;
+    try { publishDriverPresence(); } catch (e) {}
+    try { render(); } catch (e) {}
+  }
+  function autoBrkClear() { try { localStorage.removeItem(autoBrkKey()); } catch (e) {} autoBrk.lat = null; autoBrk.since = 0; }
+  function autoBrkTick(now) {
+    now = now || Date.now();
+    var flag = false; try { flag = localStorage.getItem(autoBrkKey()) === "1"; } catch (e) {}
+    if (!autoBrkEligible()) { autoBrk.since = 0; autoBrk.lat = null; if (flag) { try { localStorage.removeItem(autoBrkKey()); } catch (e) {} try { hosBrkSync(now); } catch (e) {} } return; }
+    if (!isFinite(state.hereLat) || !isFinite(state.hereLng) || state.hereLat == null) return;
+    var here = { lat: +state.hereLat, lng: +state.hereLng };
+    var mph = Number(state.speedMph), fresh = !!(state.speedAt && now - state.speedAt <= 20000);
+    var moved = autoBrk.lat != null && haversine({ lat: autoBrk.lat, lng: autoBrk.lng }, here) > AUTO_BRK_RADIUS_MI;
+    var fast = fresh && isFinite(mph) && mph > AUTO_BRK_WALK_MPH;
+    if (autoBrk.lat == null || moved || fast) {
+      autoBrk.lat = here.lat; autoBrk.lng = here.lng; autoBrk.since = now;
+      if (flag) autoBrkSet(false, now);
+      return;
+    }
+    if (!flag && now - autoBrk.since >= AUTO_BRK_STILL_MS) autoBrkSet(true, now, autoBrk.since);
+  }
+  setInterval(function () { try { autoBrkTick(Date.now()); } catch (e) {} }, 30000);
   function qAutoBusy() {
     if (ROLE !== "driver" || !signedIn()) return false;
     var st = String(state.rideStatus || "").toLowerCase();
@@ -16255,6 +16437,7 @@
     });
   }
   function qSetManualBusy(on) {
+    try { autoBrkClear(); } catch (e) {} /* v74d: any manual status change ends the auto-break */
     if (ROLE !== "driver") return;
     try { if (on) localStorage.setItem(qBusyKey(), "1"); else localStorage.removeItem(qBusyKey()); } catch (e) {}
     qd.lastPub = null;
@@ -16307,6 +16490,7 @@
         ? "Offline: you are logged in but not online. No ride offers, and your Shift and Cycle clocks are stopped (off duty). Tap Available to go online."
         : auto
         ? "Set automatically during your PCS ride. You switch back to Available when it ends."
+        : qAutoBreak() ? "Break (auto, available): you haven\u2019t moved for 10+ minutes, so this counts as break time from when you stopped. You are still Available and ride offers still come in. Moving or accepting a ride ends it."
         : brk ? "On break: your Break clock is running. Ride offers still come in; accepting one ends the break. 30 minutes of break resets your Break clock."
         : (busy
           ? "Riders see you are online but finishing a ride, and can join the queue. New ride offers are paused. Slide to Available for the next rider in line."
@@ -16493,7 +16677,8 @@
       }).catch(function (e) { qd.authBusy = false; qd.authErr = e.message || "Couldn't confirm your password."; render(); });
       return;
     }
-    if (t.id === "q-set-offline") { if (!qOffline()) { if (qOnBreak()) qSetBreak(false); qSetOffline(true); } return; }
+    if (t.id === "q-set-offline") { if (!qOffline()) offlineAsk(); return; } /* v74b: "Are you logging out for the day?" */
+    if (t.id === "q-set-available" && qOffline()) { availFlow(); return; } /* v74b: pre-trip first, then odometer */
     if (t.id === "q-set-available" && dvirBlock()) { /* v73 DVIR: unsafe defect -> God mode must clear it first */
       dvirRefresh().then(function () { if (dvirBlock()) { var bk = dvirBlock(), bl = (bk && bk.blocks || []).map(function (b) { return b.label + (b.why === "photo" ? " (photo waiting for God approval)" : b.why !== "defect" ? " (" + b.why + ")" : ""); }).join(", "); qd.brkMsg = "Unsafe vehicle defect reported" + (bl ? ": " + bl : "") + ". You can\u2019t go Available until God mode clears it." + (bk && bk.rejected ? " God mode rejected the photo: " + bk.rejected.reason + ". Do a new inspection with a new photo." : ""); render(); } else { qd.brkMsg = ""; if (qOffline()) qSetOffline(false); else qSetManualBusy(false); } });
       return;
@@ -16558,7 +16743,7 @@
   }
   window.__pcsQueue = {
     state: function () { return { join: qr.join, place: qr.place, inLine: qr.inLine, queued: !!state.qQueued, allBusy: qAllBusy(), ws: qr.ws, order: qd.order, token: !!qToken() }; },
-    dvirBlock: function () { return dvirBlock(); }, manualBusy: function () { return qManualBusy(); }, offline: function () { return qOffline(); }, setOffline: qSetOffline, onBreak: function () { return qOnBreak(); }, brkMotion: function (mph, now) { brkNoteMotion(mph, now); }, brkReset: function () { brkMotion = { stillSince: 0, fastSince: 0, lastAt: 0 }; }, autoBusy: function () { return qAutoBusy(); }, testLiveRide: function (v) { brkTestLive = v == null ? null : !!v; }, liveRide: function () { return brkLiveRide(); },
+    dvirBlock: function () { return dvirBlock(); }, manualBusy: function () { return qManualBusy(); }, offline: function () { return qOffline(); }, setOffline: qSetOffline, availFlow: availFlow, preTripDone: function () { return preTripDoneToday(); }, vehBlocks: function () { return vehAvailBlocks(); }, forceCheck: function () { return forceLogoutCheck(); }, endOfDay: function () { return endOfDay(); }, missedDay: function () { return missedPostDay(); }, onBreak: function () { return qOnBreak(); }, autoBreak: function () { return qAutoBreak(); }, autoBrkTick: function (now) { autoBrkTick(now); }, autoBrkState: function () { return { since: autoBrk.since, lat: autoBrk.lat, lng: autoBrk.lng }; }, hosBrkLog: function () { return hosReadBrk(); }, brkMotion: function (mph, now) { brkNoteMotion(mph, now); }, brkReset: function () { brkMotion = { stillSince: 0, fastSince: 0, lastAt: 0 }; }, autoBusy: function () { return qAutoBusy(); }, testLiveRide: function (v) { brkTestLive = v == null ? null : !!v; }, liveRide: function () { return brkLiveRide(); },
     offers: function () { return alertableOpenRides().map(function (r) { return r.code; }); }, poll: function () { qd.pollAt = 0; qDriverPoll(); qRiderPollOnce(); }, setOnRide: qSetManualBusy
   };
 
@@ -16574,7 +16759,7 @@
     return true;
   };
   window.__pcsApp = {
-    estimate: estimate,
+    estimate: estimate, hosRestarts: function (n) { return hosRestarts(n || Date.now()); },
     rideAudioInfo: function () { return rideAudio.info(); }, /* v72f test hook */
     hosLimitReached: hosLimitReached, /* v72r test hooks */
     driverCanTakeNew: driverCanTakeNew,

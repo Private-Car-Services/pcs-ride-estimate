@@ -44,7 +44,7 @@
       tot[restC] += len - future;
       var row = (data.rows || {})[d] || null, odo = odoOf(row);
       var edits = editsOf(row).concat((data.overrides || []).filter(function (o) { var t = Number(o.at || o.grantedAt) || 0; return t >= t0 && t < t1; }).map(function (o) {
-        return { at: Number(o.at || o.grantedAt), what: "God mode " + (o.kind || "override") + (o.hours ? " (" + o.hours + " h)" : ""), by: o.by || "God mode", reason: o.reason || "" };
+        return { at: Number(o.at || o.grantedAt), what: (o.auto ? "" : "God mode ") + (o.kind || "override") + (o.hours ? " (" + o.hours + " h)" : ""), by: o.by || "God mode", reason: o.reason || "" };
       }));
       out.push({ restCode: restC, day: d, start: t0, minutes: len, upTo: future, segs: segs, totals: tot, odo: odo, edits: edits });
     }
@@ -154,7 +154,7 @@
   function ch(k, label, opts, group, extra) { return Object.assign({ k: k, label: label, group: group || "", type: "choice", opts: opts.map(function (o) { return { label: o[0], bad: !!o[1] }; }), required: true }, extra || {}); }
   var DVIR = [
     ch("lowbeam", "Low beam", WK, "Headlights", { block: true }), ch("highbeam", "High beam", WK, "Headlights", { block: true }),
-    ch("turn", "Turn signals and hazards", WK, "", { block: true }), ch("brakelights", "Brake lights", WK, "", { block: true }), ch("taillights", "Taillights", WK), ch("brakes", "Brakes", WK, "", { block: true }), ch("brakenoise", "Do the wheels make a scratching or grinding noise while driving at low speeds?", YN_YESBAD, "", { sub: true, noPhoto: true, warn: "A brake job may be necessary before continuing operation." }), /* v74: flag + warning; blocking OFF until Matthew decides (God editor toggle) */ ch("ebrake", "Emergency / parking brake", WK, "", { block: true }),
+    ch("turn", "Turn signals and hazards", WK, "", { block: true }), ch("brakelights", "Brake lights", WK, "", { block: true }), ch("taillights", "Taillights", WK), ch("brakes", "Brakes", WK, "", { block: true }), ch("brakenoise", "Do the wheels make a scratching or grinding noise while driving at low speeds?", YN_YESBAD, "", { sub: true, noPhoto: true, noCamera: true, warn: "A brake job may be necessary before continuing operation." }), /* v74: flag + warning; blocking OFF until Matthew decides (God editor toggle) */ ch("ebrake", "Emergency / parking brake", WK, "", { block: true }),
     ch("oil", "Oil", LF, "Fluids", { block: true }), ch("coolant", "Coolant", LF, "Fluids", { block: true }), ch("washer", "Washer fluid", LF, "Fluids", { block: true }), /* block = blocks while the fluids check is overdue; a Low answer only flags */
     ch("tread", "Tread 3/32\u2033 minimum", YN_NOBAD, "Tires"), ch("pressure", "Pressure 32 psi minimum", YN_NOBAD, "Tires"), ch("tiredamage", "Damage", YN_YESBAD, "Tires"),
     ch("belts", "Seat belts", WK),
@@ -162,7 +162,7 @@
     ch("wipercracked", "Cracked", YN_YESBAD, "Wipers"), ch("wiperworking", "Working", YN_NOBAD, "Wipers"),
     ch("mirrorcracked", "Cracked", YN_YESBAD, "Mirrors"), ch("mirrorworking", "Working", YN_NOBAD, "Mirrors"),
     ch("horn", "Horn working", YN_NOBAD, "", { block: true }), ch("doors", "Doors and locks working", YN_NOBAD),
-    ch("dash", "Dash warning lights on", YN_YESBAD, "", { text: true, textLabel: "Which warning lights?" }),
+    ch("dash", "Dash warning lights on", YN_YESBAD, "", { text: true, textLabel: "Which warning lights?", noPhoto: true, noCamera: true }),
     ch("interior", "Interior clean", YN_NOBAD), ch("exterior", "Exterior clean", YN_NOBAD),
     ch("fulltank", "Full tank of gas", YN_NOBAD, "", { kinds: ["post"], noteOnly: true }), /* v74 (Matthew): post-trip only; No = a note in God mode, never unsafe */
     { k: "carwash", label: "Last date of car wash", type: "date", required: true, vehicle: true, block: true, maxAgeHours: 48 },
@@ -251,7 +251,7 @@
         (rec.unsafe ? '<p class="dl-dvir-unsafe" style="color:#b91c1c;font-weight:700">' + (rec.cleared ? "Unsafe defect cleared by " + esc(rec.cleared.by || "God mode") + " on " + esc(clock(rec.cleared.at)) + " \u00b7 reason: " + esc(rec.cleared.reason || "") : "Unsafe defect: you can\u2019t go Available until God mode clears it.") + "</p>" : "") +
         (rec.sig ? '<img alt="Driver signature" src="' + esc(rec.sig) + '" style="height:70px"><div style="border-top:1px solid #333;width:240px"></div><p style="font-size:12px">Driver signature</p>' : "") + "</div>";
     }
-    if (!meta.canSign || day.upTo >= day.minutes) return head + '<div class="dl-insp" style="background:#fff;padding:12px">No Inspections</div>';
+    if (!meta.canSign || (day.upTo >= day.minutes && meta.inspDay !== day.day)) return head + '<div class="dl-insp" style="background:#fff;padding:12px">No Inspections</div>';
     var vd = (meta.vehDates && meta.vehDates()) || {}, pg = "", fl = fluidsDue(vd.fluids, meta.now, meta.fluidsDays), flNote = false;
     return head + '<form id="dl-dvir-form" data-day="' + esc(day.day) + '" data-kind="' + kind + '" style="background:#fff;padding:10px;font-size:14px;color:#222">' +
       '<button type="button" id="dl-dvir-nodef" style="width:100%;padding:12px;margin-bottom:8px;border:0;border-radius:8px;background:#2e7d32;color:#fff;font-weight:700">No defects (mark all good)</button>' +
@@ -262,15 +262,18 @@
         var h = grp(it, pg) + (it.group === "Fluids" && it.group !== pg ? '<div class="dl-fluids-due" style="padding:2px 0 4px 12px;color:#b45309;font-size:13px">' + (fl.why === "never" ? "Fluids check due (no check on record)" : fl.why === "weekend" ? "Weekly fluids check due this weekend (last " + esc(fl.last) + ")" : "Fluids check due (last " + esc(fl.last) + ", " + fl.since + " days ago)") + "</div>" : ""); pg = it.group; var pad = it.group || it.sub ? "padding-left:12px;" : "";
         if (it.type === "date") return h + '<div class="dl-dvir-item" data-item="' + esc(it.k) + '" data-type="date" style="' + pad + 'border-bottom:1px solid #eee;padding-top:8px;padding-bottom:8px"><label style="display:flex;gap:6px;align-items:center"><span style="flex:1">' + esc(it.label) + (it.required ? "" : ' <small style="color:#888">(optional)</small>') + '</span><input type="text" inputmode="numeric" placeholder="MM/DD/YYYY" maxlength="10" name="date-' + esc(it.k) + '" value="' + esc(vd[it.k] || "") + '" style="width:120px"></label></div>';
         if (it.noteOnly) return h + '<div class="dl-dvir-item" data-item="' + esc(it.k) + '" data-note-only="1" style="' + pad + 'border-bottom:1px solid #eee;padding-top:8px;padding-bottom:8px"><div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap"><span style="flex:1">' + esc(it.label) + "</span>" +
-          it.opts.map(function (o, i) { return '<label><input type="radio" name="dv-' + esc(it.k) + '" value="' + i + '" data-bad="' + (o.bad ? "note" : 0) + '"> ' + esc(o.label) + "</label>"; }).join(" ") + "</div></div>";
+          it.opts.map(function (o, i) { return '<label><input type="radio" name="dv-' + esc(it.k) + '" value="' + i + '" data-bad="' + (o.bad ? "note" : 0) + '"> ' + esc(o.label) + "</label>"; }).join(" ") + "</div>" +
+          (it.k === "fulltank" ? '<div class="dl-fuel" hidden style="margin-top:6px"><label>Fuel level (required) <select name="fuel-fulltank" required><option value="">Pick\u2026</option>' + FUEL_LEVELS.map(function (v) { return '<option value="' + v + '">' + v + "</option>"; }).join("") + "</select></label></div>" : "") + /* v74b */
+          "</div>";
         return h + '<div class="dl-dvir-item" data-item="' + esc(it.k) + '" data-required="' + it.required + '" style="' + pad + 'border-bottom:1px solid #eee;padding-top:8px;padding-bottom:8px"><div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap"><span style="flex:1">' + esc(it.label) + (it.required ? "" : ' <small style="color:#888">(optional)</small>') + "</span>" +
           it.opts.map(function (o, i) { return '<label><input type="radio" name="dv-' + esc(it.k) + '" value="' + i + '" data-bad="' + (o.bad ? (it.noteOnly ? "note" : 1) : 0) + '"> ' + esc(o.label) + "</label>"; }).join(" ") + "</div>" +
           '<div class="dl-dvir-def" hidden style="margin-top:6px">' + (it.warn ? '<p class="dl-dvir-warn" style="margin:0 0 6px;color:#b91c1c;font-weight:700">' + esc(it.warn) + "</p>" : "") + (it.text ? '<input type="text" name="text-' + esc(it.k) + '" placeholder="' + esc(it.textLabel || "Explain") + ' (required)" maxlength="300" style="width:100%;margin-bottom:4px">' : "") +
-          '<input type="text" name="note-' + esc(it.k) + '" placeholder="Notes" maxlength="300" style="width:100%">' +
+          '<input type="text" name="note-' + esc(it.k) + '" placeholder="Notes' + ((it.noCamera || it.k === "brakenoise" || it.k === "dash") ? " (optional)" : "") + '" maxlength="300" style="width:100%">' +
           (!it.required ? '<div style="margin:4px 0;color:#888">Optional item: noted only, never blocks.</div>' : it.block ? '<div style="margin:4px 0;color:#b91c1c;font-size:13px;font-weight:600">' + (it.photoApprove ? "Blocks going Available until God mode approves the photo." : "Safety item: blocks going Available until God mode clears it.") + "</div>" : '<div style="margin:4px 0;color:#555;font-size:13px">Flagged to God mode (does not block).</div>') +
-          (it.required && !it.noPhoto ? '<div style="margin:4px 0;color:#b45309;font-size:13px">Photo required</div>' : "") +
+          (it.required && !it.noPhoto && !(it.noCamera || it.k === "brakenoise" || it.k === "dash") ? '<div style="margin:4px 0;color:#b45309;font-size:13px">Photo required</div>' : "") +
+          ((it.noCamera || it.k === "brakenoise" || it.k === "dash") ? "" : /* v74b (Matthew): never a photo for the grinding-noise question */
           '<label class="dl-photo-btn" style="display:inline-block;padding:8px 14px;border-radius:8px;background:#374151;color:#fff;font-weight:600;cursor:pointer">\ud83d\udcf7 Take photo<input type="file" accept="image/*" capture="environment" name="photo-' + esc(it.k) + '" data-photo="' + esc(it.k) + '" style="position:absolute;width:1px;height:1px;opacity:0;overflow:hidden"></label> <span class="dl-photo-count" data-photo-count="' + esc(it.k) + '" style="font-size:13px;color:#555"></span>' +
-          '<div class="dl-photo-thumbs" data-photo-thumbs="' + esc(it.k) + '"></div></div></div>';
+          '<div class="dl-photo-thumbs" data-photo-thumbs="' + esc(it.k) + '"></div>') + "</div></div>";
       }).join("") +
       '<label style="display:block;margin-top:8px">Odometer <input type="text" inputmode="numeric" pattern="[0-9]*" name="odometer" id="dl-dvir-odo" value="' + esc(meta.odoNow != null && isFinite(Number(meta.odoNow)) ? String(Math.floor(Number(meta.odoNow))) : "") + '" style="width:140px"></label>' +
       '<p style="margin:10px 0 4px">Driver signature</p><canvas id="dl-sig-pad" width="680" height="140" style="width:100%;height:140px;touch-action:none;display:block;background:#fafafa"></canvas><div style="border-top:1px solid #333"></div>' +
@@ -288,6 +291,16 @@
   }
   function shrink(file) { return new Promise(function (res) { var fr = new FileReader(); fr.onload = function () { var im = new Image(); im.onload = function () { var k = Math.min(1, 900 / Math.max(im.width, im.height)), cv = document.createElement("canvas"); cv.width = Math.round(im.width * k); cv.height = Math.round(im.height * k); cv.getContext("2d").drawImage(im, 0, 0, cv.width, cv.height); res(cv.toDataURL("image/jpeg", 0.7)); }; im.onerror = function () { res(null); }; im.src = fr.result; }; fr.onerror = function () { res(null); }; fr.readAsDataURL(file); }); }
   /* returns a Promise of the record, or { error } when a required answer is missing */
+  var FUEL_LEVELS = ["3/4", "1/2", "1/4", "Empty"];
+  var FUEL_MSG = "Please end each day with a full tank. A ride may be requested first thing in the morning, and the car needs to be ready to go.";
+  function fuelPopup(done) {
+    var old = document.getElementById("dl-fuel-pop"); if (old) old.remove();
+    var m = document.createElement("div"); m.id = "dl-fuel-pop"; m.setAttribute("role", "alertdialog"); m.setAttribute("aria-modal", "true");
+    m.style.cssText = "position:fixed;inset:0;z-index:100002;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;padding:16px";
+    m.innerHTML = '<div style="background:#fff;color:#111;border-radius:12px;padding:18px;max-width:360px;width:100%;font-size:16px"><p id="dl-fuel-msg" style="margin:0 0 14px;font-weight:600">' + FUEL_MSG + '</p><button type="button" id="dl-fuel-ok" style="width:100%;min-height:44px;background:#111;color:#fff;border:0;border-radius:8px;font-weight:700;font-size:16px">OK</button></div>';
+    document.body.appendChild(m);
+    m.querySelector("#dl-fuel-ok").addEventListener("click", function () { m.remove(); done(); });
+  }
   function readDvir(form, meta) {
     var out = {}, unsafe = false, defects = 0, jobs = [], err = "", vehDates = {}, now = Date.now(), fluidsSeen = false, notes = 0, blocks = [];
     items(meta).forEach(function (it) {
@@ -306,14 +319,17 @@
       var r = form.querySelector('input[name="dv-' + it.k + '"]:checked');
       if (!r) { if (it.required && !err) err = "Answer: " + (it.group ? it.group + " \u2013 " : "") + it.label; out[it.k] = x; return; }
       var o = it.opts[+r.value] || {}; x.answer = o.label; x.bad = !!o.bad;
-      if (it.noteOnly) { x.bad = false; if (o.bad) { x.noteFlag = true; notes++; } out[it.k] = x; return; } /* v74: e.g. post-trip "Full tank of gas = No" -> God note, never a defect */
+      if (it.noteOnly) { x.bad = false; if (o.bad) { x.noteFlag = true; notes++;
+          if (it.k === "fulltank") { x.fuel = String((form.querySelector('select[name="fuel-fulltank"]') || {}).value || ""); /* v74b: required fuel level when the tank isn't full */
+            if (FUEL_LEVELS.indexOf(x.fuel) < 0) { if (!err) err = "Pick the fuel level (Full tank of gas = No)."; } else { x.answer = o.label + " \u00b7 fuel level " + x.fuel; x.note = "Fuel level " + x.fuel; } } }
+        out[it.k] = x; return; } /* v74: e.g. post-trip "Full tank of gas = No" -> God note, never a defect */
       if (x.bad) {
         x.note = (form.querySelector('input[name="note-' + it.k + '"]') || {}).value || "";
         if (it.text) { x.text = String((form.querySelector('input[name="text-' + it.k + '"]') || {}).value || "").trim(); if (!x.text && !err) err = (it.textLabel || "Explain") + " (" + it.label + ")"; if (x.text) x.note = x.text + (x.note ? " \u00b7 " + x.note : ""); }
         if (!it.required) x.optional = true;
         else { defects++; if (it.block) { x.blocking = true; x.safe = false; unsafe = true; blocks.push({ k: it.k, label: (it.group ? it.group + " " : "") + it.label, why: it.photoApprove ? "photo" : "defect" }); if (it.photoApprove) x.needsApproval = true; } if (it.warn) x.warn = it.warn; }
         var shots = (form.__photos && form.__photos[it.k]) || []; x.photos = [];
-        if (it.required && !it.noPhoto && !shots.length && !err) err = "Take a photo of the defect (" + (it.group ? it.group + " \u2013 " : "") + it.label + ").";
+        if (it.required && !it.noPhoto && !(it.noCamera || it.k === "brakenoise" || it.k === "dash") && !shots.length && !err) err = "Take a photo of the defect (" + (it.group ? it.group + " \u2013 " : "") + it.label + ").";
         shots.slice(0, 4).forEach(function (file) { jobs.push(shrink(file).then(function (dd) { if (dd) x.photos.push(dd); })); });
       }
       out[it.k] = x;
@@ -407,6 +423,7 @@
       });
       var oi = dform.querySelector("#dl-dvir-odo"); if (oi) oi.addEventListener("input", function () { var v = oi.value.replace(/\..*$/, "").replace(/\D/g, ""); if (v !== oi.value) oi.value = v; });
     }
+    if (dform) dform.addEventListener("change", function (e) { if (e.target.name === "dv-fulltank") { var fu = dform.querySelector(".dl-fuel"); if (fu) fu.hidden = e.target.getAttribute("data-bad") !== "note"; } }); /* v74b */
     if (dform) dform.addEventListener("change", function (e) { var it = e.target.closest(".dl-dvir-item"); if (it && /^dv-/.test(e.target.name)) { var dd = it.querySelector(".dl-dvir-def"); if (dd) dd.hidden = e.target.getAttribute("data-bad") !== "1"; } });
     var st = document.getElementById("dl-print-style");
     if (!st) { st = document.createElement("style"); st.id = "dl-print-style"; st.textContent = "@media print{body>*:not(#dl-overlay){display:none!important}#dl-overlay{position:static!important;overflow:visible!important;background:#fff!important}#dl-overlay .dl-bar{display:none!important}}"; document.head.appendChild(st); }
@@ -426,7 +443,10 @@
         if (!pad || !pad.__ink) { err.textContent = "Sign with your finger to submit."; return; }
         t.disabled = true;
         var mo = f.__motion || {}; if (mo.moving) { err.textContent = "Stop the vehicle to complete inspection"; t.disabled = false; return; }
-        readDvir(f, meta).then(function (r) { r.motion = mo.seen ? "verified" : "unverified"; if (f.__startedAt) { r.startedAt = f.__startedAt; r.finishedAt = Date.now(); r.durationSec = Math.round((r.finishedAt - r.startedAt) / 1000); } if (mo.seen) r.maxMph = Math.round(mo.max); if (r.error) { err.textContent = r.error; t.disabled = false; return; } var kind = f.getAttribute("data-kind"); meta.onDvir(day.day, kind, Object.assign(r, { kind: kind, day: day.day, at: Date.now(), odometer: odo, sig: pad.toDataURL("image/png"), driver: meta.driver || "", vehicle: meta.vehicle || {} }));
+        readDvir(f, meta).then(function (r) { r.motion = mo.seen ? "verified" : "unverified"; if (f.__startedAt) { r.startedAt = f.__startedAt; r.finishedAt = Date.now(); r.durationSec = Math.round((r.finishedAt - r.startedAt) / 1000); } if (mo.seen) r.maxMph = Math.round(mo.max); if (r.error) { err.textContent = r.error; t.disabled = false; return; }
+          var ft = r.items && r.items.fulltank; /* v74b (Matthew): tank not full at post-trip -> reminder pop-up, OK acknowledged + logged */
+          if (ft && ft.noteFlag && ft.fuel) { if (!f.__fuelAck) { t.disabled = false; fuelPopup(function () { f.__fuelAck = Date.now(); t.click(); }); return; } ft.fuelAckAt = f.__fuelAck; ft.fuelMsg = FUEL_MSG; }
+          var kind = f.getAttribute("data-kind"); meta.onDvir(day.day, kind, Object.assign(r, { kind: kind, day: day.day, at: Date.now(), odometer: odo, sig: pad.toDataURL("image/png"), driver: meta.driver || "", vehicle: meta.vehicle || {} }));
           open(days, meta, "day:" + day.day + ":insp" + (kind === "post" ? "-post" : "")); });
         return;
       }
