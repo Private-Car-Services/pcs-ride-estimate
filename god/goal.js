@@ -7,7 +7,7 @@
    cannot decrypt. No network calls (CSP connect-src 'none'). Back up with "Export encrypted backup". */
 (function () {
   "use strict";
-  var GL_CSS = '#gl-screen{--bg:#0b1f0b;--card:#102810;--line:#2e5a2e;--green:#3fae5a;--lite:#7ee08f;--gold:#d4af37;--goldt:#f0d48a;--red:#ff8a80;--txt:#eef5ee}#gl-screen,#gl-screen *{box-sizing:border-box}#gl-screen,#gl-screen{margin:0;background:var(--bg);color:var(--txt);font:16px/1.35 -apple-system,system-ui,Segoe UI,Roboto,sans-serif}#gl-screen main{max-width:760px;margin:0 auto;padding:14px 14px 80px}#gl-screen h1{color:var(--goldt);font-size:24px;margin:6px 0 10px}#gl-screen .card{border:1px solid var(--line);border-radius:14px;padding:12px;margin:10px 0;background:var(--card)}#gl-screen .card.hero{border:2px solid var(--gold)}#gl-screen .card.day{border:2px solid var(--green);text-align:center;background:#0f300f}#gl-screen .card b.t{color:var(--goldt);font-size:17px}#gl-screen .grid{display:flex;flex-wrap:wrap;gap:8px;margin-top:6px}#gl-screen .big{flex:1 1 30%;min-width:110px;background:#163a16;border:1px solid var(--green);border-radius:10px;padding:8px}#gl-screen .big .v{font-size:22px;font-weight:900}#gl-screen .neg{color:var(--red)}#gl-screen .pos{color:var(--lite)}#gl-screen .fine{font-size:13px;color:#b9cdb9}#gl-screen table{width:100%;border-collapse:collapse}#gl-screen td,#gl-screen th{padding:4px 3px}#gl-screen td.r,#gl-screen th.r{text-align:right}#gl-screen tr.b{border-top:1px solid var(--line)}#gl-screen input,#gl-screen select{font-size:16px;padding:9px;border-radius:10px;border:1px solid #9ab79a;background:#fff;color:#000}#gl-screen .btn{font-weight:800;border-radius:12px;padding:10px 16px;border:2px solid var(--gold);background:linear-gradient(#f0d48a,#d4af37);color:#0b1f0b;cursor:pointer;font-size:16px}#gl-screen .btn.ghost{background:transparent;color:var(--goldt)}#gl-screen .total{font-size:42px;font-weight:900;color:var(--lite)}#gl-screen #gl-q-amt{font-size:28px;width:170px;text-align:right}#gl-screen label{display:inline-block;margin:4px 8px 4px 0}#gl-screen label span{display:block}#gl-screen .lock{max-width:420px;margin:12vh auto;padding:20px}#gl-screen .err{color:var(--red);min-height:1.2em}#gl-screen .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;justify-content:center}#gl-screen .btn.ghost{background:#f3f4f6;color:#1a1a1a;border:2px solid #6b7280}#gl-screen .lock{color:#eef5ee}#gl-close{position:fixed;top:max(40px,calc(10px + env(safe-area-inset-top)));right:max(16px,env(safe-area-inset-right));z-index:9101;min-height:52px;min-width:120px;font-size:20px;font-weight:900;border-radius:14px;border:2px solid #fff;background:#1f8a3b;color:#fff;cursor:pointer}#gl-screen main{padding-top:100px}';
+  var GL_CSS = '#gl-screen{--bg:#0b1f0b;--card:#102810;--line:#2e5a2e;--green:#3fae5a;--lite:#7ee08f;--gold:#d4af37;--goldt:#f0d48a;--red:#ff8a80;--txt:#eef5ee}#gl-screen,#gl-screen *{box-sizing:border-box}#gl-screen,#gl-screen{margin:0;background:var(--bg);color:var(--txt);font:16px/1.35 -apple-system,system-ui,Segoe UI,Roboto,sans-serif}#gl-screen main{max-width:760px;margin:0 auto;padding:14px 14px 80px}#gl-screen h1{color:var(--goldt);font-size:24px;margin:6px 0 10px}#gl-screen .card{border:1px solid var(--line);border-radius:14px;padding:12px;margin:10px 0;background:var(--card)}#gl-screen .card.hero{border:2px solid var(--gold)}#gl-screen .card.day{border:2px solid var(--green);text-align:center;background:#0f300f}#gl-screen .card b.t{color:var(--goldt);font-size:17px}#gl-screen .grid{display:flex;flex-wrap:wrap;gap:8px;margin-top:6px}#gl-screen .big{flex:1 1 30%;min-width:110px;background:#163a16;border:1px solid var(--green);border-radius:10px;padding:8px}#gl-screen .big .v{font-size:22px;font-weight:900}#gl-screen .neg{color:var(--red)}#gl-screen .pos{color:var(--lite)}#gl-screen .fine{font-size:13px;color:#b9cdb9}#gl-screen table{width:100%;border-collapse:collapse}#gl-screen td,#gl-screen th{padding:4px 3px}#gl-screen td.r,#gl-screen th.r{text-align:right}#gl-screen tr.b{border-top:1px solid var(--line)}#gl-screen input,#gl-screen select{font-size:16px;padding:9px;border-radius:10px;border:1px solid #9ab79a;background:#fff;color:#000}#gl-screen .btn{font-weight:800;border-radius:12px;padding:10px 16px;border:2px solid var(--gold);background:linear-gradient(#f0d48a,#d4af37);color:#0b1f0b;cursor:pointer;font-size:16px}#gl-screen .btn.ghost{background:transparent;color:var(--goldt)}#gl-screen .total{font-size:42px;font-weight:900;color:var(--lite)}#gl-screen #gl-q-amt{font-size:28px;width:170px;text-align:right}#gl-screen label{display:inline-block;margin:4px 8px 4px 0}#gl-screen label span{display:block}#gl-screen .lock{max-width:420px;margin:12vh auto;padding:20px}#gl-screen .err{color:var(--red);min-height:1.2em}#gl-screen .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;justify-content:center}#gl-screen .btn.ghost{background:#f3f4f6;color:#1a1a1a;border:2px solid #6b7280}#gl-screen .lock{color:#eef5ee}#gl-screen summary{cursor:pointer}#gl-close{position:fixed;top:max(40px,calc(10px + env(safe-area-inset-top)));right:max(16px,env(safe-area-inset-right));z-index:9101;min-height:52px;min-width:120px;font-size:20px;font-weight:900;border-radius:14px;border:2px solid #fff;background:#1f8a3b;color:#fff;cursor:pointer}#gl-screen main{padding-top:100px}';
   var ITER = 600000, LOCK_MS = 5 * 60000, MINPW = 10;
   var LINES = [["uber", "Uber"], ["lyft", "Lyft"], ["pcs", "PCS (private clients)"], ["ofc", "Officiating (Football/Softball)"], ["va", "VA"], ["cash", "Cash"]];
   var EXP = [["exp", "Fuel & expenses"]];
@@ -98,8 +98,9 @@
     var y = t.slice(0, 4), m = t.slice(0, 7), sum = {};
     function add(k, v) { sum[k] = (sum[k] || 0) + v; }
     Object.keys(D.entries).forEach(function (id) { var e = D.entries[id], d = String(e.date || ""), a = Number(e.amount) || 0, l = e.line;
-      if (d.slice(0, 4) === y) add("y:" + l, a); if (d.slice(0, 7) === m) add("m:" + l, a); if (d >= wk0 && d <= t) add("w:" + l, a); if (d === t) add("d:" + l, a); if (d === yday) add("y1:" + l, a);
-      if (e.tip) { if (d.slice(0, 4) === y) add("y:tip:" + l, a); if (d.slice(0, 7) === m) add("m:tip:" + l, a); if (d >= wk0 && d <= t) add("w:tip:" + l, a); if (d === t) add("d:tip:" + l, a); } });
+      var adj = e.type === "adjustment", inW = d >= wk0 && d <= t && (!adj || e.scope === "w"), inD = d === t && !adj; /* v75q: month/year adjustments never touch Today or the week */
+      if (d.slice(0, 4) === y) add("y:" + l, a); if (d.slice(0, 7) === m) add("m:" + l, a); if (inW) add("w:" + l, a); if (inD) add("d:" + l, a); if (d === yday && !adj) add("y1:" + l, a);
+      if (e.tip) { if (d.slice(0, 4) === y) add("y:tip:" + l, a); if (d.slice(0, 7) === m) add("m:tip:" + l, a); if (inW) add("w:tip:" + l, a); if (inD) add("d:tip:" + l, a); } });
     function g(sc, l) { return sum[sc + ":" + l] || 0; }
     function inc(sc) { return LINES.reduce(function (a, l) { return a + g(sc, l[0]); }, 0); }
     var weekGoal = goal(s.week), dTyped = goal(s.daysLeft), dSet = String(s.daysLeftSet || "");
@@ -115,6 +116,42 @@
       yearGoal: yearGoal, yearTotal: inc("y"), expY: g("y", "exp"), yearRem: sub(yearGoal, inc("y")), uberG: uberG, uberDaily: uberDaily, uberRem: sub(uberG, g("w", "uber")) };
   }
 
+
+  /* ---------- v75q: Adjustments ---------- */
+  var ADJ = [["uber", "Uber", false], ["lyft", "Lyft", false], ["pcs", "PCS (rides)", false], ["pcs", "PCS tips", true], ["ofc", "Officiating", false], ["va", "VA", false], ["cash", "Cash", false], ["exp", "Fuel & expenses", false]];
+  /* current period amount for an ADJ row, EXCLUDING today's (non-adjustment) entries */
+  function adjCur(c, sc, r) { var g = c.g;
+    function v(x) { return r[2] ? g(x, "tip:" + r[0]) : g(x, r[0]) - (r[0] === "pcs" ? g(x, "tip:pcs") : 0); }
+    return v(sc) - v("d"); }
+  /* inputs: [{w,m,y}] per ADJ row (null = leave alone). Week first, then month, then year, so each lands exactly. */
+  function planAdjust(inputs, t, at) {
+    t = t || today(); at = at || Date.now(); var out = [], n = 0, m1 = t.slice(0, 7) + "-01", y1 = t.slice(0, 4) + "-01-01";
+    [["w", "week"], ["m", "month"], ["y", "year"]].forEach(function (p) {
+      ADJ.forEach(function (r, i) { var v = inputs[i] && inputs[i][p[0]]; if (v == null) return;
+        var c = calc(t), date = p[0] === "w" ? c.wk0 : p[0] === "m" ? m1 : y1, amt = Math.round((v - adjCur(c, p[0], r)) * 100) / 100; if (!amt) return;
+        var id = "adj-" + newId(at + n); D.entries[id] = { date: date, line: r[0], amount: amt, tip: r[2], type: "adjustment", scope: p[0], note: "Manual adjustment (" + p[1] + " to date)", at: at + n++ }; out.push(id); }); });
+    return out;
+  }
+  function ADJHTML(c) { var open = paint.adjOpen ? " open" : "";
+    function inp(i, k) { return '<td><input id="gl-adj-' + k + i + '" type="text" inputmode="decimal" autocomplete="off" style="width:110px;background:#fff;color:#000"></td>'; }
+    var ids = Object.keys(D.entries).filter(function (k) { return D.entries[k].type === "adjustment"; }).sort(function (a, b) { return (D.entries[b].at || 0) - (D.entries[a].at || 0); });
+    return '<details class="card" id="gl-adj"' + open + '><summary><b class="t">Adjustments</b> <span class="fine">set your real to-date totals</span></summary>' +
+      '<p class="fine">Type your actual totals through yesterday (leave a box blank to leave it alone). Apply adds a dated "Manual adjustment" so Month and Year match. Month to date is dated the 1st, year remainder Jan 1. Today and this week stay the same unless you fill in Week to date.</p>' +
+      '<table><tr class="fine"><th style="text-align:left">Source</th><th>Year to date</th><th>Month to date</th><th>Week to date (before today)</th></tr>' +
+      ADJ.map(function (r, i) { return "<tr><td>" + esc(r[1]) + "</td>" + inp(i, "y") + inp(i, "m") + inp(i, "w") + "</tr>"; }).join("") + "</table>" +
+      '<button class="btn" id="gl-b-adj" type="button">Apply adjustments</button> <span class="fine" id="gl-adj-msg"></span>' +
+      (ids.length ? '<table style="margin-top:8px"><tr class="fine"><th style="text-align:left">Date</th><th style="text-align:left">Source</th><th class="r">Amount</th><th style="text-align:left">For</th><th></th></tr>' + ids.map(function (k) { var e = D.entries[k];
+        return '<tr class="b"><td>' + esc(e.date) + "</td><td>" + esc(name(e.line).replace(/ \(.*\)/, "") + (e.tip ? " tip" : "")) + '</td><td class="r">' + $m(e.amount, true) + '</td><td class="fine">' + ({ w: "week", m: "month", y: "year" }[e.scope] || "") + '</td><td class="r"><button class="btn ghost" data-adjdel="' + esc(k) + '">Undo</button></td></tr>'; }).join("") + "</table>" : "") + "</details>";
+  }
+  function bindAdj() { var d = document.getElementById("gl-adj"); if (!d) return; d.ontoggle = function () { paint.adjOpen = d.open; };
+    document.getElementById("gl-b-adj").onclick = function () { var bad = false, any = false;
+      var inputs = ADJ.map(function (r, i) { var o = {}; ["y", "m", "w"].forEach(function (k) { var el = document.getElementById("gl-adj-" + k + i), raw = el.value.trim(); if (!raw) return; var v = num(raw); if (v == null) bad = true; else { o[k] = v; any = true; } }); return o; });
+      var msg = document.getElementById("gl-adj-msg"); if (bad) { msg.textContent = "Check the numbers."; return; } if (!any) { msg.textContent = "Nothing entered."; return; }
+      if (!confirm("Set these to-date totals? Adjustment entries will be added (you can Undo them).")) return;
+      var ids = planAdjust(inputs); paint.adjOpen = true; paint(); save(); var m = document.getElementById("gl-adj-msg"); if (m) m.textContent = ids.length ? ids.length + " adjustment(s) added." : "Already matched; nothing to add."; };
+    Array.prototype.forEach.call(document.querySelectorAll("#gl-adj [data-adjdel]"), function (b) { b.onclick = function () { if (confirm("Undo this adjustment?")) { delete D.entries[b.getAttribute("data-adjdel")]; paint.adjOpen = true; paint(); save(); } }; });
+  }
+
   /* ---------- UI ---------- */
   function esc(s) { return String(s == null ? "" : s).replace(/[&<>"]/g, function (c) { return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]; }); }
   function $m(n, cents) { if (n == null || !isFinite(n)) return "\u2014"; var a = Math.abs(n).toLocaleString("en-US", cents ? { minimumFractionDigits: 2, maximumFractionDigits: 2 } : { maximumFractionDigits: 0 }); return (n < 0 ? "-$" : "$") + a; }
@@ -128,8 +165,9 @@
     function f(id, l, v) { return '<label><span class="fine">' + l + '</span><input id="' + id + '" type="text" ' + (id === "gl-s-days" ? 'inputmode="numeric" pattern="[0-9]*"' : 'inputmode="decimal"') + ' autocomplete="off" value="' + esc(v == null ? "" : v) + '" style="width:130px"></label>'; }
     h += '<form class="card" id="gl-f-set"><b class="t">Goals</b><br>' + f("gl-s-week", "Weekly goal $", s.week) + f("gl-s-days", "Days left in week", c.dLeft) + f("gl-s-uber", "Uber week goal $", s.uber) + f("gl-s-month", "Monthly goal $", s.month) + f("gl-s-year", "Year goal $", s.year) +
       '<br><button class="btn" type="submit">Save goals</button> <span class="fine" id="gl-set-msg">Saves automatically as you type.</span></form>';
+    h += ADJHTML(c);
     h += REST(c);
-    app.innerHTML = h; bind();
+    app.innerHTML = h; bind(); bindAdj();
     var qa = document.getElementById("gl-q-amt"); if (qa && paint.focusQ) { qa.focus(); paint.focusQ = false; }
   }
   /* v75l: everything above the Goals form; re-rendered on each goal keystroke without touching the Goals inputs (keeps the keyboard up) */
