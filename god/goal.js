@@ -1,4 +1,4 @@
-/* PCS Monthly Goal (Matthew) - v75y: Adjustments are SET values (YTD and Month to date replace, never add); one-time migration of old adjustment entries keeping totals; Adjustments list + Past entries with Undo; month > year blocked; old heuristic repair removed. v75w: foolproof month repair - per source, if Month > Year, or Month > 40% of Year (March on), every adjustment dated this month (any scope) moves to Jan 1 and merges; a single non-adjustment entry this month bigger than 40% of Year moves too; visible 'goal v75w' label. v75v: robust repair - a month-to-date adjustment that is really a year figure (>40% of that source's YTD from March on, or >2x a plausible month) is re-dated to Jan 1 and netted with Apply's negative year remainder; Apply treats MTD >= 90% of YTD as YTD only. v75u: big on-screen 9-key pad (1-9 . 0 del, Clear, Done) on every money/number box; 'Use iPad keyboard' fallback. v75t: every money/number box opens the number pad (numPad helper after each render). v75s: tappable goal overrides, adjustment re-dating/repair, goals never negative. v75r: goal cascade + YTD totals. v75g: runs INSIDE God mode as its own Home panel (God Home > Monthly Goal).
+/* PCS Monthly Goal (Matthew) - v76a: matches Matthew's morning math. Weeks left = whole Monday weeks left in the month (this week counts 1); weekly = month remaining at the start of this week / weeks left, optional round up (weekRound, e.g. 100); days left = Mon-Sat left this week including today (typed days only count on the day typed); today = week remaining before today / days left, rounded UP to the cent; month pace line; migrated month sets built from old year adjustments are dropped (doubling fix); week income comes from real entries only. v75z: weeks left prorated by working days (Mon-Sat) in the month; 'How today's goal was figured' line with every number; warning when month income before this week already passes the monthly goal; Adjustments show which past entries sit inside a YTD set. v75y: Adjustments are SET values (YTD and Month to date replace, never add); one-time migration of old adjustment entries keeping totals; Adjustments list + Past entries with Undo; month > year blocked; old heuristic repair removed. v75w: foolproof month repair - per source, if Month > Year, or Month > 40% of Year (March on), every adjustment dated this month (any scope) moves to Jan 1 and merges; a single non-adjustment entry this month bigger than 40% of Year moves too; visible 'goal v75w' label. v75v: robust repair - a month-to-date adjustment that is really a year figure (>40% of that source's YTD from March on, or >2x a plausible month) is re-dated to Jan 1 and netted with Apply's negative year remainder; Apply treats MTD >= 90% of YTD as YTD only. v75u: big on-screen 9-key pad (1-9 . 0 del, Clear, Done) on every money/number box; 'Use iPad keyboard' fallback. v75t: every money/number box opens the number pad (numPad helper after each render). v75s: tappable goal overrides, adjustment re-dating/repair, goals never negative. v75r: goal cascade + YTD totals. v75g: runs INSIDE God mode as its own Home panel (God Home > Monthly Goal).
    Own password + PIN, separate from God sign-in. Data stays on this device only (never Firebase, no network calls).
    Ported from the former standalone /ledger/ app; same IndexedDB vault.
    Local-first: all data lives on this device in IndexedDB, AES-GCM encrypted with a key derived from Matthew's own
@@ -142,7 +142,11 @@
   function goal(v) { return Number(v) > 0 ? Number(v) : null; }
   function sub(a, b) { return a == null || b == null ? null : a - b; }
   /* Monday-start weeks left in this month, counting the current one */
-  function weeksLeft(t, wk0) { var n = 1, d = addDays(wk0, 7); while (d.slice(0, 7) === t.slice(0, 7)) { n++; d = addDays(d, 7); } return n; }
+  /* v75z: this week counts as 1; each later Mon-Sun week counts by its working days (Mon-Sat) inside this month / 6 */
+  /* v76a: whole weeks - this week + every later Monday inside this month (Oct 14 2026 -> 12, 19, 26 = 3) */
+  function weeksLeft(t, wk0) { var n = 1, d = addDays(wk0, 7), m = t.slice(0, 7); while (d.slice(0, 7) === m) { n++; d = addDays(d, 7); } return n; }
+  function ceilC(n) { return n == null ? null : Math.ceil(Math.round(n * 1000) / 10) / 100; }
+  function monthDaysLeft(t) { var n = 0, d = t; while (d.slice(0, 7) === t.slice(0, 7)) { n++; d = addDays(d, 1); } return Math.max(1, n - 1); } /* matches his calculator: last day of month minus today (Oct 14 -> 17) */
   function calc(t) {
     t = t || today(); var s = D.settings || {}, dow = (new Date(t + "T12:00:00Z").getUTCDay() + 6) % 7, wk0 = addDays(t, -dow), yday = addDays(t, -1);
     var y = t.slice(0, 4), m = t.slice(0, 7), m1 = m + "-01", sum = {};
@@ -159,14 +163,16 @@
     /* v75r cascade: year (typed) -> month -> week -> today; each derived goal is auto unless overridden */
     var yearGoal = goal(s.year), mLeft = 12 - Number(t.slice(5, 7)) + 1, wLeft = weeksLeft(t, wk0);
     var monthAuto = yearGoal == null ? null : Math.max(0, (yearGoal - inc("yb")) / mLeft), monthOv = goal(s.monthOv), monthGoal = monthOv != null ? monthOv : monthAuto;
-    var weekAuto = monthGoal == null ? null : Math.max(0, (monthGoal - inc("mb")) / wLeft), weekOv = goal(s.weekOv), weekGoal = weekOv != null ? weekOv : weekAuto;
+    var weekRaw = monthGoal == null ? null : Math.max(0, (monthGoal - inc("mb")) / wLeft), wRound = goal(s.weekRound), weekAuto = weekRaw == null ? null : wRound ? Math.ceil(r2(weekRaw) / wRound) * wRound : r2(weekRaw), weekOv = goal(s.weekOv), weekGoal = weekOv != null ? weekOv : weekAuto;
     var dTyped = goal(s.daysLeft), dSet = String(s.daysLeftSet || "");
     var passed = dSet && dSet <= t ? Math.round((Date.parse(t + "T12:00:00Z") - Date.parse(dSet + "T12:00:00Z")) / 86400000) : 0;
-    var dLeft = dTyped == null ? null : Math.max(1, dTyped - passed);
-    var before = inc("w") - inc("d"), dailyAuto = weekGoal == null || dLeft == null ? null : Math.max(0, (weekGoal - before) / dLeft), dayOv = goal(s.dayOv), daily = dayOv != null ? dayOv : dailyAuto;
+    var autoD = Math.max(1, 6 - dow); /* v76a: Mon-Sat left this week, today included (Sunday off: counts 1 if you work it) */
+    var dLeft = dTyped != null && dSet === t ? Math.max(1, dTyped) : autoD; void passed;
+    var before = inc("w") - inc("d"), dailyAuto = weekGoal == null || dLeft == null ? null : ceilC(Math.max(0, (weekGoal - before) / dLeft)), dayOv = goal(s.dayOv), daily = dayOv != null ? dayOv : dailyAuto;
     var rolled = null; if (weekGoal != null && dLeft != null && yday >= wk0) { var yi = inc("y1"); rolled = Math.max(0, (weekGoal - (before - yi)) / (dLeft + 1)) - yi; }
     var uberG = goal(s.uber), uberDaily = uberG == null || dLeft == null ? null : (uberG - (g("w", "uber") - g("d", "uber"))) / dLeft;
-    return { monthAuto: monthAuto, monthOv: monthOv, weekAuto: weekAuto, weekOv: weekOv, dailyAuto: dailyAuto, dayOv: dayOv, mLeft: mLeft, wLeft: wLeft, yBefore: inc("yb"), mBefore: inc("mb"), wBefore: before, t: t, wk0: wk0, g: g, inc: inc, weekGoal: weekGoal, dLeft: dLeft, daily: daily, rolled: rolled, dayGross: inc("d"), expD: g("d", "exp"),
+    var mBeforeToday = inc("m") - inc("d"), mdLeft = monthDaysLeft(t), monthRemBefore = monthGoal == null ? null : monthGoal - mBeforeToday, monthPace = monthRemBefore == null ? null : r2(Math.max(0, monthRemBefore) / mdLeft);
+    return { weekRaw: weekRaw, wRound: wRound, autoD: autoD, mBeforeToday: mBeforeToday, mdLeft: mdLeft, monthRemBefore: monthRemBefore, monthPace: monthPace, weekRemBefore: weekGoal == null ? null : weekGoal - before, monthAuto: monthAuto, monthOv: monthOv, weekAuto: weekAuto, weekOv: weekOv, dailyAuto: dailyAuto, dayOv: dayOv, mLeft: mLeft, wLeft: wLeft, yBefore: inc("yb"), mBefore: inc("mb"), wBefore: before, t: t, wk0: wk0, g: g, inc: inc, weekGoal: weekGoal, dLeft: dLeft, daily: daily, rolled: rolled, dayGross: inc("d"), expD: g("d", "exp"),
       todayRem: sub(daily, inc("d")), weekTotal: inc("w"), weekRem: sub(weekGoal, inc("w")), expW: g("w", "exp"),
       monthGoal: monthGoal, monthTotal: inc("m"), expM: g("m", "exp"), monthRem: sub(monthGoal, inc("m")),
       yearGoal: yearGoal, yearTotal: inc("y"), expY: g("y", "exp"), yearRem: sub(yearGoal, inc("y")), uberG: uberG, uberDaily: uberDaily, uberRem: sub(uberG, g("w", "uber")) };
@@ -185,7 +191,7 @@
   /* virtual adjustment entries for calc(); t = today */
   function derived(t) { var out = [], A = D.adj || {}, y = t.slice(0, 4), m = t.slice(0, 7), m1 = m + "-01", y1 = y + "-01-01";
     ADJ.forEach(function (r) { var s = A[akey(r)]; if (!s) return;
-      var Y = s.y != null && String(s.yThru || "").slice(0, 4) === y ? Number(s.y) : null, M = s.m != null && s.mMonth === m ? Number(s.m) : null; if (Y == null && M == null) return;
+      var Y = s.y != null && String(s.yThru || "").slice(0, 4) === y ? Number(s.y) : null, M = s.m != null && s.mMonth === m && !s.migrated ? Number(s.m) : null; /* v76a: a migrated month set mixed old YEAR adjustments dated this month into October - ignore it (year total unchanged, since the year set still covers it) */ if (Y == null && M == null) return;
       var eY = 0, eM = 0; Object.keys(D.entries).forEach(function (k) { var e = D.entries[k], d = String(e.date || ""); if (e.type === "adjustment" || !inRow(e, r)) return; var a = Number(e.amount) || 0;
         if (Y != null && d.slice(0, 4) === y && d <= s.yThru) eY += a; if (M != null && d.slice(0, 7) === m && d <= s.mThru) eM += a; });
       var mAdj = M != null ? r2(M - eM) : 0, yAdj = Y != null ? r2(Y - eY - (M != null && m1 <= s.yThru ? mAdj : 0)) : 0;
@@ -200,7 +206,7 @@
     ADJ.forEach(function (r) { var ks = Object.keys(D.entries).filter(function (k) { var e = D.entries[k]; return e.type === "adjustment" && inRow(e, r); }); if (!ks.length) return;
       var Y = 0, M = 0, hasM = false, oldY = 0, oldM = 0;
       Object.keys(D.entries).forEach(function (k) { var e = D.entries[k], d = String(e.date || ""), a = Number(e.amount) || 0; if (!inRow(e, r) || d.slice(0, 4) !== y) return;
-        if (e.type === "adjustment") { Y += a; if (d.slice(0, 7) === m) { M += a; hasM = true; oldM += a; } else oldY += a; }
+        if (e.type === "adjustment") { Y += a; if (d.slice(0, 7) === m && e.scope !== "y") { M += a; hasM = true; oldM += a; } else oldY += a; }
         else if (d <= yday) { Y += a; if (d.slice(0, 7) === m) M += a; } });
       D.adj[akey(r)] = { y: r2(Y), yThru: yday, m: hasM ? r2(M) : null, mThru: hasM ? yday : null, mMonth: hasM ? m : null, at: Date.now(), migrated: true };
       log[akey(r)] = { name: r[1], ytd: r2(Y), mtd: hasM ? r2(M) : null, oldYearAdj: r2(oldY), oldMonthAdj: r2(oldM), count: ks.length };
@@ -257,12 +263,19 @@
   function name(l) { var x = LINES.concat(EXP).filter(function (a) { return a[0] === l; })[0]; return x ? x[1] : l; }
   function big(l, v, extra) { return '<div class="big"><div class="fine">' + l + '</div><div class="v">' + v + "</div>" + (extra || "") + "</div>"; }
   function row(l, v, gap) { return "<tr><td>" + l + '</td><td class="r"><b>' + v + "</b></td><td class=\"r " + (gap == null ? "" : gap >= 0 ? "pos" : "neg") + '">' + (gap == null ? "" : $m(gap)) + "</td></tr>"; }
+  /* v75z: every number behind today's goal, in plain words */
+  function howToday(c) { var mg = c.monthGoal, h = '<p class="fine" id="gl-how"><b>How today\u2019s goal was figured:</b> ';
+    h += "Monthly goal " + $m(mg) + (c.monthOv != null ? " (you typed it)" : " (auto)") + " \u2212 October income before this week " + $m(c.mBefore) + " = " + $m(mg == null ? null : Math.max(0, mg - c.mBefore)) + " \u00f7 " + c.wLeft + " weeks left = " + $m(c.weekRaw, true) + (c.wRound ? ", rounded up to " + $m(c.weekAuto) : "") + " = weekly (auto)";
+    if (c.weekOv != null) h += "; you typed weekly " + $m(c.weekOv) + ", so that is used";
+    h += ". Weekly " + $m(c.weekGoal) + " \u2212 week income before today " + $m(c.wBefore, true) + " = " + $m(c.weekGoal == null ? null : Math.max(0, c.weekGoal - c.wBefore), true) + " \u00f7 " + (c.dLeft == null ? "?" : c.dLeft) + " days left = today " + $m(c.dailyAuto, true) + (c.dayOv != null ? "; you typed today " + $m(c.dayOv, true) + ", so that is used" : "") + ".</p>";
+    if (mg != null && c.mBefore > mg) h += '<p class="err">October income before this week (' + $m(c.mBefore) + ') is already more than the monthly goal, so the weekly auto shows $0. If that number looks too big, open Adjustments and check the list for an entry counted twice.</p>';
+    return h; }
   function paint() {
     var c = calc(), s = D.settings, h = "";
     h += '<div id="gl-top">' + topHtml(c) + '</div>';
     function f(id, l, v) { return '<label><span class="fine">' + l + '</span><input id="' + id + '" type="text" ' + (id === "gl-s-days" ? 'inputmode="numeric" pattern="[0-9]*"' : 'inputmode="decimal"') + ' autocomplete="off" value="' + esc(v == null ? "" : v) + '" style="width:130px"></label>'; }
     function o(id, l, v, tag) { return '<div class="gl-ov" style="display:inline-block;margin:4px 8px 4px 0;position:relative;z-index:2"><span class="fine" style="display:block">' + l + ' <b id="' + tag + '" style="color:var(--lite)"></b></span><input id="' + id + '" class="gl-ovin" type="text" inputmode="decimal" enterkeyhint="done" autocomplete="off" autocorrect="off" spellcheck="false" placeholder="auto" aria-label="' + esc(l) + ' (blank = auto)" value="' + esc(v == null ? "" : v) + '" style="width:130px"></div>'; }
-    h += '<form class="card" id="gl-f-set"><b class="t">Goals</b><br>' + f("gl-s-year", "Year goal $", s.year) + o("gl-s-month", "Monthly goal $", s.monthOv, "gl-t-month") + o("gl-s-week", "Weekly goal $", s.weekOv, "gl-t-week") + o("gl-s-day", "Today's goal $", s.dayOv, "gl-t-day") + f("gl-s-days", "Days left in week", c.dLeft) + f("gl-s-uber", "Uber week goal $", s.uber) +
+    h += '<form class="card" id="gl-f-set"><b class="t">Goals</b><br>' + f("gl-s-year", "Year goal $", s.year) + o("gl-s-month", "Monthly goal $", s.monthOv, "gl-t-month") + o("gl-s-week", "Weekly goal $", s.weekOv, "gl-t-week") + o("gl-s-day", "Today's goal $", s.dayOv, "gl-t-day") + f("gl-s-days", "Days left in week", c.dLeft) + f("gl-s-wround", "Round weekly up to $ (e.g. 100)", s.weekRound) + f("gl-s-uber", "Uber week goal $", s.uber) +
       '<p class="fine">Leave Monthly / Weekly / Today blank for <b>auto</b>; type a number to override, clear it to go back to auto.</p><p class="fine" id="gl-formula"></p>' +
       '<br><button class="btn" type="submit">Save goals</button> <span class="fine" id="gl-set-msg">Saves automatically as you type.</span></form>';
     h += ADJHTML(c);
@@ -278,11 +291,11 @@
   function topHtml(c) {
     var g = c.g, h = "";
     h += '<div class="row" style="justify-content:space-between"><h1>Monthly Goal</h1><button class="btn ghost" id="gl-b-lock">Lock</button></div>';
-    h += '<div class="fine" id="gl-ver" style="text-align:right;opacity:.7">goal v75y</div>';
+    h += '<div class="fine" id="gl-ver" style="text-align:right;opacity:.7">goal v76a</div>';
     var roll = c.rolled != null && Math.abs(c.rolled) >= 0.01 ? '<div class="fine ' + (c.rolled > 0 ? "neg" : "pos") + '">Rolled over from yesterday: ' + (c.rolled > 0 ? "+$" + c.rolled.toFixed(2) + " short" : "ahead by $" + Math.abs(c.rolled).toFixed(2)) + "</div>" : "";
     h += '<div class="card hero"><b class="t">TODAY \u00b7 ' + esc(c.t) + '</b><div class="grid">' + big("Weekly goal", $m(c.weekGoal)) + big("Days left in week", c.dLeft == null ? "\u2014" : String(c.dLeft), '<div class="fine">counts down daily</div>') +
-      big("Today's goal", $m(c.daily, true), roll) + big("Today remaining", $m(left(c.todayRem), true)) + big("Week remaining", $m(left(c.weekRem))) + big("Month remaining", $m(left(c.monthRem))) +
-      '</div><p class="fine">Today\'s goal = (weekly goal \u2212 week income before today) \u00f7 days left. Week = Mon\u2013Sun (Sunday optional).</p></div>';
+      big("Today's goal", $m(c.daily, true), roll) + big("Today remaining", $m(left(c.todayRem), true)) + big("Week remaining", $m(left(c.weekRem), true), '<div class="fine">before today ' + $m(c.weekRemBefore, true) + '</div>') + big("Month remaining", $m(left(c.monthRem), true), '<div class="fine">before today ' + $m(c.monthRemBefore, true) + '</div>') + big("Month daily pace", $m(c.monthPace, true), '<div class="fine">' + c.mdLeft + ' days, 7 a week</div>') +
+      '</div>' + howToday(c) + '</div>';
     var ids = Object.keys(D.entries).filter(function (k) { return D.entries[k].date === c.t && D.entries[k].line !== "exp"; }).sort(function (a, b) { return (D.entries[a].at || 0) - (D.entries[b].at || 0); });
     var run = 0, tape = ids.map(function (k) { var e = D.entries[k]; run += Number(e.amount) || 0; var rem = c.daily == null ? null : c.daily - run;
       return '<tr class="b"><td style="text-align:left">' + esc(name(e.line).replace(/ \(.*\)/, "") + (e.line === "exp" ? "" : e.tip ? " tip" : " ride")) + '</td><td class="r">+' + $m(e.amount, true) + '</td><td class="r pos">' + $m(run, true) + '</td><td class="r" style="color:' + (rem != null && rem <= 0 ? "var(--lite)" : "var(--goldt)") + '">' + (rem != null && rem < 0 ? "ahead by " + $m(-rem, true) : $m(rem, true)) + '</td><td class="r"><button class="btn ghost" data-del="' + esc(k) + '">Undo</button></td></tr>'; }).reverse().join("");
@@ -314,8 +327,8 @@
      so the typed value counts for today and then counts down one per day. */
   var setTimer = null;
   function readGoals() { var s = D.settings;
-    [["gl-s-week", "weekOv"], ["gl-s-day", "dayOv"], ["gl-s-uber", "uber"], ["gl-s-month", "monthOv"], ["gl-s-year", "year"]].forEach(function (p) { var el = document.getElementById(p[0]); if (el) s[p[1]] = num(el.value); });
-    var de = document.getElementById("gl-s-days"); if (de) { var d = num(de.value); if (d !== calc().dLeft) { s.daysLeft = d; s.daysLeftSet = today(); } } }
+    [["gl-s-week", "weekOv"], ["gl-s-day", "dayOv"], ["gl-s-uber", "uber"], ["gl-s-month", "monthOv"], ["gl-s-year", "year"], ["gl-s-wround", "weekRound"]].forEach(function (p) { var el = document.getElementById(p[0]); if (el) s[p[1]] = num(el.value); });
+    var de = document.getElementById("gl-s-days"); if (de) { var d = num(de.value); var cc = calc(); if (d == null || d === cc.autoD) { s.daysLeft = null; s.daysLeftSet = null; } else if (d !== cc.dLeft) { s.daysLeft = d; s.daysLeftSet = today(); } } }
   function goalsSaved(m) { var x = document.getElementById("gl-set-msg"); if (x) x.textContent = m; }
   function bind() {
     bindTop();
