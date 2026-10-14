@@ -1628,7 +1628,8 @@
     var item = godPopupQueue[0];
     if (!item) return;
     try {
-      if (item.kind === "accept") renderGodAcceptPopup(item.ride);
+      if (item.kind === "dlw") renderGodDriverAlertPopup(item.ride); /* v74d */
+      else if (item.kind === "accept") renderGodAcceptPopup(item.ride);
       else renderGodRequestPopup(item.ride);
     } catch (e) {
       godPopupQueue.shift();
@@ -2229,6 +2230,7 @@
     for (var i = 0; i < godPopupQueue.length; i += 1) {
       var it = godPopupQueue[i];
       if (it.kind === "request" && isPendingOwner(freshRide(it.ride)) && !sil[String(it.ride.code)]) return true;
+      if (it.kind === "dlw") return true; /* v74d: driver-fault alerts ring until OK is tapped */
     }
     return false;
   }
@@ -3319,13 +3321,13 @@
   }
   /* ===== v72r hours of service: config (rides/HOSLIMIT) + per-driver driving / on-duty display + alerts =====
      Default = Houston Code Ch. 46 (limousine drivers): max 12 h DRIVING in any rolling 24 h. On-duty caps optional (0 = off). */
-  /* PCS HOS policy (Matthew, CDL / Motive "USA Property 70 hour / 8 day"): 11 h drive, 14 h shift, 30-min break after 8 h
-     driving, 70 h / 8 days; 10 h off resets drive + shift, 34 h off restarts the cycle. All editable here. */
-  var HOS_DEF = { maxDriveHours: 11, shiftWindowHours: 14, breakAfterDriveHours: 8, breakMinutes: 30, cycleHours: 70, cycleDays: 8, resetHours: 10, restartHours: 34, breakAfterMin: 150, breakMinOnDutyHours: 3 };
+  /* PCS HOS policy (Matthew, CDL / Motive "USA Property 70 hour / 8 day"): 12 h drive, 14 h shift (v74b; was 11 h drive), 30-min break after 8 h
+     driving, 70 h / 8 days; 10 h off resets drive + shift, 34 h off restarts ALL clocks incl. the cycle (Matthew). All editable here. */
+  var HOS_DEF = { maxDriveHours: 12, shiftWindowHours: 14, breakAfterDriveHours: 8, breakMinutes: 30, cycleHours: 70, cycleDays: 8, resetHours: 10, restartHours: 34, breakAfterMin: 150, breakMinOnDutyHours: 3 };
   var HOS_FIELDS = [["hos-drive", "maxDriveHours", 0, 24, "DRIVE: max moving time (hours, 0 = off)"], ["hos-shift", "shiftWindowHours", 0, 24, "SHIFT: on-duty window (hours, 0 = off)"],
     ["hos-brkh", "breakAfterDriveHours", 0, 24, "BREAK: required after this many hours of driving (0 = off)"], ["hos-brkm", "breakMinutes", 5, 120, "BREAK length (minutes)"], ["hos-brkmin", "breakMinOnDutyHours", 0, 14, "BREAK counts as the 30-min break only if it starts this many hours on duty after shift start or the last qualifying break (0 = any time)"],
     ["hos-cyc", "cycleHours", 0, 200, "CYCLE: max on-duty hours (0 = off)"], ["hos-cycd", "cycleDays", 1, 14, "CYCLE rolling days"],
-    ["hos-reset", "resetHours", 1, 48, "Off-duty hours that reset DRIVE + SHIFT"], ["hos-restart", "restartHours", 1, 96, "Off-duty hours that restart the CYCLE"],
+    ["hos-reset", "resetHours", 1, 48, "Off-duty hours that reset DRIVE + SHIFT"], ["hos-restart", "restartHours", 1, 96, "Consecutive off hours (Offline / logged out / off duty) that reset ALL clocks incl. the 70 h CYCLE"],
     ["hos-break", "breakAfterMin", 0, 600, "Soft take-a-break nudge after continuous driving (minutes, 0 = off)"]];
   /* v72r overrides: rides/HOSOVRDE/{driver} = { request, override, restUntil }; log at rides/DRVRHOSL/{driver}/overrides/{at} */
   state.hosOvr = {};
@@ -3398,6 +3400,24 @@
     if (!t || !t.closest) return;
     var oo = t.closest("[data-odo-ovr]");
     var od = t.closest("[data-odo-dismiss]");
+    var ofx = t.closest("[data-odo-fix]"), ofs = t.closest("[data-odo-fix-save]");
+    if (ofx) { var ff = document.querySelector('[data-odo-fix-form="' + ofx.getAttribute("data-odo-fix") + '"]'); if (ff) { ff.hidden = !ff.hidden; var vi = ff.querySelector(".odo-fix-val"); if (vi && !ff.hidden) try { vi.focus(); vi.select(); } catch (eF) {} } return; }
+    if (ofs) { /* v74b: God sets the correct reading: today's row opening odometer (day miles recalculated from it), logged, alert closed */
+      var fid = ofs.getAttribute("data-odo-fix-save"), fv = String((document.querySelector('[data-odo-fix-val="' + fid + '"]') || {}).value || "").trim(), fw = String((document.querySelector('[data-odo-fix-why="' + fid + '"]') || {}).value || "").trim();
+      var fe = document.querySelector('[data-odo-fix-err="' + fid + '"]');
+      if (!/^\d+$/.test(fv) || Number(fv) <= 0) { if (fe) fe.textContent = "Enter the reading in whole miles (digits only, more than 0)."; return; }
+      var frq = (hosOvrRow(fid).odoRequest) || {}, fnow = Date.now(), fday = new Intl.DateTimeFormat("en-CA", { timeZone: "America/Chicago" }).format(new Date(Number(frq.at) || fnow)), fval = Number(fv);
+      var rowUrl = baseUrl() + "/rides/DRVRMLES/" + encodeURIComponent(fid) + "/" + fday + ".json";
+      ofs.disabled = true;
+      fetch(rowUrl).then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }).then(function (row) {
+        var patch = { startOdometer: fval, odoRepaired: { at: fnow, from: Number(frq.entered) || 0, to: fval, by: godWho(), reason: fw || "Corrected in God mode", why: fw || "Corrected in God mode" }, odoCorrectedAt: fnow };
+        var endO = row && Number(row.endOdometer); if (endO > 0 && endO >= fval) patch.odoMiles = endO - fval; /* recalc day miles */
+        return fetch(rowUrl, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(patch) });
+      }).then(function () { return fetch(baseUrl() + "/rides/DRVRHOSL/" + encodeURIComponent(fid) + "/overrides/" + fnow + ".json", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ kind: "odometer corrected to " + fval, at: fnow, grantedAt: fnow, by: godWho(), reason: fw || "Corrected in God mode", from: Number(frq.entered) || 0, to: fval }) }); })
+        .then(function () { return hosOvrSave(fid, { odoDismiss: { reason: ("Corrected to " + fval + (fw ? ": " + fw : "")).slice(0, 200), by: godWho() } }).catch(function () {}); })
+        .then(hosOvrLoad).catch(function () { ofs.disabled = false; if (fe) fe.textContent = "Couldn't save. Try again."; });
+      return;
+    }
     if (od) { /* v74: Ignore / Dismiss the alert (logged with who / when / reason); nothing is reset */
       var did = od.getAttribute("data-odo-dismiss"), dr0 = (window.prompt("Reason for dismissing (logged, optional):") || "").trim() || "Dismissed";
       hosOvrSave(did, { odoDismiss: { reason: dr0.slice(0, 200), by: godWho() } }).then(hosOvrLoad).catch(function (er) { window.alert((er && er.message) || "Couldn't dismiss. Try again."); });
@@ -3446,6 +3466,7 @@
       if (c && typeof c === "object") {
         var n = {};
         HOS_FIELDS.forEach(function (f) { var v = Number(c[f[1]]); n[f[1]] = isFinite(v) && v >= f[2] && v <= f[3] ? v : HOS_DEF[f[1]]; });
+        if (c.rule !== "v74b" && n.maxDriveHours === 11) n.maxDriveHours = 12; /* v74b (Matthew): old 11 h default -> 12 h */
         state.hosCfg = n;
       }
       hosPaint();
@@ -3503,6 +3524,12 @@
       return '<div class="odo-req" style="background:#fee2e2;border:2px solid #b91c1c;border-radius:10px;padding:8px 10px;margin:8px 0;color:#7f1d1d">' + esc(displayName((ids[id] || {}).name || r.name || id, "Driver")) +
         (zero ? ": logged a <strong>zero</strong> opening odometer (refused by the app; day miles were NOT reset)" : ": opening odometer <strong>" + esc(String(r.entered)) + "</strong> is lower than the last reading <strong>" + esc(String(r.last)) + "</strong>") + " (" + esc(ctClock(Number(r.at))) + ") " +
         '<button type="button" class="btn btn-gold" data-odo-ovr="' + esc(id) + '">' + (zero ? "Allow (reset to this reading)" : "Allow lower odometer") + "</button> " +
+        '<button type="button" class="btn btn-ghost" data-odo-fix="' + esc(id) + '">Correct mileage</button>' + /* v74b */
+        '<div class="odo-fix-form" data-odo-fix-form="' + esc(id) + '" hidden style="margin-top:8px"><label style="display:block;font-weight:700">Correct odometer reading (whole miles)' +
+        '<input type="text" inputmode="numeric" pattern="[0-9]*" autocomplete="off" class="odo-fix-val" data-odo-fix-val="' + esc(id) + '" value="' + esc(String(Math.floor(Number(r.entered) || 0))) + '" style="display:block;width:100%;min-height:44px;font-size:18px;margin-top:4px"></label>' +
+        '<label style="display:block;margin-top:6px">Reason (logged, optional)<input type="text" class="odo-fix-why" data-odo-fix-why="' + esc(id) + '" maxlength="200" style="display:block;width:100%;min-height:44px;margin-top:4px"></label>' +
+        '<p class="odo-fix-err" data-odo-fix-err="' + esc(id) + '" role="alert" style="color:#7f1d1d;font-weight:700"></p>' +
+        '<button type="button" class="btn btn-gold" data-odo-fix-save="' + esc(id) + '">Save corrected reading</button></div>' +
         '<button type="button" class="btn btn-ghost" data-odo-dismiss="' + esc(id) + '">Ignore / Dismiss</button></div>'; /* v74 */
     }).join("");
     gpsHtml = odoHtml + gpsHtml;
@@ -3617,7 +3644,7 @@
           "</div>" +
           '<div class="field">' +
             '<label for="hire-pct">Commission %</label>' +
-            '<input id="hire-pct" name="pct" type="number" inputmode="numeric" pattern="[0-9]*" min="0" max="100" step="1" required value="' + esc(state.hirePct) + '">' +
+            '<input id="hire-pct" name="pct" type="text" inputmode="decimal" pattern="[0-9]*[.]?[0-9]*" min="0" max="100" step="1" required value="' + esc(state.hirePct) + '">' +
           "</div>" +
         "</div>" +
         '<p class="hire-error" id="hire-error">' + esc(state.hireError) + "</p>" +
@@ -3667,8 +3694,8 @@
           "<strong>Rider</strong> " + esc(e.riderName || "—") + "<br>" +
           "<strong>Route</strong> " + esc(e.pickup || "") + " → " + esc(e.drop || "") + "<br>" +
           (e.canceled || e.status === "canceled" ? '<strong style="color:#ff9b9b">CANCELED</strong> ' + esc(e.cancelFee === "charge" ? "(cancellation fee to charge)" : "(fee waived, no earnings)") + (e.cancelReason ? " \u00b7 " + esc(e.cancelReason) : "") + "<br>" : "") + /* v73 */
-          (Number(e.discountCents) > 0 ? '<strong style="color:#8fd0a8">Discount</strong> ' + esc(({ senior: "Senior 10%", military: "Military 10%", other: "Other" })[e.discountType] || "Discount") + " \u2212" + esc(fmtCents(e.discountCents)) +
-            (e.discountType === "other" ? " (from the driver\u2019s portion; PCS share on the full fare" + (e.discountReason ? "; reason: " + esc(e.discountReason) : "") + (e.discountApprovedBy ? "; approved by " + esc(e.discountApprovedBy) : "") + ")" : " (PCS share reduced in proportion)") + "<br>" : "") +
+          (Number(e.discountCents) > 0 ? '<strong style="color:#8fd0a8">' + (isCashEntry(e) && e.discountType !== "other" ? "Cash discount" : "Discount") + "</strong> " + /* v74b */ esc(({ senior: "Senior 10%", military: "Military 10%", other: "Other" })[e.discountType] || "Discount") + " \u2212" + esc(fmtCents(e.discountCents)) +
+            (e.discountType === "other" ? " (from the driver\u2019s portion; PCS share on the full fare" + (e.discountReason ? "; reason: " + esc(e.discountReason) : "") + (e.discountApprovedBy ? "; approved by " + esc(e.discountApprovedBy) : "") + ")" : isCashEntry(e) ? "" : " (PCS share reduced in proportion)") + "<br>" : "") +
           "<strong>Ride total</strong> " + esc(fmtCents(e.fareTotal)) + "<br>" +
           "<strong>Commission</strong> " + esc(fmtCents(e.commissionCents)) +
           " (" + esc(String(e.commissionPct || "")) + "%)" +
@@ -3734,7 +3761,7 @@
       "<p style=\"margin:0\"><strong>" + esc(e.riderName || "Rider") + "</strong> · " + esc(e.day || "") + "</p>" +
       '<p class="fine" style="margin:0 0 4px">' + esc(e.pickup || "") + " \u2192 " + esc(e.drop || "") + "</p>" +
       row("Fare (before discount)", esc(fmtCents(fare))) +
-      (Number(e.discountCents) > 0 ? row("Discount" + (e.discountType ? " (" + esc(({ senior: "Senior", military: "Military", other: "Other" })[e.discountType] || e.discountType) + ")" : ""), "\u2212" + esc(fmtCents(e.discountCents))) : "") +
+      (Number(e.discountCents) > 0 ? row((cash && e.discountType !== "other" ? "Cash discount" : "Discount") + (e.discountType ? " (" + esc(({ senior: "Senior", military: "Military", other: "Other" })[e.discountType] || e.discountType) + ")" : ""), "\u2212" + esc(fmtCents(e.discountCents))) : "") +
       row("Tax / fees", esc(fmtCents(e.fareTax || 0))) +
       row("Ride total", esc(fmtCents(e.fareTotal || 0))) +
       (tip ? row(cash ? "Cash tip (driver keeps)" : "Card tip (100% driver)", esc(fmtCents(tip))) : "") +
@@ -3777,9 +3804,13 @@
       mrow("Week commission", esc(fmtCents(wk.comm)), "earn-wk-comm-" + did) +
       (wk.cardTips ? mrow("Card tips (100% driver)", esc(fmtCents(wk.cardTips))) : "") +
       mrow("Cash tips received", esc(fmtCents(wk.cashTips))) +
-      mrow("<strong>Owed to PCS</strong>", "<strong>" + esc(fmtCents(wk.owed)) + "</strong>", "earn-wk-owed-" + did) +
+      mrow("<strong>Owes PCS</strong> (cash rides: company share)", "<strong>" + esc(fmtCents(wk.owed)) + "</strong>", "earn-wk-owed-" + did) +
+      (function () { var b = payBalance(all.filter(function (e) { return days.indexOf(e.day) >= 0 && !earnIsTest(e); })); /* v74b: Owes PCS netted against the week payout */
+        return mrow("<strong>Week payout (net)</strong>", "<strong>" + esc(payNetText(b)) + "</strong>", "earn-wk-net-" + did); })() +
       (wk.tests ? '<p class="fine" style="margin:4px 0 0">' + wk.tests + " rate comparison / test ride" + (wk.tests === 1 ? "" : "s") + " shown, not counted ($0).</p>" : "") +
-      "</div>" + cards +
+      "</div>" +
+      '<button type="button" class="btn btn-gold earn-add-past" data-add-past-ride="' + did + '" data-week="' + esc(monday) + '" style="margin:6px 0">+ Add past ride (this pay week)</button>' + /* v74b */
+      cards +
       '<div style="display:flex;justify-content:space-between;margin-top:6px">' +
       '<button type="button" class="btn btn-ghost earn-prev" data-driver-id="' + did + '">\u2190 Prev week</button>' +
       '<button type="button" class="btn btn-ghost earn-next" data-driver-id="' + did + '">Next week \u2192</button></div></section>';
@@ -3801,7 +3832,7 @@
       try { renderBoardLists(); } catch (e) {}
     });
   }
-  window.__pcsGodEarn = { html: earningsSheetHtml, entries: historyEntries };
+  window.__pcsGodEarn = { html: earningsSheetHtml, ride: function (e) { return earnRideHtml(e); }, entries: historyEntries, pastCheck: function (f, w, t) { return pastRideCheck(f, w, t); }, openPast: function (d, w) { return addPastRideOpen(d, w); } };
 
   function driversPanelHtml() {
     if (state.selectedDriverId) {
@@ -3835,6 +3866,7 @@
         else if (approval === "fired" || !d.active) badge = '<span class="badge fired">Fired</span>';
         else if (trip) badge = '<span class="badge on-trip">On trip' + (isBackgroundDriver(d) ? " · app in background" : "") + "</span>";
         else if (isBackgroundDriver(d)) badge = '<span class="badge bg-app" style="background:#4a3d12;color:#f0d48a;border:1px solid #f0d48a">Online · app in background · seen ' + esc(agoText(d.lastSeenAt)) + "</span>";
+        else if (d.online && d.autoBreak) badge = '<span class="badge auto-break" style="background:#1f4d33;color:#bef1c6">Break (auto, available)</span>'; /* v74d */
         else if (d.online) badge = '<span class="badge">Online · free</span>';
         else if (d.offlineLoggedIn) badge = '<span class="badge off offline-loggedin">Offline (logged in) · not dispatchable</span>'; /* v73 */
         else badge = '<span class="badge off">Approved · offline</span>';
@@ -3843,6 +3875,7 @@
         else if (approval === "rejected") statusShort = '<span class="badge fired">Rejected</span>';
         else if (approval === "fired" || !d.active) statusShort = '<span class="badge fired">Fired</span>';
         else if (isBackgroundDriver(d)) statusShort = '<span class="badge bg-app" style="background:#4a3d12;color:#f0d48a;border:1px solid #f0d48a">Online · app in background · seen ' + esc(agoText(d.lastSeenAt)) + "</span>";
+        else if (d.online && d.autoBreak) statusShort = '<span class="badge auto-break" style="background:#1f4d33;color:#bef1c6">Break (auto, available)</span>'; /* v74d */
         else if (d.online) statusShort = '<span class="badge">Online</span>';
         else if (d.offlineLoggedIn) statusShort = '<span class="badge off offline-loggedin">Offline (logged in)</span>'; /* v73 */
         else statusShort = '<span class="badge off">Offline</span>';
@@ -3891,6 +3924,7 @@
               locateBtn +
               '<button type="button" class="btn btn-gold" data-add-ride-driver="' + esc(d.id) + '">+ Add ride</button>' + /* v72d */
               '<button type="button" class="btn btn-ghost" data-driver-log="' + esc(d.id) + '">Driver\u2019s Log (14 days)</button>' + /* v73 */
+              '<button type="button" class="btn btn-ghost btn-force-logout" data-force-logout="' + esc(d.id) + '"' + (trip ? ' disabled title="Driver is on an active ride"' : "") + ">" + (trip ? "Log out driver (on a ride)" : "Log out driver") + "</button>" + /* v74b */
               '<p class="driver-speed"><strong>Speed</strong> ' + esc(speedTxt) + "</p>" +
               (d.online ? driverVersionHtml(d) : "") + /* v72r */
               (d.online ? driverHosHtml(d) : "") + /* v72r HOS */
@@ -3924,7 +3958,7 @@
               '<button type="button" class="btn btn-ghost btn-open-driver" data-driver-id="' + esc(d.id) + '">Calendar & history</button>' +
               '<div class="commission-row">' +
                 '<label class="commission-label" for="comm-' + esc(d.id) + '">Commission %</label>' +
-                '<input class="commission-input" id="comm-' + esc(d.id) + '" data-driver-id="' + esc(d.id) + '" type="number" inputmode="numeric" pattern="[0-9]*" min="0" max="100" step="1" value="' + esc(String(pct)) + '"' + (approval === "approved" ? "" : " disabled") + ">" +
+                '<input class="commission-input" id="comm-' + esc(d.id) + '" data-driver-id="' + esc(d.id) + '" type="text" inputmode="decimal" pattern="[0-9]*" min="0" max="100" step="1" value="' + esc(String(pct)) + '"' + (approval === "approved" ? "" : " disabled") + ">" +
                 '<button type="button" class="btn btn-ghost btn-save-comm" data-driver-id="' + esc(d.id) + '"' + (approval === "approved" ? "" : " disabled") + ">Save</button>" +
                 (approval === "pending"
                   ? '<button type="button" class="btn btn-gold btn-approve" data-driver-id="' + esc(d.id) + '">Approve</button>' +
@@ -4264,7 +4298,13 @@
     if (dg.length > 7) dg = dg.slice(0, 7);
     return (Number(dg) / 100).toFixed(2);
   }
-  function moneyRegAttrs() { return ' type="text" inputmode="numeric" pattern="[0-9]*" autocomplete="off" data-money-reg="1"'; }
+  /* v74b (Matthew): alert-card buttons readable: solid, high contrast, full width, 44 px+ (was faint gold-on-pink ghost) */
+  (function () { if (typeof document === "undefined" || document.getElementById("god-alert-btn-css")) return; var st = document.createElement("style"); st.id = "god-alert-btn-css";
+    st.textContent = ".odo-req .btn,.god-dvir-flag .btn,.god-dvir-missed .btn,.booking-alert .btn,#god-dvir-alerts .btn{display:block;width:100%;min-height:44px;margin:8px 0 0;font-weight:700;font-size:16px;border-radius:10px;opacity:1}" +
+      ".odo-req .btn-ghost,.god-dvir-flag .btn-ghost,.god-dvir-missed .btn-ghost,.booking-alert .btn-ghost,#god-dvir-alerts .btn-ghost{background:#1f2937 !important;color:#fff !important;border:2px solid #fff !important;text-shadow:none}" +
+      ".odo-req .btn-gold,#god-dvir-alerts .btn-gold,.booking-alert .btn-gold{background:#d4af37 !important;color:#111 !important;border:2px solid #111 !important}";
+    (document.head || document.documentElement).appendChild(st); })();
+  function moneyRegAttrs() { return ' type="text" inputmode="decimal" pattern="[0-9]*[.]?[0-9]{0,2}" autocomplete="off" data-money-reg="1"'; } /* v74b: numeric keypad with a decimal point */
   function moneyRegVal(n) { var x = Number(n); return n === "" || n == null || !isFinite(x) ? "" : x.toFixed(2); }
   if (typeof document !== "undefined") {
     document.addEventListener("input", function (e) {
@@ -4332,7 +4372,7 @@
       '<p class="meta" id="gd-who">' + esc(q.driverName || q.driverId || "Driver") + " \u00b7 fare " + esc(fmtCents(q.fareSubCents)) + " before tax" + (pend.length > 1 ? " \u00b7 " + (pend.length - 1) + " more waiting" : "") + "</p>" +
       '<p id="gd-reason" style="font-weight:700">Reason: ' + esc(q.reason || "") + "</p>" +
       '<div style="display:flex;gap:8px;align-items:end;flex-wrap:wrap"><div><label for="gd-amount">Amount off ($)</label><input id="gd-amount"' + moneyRegAttrs() + ' style="width:120px"></div>' +
-      '<div><label for="gd-pct">or percent off (%)</label><input id="gd-pct" type="text" inputmode="numeric" pattern="[0-9]*" autocomplete="off" style="width:90px"></div></div>' +
+      '<div><label for="gd-pct">or percent off (%)</label><input id="gd-pct" type="text" inputmode="decimal" pattern="[0-9]*[.]?[0-9]*" autocomplete="off" style="width:90px"></div></div>' +
       '<p class="fine">The whole discount comes out of the driver\u2019s portion; PCS\u2019s share stays on the full fare.</p>' +
       '<p class="error" id="gd-err" role="alert" style="color:#ff6b6b"></p>' +
       '<div style="display:flex;gap:8px"><button type="button" class="btn btn-gold" id="gd-approve">Approve</button><button type="button" class="btn btn-ghost" id="gd-decline">Decline</button></div></div>';
@@ -5066,7 +5106,7 @@
     return (
       '<div class="login-wrap">' +
         '<form class="login-card" id="god-login" autocomplete="username">' +
-          '<svg class="pcs-wm" viewBox="0 0 390 96" role="img" aria-label="Private Car Services God mode" style="display:block;width:100%;max-width:420px;height:auto;max-height:120px;border-radius:8px" xmlns="http://www.w3.org/2000/svg"><defs><pattern id="wmg-gl" width="16" height="16" patternUnits="userSpaceOnUse"><path d="M16 0H0V16" fill="none" stroke="#2c4a2a" stroke-width=".6"/></pattern></defs><rect width="390" height="96" fill="#20371d"/><rect width="390" height="96" fill="url(#wmg-gl)"/><text x="195" y="44" text-anchor="middle" font-family="Poppins,Montserrat,Helvetica,Arial,sans-serif" font-style="italic" font-size="21" letter-spacing="1.5" font-weight="300" fill="#cdeccd">PRIVATE CAR SERVICES</text><path d="M28 54H350" stroke="#cdeccd" stroke-width="3"/><path d="M348 48L362 54L348 60Z" fill="#cdeccd"/><text x="195" y="76" text-anchor="middle" font-family="Poppins,Helvetica,Arial,sans-serif" font-style="italic" font-size="14" letter-spacing="1" fill="#a9c9a9">God mode</text></svg>' + /* v72e wordmark */
+          '<svg class="pcs-wm" viewBox="0 0 390 96" role="img" aria-label="Private Car Services God mode" style="display:block;width:100%;max-width:420px;height:auto;max-height:120px;border-radius:8px" xmlns="http://www.w3.org/2000/svg"><defs><pattern id="wmg-gl" width="16" height="16" patternUnits="userSpaceOnUse"><path d="M16 0H0V16" fill="none" stroke="#2c4a2a" stroke-width=".6"/></pattern></defs><rect width="390" height="96" fill="#20371d"/><rect width="390" height="96" fill="url(#wmg-gl)"/><text class="pcs-wm-name" x="28" y="44" text-anchor="start" textLength="334" lengthAdjust="spacingAndGlyphs" font-family="Poppins,Montserrat,Helvetica,Arial,sans-serif" font-style="italic" font-size="21" font-weight="300" fill="#cdeccd">PRIVATE CAR SERVICES</text><path d="M28 54H350" stroke="#cdeccd" stroke-width="3"/><path d="M348 48L362 54L348 60Z" fill="#cdeccd"/><text x="195" y="76" text-anchor="middle" font-family="Poppins,Helvetica,Arial,sans-serif" font-style="italic" font-size="14" letter-spacing="1" fill="#a9c9a9">God mode</text></svg>' + /* v72e wordmark */
           '<h1 style="position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)">PCS God mode</h1>' +
           '<p class="lede">Owner console. Drivers, riders, and live trips — for you only.</p>' +
           '<div class="field">' +
@@ -5512,7 +5552,7 @@
      chosen driver: driver app "Scheduled for you", God board, and when status = completed a /rides/DRVRHSTY/{driver}/{code}
      entry (cents) that counts toward commission and the Mon–Sun pay week. Edit / delete after saving, each with an audit note.
      Delete is a soft delete (status "deleted", kept for the audit trail; pay-week entry removed). */
-  var ADD_RIDE_PAY = [["square", "Card (Square)"], ["cash", "Cash (driver collects)"], ["card_failed", "Card failed - collect"], ["prepaid", "Prepaid"], ["invoice", "Invoice"]];
+  var ADD_RIDE_PAY = [["square", "Card (Square)"], ["cash", "Cash (driver collects)"], ["card_failed", "Card failed - collect"], ["prepaid", "Prepaid"], ["invoice", "Invoice"], ["account", "Account (billed to account)"]]; /* v74b: Account */
   function arCollects(pm) { return pm === "cash" || pm === "card_failed"; }
   var ADD_RIDE_STATUS = [["assigned", "Assigned (upcoming)"], ["completed", "Completed"], ["cancelled", "Cancelled"]];
   var AR_DERIVED = ["total", "commission", "balance"];
@@ -5739,11 +5779,14 @@
     var prevNorm = editId ? arFindRow(editId) : null;
     var prev = editId ? Object.assign({}, (state.addRideRaw && state.addRideRaw[editId]) || prevNorm || {}) : null;
     if (editId && !String(f.audit || "").trim()) return Promise.reject(new Error("Add an audit note saying what you changed and why."));
+    var past = !editId && state.addRidePast ? state.addRidePast : "";
+    if (past) { var pe = pastRideCheck(f, past, chicagoToday()); if (pe) return Promise.reject(new Error(pe)); f = Object.assign({}, f, { status: "completed" }); }
     var now = Date.now();
     var built = addRideBuild(f, arDriverChoices(f.driverId), now, prev);
     if (!built.ok) return Promise.reject(new Error(built.error));
     var row = built.row;
-    row.audit = arAudit(prev, editId ? f.audit : (f.audit || "created"), editId ? "edit" : "create", now);
+    if (past) { row.backdated = true; row.backdatedAt = now; row.payWeek = past; }
+    row.audit = arAudit(prev, editId ? f.audit : past ? "Past ride added (backdated) to pay week " + past + (f.audit ? ": " + f.audit : "") : (f.audit || "created"), editId ? "edit" : past ? "backdate" : "create", now);
     var wasDone = prev && prev.status === "completed";
     var steps = Promise.resolve();
     if (wasDone && (row.status !== "completed" || prev.assignedDriverId !== row.assignedDriverId)) {
@@ -5756,8 +5799,16 @@
       });
     }).then(function () {
       if (row.status !== "completed") return null;
-      return arHistoryPut(row.assignedDriverId, row.code, addRideHistoryEntry(row, now));
+      var he = addRideHistoryEntry(row, now); if (past) { he.backdated = true; he.payWeek = past; }
+      return arHistoryPut(row.assignedDriverId, row.code, he);
     }).then(function () {
+      if (!past) return null; /* v74b: Driver's Log entry for the backdated ride */
+      var owes = arCollects(row.payMethod) ? Math.round(row.balance * 100) : 0;
+      return fetch(baseUrl() + "/rides/DRVRHOSL/" + encodeURIComponent(row.assignedDriverId) + "/overrides/" + now + ".json", { method: "PUT", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ kind: "past ride added", at: now, grantedAt: now, by: godWho(), code: row.code, day: f.date, time: f.time, payWeek: past, payMethod: row.payMethod, fare: row.fare,
+          reason: "Past ride " + row.code + " on " + f.date + " " + f.time + " (" + row.payMethod + ")" + (owes ? ", driver owes PCS " + fmtCents(owes) : "") }) }).catch(function () {});
+    }).then(function () {
+      state.addRidePast = "";
       state.addRideDraft = null; state.addRideTouched = {}; state.addRideOpen = false; state.addRideEditId = "";
       var cash = arCollects(row.payMethod);
       state.boardNotice = (editId ? "Updated " : "Added ") + row.rider + " → " + row.assignedDriverName + " · " + row.status +
@@ -5804,7 +5855,26 @@
       payMethod: r.payMethod || "", flat: !!r.flatPrice, notes: r.notes || "", audit: "" };
   }
 
+  /* v74b (Matthew): "Add past ride" (backdated) inside a driver's Mon-Sun pay week: date/time, pickup, drop-off, fare,
+     Cash/Card/Account. Saved completed straight into that week; cash = driver owes PCS (100% - commission%) of the fare,
+     netted against the week payout. Logged in the ride audit + the Driver's Log. */
+  function pastRideCheck(f, week, today) {
+    var d = String(f.date || ""), end = addDaysYmd(week, 6);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(d) || d < week || d > end) return "Pick a date inside this pay week (" + week + " \u2192 " + end + ").";
+    if (d > today) return "A past ride can\u2019t be in the future.";
+    if (!/^\d{2}:\d{2}$/.test(String(f.time || ""))) return "Enter the time of the ride.";
+    if (["cash", "square", "account"].indexOf(String(f.payMethod || "")) < 0) return "Pick Cash, Card or Account.";
+    return "";
+  }
+  function addPastRideOpen(driverId, week) {
+    var today = chicagoToday(), end = addDaysYmd(week, 6);
+    state.addRidePast = week; state.addRideOpen = true; state.addRideError = ""; state.addRideEditId = ""; state.addRideTouched = {};
+    state.addRideDraft = addRidePrefill({ driverId: driverId, status: "completed", date: end < today ? end : today, time: "", payMethod: "" }, {}, driverId ? commissionPctFor(driverId) : DEFAULT_COMMISSION_PCT);
+    mountAddRideModal(true);
+    return Promise.resolve();
+  }
   function addRideOpenFor(driverId, editId) {
+    state.addRidePast = "";
     state.addRideOpen = true; state.addRideError = ""; state.addRideEditId = editId || "";
     if (editId) {
       return arLoadRaw(editId).then(function (raw) {
@@ -5908,11 +5978,12 @@
       return '<label class="ar-l" for="ar-' + id + '">' + label + "</label>" +
         '<input id="ar-' + id + '" data-ar="' + id + '" type="' + (type || "text") + '" value="' + esc(d[id] == null ? "" : d[id]) + '"' + (extra || "") + ">";
     };
-    var money = ' inputmode="numeric" pattern="[0-9]*" autocomplete="off" data-money-reg="1"'; /* v73 cash-register entry */
+    var money = ' inputmode="decimal" pattern="[0-9]*[.]?[0-9]{0,2}" autocomplete="off" data-money-reg="1"'; /* v73 cash-register entry */
     var cash = arCollects(d.payMethod);
     return (
       '<div class="add-ride-sheet" role="dialog" aria-modal="true" aria-labelledby="ar-title" style="background:#141414;color:#fff;border:2px solid #f0d48a;border-radius:16px;max-width:560px;width:100%;max-height:92vh;overflow:auto;padding:16px 18px">' +
-      '<h2 id="ar-title" style="margin:0 0 8px">' + (state.addRideEditId ? "Edit manual ride" : "Add ride") + "</h2>" +
+      '<h2 id="ar-title" style="margin:0 0 8px">' + (state.addRideEditId ? "Edit manual ride" : state.addRidePast ? "Add past ride (backdated)" : "Add ride") + "</h2>" +
+      (state.addRidePast ? '<p class="fine ar-past-note" style="margin:0 0 8px">Pay week ' + esc(state.addRidePast) + " \u2192 " + esc(addDaysYmd(state.addRidePast, 6)) + ". Saved as completed in this week. Cash = the driver collected it and owes PCS the company share (100% \u2212 commission %).</p>" : "") +
       '<p class="fine" style="opacity:.8;margin:0 0 10px">Every field is yours to change. Totals only prefill boxes you haven\'t typed in.</p>' +
       '<div class="ar-grid" style="display:grid;grid-template-columns:1fr 1fr;gap:6px 12px">' +
       '<div><label class="ar-l" for="ar-driverId">Driver</label>' + sel("driverId", drivers.map(function (x) { return [x.id, x.name || x.id]; }), "Pick a driver…") + "</div>" +
@@ -5922,12 +5993,12 @@
       '<div style="grid-column:1/3" id="ar-stops-box">' + arStopsHtml(d) + "</div>" + /* v73: one address search per stop */
       '<div style="grid-column:1/3;position:relative">' + inp("dropoff", "Drop-off (search an address)", "text", ' autocomplete="off" data-places="dropoff"') + "</div>" +
       "<div>" + inp("date", "Date", "date") + "</div><div>" + inp("time", "Time", "time") + "</div>" +
-      '<div><label class="ar-l" for="ar-payMethod">Payment method</label>' + sel("payMethod", ADD_RIDE_PAY, "Cash or card…") + "</div>" +
+      '<div><label class="ar-l" for="ar-payMethod">Payment method</label>' + sel("payMethod", state.addRidePast ? ADD_RIDE_PAY.filter(function (p) { return ["cash", "square", "account"].indexOf(p[0]) >= 0; }) : ADD_RIDE_PAY, state.addRidePast ? "Cash, Card or Account…" : "Cash or card…") + "</div>" +
       '<div><label class="ar-c" style="display:block;margin-top:22px"><input type="checkbox" id="ar-flat" data-ar="flat"' + (d.flat ? " checked" : "") + "> Flat price</label></div>" +
       "<div>" + inp("fare", "Fare ($)", "text", money) + "</div><div>" + inp("discount", "Discount ($)", "text", money) + "</div>" +
-      "<div>" + inp("discountPct", "Discount (%)", "text", ' inputmode="numeric" pattern="[0-9]*" autocomplete="off"') + '</div><div class="fine" style="align-self:end;opacity:.8">% fills $ on the pretax fare, and $ fills %.</div>' + /* v73 */
+      "<div>" + inp("discountPct", "Discount (%)", "text", ' inputmode="decimal" pattern="[0-9]*[.]?[0-9]*" autocomplete="off"') + '</div><div class="fine" style="align-self:end;opacity:.8">% fills $ on the pretax fare, and $ fills %.</div>' + /* v73 */
       "<div>" + inp("taxFees", "Tax / fees ($)", "text", money) + "</div><div>" + inp("total", "Total charged ($)", "text", money) + "</div>" +
-      "<div>" + inp("commissionPct", "Commission %", "text", ' inputmode="numeric" pattern="[0-9]*" autocomplete="off"') + "</div><div>" + inp("commission", "Driver commission ($)", "text", money) + "</div>" +
+      "<div>" + inp("commissionPct", "Commission %", "text", ' inputmode="decimal" pattern="[0-9]*[.]?[0-9]*" autocomplete="off"') + "</div><div>" + inp("commission", "Driver commission ($)", "text", money) + "</div>" +
       '<div style="grid-column:1/3">' + inp("balance", cash ? "Driver owes PCS ($) — driver collects" : "PCS owes driver ($)", "text", money + ' style="font-weight:800;font-size:18px"') + "</div>" +
       '<div style="grid-column:1/3"><label class="ar-l" for="ar-notes">Notes</label><textarea id="ar-notes" data-ar="notes" rows="2" style="width:100%">' + esc(d.notes || "") + "</textarea></div>" +
       '<div style="grid-column:1/3">' + inp("audit", state.addRideEditId ? "Audit note (required): what changed and why" : "Audit note (optional)") + "</div>" +
@@ -5983,7 +6054,7 @@
       el.addEventListener("input", save);
       el.addEventListener("change", save);
     });
-    document.getElementById("add-ride-cancel").addEventListener("click", function () { state.addRideOpen = false; state.addRideEditId = ""; mountAddRideModal(); });
+    document.getElementById("add-ride-cancel").addEventListener("click", function () { state.addRidePast = ""; state.addRideOpen = false; state.addRideEditId = ""; mountAddRideModal(); });
     document.getElementById("add-ride-recalc").addEventListener("click", function () {
       state.addRideTouched = {};
       state.addRideDraft = addRidePrefill(Object.assign({}, state.addRideDraft, { commissionPct: state.addRideDraft.driverId ? String(commissionPctFor(state.addRideDraft.driverId)) : state.addRideDraft.commissionPct }), { commissionPct: true }, DEFAULT_COMMISSION_PCT);
@@ -5991,7 +6062,7 @@
     });
     document.getElementById("add-ride-save").addEventListener("click", function () {
       var f = state.addRideDraft || {};
-      if (f.status === "completed" && !state.addRideEditId && !window.confirm("Save as completed and put it in the driver's pay week now?")) return;
+      if (f.status === "completed" && !state.addRideEditId && !state.addRidePast && !window.confirm("Save as completed and put it in the driver's pay week now?")) return;
       state.addRideBusy = true; state.addRideError = ""; mountAddRideModal(true);
       addRideSave(f).then(function () {
         state.addRideBusy = false; mountAddRideModal();
@@ -6048,11 +6119,12 @@
     if (!window.__pcsArBound) {
       window.__pcsArBound = true;
       document.addEventListener("click", function (ev) {
-        var t = ev.target && ev.target.closest ? ev.target.closest("[data-add-ride-driver],[data-ar-edit],[data-ar-delete],[data-cardfail-toggle]") : null;
+        var t = ev.target && ev.target.closest ? ev.target.closest("[data-add-ride-driver],[data-add-past-ride],[data-ar-edit],[data-ar-delete],[data-cardfail-toggle]") : null;
         if (!t) return;
         ev.preventDefault();
         if (t.hasAttribute("data-cardfail-toggle")) { cardFailToggle(t.getAttribute("data-driver"), t.getAttribute("data-cardfail-toggle"), t.getAttribute("data-on") !== "1"); return; }
         if (t.hasAttribute("data-add-ride-driver")) { addRideOpenFor(t.getAttribute("data-add-ride-driver") || ""); return; }
+        if (t.hasAttribute("data-add-past-ride")) { addPastRideOpen(t.getAttribute("data-add-past-ride") || "", t.getAttribute("data-week") || ""); return; }
         if (t.hasAttribute("data-ar-edit")) { addRideOpenFor("", t.getAttribute("data-ar-edit")); return; }
         var id = t.getAttribute("data-ar-delete");
         var note = window.prompt("Delete this manual ride? Type an audit note (why):", "");
@@ -6072,7 +6144,7 @@
       '<div class="shell">' +
         '<header class="topbar">' +
           "<div>" +
-            '<svg class="pcs-wm" viewBox="0 0 390 96" role="img" aria-label="Private Car Services God mode" style="display:block;width:100%;max-width:300px;height:auto;max-height:64px;border-radius:8px" xmlns="http://www.w3.org/2000/svg"><defs><pattern id="wmg-gh" width="16" height="16" patternUnits="userSpaceOnUse"><path d="M16 0H0V16" fill="none" stroke="#2c4a2a" stroke-width=".6"/></pattern></defs><rect width="390" height="96" fill="#20371d"/><rect width="390" height="96" fill="url(#wmg-gh)"/><text x="195" y="44" text-anchor="middle" font-family="Poppins,Montserrat,Helvetica,Arial,sans-serif" font-style="italic" font-size="21" letter-spacing="1.5" font-weight="300" fill="#cdeccd">PRIVATE CAR SERVICES</text><path d="M28 54H350" stroke="#cdeccd" stroke-width="3"/><path d="M348 48L362 54L348 60Z" fill="#cdeccd"/><text x="195" y="76" text-anchor="middle" font-family="Poppins,Helvetica,Arial,sans-serif" font-style="italic" font-size="14" letter-spacing="1" fill="#a9c9a9">God mode</text></svg>' + /* v72e wordmark */
+            '<svg class="pcs-wm" viewBox="0 0 390 96" role="img" aria-label="Private Car Services God mode" style="display:block;width:100%;max-width:300px;height:auto;max-height:64px;border-radius:8px" xmlns="http://www.w3.org/2000/svg"><defs><pattern id="wmg-gh" width="16" height="16" patternUnits="userSpaceOnUse"><path d="M16 0H0V16" fill="none" stroke="#2c4a2a" stroke-width=".6"/></pattern></defs><rect width="390" height="96" fill="#20371d"/><rect width="390" height="96" fill="url(#wmg-gh)"/><text class="pcs-wm-name" x="28" y="44" text-anchor="start" textLength="334" lengthAdjust="spacingAndGlyphs" font-family="Poppins,Montserrat,Helvetica,Arial,sans-serif" font-style="italic" font-size="21" font-weight="300" fill="#cdeccd">PRIVATE CAR SERVICES</text><path d="M28 54H350" stroke="#cdeccd" stroke-width="3"/><path d="M348 48L362 54L348 60Z" fill="#cdeccd"/><text x="195" y="76" text-anchor="middle" font-family="Poppins,Helvetica,Arial,sans-serif" font-style="italic" font-size="14" letter-spacing="1" fill="#a9c9a9">God mode</text></svg>' + /* v72e wordmark */
             '<h1 style="position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)">PCS God mode</h1>' +
             '<p class="who">' + esc(state.sessionEmail) + "</p>" +
           "</div>" +
@@ -6561,9 +6633,11 @@
     var since = Date.now() - 15 * 86400000;
     return Promise.all(Object.keys(ids).map(function (id) {
       return fetch(baseUrl() + "/rides/DRVRHOSL/" + encodeURIComponent(id) + "/dvir.json").then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }).then(function (o) {
-        var out = []; Object.keys(o || {}).forEach(function (d) { ["pre", "post"].forEach(function (k) { var r = o[d] && o[d][k]; if (r && (r.defects > 0 || r.notes > 0 || r.motion === "unverified") && (Number(r.at) > since || (r.unsafe && !r.cleared))) out.push({ id: id, day: d, kind: k, r: r }); }); });
+        var out = []; Object.keys(o || {}).forEach(function (d) { ["pre", "post", "avail"].forEach(function (k) { var r = o[d] && o[d][k]; if (r && (r.unsafe || r.defects > 0 || r.notes > 0 || r.motion === "unverified") && (Number(r.at) > since || (r.unsafe && !r.cleared))) out.push({ id: id, day: d, kind: k, r: r }); }); });
         return out; });
-    })).then(function (lists) { state.dvirFlags = [].concat.apply([], lists).sort(function (a, b) { return Number(b.r.at) - Number(a.r.at); }); dvirPaint(); });
+    })).then(function (lists) { state.dvirFlags = [].concat.apply([], lists).sort(function (a, b) { return Number(b.r.at) - Number(a.r.at); });
+      return fetch(baseUrl() + "/rides/DVIRMISS.json").then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }); }).then(function (m) {
+      state.dvirMiss = Object.keys(m || {}).map(function (k) { return m[k]; }).filter(function (x) { return x && x.driver && !x.resolvedAt; }); dvirPaint(); });
   }
   state.dvirVeh = {};
   function dvirVehLoad() { return fetch(baseUrl() + "/rides/DVIRVEH.json").then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }).then(function (o) { state.dvirVeh = o || {}; dvirPaint(); }); }
@@ -6578,9 +6652,12 @@
     var host = document.getElementById("god-dvir-alerts");
     if (!host) { host = document.createElement("div"); host.id = "god-dvir-alerts"; var m = document.querySelector("main") || document.body; m.insertBefore(host, m.firstChild); }
     var f = state.dvirFlags || [];
-    host.innerHTML = dvirVehHtml() + (!f.length ? "" : '<div class="card" style="border:2px solid #b91c1c;background:#2a1212;color:#fff;padding:10px;margin:8px 0"><b>Vehicle inspection defects (DVIR)</b>' + f.map(function (x) {
-      var defs = Object.keys(x.r.items || {}).filter(function (k) { var it = x.r.items[k]; return ((it.bad || it.s === "defect") && !it.optional) || it.noteFlag; }).map(function (k) { var it = x.r.items[k]; return esc((it.group ? it.group + " " : "") + (it.label || k)) + (it.answer ? " = " + esc(it.answer) : "") + (it.expiry === "expired" ? " EXPIRED " + esc(it.date || "") : "") + (it.needsApproval ? " (photo needs approval)" : it.stale ? " (over 48 h)" : it.blocking || it.safe === false ? " (NOT safe)" : "") + (it.noteFlag ? " (note, not unsafe)" : "") + (it.warn ? ' <b style="color:#ff9b9b">\u26a0 ' + esc(it.warn) + "</b>" : "") + (it.note ? ": " + esc(it.note) : "") + ((it.photos || []).length ? " \u00b7 " + it.photos.length + " photo(s)" : ""); }).join("; ");
-      return '<div class="god-dvir-flag" data-dvir-driver="' + esc(x.id) + '" style="border-top:1px solid #733;padding:6px 0">' + esc(gqName(x.id)) + " \u00b7 " + esc(x.day) + " " + (x.kind === "pre" ? "pre-trip" : "post-trip") + (x.r.startedAt ? ' <span class="fine god-dvir-dur">(' + esc(new Date(x.r.startedAt).toLocaleTimeString("en-US", { timeZone: "America/Chicago", hour: "numeric", minute: "2-digit" })) + "\u2013" + esc(new Date(x.r.finishedAt).toLocaleTimeString("en-US", { timeZone: "America/Chicago", hour: "numeric", minute: "2-digit" })) + ", took " + Math.floor(x.r.durationSec / 60) + "m " + ("0" + (x.r.durationSec % 60)).slice(-2) + "s)</span>" : "") + (x.r.motion === "unverified" ? ' <span class="badge" style="background:#7c5c00">motion unverified (no GPS)</span>' : "") + " \u00b7 " + defs +
+    var mi = state.dvirMiss || [];
+    host.innerHTML = (mi.length ? '<div class="card god-dvir-missed" style="border:2px solid #b91c1c;background:#2a1212;color:#fff;padding:10px;margin:8px 0"><b>Missed post-trip inspection</b>' + mi.map(function (x) {
+        return '<div style="border-top:1px solid #733;padding:6px 0">' + esc(gqName(x.driver) || x.name || x.driver) + " \u00b7 shift " + esc(x.day) + " ended without a post-trip. Must complete it, then a pre-trip, before going Available.</div>"; }).join("") + "</div>" : "") +
+      dvirVehHtml() + (!f.length ? "" : '<div class="card" style="border:2px solid #b91c1c;background:#2a1212;color:#fff;padding:10px;margin:8px 0"><b>Vehicle inspection defects (DVIR)</b>' + f.map(function (x) {
+      var defs = Object.keys(x.r.items || {}).filter(function (k) { var it = x.r.items[k]; return ((it.bad || it.s === "defect") && !it.optional) || it.noteFlag; }).map(function (k) { var it = x.r.items[k]; return esc((it.group ? it.group + " " : "") + (it.label || k)) + (it.answer ? " = " + esc(it.answer) : "") + (it.expiry === "expired" ? " EXPIRED " + esc(it.date || "") : "") + (it.needsApproval ? " (photo needs approval)" : it.stale ? " (over 48 h)" : it.blocking || it.safe === false ? " (NOT safe)" : "") + (it.noteFlag ? " (note, not unsafe)" : "") + (it.fuelAckAt ? " \u00b7 reminder acknowledged " + esc(new Date(it.fuelAckAt).toLocaleTimeString("en-US", { timeZone: "America/Chicago", hour: "numeric", minute: "2-digit" })) : "") + (it.warn ? ' <b style="color:#ff9b9b">\u26a0 ' + esc(it.warn) + "</b>" : "") + (it.note ? ": " + esc(it.note) : "") + ((it.photos || []).length ? " \u00b7 " + it.photos.length + " photo(s)" : ""); }).join("; ");
+      return '<div class="god-dvir-flag" data-dvir-driver="' + esc(x.id) + '" style="border-top:1px solid #733;padding:6px 0">' + esc(gqName(x.id)) + " \u00b7 " + esc(x.day) + " " + (x.kind === "pre" ? "pre-trip" : x.kind === "avail" ? "Available check" : "post-trip") + (x.r.startedAt ? ' <span class="fine god-dvir-dur">(' + esc(new Date(x.r.startedAt).toLocaleTimeString("en-US", { timeZone: "America/Chicago", hour: "numeric", minute: "2-digit" })) + "\u2013" + esc(new Date(x.r.finishedAt).toLocaleTimeString("en-US", { timeZone: "America/Chicago", hour: "numeric", minute: "2-digit" })) + ", took " + Math.floor(x.r.durationSec / 60) + "m " + ("0" + (x.r.durationSec % 60)).slice(-2) + "s)</span>" : "") + (x.r.motion === "unverified" ? ' <span class="badge" style="background:#7c5c00">motion unverified (no GPS)</span>' : "") + " \u00b7 " + defs +
         (x.r.unsafe ? (x.r.cleared ? ' <span class="badge">Cleared by ' + esc(x.r.cleared.by) + ": " + esc(x.r.cleared.reason) + "</span>"
           : ' <b style="color:#ff9b9b">UNSAFE \u2013 driver blocked from Available</b>' + ((x.r.blocks || []).length ? ' <span class="fine">(' + x.r.blocks.map(function (b) { return esc(b.label) + (b.why === "photo" ? " photo" : b.why !== "defect" ? " " + esc(b.why) : ""); }).join(", ") + ")</span>" : "") +
             Object.keys(x.r.items || {}).filter(function (k) { return x.r.items[k].needsApproval; }).map(function (k) { return '<div class="god-dvir-photos">' + (x.r.items[k].photos || []).map(function (ph) { return /^data:image\//.test(ph) ? '<img src="' + esc(ph) + '" alt="Windshield photo" style="height:90px;margin:4px 4px 0 0;border-radius:4px">' : ""; }).join("") + "</div>"; }).join("") +
@@ -6604,6 +6681,21 @@
     put(baseUrl() + "/rides/DRVRHOSL/" + encodeURIComponent(a[0]) + "/dvir/" + a[1] + "/" + a[2] + "/cleared.json", rec)
       .then(function () { return put(baseUrl() + "/rides/DRVRHOSL/" + encodeURIComponent(a[0]) + "/overrides/" + rec.at + ".json", Object.assign({ kind: ap ? "dvir-photo-approved" : "dvir-unsafe-cleared", day: a[1], inspection: a[2], grantedAt: rec.at }, rec)); })
       .then(dvirLoad).catch(function () { window.alert("Couldn't clear it. Try again."); });
+  });
+  /* v74b (Matthew): God mode "Log out driver": ends the shift, Offline / logged out, reason + time in the Driver's Log
+     (rides/DRVRHOSL/{id}/overrides/{at} kind "forced logout"); the driver app sees rides/DRVRHOSL/{id}/forceLogout on its next sync. */
+  document.addEventListener("click", function (e) {
+    var b = e.target && e.target.closest ? e.target.closest("[data-force-logout]") : null; if (!b || b.disabled) return;
+    var id = b.getAttribute("data-force-logout"), reason = (window.prompt("Log out " + gqName(id) + "? Reason (logged in the Driver\u2019s Log):") || "").trim();
+    if (reason.length < 3) return;
+    var at = Date.now(), rec = { at: at, by: godWho(), reason: reason.slice(0, 200) }, ub = baseUrl() + "/rides/DRVRHOSL/" + encodeURIComponent(id);
+    var send = function (u, m, body) { return fetch(u, { method: m, headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }); };
+    b.disabled = true;
+    send(ub + "/forceLogout.json", "PUT", rec)
+      .then(function () { return send(ub + "/overrides/" + at + ".json", "PUT", Object.assign({ kind: "forced logout", grantedAt: at }, rec)); })
+      .then(function () { return send(baseUrl() + "/rides/AVLBLDRV/drivers/" + encodeURIComponent(id) + ".json", "PATCH", { online: false, shiftOnline: false, driverOffline: false, loggedIn: false, forcedLogoutAt: at, updatedAt: at }); })
+      .then(function () { b.textContent = "Logged out (driver app returns to login on next sync)"; })
+      .catch(function () { b.disabled = false; window.alert("Couldn't log the driver out. Try again."); });
   });
   setTimeout(dvirLoad, 1500); setInterval(dvirLoad, 30000); setTimeout(dvirVehLoad, 1600); setInterval(dvirVehLoad, 60000);
   /* v73: God-editable DVIR checklist (rides/DVIRCFG = { items: [{k, label, required}], updatedAt, by }). Optional items never flag or block. */
@@ -6646,4 +6738,51 @@
   setTimeout(dvirCfgLoad, 1800);
   window.__godDvir = { cfgLoad: function () { return dvirCfgLoad(); }, load: dvirLoad, flags: function () { return state.dvirFlags; } };
   window.__godDriverLog = { data: godDriverLogData };
+
+  /* ================= v74d (Matthew 10/13): driver-fault alerts (Worker v69.13) =================
+     The Worker watches every accepted ride and flags: driver cancelled, driver un-accepted, or driver not at the pickup
+     5 min after the ETA / scheduled time. Client or passenger no-shows / cancels never flag. Each alert also arrives as a
+     phone push. Here: poll POST /god/driver-alerts (God token) every 15 s; each new alert pops an urgent pop-up with the
+     ride chime that rings until OK (OK marks it seen on every device). */
+  var DLW_SEEN_KEY = "pcs-god-dlw-seen";
+  function dlwSeen() { try { return JSON.parse(localStorage.getItem(DLW_SEEN_KEY) || "{}") || {}; } catch (e) { return {}; } }
+  function dlwMarkSeen(id) { try { var m = dlwSeen(); m[id] = Date.now(); var ks = Object.keys(m); if (ks.length > 200) ks.sort(function (a, b) { return m[a] - m[b]; }).slice(0, ks.length - 200).forEach(function (k) { delete m[k]; }); localStorage.setItem(DLW_SEEN_KEY, JSON.stringify(m)); } catch (e) {} }
+  var dlwBusy = false;
+  function dlwLoad() {
+    if (dlwBusy || !(gq.pw || gqTok())) return;
+    dlwBusy = true;
+    workerJson("/god/driver-alerts", gqAuth()).then(function (d) {
+      dlwBusy = false;
+      if (d && d.godToken) { gqSetTok(d.godToken); gq.tokOn = true; }
+      state.driverAlerts = (d && d.alerts) || [];
+      var seen = dlwSeen();
+      state.driverAlerts.slice().reverse().forEach(function (a) {
+        if (!a || !a.id || a.ackAt || seen[a.id] || Date.now() - Number(a.at || 0) > 12 * 3600000) return;
+        queueGodPopup("dlw", { code: a.id, alert: a });
+      });
+      syncGodAlarm();
+    }).catch(function () { dlwBusy = false; });
+  }
+  function dlwAck(id) {
+    dlwMarkSeen(id);
+    if (gq.pw || gqTok()) workerJson("/god/driver-alerts", Object.assign({ ack: id }, gqAuth())).catch(function () {});
+  }
+  function renderGodDriverAlertPopup(item) {
+    var a = item.alert || {}, key = "dlw:" + item.code;
+    var head = a.kind === "late" ? "Driver late to pickup" : (a.kind === "cancel" ? "Driver cancelled a ride" : "Driver dropped an accepted ride");
+    var when = a.at ? new Date(Number(a.at)).toLocaleTimeString("en-US", { timeZone: "America/Chicago", hour: "numeric", minute: "2-digit" }) + " CT" : "";
+    var el = godPopupShell("gp-request gp-waiting gp-dlw",
+      '<p class="gp-title" style="color:#ff6b6b">&#9888;&#65039; URGENT: ' + esc(head) + "</p>" +
+      '<div class="gp-row"><b>Driver</b>' + esc(a.driverName || a.driverId || "—") + "</div>" +
+      '<div class="gp-row"><b>Ride code</b>' + esc(a.code || "") + "</div>" +
+      '<div class="gp-row"><b>What happened</b>' + esc(a.body || a.reason || "") + "</div>" +
+      (when ? '<div class="gp-row"><b>Flagged</b>' + esc(when) + "</div>" : "") +
+      '<p class="gp-row" style="font-size:13px;opacity:.85">Logged on the ride and the driver\u2019s record. Client no-shows or cancels never trigger this.</p>' +
+      '<div class="gp-actions"><button type="button" class="gp-ok" id="gp-dlw-ok">OK</button></div>');
+    el.addEventListener("click", function (ev) {
+      if (ev.target && ev.target.id === "gp-dlw-ok") { dlwAck(item.code); hideGodRidePopup(key); }
+    });
+  }
+  setTimeout(dlwLoad, 2500); setInterval(dlwLoad, 15000);
+  window.pcsGodDriverAlerts = { load: dlwLoad, ack: dlwAck }; /* test hook */
 })();
