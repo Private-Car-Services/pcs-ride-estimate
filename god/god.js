@@ -1,3 +1,5 @@
+/* v75g (Matthew): no light-gold text on white. Secondary/ghost buttons inside any white or light card become real buttons: light fill, dark text, visible border. */
+(function () { if (typeof document === "undefined") return; var st = document.createElement("style"); st.id = "pcs-v75g-contrast-god"; st.textContent = ".pcs-light-btn,[style*=\"background:#fff\"] .btn-ghost,[style*=\"background:#fff\"] .btn.ghost,[style*=\"background: #fff\"] .btn-ghost,[style*=\"background: #fff\"] .btn.ghost,[style*=\"background:#ffffff\"] .btn-ghost,[style*=\"background:#ffffff\"] .btn.ghost,[style*=\"background:white\"] .btn-ghost,[style*=\"background:white\"] .btn.ghost,.meter-qr .btn-ghost,.meter-rqr .btn-ghost"+"{background:#f3f4f6!important;color:#1a1a1a!important;-webkit-text-fill-color:#1a1a1a!important;border:2px solid #6b7280!important;border-radius:14px!important;padding:15px 16px!important;font-size:17px!important;font-weight:800!important;text-align:center!important;opacity:1}"+".pcs-light-btn:hover,.pcs-light-btn:focus-visible{background:#e5e7eb!important;color:#000!important}"; (document.head || document.documentElement).appendChild(st); })();
 /* Private Car Services — PCS God mode (Matthew only). v25/v45: day board from PCS calendar + assign/commission.
    v57: visual pop-ups for every new ride request and every accept; safety alerts (police assist red banner +
    pop-up, soft not-OK notes). No sound in God mode.
@@ -5521,6 +5523,179 @@
     return head + '<div class="dm-list">' + body + "</div>";
   }
 
+  /* ---------- v75 (Oct 13): God Home menu: Vehicle Maintenance + Monthly Goal (v75g: god/goal.js, own password, local only) ----------
+     Data: rides/VHCLMNTC/{vehicleId} (God writes via Worker /god/db; hub added in Worker v69.14 draft)
+       { year, make, model, plate, driverId, odoOverride:{miles,at,by}, oil:{lastMiles,lastDate,interval},
+         rot:{lastMiles,lastDate,interval}, updatedAt }  +  /services/{at}: { kind:"oil"|"rot", date, miles, by, at }
+     Current mileage = newest of (driver app shift odometers rides/DRVRMLES/{driverId}) and God override.
+     Status: red = overdue, amber = <= 1,000 mi or <= 7 days left, green otherwise. */
+  var VM_HUB = "VHCLMNTC", VM_FALLBACK_MPD = 2500 / 7;
+  var vm = { list: {}, loaded: false, err: "", screen: "", editId: "" };
+  function vmUrl(p) { return baseUrl() + "/rides/" + VM_HUB + (p ? "/" + p : "") + ".json"; }
+  function vmLoad() {
+    return fetch(vmUrl(""), { cache: "no-store" }).then(function (r) { return r.ok ? r.json() : Promise.reject(new Error("HTTP " + r.status)); })
+      .then(function (d) { vm.list = d || {}; vm.loaded = true; vm.err = ""; vmPaint(); })
+      .catch(function (e) { vm.err = String(e && e.message || e); vmPaint(); });
+  }
+  function vmDayMs(ymd) { var p = String(ymd || "").split("-"); return p.length === 3 ? Date.UTC(+p[0], +p[1] - 1, +p[2], 18) : 0; }
+  function vmParseDate(s) { /* "2025-11-08" or "11-8-25" / "11/8/2025" */
+    s = String(s || "").trim(); if (!s) return 0; var m;
+    if ((m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/))) return Date.UTC(+m[1], +m[2] - 1, +m[3], 18);
+    if ((m = s.match(/^(\d{1,2})[-\/](\d{1,2})[-\/](\d{2,4})$/))) { var y = +m[3]; if (y < 100) y += 2000; return Date.UTC(y, +m[1] - 1, +m[2], 18); }
+    return 0;
+  }
+  function vmFmtDate(ms) { try { return new Date(ms).toLocaleDateString("en-US", { timeZone: "America/Chicago", month: "short", day: "numeric", year: "numeric" }); } catch (e) { return ""; } }
+  function vmN(n) { return n == null || !isFinite(n) ? "\u2014" : Math.round(n).toLocaleString("en-US"); }
+  function vmDriverFor(v) { /* assigned driver, else the roster driver whose car model matches */
+    if (v.driverId) return String(v.driverId);
+    var r = state.roster || {}, hit = "";
+    Object.keys(r).forEach(function (id) { var x = r[id] || {}; if (!hit && v.model && String(x.carModel || "").toLowerCase() === String(v.model).toLowerCase() && (!v.make || String(x.carMake || "").toLowerCase() === String(v.make).toLowerCase())) hit = id; });
+    return hit;
+  }
+  function vmOdoHistory(driverId) { /* [{at, odo}] from the driver app's shift odometers */
+    var days = (state.miles || {})[driverId] || {}, out = [];
+    Object.keys(days).forEach(function (ymd) {
+      var row = days[ymd]; if (!row || typeof row !== "object") return; var base = vmDayMs(ymd);
+      [row.startOdometer, row.endOdometer, row.priorEndOdometer].forEach(function (o, i) { if (dmNum(o) > 0) out.push({ at: base + i, odo: dmNum(o) }); });
+      var sh = row.shifts && typeof row.shifts === "object" ? row.shifts : {};
+      Object.keys(sh).forEach(function (k) { var x = sh[k] || {}, at = dmNum(x.shiftStartedAt) || dmNum(k) || base;
+        if (dmNum(x.startOdo) > 0) out.push({ at: at, odo: dmNum(x.startOdo) }); if (dmNum(x.endOdo) > 0) out.push({ at: at + 1, odo: dmNum(x.endOdo) }); });
+    });
+    return out.sort(function (a, b) { return a.odo - b.odo; });
+  }
+  function vmCalc(v, now) {
+    now = now || Date.now();
+    var did = vmDriverFor(v), hist = did ? vmOdoHistory(did) : [], app = hist.length ? hist[hist.length - 1] : null;
+    var ovr = v.odoOverride && dmNum(v.odoOverride.miles) > 0 ? v.odoOverride : null, cur = null, src = "";
+    if (app && (!ovr || app.odo >= dmNum(ovr.miles))) { cur = app.odo; src = "driver app"; }
+    else if (ovr) { cur = dmNum(ovr.miles); src = "entered in God mode"; }
+    function one(s, defInt) {
+      s = s || {}; var interval = dmNum(s.interval) || defInt, last = dmNum(s.lastMiles), lastAt = vmParseDate(s.lastDate);
+      if (last == null) return { interval: interval, status: "unknown" };
+      var due = last + interval, left = cur != null ? due - cur : null, mpd = null, mpdSrc = "";
+      var days = lastAt ? (now - lastAt) / 86400000 : 0;
+      if (cur != null && days >= 3 && cur > last) { mpd = (cur - last) / days; mpdSrc = "since last service"; }
+      if (mpd == null && hist.length > 1) { var a = hist[0], b = hist[hist.length - 1], dd = Math.max(1, (b.at - a.at) / 86400000); if (b.odo > a.odo) { mpd = (b.odo - a.odo) / dd; mpdSrc = "odometer history"; } }
+      if (mpd == null) { mpd = VM_FALLBACK_MPD; mpdSrc = "default 2,500 mi/week"; }
+      var dLeft = left != null && mpd > 0 ? left / mpd : null, dueAt = dLeft != null ? now + dLeft * 86400000 : null;
+      var status = left == null ? "unknown" : left <= 0 ? "red" : (left <= 1000 || dLeft <= 7) ? "amber" : "green";
+      return { interval: interval, last: last, lastAt: lastAt, due: due, left: left, mpd: mpd, mpdSrc: mpdSrc, daysSince: lastAt ? days : null, sinceMiles: cur != null ? cur - last : null, dLeft: dLeft, dueAt: dueAt, status: status };
+    }
+    return { driverId: did, cur: cur, src: src, oil: one(v.oil, 25000), rot: one(v.rot, 10000) };
+  }
+  var VM_COL = { green: "#3fae5a", amber: "#f0b429", red: "#e5534b", unknown: "#8a9a8a" };
+  function vmBlock(label, c) {
+    if (c.status === "unknown") return '<div class="vm-blk"><b>' + label + '</b><div class="fine">No last-service miles yet. Tap Edit to enter them.</div></div>';
+    var word = c.status === "red" ? "OVERDUE by " + vmN(-c.left) + " mi" : c.status === "amber" ? "DUE SOON" : "OK";
+    return '<div class="vm-blk" style="border-left:6px solid ' + VM_COL[c.status] + ';padding-left:10px;margin:8px 0">' +
+      '<b>' + label + '</b> <span style="background:' + VM_COL[c.status] + ';color:#0b1f0b;border-radius:10px;padding:1px 8px;font-weight:800;font-size:12px">' + word + "</span>" +
+      '<div class="fine">Last ' + vmN(c.last) + " mi" + (c.lastAt ? " on " + esc(vmFmtDate(c.lastAt)) + " (" + vmN(c.daysSince) + " days ago)" : "") + " \u00b7 every " + vmN(c.interval) + " mi \u00b7 due at <b>" + vmN(c.due) + " mi</b></div>" +
+      '<div class="fine">Miles left <b>' + vmN(c.left) + "</b> \u00b7 driven since " + vmN(c.sinceMiles) + " \u00b7 avg " + vmN(c.mpd) + " mi/day (" + esc(c.mpdSrc) + ")</div>" +
+      '<div class="fine">Est. ' + (c.dLeft != null ? (c.dLeft <= 0 ? "now" : vmN(c.dLeft) + " days") : "\u2014") + " \u00b7 due date <b>" + (c.dueAt ? esc(vmFmtDate(c.dueAt)) : "\u2014") + "</b></div></div>";
+  }
+  function vmName(v) { return [v.year, v.make, v.model].filter(Boolean).join(" ") || "Vehicle"; }
+  function vmDriverName(id) { var r = (state.roster || {})[id] || {}; return r.name || id || ""; }
+  function vmListHtml() {
+    var ids = Object.keys(vm.list || {}).sort(function (a, b) { return vmName(vm.list[a]).localeCompare(vmName(vm.list[b])); });
+    var h = '<p class="fine">Oil and tire rotation countdowns for every PCS vehicle. Current miles come from the driver app\'s shift odometer readings (or the miles you enter). Amber = 1,000 mi or 7 days left; red = overdue. The assigned driver sees a heads-up banner in the driver app at amber and red.</p>' +
+      '<p><button type="button" class="btn btn-gold" data-vm-edit="__new">+ Add vehicle</button></p>';
+    if (vm.err) h += '<p class="fine" style="color:#ff9b9b">Could not load vehicles: ' + esc(vm.err) + "</p>";
+    if (!ids.length && vm.loaded) h += '<p class="fine">No vehicles yet.</p>';
+    ids.forEach(function (id) {
+      var v = vm.list[id] || {}, c = vmCalc(v), worst = [c.oil.status, c.rot.status].indexOf("red") >= 0 ? "red" : [c.oil.status, c.rot.status].indexOf("amber") >= 0 ? "amber" : "green";
+      h += '<div class="vm-card" style="border:1px solid #2e5a2e;border-top:4px solid ' + VM_COL[worst] + ';border-radius:12px;padding:12px;margin:12px 0;background:#102810">' +
+        '<div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap"><div><b style="font-size:17px">' + esc(vmName(v)) + "</b>" + (v.plate ? ' <span class="fine">\u00b7 ' + esc(v.plate) + "</span>" : "") +
+        '<div class="fine">Driver: ' + esc(c.driverId ? vmDriverName(c.driverId) + (v.driverId ? "" : " (matched by car)") : "not assigned") + "</div>" +
+        '<div>Current <b>' + vmN(c.cur) + " mi</b> " + (c.src ? '<span class="fine">(' + esc(c.src) + ")</span>" : "") + "</div></div>" +
+        '<div><button type="button" class="btn btn-ghost" data-vm-edit="' + esc(id) + '">Edit</button></div></div>' +
+        vmBlock("Oil change", c.oil) + '<button type="button" class="btn btn-gold" data-vm-done="oil" data-vm-id="' + esc(id) + '">Mark oil change done</button>' +
+        vmBlock("Tire rotation", c.rot) + '<button type="button" class="btn btn-gold" data-vm-done="rot" data-vm-id="' + esc(id) + '">Mark rotation done</button>' +
+        vmHistHtml(v) + "</div>";
+    });
+    return h;
+  }
+  function vmHistHtml(v) {
+    var s = v.services || {}, ks = Object.keys(s).sort().reverse().slice(0, 6);
+    if (!ks.length) return "";
+    return '<details style="margin-top:8px"><summary class="fine">Service log (' + Object.keys(s).length + ")</summary>" + ks.map(function (k) { var x = s[k] || {};
+      return '<div class="fine">' + esc(x.date || "") + " \u00b7 " + (x.kind === "oil" ? "Oil change" : "Tire rotation") + " at " + vmN(dmNum(x.miles)) + " mi" + (x.by ? " \u00b7 " + esc(x.by) : "") + "</div>"; }).join("") + "</details>";
+  }
+  function vmFormHtml(id) {
+    var v = id === "__new" ? {} : (vm.list[id] || {}), o = v.oil || {}, r = v.rot || {}, ro = state.roster || {};
+    function f(name, label, val, type) { return '<label style="display:block;margin:6px 0"><span class="fine">' + label + '</span><br><input name="' + name + '" type="' + (type === "number" ? "text" : (type || "text")) + '"' + (type === "number" ? ' inputmode="numeric" pattern="[0-9]*" autocomplete="off"' : "") + ' value="' + esc(val == null ? "" : val) + '" style="width:100%;max-width:260px"></label>'; }
+    var opts = '<option value="">(match by car / none)</option>' + Object.keys(ro).map(function (k) { return '<option value="' + esc(k) + '"' + (v.driverId === k ? " selected" : "") + ">" + esc(ro[k].name || k) + "</option>"; }).join("");
+    return '<form id="vm-form" data-vm-id="' + esc(id) + '"><h3 style="margin:4px 0">' + (id === "__new" ? "Add vehicle" : "Edit " + esc(vmName(v))) + "</h3>" +
+      f("year", "Year", v.year) + f("make", "Make", v.make) + f("model", "Model", v.model) + f("plate", "Plate (optional)", v.plate) +
+      '<label style="display:block;margin:6px 0"><span class="fine">Assigned driver</span><br><select name="driverId">' + opts + "</select></label>" +
+      f("odo", "Current mileage override (leave blank to use the driver app)", v.odoOverride && v.odoOverride.miles, "number") +
+      "<h4>Oil change</h4>" + f("oilMiles", "Last oil change miles", o.lastMiles, "number") + f("oilDate", "Last oil change date", o.lastDate, "date") + f("oilInt", "Interval (miles)", o.interval || 25000, "number") +
+      "<h4>Tire rotation</h4>" + f("rotMiles", "Last rotation miles", r.lastMiles, "number") + f("rotDate", "Last rotation date", r.lastDate, "date") + f("rotInt", "Interval (miles)", r.interval || 10000, "number") +
+      '<p><button type="submit" class="btn btn-gold">Save</button> <button type="button" class="btn btn-ghost" data-vm-cancel="1">Cancel</button></p><p class="fine" id="vm-form-err"></p></form>';
+  }
+  function vmNum(x) { x = String(x == null ? "" : x).replace(/[,\s]/g, ""); return x && isFinite(Number(x)) ? Math.round(Number(x)) : null; }
+  function vmSave(id, rec) {
+    return godFetch(vmUrl(encodeURIComponent(id)), { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(rec) })
+      .then(function (res) { if (!res.ok) throw new Error(state.boardNotice || "Not saved"); return vmLoad(); });
+  }
+  function vmPaint() {
+    var el = document.getElementById("vm-screen-body"); if (!el || vm.screen !== "maint") return;
+    el.innerHTML = vm.editId ? vmFormHtml(vm.editId) : vmListHtml();
+  }
+  function vmOpen(which) {
+    vm.screen = which; vm.editId = "";
+    var ov = document.getElementById("vm-screen"); if (ov) ov.remove();
+    ov = document.createElement("div"); ov.id = "vm-screen";
+    ov.style.cssText = "position:fixed;inset:0;z-index:9000;background:#0b1f0b;color:#eef5ee;overflow:auto;padding:max(40px, calc(12px + env(safe-area-inset-top))) max(16px, env(safe-area-inset-right)) 60px max(16px, env(safe-area-inset-left));-webkit-overflow-scrolling:touch"; /* clear of iPad Stage Manager dots */
+    ov.innerHTML = '<div style="max-width:760px;margin:0 auto"><p style="text-align:right"><button type="button" class="btn btn-ghost" data-vm-close="1" style="min-height:44px;min-width:88px">\u2190 Home</button></p>' +
+      '<h2 style="margin:6px 0 10px;color:#f0d48a">' + "Vehicle Maintenance" + "</h2>" +
+      '<div id="vm-screen-body">' + '<p class="fine">Loading\u2026</p>' + "</div></div>";
+    document.body.appendChild(ov);
+    if (which === "maint") { vmPaint(); vmLoad(); }
+    ov.addEventListener("click", vmClick);
+    ov.addEventListener("submit", vmSubmit);
+  }
+  function vmClick(e) {
+    var t = e.target.closest ? e.target.closest("button") : null; if (!t) return;
+    if (t.getAttribute("data-vm-close")) { vm.screen = ""; var ov = document.getElementById("vm-screen"); if (ov) ov.remove(); return; }
+    if (t.getAttribute("data-vm-edit")) { vm.editId = t.getAttribute("data-vm-edit"); vmPaint(); return; }
+    if (t.getAttribute("data-vm-cancel")) { vm.editId = ""; vmPaint(); return; }
+    var kind = t.getAttribute("data-vm-done");
+    if (kind) {
+      var id = t.getAttribute("data-vm-id"), v = vm.list[id] || {}, c = vmCalc(v);
+      var miles = vmNum(window.prompt((kind === "oil" ? "Oil change" : "Tire rotation") + " done at what mileage?", c.cur != null ? String(Math.round(c.cur)) : ""));
+      if (!(miles > 0)) return;
+      var date = (window.prompt("Date done (YYYY-MM-DD):", chicagoToday()) || "").trim(); if (!vmParseDate(date)) { alert("Date not recognized."); return; }
+      var now = Date.now(), patch = {}, sv = v[kind] || {};
+      patch[kind] = { lastMiles: miles, lastDate: date, interval: dmNum(sv.interval) || (kind === "oil" ? 25000 : 10000) };
+      patch["services/" + now] = { kind: kind, date: date, miles: miles, by: godWho(), at: now };
+      patch["alerts/" + kind] = null; patch.updatedAt = now;
+      vmSave(id, patch).catch(function (er) { alert(String(er.message || er)); });
+    }
+  }
+  function vmSubmit(e) {
+    e.preventDefault(); var f = e.target, id = f.getAttribute("data-vm-id"), err = document.getElementById("vm-form-err");
+    if (!f.model.value.trim()) { err.textContent = "Enter at least the model."; return; }
+    if (id === "__new") id = ("v" + (f.year.value || "") + "-" + f.make.value + "-" + f.model.value).toLowerCase().replace(/[^a-z0-9_-]+/g, "-").slice(0, 60) + "-" + Date.now().toString(36);
+    var old = vm.list[id] || {}, odo = vmNum(f.odo.value), now = Date.now();
+    var rec = { year: f.year.value.trim(), make: f.make.value.trim(), model: f.model.value.trim(), plate: f.plate.value.trim(), driverId: f.driverId.value,
+      oil: { lastMiles: vmNum(f.oilMiles.value), lastDate: f.oilDate.value || "", interval: vmNum(f.oilInt.value) || 25000 },
+      rot: { lastMiles: vmNum(f.rotMiles.value), lastDate: f.rotDate.value || "", interval: vmNum(f.rotInt.value) || 10000 }, updatedAt: now };
+    var prevO = old.odoOverride && dmNum(old.odoOverride.miles);
+    rec.odoOverride = odo > 0 ? (odo === prevO ? old.odoOverride : { miles: odo, at: now, by: godWho() }) : null;
+    err.textContent = "Saving\u2026";
+    vmSave(id, rec).then(function () { vm.editId = ""; vmPaint(); }).catch(function (er) { err.textContent = String(er.message || er); });
+  }
+  function vmHomeMenuHtml() {
+    var b = "display:block;width:100%;text-align:left;margin:6px 0;padding:12px 14px;border:2px solid #d4af37;border-radius:12px;background:transparent;color:#f0d48a;font-weight:800;font-size:16px;cursor:pointer";
+    return '<section class="side-section" id="god-home-menu"><h2>Home</h2>' +
+      '<button type="button" style="' + b + '" data-god-menu="maint">\uD83D\uDD27 Vehicle Maintenance</button>' +
+      '<button type="button" style="' + b + '" data-god-menu="goal">\uD83D\uDCB0 Monthly Goal</button>' + /* v75g: goal.js, own password/PIN, local only */
+      '</section>';
+  }
+  document.addEventListener("click", function (e) { var t = e.target.closest ? e.target.closest("[data-god-menu]") : null; if (t) vmOpen(t.getAttribute("data-god-menu")); });
+  window.__pcsVmCalc = vmCalc; /* test hook */
+  window.__pcsVmOpen = vmOpen;
+
   function refreshDailyMiles() {
     var el = document.getElementById("daily-miles-list");
     if (!el) return;
@@ -6157,6 +6332,7 @@
         dayBoardHtml() +
         '<div class="workspace">' +
           '<aside class="side">' +
+            vmHomeMenuHtml() + /* v75 */
             '<section class="side-section" id="add-ride-section">' +
               "<h2>Add ride</h2>" +
               '<div id="add-ride-box"></div>' +
@@ -6710,7 +6886,7 @@
     host.innerHTML = "<summary><b>Vehicle inspection checklist (DVIR)</b> \u00b7 " + list.length + " items</summary>" +
       '<p class="fine">Required items can be marked unsafe (blocks Available until cleared). Optional items are noted only and never flag or block.</p>' +
       list.map(function (it, i) { return '<div class="dvir-cfg-row" data-i="' + i + '" style="display:flex;gap:6px;align-items:center;margin:4px 0">' + (it.group ? '<span class="fine" style="min-width:80px">' + esc(it.group) + "</span>" : "") + '<input type="text" class="dvir-cfg-label" data-i="' + i + '" value="' + esc(it.label) + '" maxlength="120" style="flex:1">' +
-        '<span class="fine">' + esc(it.type === "date" ? "date MM/DD/YYYY" + (it.expiry ? " (expiry)" : "") : (it.opts || []).map(function (o) { return o.label + (o.bad ? (it.noteOnly ? " (note)" : " (bad)") : ""); }).join(" / ") + (Array.isArray(it.kinds) && it.kinds.length === 1 ? " \u00b7 " + (it.kinds[0] === "post" ? "post-trip only" : "pre-trip only") : "")) + "</span>" +
+        '<span class="fine">' + esc(it.type === "date" ? (it.k === "regexp" ? "month/year MM/YYYY" : "date MM/DD/YYYY") + (it.expiry ? " (expiry)" : "") : (it.opts || []).map(function (o) { return o.label + (o.bad ? (it.noteOnly ? " (note)" : " (bad)") : ""); }).join(" / ") + (Array.isArray(it.kinds) && it.kinds.length === 1 ? " \u00b7 " + (it.kinds[0] === "post" ? "post-trip only" : "pre-trip only") : "")) + "</span>" +
         '<label><input type="checkbox" class="dvir-cfg-req" data-i="' + i + '"' + (it.required !== false ? " checked" : "") + "> Required</label>" +
         (it.noteOnly ? "" : '<label title="Driver can\u2019t go Available until God clears it"><input type="checkbox" class="dvir-cfg-block" data-i="' + i + '"' + (it.block ? " checked" : "") + "> Blocks</label>") +
         '<button type="button" class="btn btn-ghost dvir-cfg-del" data-i="' + i + '">Remove</button></div>'; }).join("") +
