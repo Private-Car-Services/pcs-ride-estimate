@@ -123,7 +123,19 @@
   function big(l, v, extra) { return '<div class="big"><div class="fine">' + l + '</div><div class="v">' + v + "</div>" + (extra || "") + "</div>"; }
   function row(l, v, gap) { return "<tr><td>" + l + '</td><td class="r"><b>' + v + "</b></td><td class=\"r " + (gap == null ? "" : gap >= 0 ? "pos" : "neg") + '">' + (gap == null ? "" : $m(gap)) + "</td></tr>"; }
   function paint() {
-    var c = calc(), s = D.settings, g = c.g, h = "";
+    var c = calc(), s = D.settings, h = "";
+    h += '<div id="gl-top">' + topHtml(c) + '</div>';
+    function f(id, l, v) { return '<label><span class="fine">' + l + '</span><input id="' + id + '" type="text" ' + (id === "gl-s-days" ? 'inputmode="numeric" pattern="[0-9]*"' : 'inputmode="decimal"') + ' autocomplete="off" value="' + esc(v == null ? "" : v) + '" style="width:130px"></label>'; }
+    h += '<form class="card" id="gl-f-set"><b class="t">Goals</b><br>' + f("gl-s-week", "Weekly goal $", s.week) + f("gl-s-days", "Days left in week", c.dLeft) + f("gl-s-uber", "Uber week goal $", s.uber) + f("gl-s-month", "Monthly goal $", s.month) + f("gl-s-year", "Year goal $", s.year) +
+      '<br><button class="btn" type="submit">Save goals</button> <span class="fine" id="gl-set-msg">Saves automatically as you type.</span></form>';
+    h += REST(c);
+    app.innerHTML = h; bind();
+    var qa = document.getElementById("gl-q-amt"); if (qa && paint.focusQ) { qa.focus(); paint.focusQ = false; }
+  }
+  /* v75l: everything above the Goals form; re-rendered on each goal keystroke without touching the Goals inputs (keeps the keyboard up) */
+  function paintTop() { var top = document.getElementById("gl-top"); if (!top || !D) return; top.innerHTML = topHtml(calc()); bindTop(); }
+  function topHtml(c) {
+    var g = c.g, h = "";
     h += '<div class="row" style="justify-content:space-between"><h1>Monthly Goal</h1><button class="btn ghost" id="gl-b-lock">Lock</button></div>';
     var roll = c.rolled != null && Math.abs(c.rolled) >= 0.01 ? '<div class="fine ' + (c.rolled > 0 ? "neg" : "pos") + '">Rolled over from yesterday: ' + (c.rolled > 0 ? "+" : "\u2212") + "$" + Math.abs(c.rolled).toFixed(2) + (c.rolled > 0 ? " short" : " ahead") + "</div>" : "";
     h += '<div class="card hero"><b class="t">TODAY \u00b7 ' + esc(c.t) + '</b><div class="grid">' + big("Weekly goal", $m(c.weekGoal)) + big("Days left in week", c.dLeft == null ? "\u2014" : String(c.dLeft), '<div class="fine">counts down daily</div>') +
@@ -144,20 +156,34 @@
     h += '<div class="card"><b class="t">Income lines</b><table><tr><th></th><th class="r" style="color:var(--goldt)">Today</th><th class="r" style="color:var(--goldt)">Week</th><th class="r" style="color:var(--goldt)">Month</th><th class="r" style="color:var(--goldt)">Year</th></tr>' + LINES.concat(EXP).map(function (l) { var k = "tip:" + l[0], tr = g("y", k) ? '<tr class="fine"><td>\u21b3 of which tips</td><td class="r">' + $m(g("d", k)) + '</td><td class="r">' + $m(g("w", k)) + '</td><td class="r">' + $m(g("m", k)) + '</td><td class="r">' + $m(g("y", k)) + "</td></tr>" : "";
       return "<tr><td>" + l[1] + '</td><td class="r">' + $m(g("d", l[0])) + '</td><td class="r">' + $m(g("w", l[0])) + '</td><td class="r">' + $m(g("m", l[0])) + '</td><td class="r">' + $m(g("y", l[0])) + "</td></tr>" + tr; }).join("") +
       '<tr class="b"><td><b>TOTAL income</b></td><td class="r"><b>' + $m(c.dayGross) + '</b></td><td class="r"><b>' + $m(c.weekTotal) + '</b></td><td class="r"><b>' + $m(c.monthTotal) + '</b></td><td class="r"><b>' + $m(c.yearTotal) + "</b></td></tr></table></div>";
-    function f(id, l, v) { return '<label><span class="fine">' + l + '</span><input id="' + id + '" type="text" ' + (id === "s-days" ? 'inputmode="numeric" pattern="[0-9]*"' : 'inputmode="decimal"') + ' autocomplete="off" value="' + esc(v == null ? "" : v) + '" style="width:130px"></label>'; }
-    h += '<form class="card" id="gl-f-set"><b class="t">Goals</b><br>' + f("s-week", "Weekly goal $", s.week) + f("s-days", "Days left in week", c.dLeft) + f("s-uber", "Uber week goal $", s.uber) + f("s-month", "Monthly goal $", s.month) + f("s-year", "Year goal $", s.year) +
-      '<br><button class="btn" type="submit">Save goals</button></form>';
+    return h;
+  }
+  function REST(c) { var h = "";
     h += '<form class="card" id="gl-f-add"><b class="t">Add past entry</b><br><input id="gl-a-date" type="date" value="' + esc(c.t) + '"> <select id="gl-a-line">' + LINES.concat(EXP).map(function (l) { return '<option value="' + l[0] + '">' + l[1] + "</option>"; }).join("") + '</select> <input id="gl-a-amt" type="text" inputmode="decimal" autocomplete="off" placeholder="Amount" style="width:120px"> <label style="display:inline"><input type="checkbox" id="gl-a-tip"> tip</label> <input id="gl-a-note" placeholder="Note" style="width:150px"> <button class="btn" type="submit">Add</button></form>';
     h += '<div class="card"><b class="t">Backup &amp; import</b><p class="fine">Everything stays on this device, encrypted. Export a backup regularly.</p><div class="row" style="justify-content:flex-start">' +
       '<button class="btn ghost" id="gl-b-exp">Export encrypted backup</button><button class="btn ghost" id="gl-b-csv">Export CSV (not encrypted)</button>' +
       '<label class="btn ghost">Import CSV / seed / backup<input type="file" id="gl-b-imp" accept=".csv,.json,text/csv,application/json" hidden></label></div><p class="fine" id="gl-imp-msg"></p>' +
       '<p class="fine">CSV format: Date,Category,Service,Amount,Notes (Service uber/lyft; Category Other = PCS, Tips = Cash (or a tip on the Service named), Bonus = Uber, Officiating, VA, Expense). ' + Object.keys(D.entries).length + " entries stored.</p></div>";
-    app.innerHTML = h; bind();
-    var qa = document.getElementById("gl-q-amt"); if (qa && paint.focusQ) { qa.focus(); paint.focusQ = false; }
+    return h;
   }
   function num(v) { var n = Number(String(v == null ? "" : v).replace(/[$,\s]/g, "")); return String(v).trim() !== "" && isFinite(n) ? n : null; }
   function newId(at) { return String(at) + "-" + Math.random().toString(36).slice(2, 7); }
+  /* v75l: read the Goals form into settings. Days left is only re-stamped when its box actually changed,
+     so the typed value counts for today and then counts down one per day. */
+  var setTimer = null;
+  function readGoals() { var s = D.settings;
+    [["gl-s-week", "week"], ["gl-s-uber", "uber"], ["gl-s-month", "month"], ["gl-s-year", "year"]].forEach(function (p) { var el = document.getElementById(p[0]); if (el) s[p[1]] = num(el.value); });
+    var de = document.getElementById("gl-s-days"); if (de) { var d = num(de.value); if (d !== calc().dLeft) { s.daysLeft = d; s.daysLeftSet = today(); } } }
+  function goalsSaved(m) { var x = document.getElementById("gl-set-msg"); if (x) x.textContent = m; }
   function bind() {
+    bindTop();
+    var fs = document.getElementById("gl-f-set");
+    fs.onsubmit = function (e) { e.preventDefault(); clearTimeout(setTimer); readGoals(); paint(); save().then(function () { goalsSaved("Saved."); }); };
+    fs.oninput = function () { readGoals(); paintTop(); goalsSaved("Saving\u2026"); clearTimeout(setTimer); setTimer = setTimeout(function () { save().then(function () { goalsSaved("Saved."); }); }, 600); };
+    fs.onchange = function () { readGoals(); paintTop(); clearTimeout(setTimer); save().then(function () { goalsSaved("Saved."); }); };
+    bindRest();
+  }
+  function bindTop() {
     document.getElementById("gl-b-lock").onclick = function () { lockNow("Locked."); };
     document.getElementById("gl-f-q").onsubmit = function (e) { e.preventDefault(); var a = num(document.getElementById("gl-q-amt").value), l = document.getElementById("gl-q-line").value;
       var tp = num(document.getElementById("gl-q-tip").value);
@@ -165,13 +191,12 @@
       if (a > 0) D.entries[newId(at)] = { date: today(), line: l, amount: Math.round(a * 100) / 100, note: "", at: at, source: "quick" };
       if (tp > 0 && l !== "exp") D.entries[newId(at + 1)] = { date: today(), line: l, amount: Math.round(tp * 100) / 100, note: "", at: at + 1, source: "quick", tip: true };
       D.lastLine = l; paint.focusQ = true; paint(); save(); };
+    Array.prototype.forEach.call(document.querySelectorAll("#gl-top [data-del]"), function (b) { b.onclick = function () { if (confirm("Undo this entry?")) { delete D.entries[b.getAttribute("data-del")]; paint(); save(); } }; });
+  }
+  function bindRest() {
     document.getElementById("gl-f-add").onsubmit = function (e) { e.preventDefault(); var a = num(document.getElementById("gl-a-amt").value), d = document.getElementById("gl-a-date").value;
       if (a == null || !d) return alert("Enter a date and amount."); var at = Date.now();
       D.entries[newId(at)] = { date: d, line: document.getElementById("gl-a-line").value, amount: a, note: document.getElementById("gl-a-note").value.trim(), at: at, source: "manual", tip: document.getElementById("gl-a-tip").checked || undefined }; paint(); save(); };
-    document.getElementById("gl-f-set").onsubmit = function (e) { e.preventDefault(); var s = D.settings;
-      [["s-week", "week"], ["s-uber", "uber"], ["s-month", "month"], ["s-year", "year"]].forEach(function (p) { s[p[1]] = num(document.getElementById(p[0]).value); });
-      s.daysLeft = num(document.getElementById("gl-s-days").value); s.daysLeftSet = today(); paint(); save(); };
-    Array.prototype.forEach.call(document.querySelectorAll("[data-del]"), function (b) { b.onclick = function () { if (confirm("Undo this entry?")) { delete D.entries[b.getAttribute("data-del")]; paint(); save(); } }; });
     document.getElementById("gl-b-exp").onclick = function () { kvGet("vault").then(function (v0) { var v = Object.assign({}, v0, { pw: { iv: v0.pw.iv, w: Array.from(v0.pw.w) }, ct: Array.from(v0.ct) }); download("ledger-backup-" + today() + ".json", JSON.stringify({ pcsLedgerBackup: 1, vault: v }), "application/json"); }); };
     document.getElementById("gl-b-csv").onclick = function () { if (confirm("The CSV is NOT encrypted. Export anyway?")) download("ledger-" + today() + ".csv", toCsv(), "text/csv"); };
     document.getElementById("gl-b-imp").onchange = function (e) { var file = e.target.files[0]; if (!file) return; file.text().then(function (txt) { importText(file.name, txt); }); e.target.value = ""; };
