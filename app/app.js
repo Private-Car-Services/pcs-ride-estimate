@@ -4130,15 +4130,27 @@
     list.forEach(function (iv) { t += Math.max(0, Math.min(Number(iv[1]), to) - Math.max(Number(iv[0]), from)); });
     return t;
   }
-  /* v75h1: server-side God reset of Drive + Shift (rides/DRVRHOSL/{id}/hosReset = {at, by, reason}); polled with forceLogout */
+  /* v75h2: server-side God reset of Drive + Shift. rides/DRVRHOSL is unreadable (the rules' code alphabet has no "O"),
+     so the reset lives on the miles day row: rides/DRVRMLES/{id}/{day}/hosReset = {at, by, reason} (today + yesterday).
+     The newest reset seen (server, local miles rows, or saved) wins. Drive + Shift count only from it; Cycle untouched. */
   function hosResetKey() { return hosKey() + "-reset"; }
-  function hosResetAt() { try { return Number(localStorage.getItem(hosResetKey())) || 0; } catch (e) { return 0; } }
+  function hosResetAt() {
+    var t = 0; try { t = Number(localStorage.getItem(hosResetKey())) || 0; } catch (e) {}
+    try { var m = readMilesLocal(); Object.keys(m).forEach(function (d) { var r = m[d] && m[d].hosReset; var a = Number(r && r.at) || 0; if (a > t) t = a; }); } catch (e) {}
+    return t;
+  }
+  function hosResetSave(at) {
+    at = Number(at) || 0;
+    var cur = 0; try { cur = Number(localStorage.getItem(hosResetKey())) || 0; } catch (e) {}
+    if (at > cur) { try { localStorage.setItem(hosResetKey(), String(at)); } catch (e) {} hosWarned = {}; try { render(); } catch (e) {} }
+  }
   function hosResetCheck() {
     if (ROLE !== "driver" || !signedIn() || !syncOn()) return Promise.resolve();
-    return authFetch(databaseURL() + "/rides/DRVRHOSL/" + encodeURIComponent(driverPresenceId()) + "/hosReset.json").then(function (r) { return r.ok ? r.json() : null; }).then(function (rs) {
-      var at = Number(rs && rs.at) || 0;
-      if (at > hosResetAt()) { try { localStorage.setItem(hosResetKey(), String(at)); } catch (e) {} hosWarned = {}; try { render(); } catch (e) {} }
-    }).catch(function () {});
+    var base = databaseURL() + "/rides/DRVRMLES/" + encodeURIComponent(driverPresenceId()) + "/";
+    var today = chicagoToday();
+    return Promise.all([today, addDaysYmd(today, -1)].map(function (d) {
+      return authFetch(base + d + "/hosReset.json").then(function (r) { return r.ok ? r.json() : null; }).then(function (rs) { hosResetSave(rs && rs.at); }).catch(function () {});
+    }));
   }
   if (typeof window !== "undefined" && ROLE === "driver") { setTimeout(function () { hosResetCheck(); }, 3000); setInterval(function () { hosResetCheck(); }, 20000); }
   function hosStatus(now) {
@@ -4167,7 +4179,7 @@
     if (cycleFrom > dutyStart && dutyStart) { var nx2 = 0; segs.forEach(function (g) { if (!nx2 && g[1] > cycleFrom) nx2 = Math.max(g[0], cycleFrom); }); dutyStart = nx2 || dutyStart; }
     var brks = hosBreaks(now); /* v72x: Break status = off duty for Shift + Cycle */
     /* v75h1 (Matthew 10/14): God reset (rides/DRVRHOSL/{id}/hosReset.at): Drive + Shift count only from the reset; Cycle untouched */
-    var hosRs = hosResetAt(); if (hosRs && hosRs <= now && dutyStart && dutyStart < hosRs) dutyStart = hosRs;
+    var hosRs = hosResetAt(); if (hosRs && hosRs <= now && dutyStart < hosRs) { var nx3 = 0; segs.forEach(function (g) { if (!nx3 && g[1] > hosRs) nx3 = Math.max(g[0], hosRs); }); dutyStart = nx3; } /* v75h2: any shift state; first duty after the reset */
     /* v75h1 (Matthew 10/14): logged-out time (gaps between duty pieces) is OFF duty like Break/Offline: it pauses Shift.
        Only 10 h off in a row resets; a shorter logout no longer burns the 14 h window. Same basis as Cycle. */
     var shiftMs = dutyStart ? Math.max(0, hosOverlap(segs, dutyStart, now) - hosOverlap2(segs, hosMerge(brks.concat(offl)), dutyStart, now)) : 0;
