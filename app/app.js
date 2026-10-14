@@ -3681,10 +3681,10 @@
     var m = document.createElement("div"); m.id = "q-off-ask"; m.setAttribute("role", "dialog"); m.setAttribute("aria-modal", "true");
     m.style.cssText = "position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;padding:20px";
     m.innerHTML = '<div style="background:#fff;color:#111;border-radius:12px;padding:18px;max-width:340px;width:100%;text-align:center;font-size:17px"><p style="margin:0 0 14px;font-weight:700">Are you finished for today?</p>' +
-      '<div style="display:flex;gap:10px"><button type="button" id="q-off-no" class="btn pcs-light-btn" style="flex:1;margin:0">No</button><button type="button" id="q-off-yes" class="btn" style="flex:1;margin:0">Yes</button></div></div>';
+      '<div style="display:flex;gap:10px"><button type="button" id="q-off-no" class="btn pcs-light-btn" style="flex:1;margin:0">I\u2019m taking a pause</button><button type="button" id="q-off-yes" class="btn" style="flex:1;margin:0">Yes, done for today</button></div></div>';
     document.body.appendChild(m);
     m.addEventListener("click", function (e) { var b = e.target.closest && e.target.closest("button"); if (!b) return; m.remove();
-      if (b.id === "q-off-no") return; /* v75c (Matthew): No = close the popup, nothing else (status screen unchanged) */
+      if (b.id === "q-off-no") { goOfflineNow(); return; } /* v75h.3 (Matthew 10/14): pause = Offline, shift stays open */
       goOfflineNow(); endOfDay(); });
   }
   function endOfDay() {
@@ -16559,14 +16559,14 @@
     try { if (meterActive()) return true; } catch (e) {}
     return false;
   }
-  function qDriverBusy() { return qManualBusy() || qAutoBusy(); }
+  function qDriverBusy() { return qManualBusy() || qAutoBusy() || qOnBreak(); } /* v75h.3 */
   function qPushStatus() {
     var tok = qToken();
     if (!tok) return;
     var auto = qAutoBusy(), busy = auto || qManualBusy();
     qd.pubBusy = true;
     /* v72u: Break is private to the driver: riders/queue see the driver as Available (never "Driver on break") */
-    qWorker("/driver/status", { token: tok, onRide: busy, onBreak: false, source: auto ? "pcs" : "manual" }).then(function () {
+    qWorker("/driver/status", { token: tok, onRide: busy, onBreak: !busy && qOnBreak(), source: auto ? "pcs" : "manual" }).then(function () {
       qd.pubBusy = false; qd.pubErr = "";
     }).catch(function (e) {
       qd.pubBusy = false; qd.pubErr = e.message || "Couldn't update your status.";
@@ -16779,7 +16779,7 @@
       if (!signedIn()) return;
       try { if (state.milesEndPrompt || odometerGatePending() || !canGoOnline()) { qd.lastPub = null; return; } } catch (e) {}
       var busy = qDriverBusy();
-      var key = (qToken() ? "t" : "n") + (busy ? 1 : 0);
+      var key = (qToken() ? "t" : "n") + (qOnBreak() ? "b" : "") + (busy ? 1 : 0);
       if (qd.lastPub !== key) {
         var was = qd.lastPub;
         qd.lastPub = key;
