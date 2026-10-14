@@ -1,4 +1,4 @@
-/* PCS Monthly Goal (Matthew) - v75u: big on-screen 9-key pad (1-9 . 0 del, Clear, Done) on every money/number box; 'Use iPad keyboard' fallback. v75t: every money/number box opens the number pad (numPad helper after each render). v75s: tappable goal overrides, adjustment re-dating/repair, goals never negative. v75r: goal cascade + YTD totals. v75g: runs INSIDE God mode as its own Home panel (God Home > Monthly Goal).
+/* PCS Monthly Goal (Matthew) - v75v: robust repair - a month-to-date adjustment that is really a year figure (>40% of that source's YTD from March on, or >2x a plausible month) is re-dated to Jan 1 and netted with Apply's negative year remainder; Apply treats MTD >= 90% of YTD as YTD only. v75u: big on-screen 9-key pad (1-9 . 0 del, Clear, Done) on every money/number box; 'Use iPad keyboard' fallback. v75t: every money/number box opens the number pad (numPad helper after each render). v75s: tappable goal overrides, adjustment re-dating/repair, goals never negative. v75r: goal cascade + YTD totals. v75g: runs INSIDE God mode as its own Home panel (God Home > Monthly Goal).
    Own password + PIN, separate from God sign-in. Data stays on this device only (never Firebase, no network calls).
    Ported from the former standalone /ledger/ app; same IndexedDB vault.
    Local-first: all data lives on this device in IndexedDB, AES-GCM encrypted with a key derived from Matthew's own
@@ -183,19 +183,35 @@
     t = t || today(); at = at || Date.now(); var out = [], n = 0, m1 = t.slice(0, 7) + "-01", y1 = t.slice(0, 4) + "-01-01";
     [["w", "week"], ["m", "month"], ["y", "year"]].forEach(function (p) {
       ADJ.forEach(function (r, i) { var v = inputs[i] && inputs[i][p[0]]; if (v == null) return;
-        if (p[0] === "m" && inputs[i].y != null && v > inputs[i].y) return; var c = calc(t), date = p[0] === "w" ? c.wk0 : p[0] === "m" ? m1 : y1, amt = Math.round((v - adjCur(c, p[0], r)) * 100) / 100; if (!amt) return;
+        if (p[0] === "m" && inputs[i].y != null && v >= 0.9 * inputs[i].y && inputs[i].y > 0) return; /* v75v: MTD >= 90% of YTD = a year figure, use YTD only */
+        if (p[0] === "m" && inputs[i].y == null && looksYearly(calc(t), r, v, t)) { inputs[i].y = v; return; } /* v75v: a year figure typed in Month goes to the year */ var c = calc(t), date = p[0] === "w" ? c.wk0 : p[0] === "m" ? m1 : y1, amt = Math.round((v - adjCur(c, p[0], r)) * 100) / 100; if (!amt) return;
         var id = "adj-" + newId(at + n); D.entries[id] = { date: date, line: r[0], amount: amt, tip: r[2], type: "adjustment", scope: p[0], note: "Manual adjustment (" + p[1] + " to date)", at: at + n++ }; out.push(id); }); });
     return out;
   }
   /* v75s: repair saved adjustments on load. Year = Jan 1, month = the 1st, week = its Monday. A month adjustment that pushes
      a source's month above its year total was really a year figure: it becomes part of the year remainder (Jan 1). */
-  function repair(t) { t = t || today(); var ch = 0, E = D.entries;
+  /* v75v: is a month-to-date figure really a year figure? (Jan/Feb can legitimately be most of the year) */
+  function looksYearly(c, r, v, t) { var mo = Number(t.slice(5, 7)), ytd = ytdTotal(c, r), yg = goal((D.settings || {}).year), cap = yg != null ? 2 * yg / 12 : null;
+    if (v <= 0) return false; if (mo >= 3 && ytd > 0 && v > 0.4 * ytd) return true; if (cap != null && v > cap) return true; return mo >= 2 && ytd > 0 && v > ytd + 0.005; }
+  /* v75s+v75v: repair saved adjustments on load. Year = Jan 1, month = the 1st, week = its Monday. Then, per source, if this
+     month's MONTH adjustments add up to a year-sized figure, they become year adjustments (Jan 1) and every year adjustment
+     for that source (including Apply's negative "year remainder") is netted into ONE Jan 1 entry, so YTD stays exactly
+     what was typed and the month only counts real rides in this month. */
+  function repair(t) { t = t || today(); var ch = 0, E = D.entries, m = t.slice(0, 7), y1 = t.slice(0, 4) + "-01-01";
     Object.keys(E).forEach(function (k) { var e = E[k]; if (e.type !== "adjustment") return; var d = String(e.date || ""); if (!/^\d{4}-\d{2}-\d{2}$/.test(d)) d = t;
       var nd = e.scope === "y" ? d.slice(0, 4) + "-01-01" : e.scope === "m" ? d.slice(0, 7) + "-01" : e.scope === "w" ? addDays(d, -((new Date(d + "T12:00:00Z").getUTCDay() + 6) % 7)) : d;
       if (nd !== e.date) { e.date = nd; ch++; } });
-    var c = calc(t), m = t.slice(0, 7);
-    ADJ.forEach(function (r) { if (ytdTotal(c, r) >= -0.005 && mtd(c, r) <= ytdTotal(c, r) + 0.005) return;
-      Object.keys(E).forEach(function (k) { var e = E[k]; if (e.type === "adjustment" && e.scope === "m" && e.line === r[0] && !!e.tip === !!r[2] && String(e.date).slice(0, 7) === m) { e.scope = "y"; e.date = t.slice(0, 4) + "-01-01"; e.note = "Manual adjustment (year to date, moved from month)"; ch++; } }); });
+    ADJ.forEach(function (r) { var c = calc(t);
+      function mine(e) { return e.type === "adjustment" && e.line === r[0] && !!e.tip === !!r[2]; }
+      var mk = Object.keys(E).filter(function (k) { var e = E[k]; return mine(e) && e.scope === "m" && String(e.date).slice(0, 7) === m; });
+      var madj = mk.reduce(function (a, k) { return a + (Number(E[k].amount) || 0); }, 0);
+      if (!mk.length || !(madj > 0) || !(looksYearly(c, r, madj, t) || mtd(c, r) > ytdTotal(c, r) + 0.005)) return;
+      mk.forEach(function (k) { E[k].scope = "y"; E[k].date = y1; });
+      var yk = Object.keys(E).filter(function (k) { var e = E[k]; return mine(e) && e.scope === "y" && String(e.date) === y1; });
+      var net = Math.round(yk.reduce(function (a, k) { return a + (Number(E[k].amount) || 0); }, 0) * 100) / 100, keep = yk[0];
+      yk.slice(1).forEach(function (k) { delete E[k]; });
+      if (net) { E[keep].amount = net; E[keep].note = "Manual adjustment (year to date, fixed from month)"; } else delete E[keep];
+      ch++; });
     return ch; }
   function mtd(c, r) { return r[2] ? c.g("m", "tip:" + r[0]) : c.g("m", r[0]) - (r[0] === "pcs" ? c.g("m", "tip:pcs") : 0); }
   function ytdTotal(c, r) { return r[2] ? c.g("y", "tip:" + r[0]) : c.g("y", r[0]) - (r[0] === "pcs" ? c.g("y", "tip:pcs") : 0); }
@@ -365,7 +381,7 @@
     idb().then(function () { lockNow(); }).catch(function () { app.innerHTML = '<p class="err">This browser cannot store the ledger (private browsing?).</p>'; });
   }
   function glClose() { kpClose(); kpEl = null; dek = null; D = null; app = null; var ov = document.getElementById("gl-screen"); if (ov) ov.remove(); }
-  if (typeof module !== "undefined" && module.exports) module.exports = { repair: repair, _set: function (d) { D = d; }, calc: calc, planAdjust: planAdjust, ytdTotal: ytdTotal, ADJ: ADJ, weeksLeft: weeksLeft, numPad: numPad, kpPress: kpPress, glOpen: glOpen };
+  if (typeof module !== "undefined" && module.exports) module.exports = { looksYearly: looksYearly, repair: repair, _set: function (d) { D = d; }, calc: calc, planAdjust: planAdjust, ytdTotal: ytdTotal, ADJ: ADJ, weeksLeft: weeksLeft, numPad: numPad, kpPress: kpPress, glOpen: glOpen };
   window.__pcsGoalOpen = glOpen; window.__pcsGoalClose = glClose;
   document.addEventListener("click", function (e) { var t = e.target.closest ? e.target.closest("[data-god-menu=goal]") : null; if (t) { e.stopPropagation(); glOpen(); } }, true);
 })();
