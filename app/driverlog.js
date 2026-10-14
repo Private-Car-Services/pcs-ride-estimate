@@ -114,7 +114,7 @@
   function eventsHtml(day, meta) {
     return '<ul class="dl-events" style="list-style:none;margin:0;padding:0">' + events(day, meta).map(function (e) {
       return '<li class="dl-ev" style="display:flex;gap:10px;padding:10px 12px;border-bottom:1px solid #ddd;background:#fff">' + badge(e.c) +
-        '<div><div><span class="dl-ev-time">' + esc(tclock(e.at)) + '</span> <span style="color:#999">|</span> <span class="dl-ev-dur">' + esc(dur(e.min)) + "</span></div>" +
+        '<div><div><span class="dl-ev-time">' + esc(tclock(e.at)) + '</span> <span style="color:#595959">|</span> <span class="dl-ev-dur">' + esc(dur(e.min)) + "</span></div>" +
         '<div class="dl-ev-city" style="color:#666;font-size:13px">' + esc(e.city || "Location not recorded") + "</div></div></li>";
     }).join("") + "</ul>";
   }
@@ -166,14 +166,14 @@
     ch("interior", "Interior clean", YN_NOBAD), ch("exterior", "Exterior clean", YN_NOBAD),
     ch("fulltank", "Full tank of gas", YN_NOBAD, "", { kinds: ["post"], noteOnly: true }), /* v74 (Matthew): post-trip only; No = a note in God mode, never unsafe */
     { k: "carwash", label: "Last date of car wash", type: "date", required: true, vehicle: true, block: true, maxAgeHours: 48 },
-    { k: "regexp", label: "Registration expiration date", type: "date", required: true, vehicle: true, expiry: true },
+    { k: "regexp", label: "Registration expiration (month/year)", type: "date", monthYear: true, required: true, vehicle: true, expiry: true },
     { k: "insexp", label: "Insurance card expiration date", type: "date", required: true, vehicle: true, expiry: true }
   ];
   var DVIR_EXTRAS = [];
   function norm1(x) {
     if (Array.isArray(x)) return ch(String(x[0]), String(x[1]), YN_NOBAD, "", { required: x[2] !== false }); /* old [key, label, required] -> OK/Defect style Yes/No */
     if (!x || !x.k || !x.label) return null;
-    var o = Object.assign({}, x); o.type = o.type === "date" ? "date" : "choice"; o.required = o.required !== false;
+    var o = Object.assign({}, x); o.type = o.type === "date" ? "date" : "choice"; if (o.k === "regexp") o.monthYear = true; /* v75: MM/YYYY even with a God-edited checklist */ o.required = o.required !== false;
     if (o.type === "choice" && !(Array.isArray(o.opts) && o.opts.length)) o.opts = [{ label: "OK", bad: false }, { label: "Defect", bad: true }];
     return o;
   }
@@ -226,10 +226,13 @@
   function fmtDur(sec) { sec = Math.max(0, Math.round(Number(sec) || 0)); return Math.floor(sec / 60) + "m " + ("0" + (sec % 60)).slice(-2) + "s"; }
   function items(meta) { var c = meta && meta.dvirItems; return (Array.isArray(c) && c.length ? c : DVIR).map(norm1).filter(Boolean); }
   /* MM/DD/YYYY -> ms at Chicago midnight (null if invalid) */
-  function parseMdy(v) { var m = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/.exec(String(v || "").trim()); if (!m) return null; var mo = +m[1], d = +m[2], y = +m[3]; if (mo < 1 || mo > 12 || d < 1 || d > 31) return null;
+  function parseMdy(v) { var my = /^(\d{4})-(\d{2})$/.exec(String(v || "").trim()) || (function (z) { return z ? [z[0], z[2], z[1]] : null; })(/^(\d{1,2})\/(\d{4})$/.exec(String(v || "").trim()));
+    if (my) { var yy = +my[1], mm = +my[2]; if (mm < 1 || mm > 12) return null; var last = new Date(Date.UTC(yy, mm, 0)).getUTCDate(); return parseMdy(mm + "/" + last + "/" + yy); } /* v75: YYYY-MM / MM/YYYY = end of that month */
+    var m = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/.exec(String(v || "").trim()); if (!m) return null; var mo = +m[1], d = +m[2], y = +m[3]; if (mo < 1 || mo > 12 || d < 1 || d > 31) return null;
     var ds = y + "-" + ("0" + mo).slice(-2) + "-" + ("0" + d).slice(-2); var t = midnight(ds); return ymd(t + 3600000) === ds ? t : null; }
   function expiryState(v, now) { var t = parseMdy(v); if (t == null) return ""; now = now || Date.now(); var end = t + 86400000; if (end <= now) return "expired"; if (end - now <= 30 * 86400000) return "soon"; return "ok"; }
-  function ansText(it, x) { if (!x) return "\u2014"; if (it.type === "date") return x.date || "\u2014"; return x.answer || "\u2014"; }
+  function myShow(v) { v = String(v || ""); var a = /^(\d{4})-(\d{2})$/.exec(v); if (a) return a[2] + "/" + a[1]; var b = /^(\d{1,2})\/\d{1,2}\/(\d{4})$/.exec(v); return b ? ("0" + b[1]).slice(-2) + "/" + b[2] : v; }
+  function ansText(it, x) { if (!x) return "\u2014"; if (it.type === "date") return (it.monthYear ? myShow(x.date) : x.date) || "\u2014"; return x.answer || "\u2014"; }
   function inspHtml(day, meta, kind) {
     var DVIR = items(meta);
     kind = kind === "post" ? "post" : "pre";
@@ -253,29 +256,29 @@
     }
     if (!meta.canSign || (day.upTo >= day.minutes && meta.inspDay !== day.day)) return head + '<div class="dl-insp" style="background:#fff;padding:12px">No Inspections</div>';
     var vd = (meta.vehDates && meta.vehDates()) || {}, pg = "", fl = fluidsDue(vd.fluids, meta.now, meta.fluidsDays), flNote = false;
-    return head + '<form id="dl-dvir-form" data-day="' + esc(day.day) + '" data-kind="' + kind + '" style="background:#fff;padding:10px;font-size:14px;color:#222">' +
+    return head + '<form id="dl-dvir-form" novalidate autocomplete="off" data-day="' + esc(day.day) + '" data-kind="' + kind + '" style="background:#fff;padding:10px;font-size:14px;color:#222">' +
       '<button type="button" id="dl-dvir-nodef" style="width:100%;padding:12px;margin-bottom:8px;border:0;border-radius:8px;background:#2e7d32;color:#fff;font-weight:700">No defects (mark all good)</button>' +
       DVIR.map(function (it) {
         if (Array.isArray(it.kinds) && it.kinds.length && it.kinds.indexOf(kind) < 0) return "";
         if (it.group === "Fluids" && !fl.due) { if (flNote) return ""; flNote = true; pg = it.group;
           return '<div class="dl-dvir-group" style="font-weight:700;margin-top:10px">Fluids</div><div class="dl-fluids-ok" style="padding:8px 0 8px 12px;color:#2e7d32;border-bottom:1px solid #eee">Fluids checked ' + esc(fl.last) + ", next due by " + esc(fl.next) + "</div>"; }
         var h = grp(it, pg) + (it.group === "Fluids" && it.group !== pg ? '<div class="dl-fluids-due" style="padding:2px 0 4px 12px;color:#b45309;font-size:13px">' + (fl.why === "never" ? "Fluids check due (no check on record)" : fl.why === "weekend" ? "Weekly fluids check due this weekend (last " + esc(fl.last) + ")" : "Fluids check due (last " + esc(fl.last) + ", " + fl.since + " days ago)") + "</div>" : ""); pg = it.group; var pad = it.group || it.sub ? "padding-left:12px;" : "";
-        if (it.type === "date") return h + '<div class="dl-dvir-item" data-item="' + esc(it.k) + '" data-type="date" style="' + pad + 'border-bottom:1px solid #eee;padding-top:8px;padding-bottom:8px"><label style="display:flex;gap:6px;align-items:center"><span style="flex:1">' + esc(it.label) + (it.required ? "" : ' <small style="color:#888">(optional)</small>') + '</span><input type="text" inputmode="numeric" placeholder="MM/DD/YYYY" maxlength="10" name="date-' + esc(it.k) + '" value="' + esc(vd[it.k] || "") + '" style="width:120px"></label></div>';
+        if (it.type === "date") return h + '<div class="dl-dvir-item" data-item="' + esc(it.k) + '" data-type="date" style="' + pad + 'border-bottom:1px solid #eee;padding-top:8px;padding-bottom:8px"><label style="display:flex;gap:6px;align-items:center"><span style="flex:1">' + esc(it.label) + (it.required ? "" : ' <small style="color:#595959">(optional)</small>') + '</span><input type="text" inputmode="numeric" pattern="[0-9]*" autocomplete="off" autocorrect="off" spellcheck="false" data-date-mask="' + (it.monthYear ? "my" : "mdy") + '" placeholder="' + (it.monthYear ? "MM/YYYY" : "MM/DD/YYYY") + '" maxlength="' + (it.monthYear ? 7 : 10) + '" name="date-' + esc(it.k) + '" value="' + esc(it.monthYear ? myShow(vd[it.k]) : (vd[it.k] || "")) + '" style="width:120px"></label></div>';
         if (it.noteOnly) return h + '<div class="dl-dvir-item" data-item="' + esc(it.k) + '" data-note-only="1" style="' + pad + 'border-bottom:1px solid #eee;padding-top:8px;padding-bottom:8px"><div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap"><span style="flex:1">' + esc(it.label) + "</span>" +
           it.opts.map(function (o, i) { return '<label><input type="radio" name="dv-' + esc(it.k) + '" value="' + i + '" data-bad="' + (o.bad ? "note" : 0) + '"> ' + esc(o.label) + "</label>"; }).join(" ") + "</div>" +
           (it.k === "fulltank" ? '<div class="dl-fuel" hidden style="margin-top:6px"><label>Fuel level (required) <select name="fuel-fulltank" required><option value="">Pick\u2026</option>' + FUEL_LEVELS.map(function (v) { return '<option value="' + v + '">' + v + "</option>"; }).join("") + "</select></label></div>" : "") + /* v74b */
           "</div>";
-        return h + '<div class="dl-dvir-item" data-item="' + esc(it.k) + '" data-required="' + it.required + '" style="' + pad + 'border-bottom:1px solid #eee;padding-top:8px;padding-bottom:8px"><div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap"><span style="flex:1">' + esc(it.label) + (it.required ? "" : ' <small style="color:#888">(optional)</small>') + "</span>" +
+        return h + '<div class="dl-dvir-item" data-item="' + esc(it.k) + '" data-required="' + it.required + '" style="' + pad + 'border-bottom:1px solid #eee;padding-top:8px;padding-bottom:8px"><div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap"><span style="flex:1">' + esc(it.label) + (it.required ? "" : ' <small style="color:#595959">(optional)</small>') + "</span>" +
           it.opts.map(function (o, i) { return '<label><input type="radio" name="dv-' + esc(it.k) + '" value="' + i + '" data-bad="' + (o.bad ? (it.noteOnly ? "note" : 1) : 0) + '"> ' + esc(o.label) + "</label>"; }).join(" ") + "</div>" +
           '<div class="dl-dvir-def" hidden style="margin-top:6px">' + (it.warn ? '<p class="dl-dvir-warn" style="margin:0 0 6px;color:#b91c1c;font-weight:700">' + esc(it.warn) + "</p>" : "") + (it.text ? '<input type="text" name="text-' + esc(it.k) + '" placeholder="' + esc(it.textLabel || "Explain") + ' (required)" maxlength="300" style="width:100%;margin-bottom:4px">' : "") +
           '<input type="text" name="note-' + esc(it.k) + '" placeholder="Notes' + ((it.noCamera || it.k === "brakenoise" || it.k === "dash") ? " (optional)" : "") + '" maxlength="300" style="width:100%">' +
-          (!it.required ? '<div style="margin:4px 0;color:#888">Optional item: noted only, never blocks.</div>' : it.block ? '<div style="margin:4px 0;color:#b91c1c;font-size:13px;font-weight:600">' + (it.photoApprove ? "Blocks going Available until God mode approves the photo." : "Safety item: blocks going Available until God mode clears it.") + "</div>" : '<div style="margin:4px 0;color:#555;font-size:13px">Flagged to God mode (does not block).</div>') +
+          (!it.required ? '<div style="margin:4px 0;color:#595959">Optional item: noted only, never blocks.</div>' : it.block ? '<div style="margin:4px 0;color:#b91c1c;font-size:13px;font-weight:600">' + (it.photoApprove ? "Blocks going Available until God mode approves the photo." : "Safety item: blocks going Available until God mode clears it.") + "</div>" : '<div style="margin:4px 0;color:#555;font-size:13px">Flagged to God mode (does not block).</div>') +
           (it.required && !it.noPhoto && !(it.noCamera || it.k === "brakenoise" || it.k === "dash") ? '<div style="margin:4px 0;color:#b45309;font-size:13px">Photo required</div>' : "") +
           ((it.noCamera || it.k === "brakenoise" || it.k === "dash") ? "" : /* v74b (Matthew): never a photo for the grinding-noise question */
           '<label class="dl-photo-btn" style="display:inline-block;padding:8px 14px;border-radius:8px;background:#374151;color:#fff;font-weight:600;cursor:pointer">\ud83d\udcf7 Take photo<input type="file" accept="image/*" capture="environment" name="photo-' + esc(it.k) + '" data-photo="' + esc(it.k) + '" style="position:absolute;width:1px;height:1px;opacity:0;overflow:hidden"></label> <span class="dl-photo-count" data-photo-count="' + esc(it.k) + '" style="font-size:13px;color:#555"></span>' +
           '<div class="dl-photo-thumbs" data-photo-thumbs="' + esc(it.k) + '"></div>') + "</div></div>";
       }).join("") +
-      '<label style="display:block;margin-top:8px">Odometer <input type="text" inputmode="numeric" pattern="[0-9]*" name="odometer" id="dl-dvir-odo" value="' + esc(meta.odoNow != null && isFinite(Number(meta.odoNow)) ? String(Math.floor(Number(meta.odoNow))) : "") + '" style="width:140px"></label>' +
+      '<label style="display:block;margin-top:8px">Odometer <input type="text" inputmode="numeric" pattern="[0-9]*" name="odometer" id="dl-dvir-odo" autocomplete="off" autocorrect="off" spellcheck="false" maxlength="7" value="' + esc(kind === "pre" && meta.odoNow != null && isFinite(Number(meta.odoNow)) ? String(Math.floor(Number(meta.odoNow))) : "") + '" style="width:140px"></label>' +
       '<p style="margin:10px 0 4px">Driver signature</p><canvas id="dl-sig-pad" width="680" height="140" style="width:100%;height:140px;touch-action:none;display:block;background:#fafafa"></canvas><div style="border-top:1px solid #333"></div>' +
       '<p style="margin:8px 0;text-align:center"><a href="#" id="dl-sig-clear" style="color:#2f6fe0;text-decoration:none">Clear Signature</a></p>' +
       '<p id="dl-dvir-err" role="alert" style="color:#b91c1c"></p><button type="button" id="dl-dvir-save" style="width:100%;padding:12px;border:0;border-radius:8px;background:#2f6fe0;color:#fff;font-weight:700">Submit inspection</button></form>';
@@ -307,8 +310,9 @@
       var x = { label: it.label, group: it.group || "", type: it.type, required: it.required };
       if (it.type === "date") {
         var v = String((form.querySelector('input[name="date-' + it.k + '"]') || {}).value || "").trim();
-        if (!v) { if (it.required && !err) err = "Enter " + it.label + " (MM/DD/YYYY)."; }
-        else if (parseMdy(v) == null) { if (!err) err = it.label + ": use MM/DD/YYYY."; }
+        if (it.monthYear && v) { var mym = /^(\d{1,2})\/(\d{4})$/.exec(v); v = mym && +mym[1] >= 1 && +mym[1] <= 12 ? mym[2] + "-" + ("0" + mym[1]).slice(-2) : "bad"; } /* stored YYYY-MM */
+        if (!v) { if (it.required && !err) err = "Enter " + it.label + (it.monthYear ? " (MM/YYYY)." : " (MM/DD/YYYY)."); }
+        else if (parseMdy(v) == null) { if (!err) err = it.label + (it.monthYear ? ": use MM/YYYY with a month 01-12 (e.g. 06/2027)." : ": use MM/DD/YYYY."); }
         else { x.date = v; if (it.vehicle) vehDates[it.k] = v;
           if (it.block && it.maxAgeHours) { var age = (now - parseMdy(v)) / 3600000 - 24; /* a date counts until its end of day */ if (age > Number(it.maxAgeHours)) { x.stale = true; x.bad = true; x.blocking = true; unsafe = true; blocks.push({ k: it.k, label: it.label, why: "older than " + it.maxAgeHours + " h" }); } } if (it.expiry) { x.expiry = expiryState(v, now); if (x.expiry === "expired") { x.bad = true; if (it.required) defects++; else x.optional = true; } } }
         out[it.k] = x; return;
@@ -353,7 +357,7 @@
   }
   function listItem(day, withGrid) {
     return '<button type="button" class="dl-item" data-open-day="' + esc(day.day) + '" style="display:block;width:100%;text-align:left;border:0;border-bottom:1px solid #ddd;background:#fff;padding:10px 12px;color:#222">' +
-      '<div><b>' + esc(wd(day, { weekday: "long" })) + "</b> " + esc(wd(day, { month: "short", day: "2-digit" })) + '<span style="float:right;color:#999">\u203a</span></div>' +
+      '<div><b>' + esc(wd(day, { weekday: "long" })) + "</b> " + esc(wd(day, { month: "short", day: "2-digit" })) + '<span style="float:right;color:#595959">\u203a</span></div>' +
       '<div class="dl-item-hrs" style="color:#666;font-size:13px">\u23f1 ' + esc(hrmin(onMin(day))) + " \u00b7 No Inspections</div>" +
       (withGrid ? '<div style="margin-top:6px">' + gridSvg(day) + "</div>" : "") + "</button>";
   }
@@ -479,5 +483,15 @@
     window.addEventListener("popstate", function () { if (closing) { closing = false; return; } if (document.getElementById("dl-overlay")) close(true); });
     document.addEventListener("keydown", function (e) { if ((e.key === "Escape" || e.key === "Esc") && document.getElementById("dl-overlay") && !document.getElementById("dl-fuel-pop")) close(); });
   }
+  /* v75: auto-insert slashes while typing a DVIR date (numeric keypad has no "/"); odometer = digits only */
+  if (typeof document !== "undefined") document.addEventListener("input", function (e) {
+    var t = e.target; if (!t || !t.getAttribute) return;
+    if (t.id === "dl-dvir-odo") { var o = t.value.replace(/\D/g, "").slice(0, 7); if (o !== t.value) t.value = o; return; }
+    var mk = t.getAttribute("data-date-mask"); if (!mk) return;
+    var del = e.inputType && e.inputType.indexOf("delete") === 0, d = t.value.replace(/\D/g, "").slice(0, mk === "my" ? 6 : 8), out = d;
+    if (d.length > 2 || (d.length === 2 && !del)) out = d.slice(0, 2) + "/" + d.slice(2);
+    if (mk === "mdy" && (d.length > 4 || (d.length === 4 && !del))) out = d.slice(0, 2) + "/" + d.slice(2, 4) + "/" + d.slice(4);
+    if (out !== t.value) t.value = out;
+  }, true);
   window.PCSDriverLog = { minTimeGate: minTimeGate, fmtDur: fmtDur, motionGate: motionGate, fluidsDue: fluidsDue, readDvir: readDvir, parseMdy: parseMdy, expiryState: expiryState, EXTRAS: DVIR_EXTRAS, items: items, DVIR: DVIR, CERT: CERT, dayHash: dayHash, snapshot: snapshot, historyHtml: historyHtml, build: build, html: html, gridSvg: gridSvg, listHtml: listHtml, detailHtml: detailHtml, csv: csv, open: open, close: close, download: download, midnight: midnight, CARRIER: CARRIER };
 })();

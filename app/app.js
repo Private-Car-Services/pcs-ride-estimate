@@ -1,3 +1,5 @@
+/* v75g (Matthew): no light-gold text on white. Secondary/ghost buttons inside any white or light card become real buttons: light fill, dark text, visible border. */
+(function () { if (typeof document === "undefined") return; var st = document.createElement("style"); st.id = "pcs-v75g-contrast"; st.textContent = ".pcs-light-btn,[style*=\"background:#fff\"] .btn.ghost,[style*=\"background:#fff\"] .btn.secondary,[style*=\"background: #fff\"] .btn.ghost,[style*=\"background: #fff\"] .btn.secondary,[style*=\"background:#ffffff\"] .btn.ghost,[style*=\"background:#ffffff\"] .btn.secondary,[style*=\"background:white\"] .btn.ghost,[style*=\"background:white\"] .btn.secondary,.meter-qr .btn.ghost,.meter-rqr .btn.ghost"+"{background:#f3f4f6!important;color:#1a1a1a!important;-webkit-text-fill-color:#1a1a1a!important;border:2px solid #6b7280!important;border-radius:14px!important;padding:15px 16px!important;font-size:17px!important;font-weight:800!important;text-align:center!important;opacity:1}"+".pcs-light-btn:hover,.pcs-light-btn:focus-visible{background:#e5e7eb!important;color:#000!important}"; (document.head || document.documentElement).appendChild(st); })();
 /* Private Car Services starter. Preview only: no texts, no charges, no API key. Shared rides use Firebase REST when PCS_SYNC.databaseURL is set.
    v47 (Oct 6): structured addresses + stops, nearest-first place search, card step before PIN, working rider cancel,
    driver online time + screen wake lock.
@@ -3554,6 +3556,7 @@
         try { var pl = normalizePlate(acc.carPlate || "") || "car", vm = JSON.parse(localStorage.getItem("pcs-dvir-veh") || "{}") || {}; vm[pl] = Object.assign({}, vm[pl] || {}, rec.vehDates || {}, { updatedAt: Date.now(), driver: driverPresenceId(), vehicle: [acc.carYear, acc.carMake, acc.carModel].filter(Boolean).join(" ") }); localStorage.setItem("pcs-dvir-veh", JSON.stringify(vm));
           if (syncOn()) authFetch(databaseURL() + "/rides/DVIRVEH/" + encodeURIComponent(pl) + ".json", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(vm[pl]) }).catch(function () {}); } catch (e) {}
         rec.plate = normalizePlate(acc.carPlate || "");
+        if (k === "pre" && Number(rec.odometer) > 0) { try { localStorage.setItem("pcs-dvir-odo", JSON.stringify({ odo: Number(rec.odometer), at: Date.now(), plate: rec.plate, driver: driverPresenceId() })); } catch (e) {} } /* v75: reused as the opening odometer */
         var all = dlRec("dvir"); all[d] = all[d] || {}; all[d][k] = rec; try { localStorage.setItem(dlKey("dvir"), JSON.stringify(all)); } catch (e) {}
         if (syncOn()) authFetch(databaseURL() + "/rides/DRVRHOSL/" + encodeURIComponent(driverPresenceId()) + "/dvir/" + d + "/" + k + ".json", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(rec) }).catch(function () {});
         try { render(); } catch (e) {}
@@ -3601,7 +3604,13 @@
   function dlToday() { return new Intl.DateTimeFormat("en-CA", { timeZone: "America/Chicago", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date()); }
   function dlPlate() { return normalizePlate((readDriverAccount() || {}).carPlate || ""); }
   function dlDvirRec(d, k) { var a = (dlRec("dvir")[d] || {})[k], b = ((hosReadHist().dvir || {})[d] || {})[k]; if (a && b && b.cleared) a = Object.assign({}, a, { cleared: b.cleared }); return a || b || null; }
-  function preTripDoneToday() { var r = dlDvirRec(dlToday(), "pre"); return !!(r && Number(r.at) > 0 && (!r.plate || !dlPlate() || r.plate === dlPlate())); }
+  function preTripDoneToday() { /* v75 (Matthew): a completed pre-trip counts for that vehicle through 11:59 PM Chicago that day, whatever the
+       online/offline/logout toggles and whichever day page it was saved under (e.g. a shift that started before midnight) */
+    var t = dlToday(), pl = dlPlate(), ok = function (r) { return !!(r && Number(r.at) > 0 && (!r.plate || !pl || r.plate === pl)); };
+    if (ok(dlDvirRec(t, "pre"))) return true;
+    var day = function (ms) { try { return new Intl.DateTimeFormat("en-CA", { timeZone: "America/Chicago", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date(ms)); } catch (e) { return ""; } };
+    var hit = false; [dlRec("dvir"), hosReadHist().dvir || {}].forEach(function (m) { Object.keys(m || {}).forEach(function (d) { var r = m[d] && m[d].pre; if (ok(r) && day(Number(r.at)) === t) hit = true; }); });
+    return hit; }
   function vehAvailBlocks(now) {
     var L = window.PCSDriverLog; if (!L) return [];
     now = now || Date.now();
@@ -3624,7 +3633,7 @@
     return dvirRefresh().then(function () {
       if (dvirBlock()) { qd.brkMsg = availBlockMsg(dvirBlock()); render(); return; }
       var md = missedPostDay();
-      if (md) { state.availAfterMissed = md; state.availAfterPre = false; qd.brkMsg = "You ended the " + md + " shift without a post-trip inspection. Complete it now, then today\u2019s pre-trip, to go Available."; render(); openDriverLog("day:" + md + ":insp-post"); return; }
+      if (md && false) { state.availAfterMissed = md; /* v75 (Matthew): a missed post-trip never blocks going Available; God mode still sees the flag */ state.availAfterPre = false; qd.brkMsg = "You ended the " + md + " shift without a post-trip inspection. Complete it now, then today\u2019s pre-trip, to go Available."; render(); openDriverLog("day:" + md + ":insp-post"); return; }
       if (!preTripDoneToday()) { state.availAfterPre = true; qd.brkMsg = "Complete today\u2019s pre-trip inspection to go Available."; render(); openDriverLog("day:" + dlToday() + ":insp"); return; }
       var vb = vehAvailBlocks();
       if (vb.length) {
@@ -3671,16 +3680,17 @@
     var old = document.getElementById("q-off-ask"); if (old) old.remove();
     var m = document.createElement("div"); m.id = "q-off-ask"; m.setAttribute("role", "dialog"); m.setAttribute("aria-modal", "true");
     m.style.cssText = "position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;padding:20px";
-    m.innerHTML = '<div style="background:#fff;color:#111;border-radius:12px;padding:18px;max-width:340px;width:100%;text-align:center;font-size:17px"><p style="margin:0 0 14px;font-weight:700">Are you logging out for the day?</p>' +
-      '<div style="display:flex;gap:10px"><button type="button" id="q-off-no" class="btn ghost" style="flex:1">No</button><button type="button" id="q-off-yes" class="btn" style="flex:1">Yes</button></div></div>';
+    m.innerHTML = '<div style="background:#fff;color:#111;border-radius:12px;padding:18px;max-width:340px;width:100%;text-align:center;font-size:17px"><p style="margin:0 0 14px;font-weight:700">Are you finished for today?</p>' +
+      '<div style="display:flex;gap:10px"><button type="button" id="q-off-no" class="btn pcs-light-btn" style="flex:1;margin:0">No</button><button type="button" id="q-off-yes" class="btn" style="flex:1;margin:0">Yes</button></div></div>';
     document.body.appendChild(m);
     m.addEventListener("click", function (e) { var b = e.target.closest && e.target.closest("button"); if (!b) return; m.remove();
-      if (b.id === "q-off-no") { goOfflineNow(); return; }
+      if (b.id === "q-off-no") return; /* v75c (Matthew): No = close the popup, nothing else (status screen unchanged) */
       goOfflineNow(); endOfDay(); });
   }
   function endOfDay() {
     var r = dlDvirRec(dlToday(), "post");
-    if (!(r && Number(r.at) > 0 && (!r.plate || !dlPlate() || r.plate === dlPlate()))) { state.logoutAfterPost = true; openDriverLog("day:" + dlToday() + ":insp-post"); return; }
+    if (!(r && Number(r.at) > 0 && (!r.plate || !dlPlate() || r.plate === dlPlate()))) { state.logoutAfterPost = true; openDriverLog("day:" + dlToday() + ":insp-post");
+      return; }
     endOfDayOdo();
   }
   function endOfDayOdo() {
@@ -3807,6 +3817,40 @@
      rides/DRVRHOSL/{driver}/overrides (God writes who / when / reason / hours). */
   var hosOvr = { override: null, restUntil: 0, request: null };
   /* v72u: last known odometer for this driver/vehicle: max of every recorded reading (today + yesterday rows, their shifts, local memory) */
+  /* v75 (Oct 13): vehicle maintenance heads-up for the driver. God mode keeps rides/VHCLMNTC/{vehicleId}
+     (driverId, oil/rot lastMiles + interval). Amber (<= 1,000 mi left) / red (overdue) shows a banner; dismissing hides it
+     until the next threshold (amber -> red, or a new service). There is no driver push yet, so God gets the push
+     (Worker cron, once per threshold). */
+  function vmDriverCheck() {
+    if (ROLE !== "driver") return;
+    var me = ""; try { me = driverPresenceId(); } catch (e) {} if (!me) return;
+    fetch(databaseURL() + "/rides/VHCLMNTC.json", { cache: "no-store" }).then(function (r) { return r.ok ? r.json() : null; }).then(function (all) {
+      var odo = null; try { odo = lastKnownOdometer(); } catch (e) {}
+      var msgs = [];
+      Object.keys(all || {}).forEach(function (id) {
+        var v = all[id] || {}; if (String(v.driverId || "") !== me) return;
+        var cur = Number(odo) > 0 ? Number(odo) : (v.odoOverride && Number(v.odoOverride.miles)) || 0; if (!(cur > 0)) return;
+        [["oil", "Oil change", 25000], ["rot", "Tire rotation", 10000]].forEach(function (k) {
+          var s = v[k[0]] || {}; if (!(Number(s.lastMiles) > 0)) return;
+          var left = Number(s.lastMiles) + (Number(s.interval) || k[2]) - cur, lvl = left <= 0 ? "red" : left <= 1000 ? "amber" : "";
+          if (!lvl) return;
+          var key = "pcs.vm." + id + "." + k[0] + "." + s.lastMiles + "." + lvl;
+          try { if (localStorage.getItem(key)) return; } catch (e) {}
+          msgs.push({ key: key, lvl: lvl, text: k[1] + " " + (lvl === "red" ? "is OVERDUE by " + Math.round(-left).toLocaleString() + " mi" : "is due in " + Math.round(left).toLocaleString() + " mi") + " (" + [v.year, v.make, v.model].filter(Boolean).join(" ") + "). Please schedule it." });
+        });
+      });
+      var bar = document.getElementById("vm-driver-bar"); if (bar) bar.remove();
+      if (!msgs.length) return;
+      bar = document.createElement("div"); bar.id = "vm-driver-bar";
+      var red = msgs.some(function (m) { return m.lvl === "red"; });
+      bar.style.cssText = "position:fixed;left:8px;right:8px;top:calc(8px + env(safe-area-inset-top));z-index:9999;border-radius:12px;padding:12px 14px;font-weight:700;box-shadow:0 4px 16px rgba(0,0,0,.4);color:#0b1f0b;background:" + (red ? "#e5534b" : "#f0b429");
+      bar.innerHTML = "\uD83D\uDD27 " + msgs.map(function (m) { return m.text.replace(/</g, "&lt;"); }).join("<br>") + '<br><button type="button" style="margin-top:8px;padding:6px 14px;border-radius:10px;border:2px solid #0b1f0b;background:#fff;font-weight:800">Got it</button>';
+      bar.querySelector("button").addEventListener("click", function () { msgs.forEach(function (m) { try { localStorage.setItem(m.key, String(Date.now())); } catch (e) {} }); bar.remove(); });
+      document.body.appendChild(bar);
+    }).catch(function () {});
+  }
+  if (ROLE === "driver") { setTimeout(vmDriverCheck, 15000); setInterval(vmDriverCheck, 30 * 60000); }
+
   function lastKnownOdometer() {
     var best = null, add = function (v) { v = Number(v); if (v > 0 && isFinite(v) && (best == null || v > best)) best = v; };
     try {
@@ -3915,6 +3959,7 @@
     if (t) { e.preventDefault(); hosRequestOverride(); }
   });
 
+  var HOS_MIN_PIECE_MS = 2 * 60000; /* v75 (Matthew): Online toggles under ~2 min never start or add to Drive/Shift clocks */
   function hosShiftStart() {
     var row = todayMilesRow();
     return shiftOpen(row) ? Number(row.shiftStartAt) || 0 : 0;
@@ -3973,7 +4018,7 @@
     log[k] = seg;
     /* v73 (Matthew 10/13): duty records are kept permanently (Driver's Log); nothing is pruned */
     hosWriteLog(log);
-    if (syncOn() && now - hosLastPush > 5 * 60000) {
+    if (syncOn() && now - hosLastPush > 5 * 60000 && Number(seg.e) - Number(seg.s) >= HOS_MIN_PIECE_MS) { /* v75: a < 2 min Online toggle is never sent */
       hosLastPush = now;
       authFetch(databaseURL() + "/rides/DRVRHOSL/" + encodeURIComponent(driverPresenceId()) + "/" + k + ".json", {
         method: "PUT", headers: { "Content-Type": "application/json" },
@@ -4075,7 +4120,7 @@
       var srvEnd = histEnd[String(Number(g.shift || k))]; /* v72v: a shift the server has closed ends where the server says */
       if (srvEnd && srvEnd.x) return; /* v72w: excluded shift: no duty at all */
       if (srvEnd && srvEnd.closed) e0 = Math.min(e0, srvEnd.e);
-      if (s0 > 0 && e0 >= s0) segs.push([s0, Math.min(e0, now)]);
+      if (s0 > 0 && e0 >= s0 && (Math.min(e0, now) - s0 >= HOS_MIN_PIECE_MS || (mine && e0 === now))) segs.push([s0, Math.min(e0, now)]); /* v75: closed pieces under 2 min don't count */
     });
     if (st && !log[String(st)] && !log.__cur) segs.push([st, Math.min(now, st + HOS_HEARTBEAT_GAP_MS)]);
     return hosMerge(segs.filter(function (x) { return x[1] >= x[0]; }));
@@ -8568,9 +8613,12 @@
     if (!me) return [];
     return (state.scheduledRides || []).filter(function (r) {
       if (!r || r.status === "completed" || r.status === "cancelled" || r.status === "deleted") return false;
-      return String(r.assignedDriverId || "") === me;
-    }).sort(function (a, b) {
-      return String(a.start || "").localeCompare(String(b.start || ""));
+      /* v75h: same id normalization as driverPresenceId so God's roster id always matches */
+      return String(r.assignedDriverId || "").toLowerCase().replace(/[^a-z0-9]/g, "_").replace(/^_+|_+$/g, "").slice(0, 48) === me;
+    }).sort(function (a, b) { /* v75h: true time order (past-due first, then today, then future days); no start = last */
+      var ta = Date.parse(a.start || ""), tb = Date.parse(b.start || "");
+      if (!isFinite(ta)) ta = 8.64e15; if (!isFinite(tb)) tb = 8.64e15;
+      return ta - tb;
     });
   }
 
@@ -8591,11 +8639,31 @@
         });
       } catch (e) {}
       state.scheduledStamp = String(Date.now());
+      /* v75h: background refresh redraws only when MY assigned list changed, and never mid-ride, during a meter, or while typing */
+      var sig = schedSig();
+      var changedV75h = sig !== state.scheduledSig;
+      state.scheduledSig = sig;
       if (force) render();
+      else if (changedV75h) { if (schedRedrawSafe()) render(); else state.scheduledDirty = true; }
     }).catch(function (err) {
       state.scheduledError = err && err.denied ? "denied" : "error";
       if (force) render();
     });
+  }
+
+  function schedSig() {
+    return myAssignedScheduled().map(function (r) {
+      return [r.id, r.start, r.pickup, r.dropoff, r.rider, r.status, r.payMethod, r.fareBeforeTax, r.notes].join("|");
+    }).join("~");
+  }
+
+  function schedRedrawSafe() {
+    var ae = typeof document !== "undefined" ? document.activeElement : null;
+    if (ae && /^(INPUT|TEXTAREA|SELECT)$/.test(ae.tagName)) return false;
+    if (state.meter || state.meterOpen || state.hubOpen || state.screen !== "home") return false;
+    try { if (driverMidRide()) return false; } catch (e) {}
+    if (state.payConfirm || state.payBusy || state.meterBusy) return false;
+    return true;
   }
 
   function scheduledRidesCard() {
@@ -8609,23 +8677,33 @@
     }
     var cards = mine.map(function (r) {
       return (
-        '<article class="card scheduled-ride-card" data-schedule-id="' + esc(r.id) + '">' +
-        '<p class="tag">Assigned scheduled ride</p>' +
-        "<h3>" + esc(r.rider) + "</h3>" +
-        '<p class="lede">' + esc(prettyScheduleWhen(r.start)) + "</p>" +
-        "<p><strong>Pickup</strong><br>" + esc(r.pickup || "—") + "</p>" +
-        "<p><strong>Drop-off</strong><br>" + esc(r.dropoff || "—") + "</p>" +
-        (r.payMethod === "cash" ? '<p style="color:#ffb35c"><strong>CASH ride:</strong> you collect the fare' + (r.fareBeforeTax != null ? " ($" + (Number(r.fareBeforeTax) + (Number(r.taxFees) || 0)).toFixed(2) + ")" : "") + "; the PCS share is taken from your weekly balance.</p>" : "") +
-        (r.notes ? '<p class="fine">' + esc(r.notes) + "</p>" : "") +
+        '<article class="card scheduled-ride-card" data-schedule-id="' + esc(r.id) + '" style="background:#fff;color:#1a1a1a;border:2px solid #0b3d23;border-radius:14px;padding:12px 14px;margin:8px 0">' +
+        '<p style="margin:0 0 4px;font-size:13px;font-weight:800;letter-spacing:.04em;text-transform:uppercase;color:#0b3d23">Assigned to you' + schedDayLabel(r.start) + "</p>" +
+        '<p style="margin:0 0 6px;font-size:20px;font-weight:800;color:#111">' + esc(prettyScheduleWhen(r.start)) + "</p>" +
+        '<p style="margin:0 0 6px;color:#1a1a1a"><strong>Rider:</strong> ' + esc(r.rider || "—") + (r.riderPhone ? ' \u00b7 <a href="tel:' + esc(r.riderPhone) + '" style="color:#0b3d23;font-weight:700">' + esc(r.riderPhone) + "</a>" : "") + "</p>" +
+        '<p style="margin:0 0 6px;color:#1a1a1a"><strong>Pickup:</strong> ' + esc(r.pickup || "—") + "</p>" +
+        (r.dropoff ? '<p style="margin:0 0 6px;color:#1a1a1a"><strong>Drop-off:</strong> ' + esc(r.dropoff) + "</p>" : "") +
+        (r.payMethod === "cash" ? '<p style="color:#7c2d12;background:#ffedd5;padding:6px 8px;border-radius:8px"><strong>CASH ride:</strong> you collect the fare' + (r.fareBeforeTax != null ? " ($" + (Number(r.fareBeforeTax) + (Number(r.taxFees) || 0)).toFixed(2) + ")" : "") + "; the PCS share is taken from your weekly balance.</p>" : "") +
+        (r.notes ? '<p style="margin:0 0 6px;color:#374151;font-size:14px">' + esc(r.notes) + "</p>" : "") +
         '<div class="row-actions">' +
         (meterSetFareOk(r) && !state.meter ? '<button class="btn" type="button" data-meter-schedule="' + esc(r.id) + '">Start meter (charges set fare ' + money(Math.round(Number(r.fareBeforeTax) * 100)) + ")</button>" : "") +
         (meterSetFareOk(r) ? "" : '<button class="btn" type="button" data-complete-schedule="' + esc(r.id) + '">Mark complete</button>') +
         "</div>" +
-        '<p class="fine">Matthew assigned this from the God day board. Completing credits your Mon–Sun commission week.</p>' +
+        '<p style="margin:6px 0 0;color:#4b5563;font-size:13px">Assigned by PCS. Completing credits your Mon–Sun commission week.</p>' +
         "</article>"
       );
     }).join("");
-    return "<h2>Scheduled for you</h2>" + cards;
+    return '<h2 style="margin:10px 0 4px">Scheduled for you (' + mine.length + ")</h2>" + cards;
+  }
+
+  function schedDayLabel(iso) { /* v75h: " \u00b7 Today" / " \u00b7 Tomorrow" / " \u00b7 in N days" / " \u00b7 Past due" (Chicago days) */
+    var t = Date.parse(iso || "");
+    if (!isFinite(t)) return "";
+    function dk(ms) { return new Date(ms).toLocaleDateString("en-CA", { timeZone: "America/Chicago" }); }
+    var a = Date.parse(dk(Date.now()) + "T00:00:00Z"), b = Date.parse(dk(t) + "T00:00:00Z");
+    var n = Math.round((b - a) / 86400000);
+    if (t < Date.now() - 3600000 && n <= 0) return " \u00b7 Past due";
+    return n === 0 ? " \u00b7 Today" : n === 1 ? " \u00b7 Tomorrow" : n > 1 ? " \u00b7 in " + n + " days" : " \u00b7 Past due";
   }
 
   function completeScheduledRide(eventId) {
@@ -13093,7 +13171,7 @@
       return (
         milesStartCard() +
         approvalGateCard() +
-        '<div class="app-nav">' + logoutLine() + "</div>"
+        '<div class="app-nav"><button class="btn secondary" type="button" id="gate-stay-offline">Stay Offline (Home menu, no shift)</button>' + logoutLine() + "</div>"
       );
     }
     if (state.hubOpen) return driverHub();
@@ -13110,6 +13188,7 @@
         ? '<div class="card notice-card" role="status"><p class="lede">' + esc(state.driverNotice) + "</p>" +
           '<button class="btn ghost" type="button" id="dismiss-driver-notice">OK</button></div>'
         : "") +
+      scheduledRidesCard() + /* v75h: assigned rides (today and future days) show on Home right away */
       approvalGateCard() +
       vehicleNeededCard() +
       milesStartCard() +
@@ -13818,7 +13897,24 @@
       state.onlineStamp = "";
       render();
     }
+    var gateOff = document.getElementById("gate-stay-offline"); /* v75: Offline = full Home menu without starting a shift or any HOS clock */
+    if (gateOff) gateOff.addEventListener("click", function () { qSetOffline(true); state.hubOpen = true; state.hubView = "menu"; render(); });
     var milesStartForm = document.getElementById("miles-start-form");
+    /* v75 (Matthew): a pre-trip DVIR odometer from the last 30 min (same driver + vehicle) becomes the opening odometer, so the
+       gate does not ask again. Submitted through the normal handler, so the "not lower than last reading" rule still applies;
+       if it is refused the driver sees the usual error and types it. Tried once per DVIR reading. Not for a stale-shift close. */
+    if (milesStartForm && !document.getElementById("miles-stale-end-odo") && !state.milesOdoError) {
+      try {
+        var dvo = JSON.parse(localStorage.getItem("pcs-dvir-odo") || "null");
+        var accP = (function () { try { return normalizePlate((readDriverAccount() || {}).carPlate || ""); } catch (e) { return ""; } })();
+        if (dvo && Number(dvo.odo) > 0 && Date.now() - Number(dvo.at) <= 30 * 60000 && dvo.driver === driverPresenceId() && (!dvo.plate || !accP || dvo.plate === accP) && state.dvirOdoTried !== dvo.at) {
+          state.dvirOdoTried = dvo.at;
+          var oin = document.getElementById("miles-start-odo"); if (oin) { oin.value = String(Math.floor(Number(dvo.odo))); state.milesOdoDraft = oin.value; }
+          state.milesOdoFromDvir = true;
+          setTimeout(function () { var fm = document.getElementById("miles-start-form"); if (fm) { if (fm.requestSubmit) fm.requestSubmit(); else fm.dispatchEvent(new Event("submit", { cancelable: true })); } }, 0);
+        }
+      } catch (e) {}
+    }
     if (milesStartForm) {
       milesStartForm.addEventListener("submit", function (event) {
         event.preventDefault();
@@ -16113,6 +16209,7 @@
     }, 3000);
     setInterval(function () {
       if (ROLE === "driver" && signedIn() && !state.hubOpen) refreshScheduledRides(false);
+      if (state.scheduledDirty && schedRedrawSafe()) { state.scheduledDirty = false; render(); } /* v75h: deferred redraw */
     }, 20000);
     setInterval(function () {
       if (ROLE === "driver" && signedIn()) publishDriverPresence();
