@@ -3732,7 +3732,7 @@
     if (c) return c;
     if (!dlGeoQ[k]) { dlGeoQ[k] = 1; reverseGeocode(best[1], best[2]).then(function (pl) {
       if (!pl || !pl.city) return; var m = dlCities(); m[k] = pl.city + (pl.state ? ", " + pl.state : ""); try { localStorage.setItem("pcs-dl-cities", JSON.stringify(m)); } catch (e) {}
-      var o = document.getElementById("dl-overlay"); if (o && o.getAttribute("data-mode")) openDriverLog(o.getAttribute("data-mode"));
+      dlRepaintSoon(); /* v74e: no rebuild under the driver's finger */
     }).catch(function () {}); }
     return "";
   }
@@ -3747,12 +3747,25 @@
     });
     if (changed) try { localStorage.setItem(dlKey("days"), JSON.stringify(m)); } catch (e) {}
   }
-  function openDriverLog(mode) {
+  function openDriverLog(mode, repaintOnly) {
     if (!window.PCSDriverLog) return;
+    if (repaintOnly) { var d0 = driverLogData(); d0.inspDay = state.availAfterMissed || null; var days0 = window.PCSDriverLog.build(d0); window.PCSDriverLog.open(days0, d0, mode); return; }
     try { dvirCfgPull(); } catch (e) {} /* God-mode checklist for the next inspection */
     var paint = function () { var d = driverLogData(); d.inspDay = state.availAfterMissed || null; var days = window.PCSDriverLog.build(d); dlSaveDays(days); window.PCSDriverLog.open(days, d, mode); };
     paint();
-    try { hosPullHistory().then(function () { if (document.getElementById("dl-overlay")) paint(); }); } catch (e) {}
+    try { hosPullHistory().then(function () { dlRepaintSoon(); }); } catch (e) {}
+  }
+  /* v74e hotfix (Oct 14): background repaints (server history, city names) used to rebuild the whole Driver's Log overlay at
+     any moment; a tap on the Close button that landed during a rebuild was lost, so the log looked impossible to close.
+     Now: at most one repaint every 5 s, never within 2 s of a touch, and never after it was closed. */
+  var dlLastTouch = 0, dlRepaintAt = 0, dlRepaintT = null;
+  if (typeof document !== "undefined") ["pointerdown", "touchstart", "mousedown", "keydown"].forEach(function (ev) { document.addEventListener(ev, function () { dlLastTouch = Date.now(); }, true); });
+  function dlRepaintSoon() {
+    if (dlRepaintT) return;
+    var wait = Math.max(0, 2000 - (Date.now() - dlLastTouch), 5000 - (Date.now() - dlRepaintAt));
+    dlRepaintT = setTimeout(function () { dlRepaintT = null; var o = document.getElementById("dl-overlay"); if (!o || !o.getAttribute("data-mode") || o.querySelector("#dl-dvir-form, #dl-sig-pad")) return; /* never wipe an inspection or signature in progress */
+      if (Date.now() - dlLastTouch < 2000) { dlRepaintSoon(); return; }
+      var sc = o.scrollTop; dlRepaintAt = Date.now(); openDriverLog(o.getAttribute("data-mode"), true); var n = document.getElementById("dl-overlay"); if (n) n.scrollTop = sc; }, wait);
   }
   window.__pcsDriverLog = { data: driverLogData, open: openDriverLog };
   /* break intervals [s, e] from this phone + the server copy; an open break on another device runs to its last heartbeat */

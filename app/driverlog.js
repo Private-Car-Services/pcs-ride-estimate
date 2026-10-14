@@ -390,7 +390,7 @@
   }
   /* full-screen viewer. mode: "all" (Logs list, 14 days) | "inspector" (today + previous day) | "day:YYYY-MM-DD[:tab]" */
   function open(days, meta, mode) {
-    close();
+    var o0 = document.getElementById("dl-overlay"); if (o0) o0.remove(); /* switching views keeps the one history entry */
     meta = meta || {};
     var w = document.createElement("div");
     w.id = "dl-overlay"; w.setAttribute("role", "dialog"); w.setAttribute("aria-label", "Driver's Log");
@@ -398,17 +398,21 @@
     var hm2 = /^history(?::(\d+))?$/.exec(mode || ""), shown = hm2 ? Number(hm2[1]) || 14 : 0;
     if (hm2 && days.length < 1 + shown && meta.more) { meta.more(1 + shown); return null; } /* host rebuilds with more days and reopens */
     var m = /^day:(\d{4}-\d{2}-\d{2})(?::([\w-]+))?$/.exec(mode || ""), day = m && days.filter(function (d) { return d.day === m[1]; })[0];
-    var bar = function (title, back) { return '<div class="dl-bar" style="position:sticky;top:0;z-index:2;display:flex;align-items:center;gap:6px;background:#2b2b2b;color:#fff;padding:10px">' +
-      '<button type="button" id="' + (back ? "dl-back" : "dl-close") + '" style="background:none;border:0;color:#fff;font-size:20px">' + (back ? "\u2190" : "\u2715") + "</button>" +
-      '<b style="flex:1;text-align:center;font-size:17px">' + title + "</b>" +
-      (mode === "inspector" ? "" : '<button type="button" id="dl-inspector" style="background:#2f6fe0;color:#fff;border:0;border-radius:6px;padding:6px 8px">Show inspector</button>') +
-      '<button type="button" id="dl-print" style="background:#444;color:#fff;border:0;border-radius:6px;padding:6px 8px">Print</button><button type="button" id="dl-csv" style="background:#444;color:#fff;border:0;border-radius:6px;padding:6px 8px">Export</button></div>'; };
+    if (m && !day && /^insp/.test(m[2] || "") && days[0]) day = days[0]; /* v74e: an inspection request never lands on the Logs graph list */
+    /* v74e hotfix (iPad Stage Manager, Oct 14 3:30 AM): the bar now clears the status bar / window controls (viewport-fit=cover had
+       put it under them), wraps on narrow windows, and the close/back button is a 44 px target labeled for touch */
+    var bar = function (title, back) { return '<div class="dl-bar" style="position:sticky;top:0;z-index:2;display:flex;flex-wrap:wrap;align-items:center;gap:6px;background:#2b2b2b;color:#fff;padding:10px;padding-top:max(36px, calc(10px + env(safe-area-inset-top)));padding-left:max(10px, calc(10px + env(safe-area-inset-left)));padding-right:max(10px, calc(10px + env(safe-area-inset-right)))">' + /* top 36 px clear: iPadOS Stage Manager window dots sit over the top-left corner */
+      '<b style="flex:1 1 100%;min-width:0;text-align:left;font-size:17px">' + title + "</b>" +
+      (mode === "inspector" ? "" : '<button type="button" id="dl-inspector" style="background:#2f6fe0;color:#fff;border:0;border-radius:6px;padding:6px 8px;min-height:44px">Show inspector</button>') +
+      '<button type="button" id="dl-print" style="background:#444;color:#fff;border:0;border-radius:6px;padding:6px 8px;min-height:44px">Print</button><button type="button" id="dl-csv" style="background:#444;color:#fff;border:0;border-radius:6px;padding:6px 8px;min-height:44px">Export</button>' +
+      '<button type="button" id="' + (back ? "dl-back" : "dl-close") + '" aria-label="' + (back ? "Back" : "Close") + '" style="margin-left:auto;min-width:88px;min-height:44px;background:#2e7d32;border:0;border-radius:10px;color:#fff;font-size:17px;font-weight:800;padding:6px 14px">' + (back ? "\u2190 Back" : "Close \u2715") + "</button></div>"; }; /* v74e: Close/Back on the RIGHT, 44 px+ */
     if (day) w.innerHTML = bar(esc(wd(day, { weekday: "short" }) + " | " + wd(day, { month: "short", day: "2-digit" })), true) + detailHtml(day, meta, m[2] || "log");
     else if (mode === "inspector") w.innerHTML = bar("Inspector view \u00b7 today + previous day", false) + '<div class="dl-insp-days" style="padding:6px">' + html(days.slice(0, 2), meta) + "</div>";
     else if (hm2) w.innerHTML = bar("History", true) + historyHtml(days, shown);
     else w.innerHTML = bar("Logs", false) + listHtml(days, meta);
     w.setAttribute("data-mode", mode || "all");
     document.body.appendChild(w);
+    try { if (!(history.state && history.state.dlOverlay)) history.pushState({ dlOverlay: 1 }, ""); } catch (eH) {} /* v74e: back gesture / button closes */
     padWire(w);
     var dform = w.querySelector("#dl-dvir-form");
     if (dform) { motionGate(dform); minTimeGate(dform); }
@@ -468,6 +472,12 @@
     document.body.appendChild(a); a.click(); setTimeout(function () { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
     return a.download;
   }
-  function close() { var o = document.getElementById("dl-overlay"); if (o) o.remove(); }
+  function close(fromPop) { var o = document.getElementById("dl-overlay"); if (o) o.remove();
+    if (!fromPop) { try { if (history.state && history.state.dlOverlay) { closing = true; history.back(); } } catch (e) {} } }
+  var closing = false;
+  if (typeof window !== "undefined" && window.addEventListener) {
+    window.addEventListener("popstate", function () { if (closing) { closing = false; return; } if (document.getElementById("dl-overlay")) close(true); });
+    document.addEventListener("keydown", function (e) { if ((e.key === "Escape" || e.key === "Esc") && document.getElementById("dl-overlay") && !document.getElementById("dl-fuel-pop")) close(); });
+  }
   window.PCSDriverLog = { minTimeGate: minTimeGate, fmtDur: fmtDur, motionGate: motionGate, fluidsDue: fluidsDue, readDvir: readDvir, parseMdy: parseMdy, expiryState: expiryState, EXTRAS: DVIR_EXTRAS, items: items, DVIR: DVIR, CERT: CERT, dayHash: dayHash, snapshot: snapshot, historyHtml: historyHtml, build: build, html: html, gridSvg: gridSvg, listHtml: listHtml, detailHtml: detailHtml, csv: csv, open: open, close: close, download: download, midnight: midnight, CARRIER: CARRIER };
 })();
