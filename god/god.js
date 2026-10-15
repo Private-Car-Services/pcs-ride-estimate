@@ -245,7 +245,7 @@
       var m = line.match(/^(?:drop[\s-]?off|to)\s*:\s*(.+)$/i);
       if (m && m[1]) return String(m[1]).trim();
     }
-    return text.trim();
+    return ""; /* v75r: free calendar notes ("Take to Hotel Galvez") are never used as the drop-off */
   }
 
   function normalizeCalendarRow(id, raw) {
@@ -273,7 +273,13 @@
       cancelledAt: Number(raw.cancelledAt) || null, cancelledBy: raw.cancelledBy ? String(raw.cancelledBy) : null, cancelReason: raw.cancelReason ? String(raw.cancelReason) : null,
       cancelFee: raw.cancelFee ? String(raw.cancelFee) : null, cancelFeeStatus: raw.cancelFeeStatus ? String(raw.cancelFeeStatus) : null,
       fixedFare: raw.fixedFare === true, completedEarly: raw.completedEarly === true, /* v73 fare-save fix */
-      meterReadingCents: raw.meterReadingCents != null ? Number(raw.meterReadingCents) : null, meterCode: raw.meterCode ? String(raw.meterCode) : ""
+      meterReadingCents: raw.meterReadingCents != null ? Number(raw.meterReadingCents) : null, meterCode: raw.meterCode ? String(raw.meterCode) : "",
+      stopsGeo: Array.isArray(raw.stopsGeo) ? raw.stopsGeo : [], dropoffEdited: raw.dropoffEdited === true, dropoffEditedBy: raw.dropoffEditedBy ? String(raw.dropoffEditedBy) : "", /* v75r */
+      pickupLat: isFinite(+raw.pickupLat) && raw.pickupLat != null && raw.pickupLat !== "" ? +raw.pickupLat : null, pickupLng: isFinite(+raw.pickupLng) && raw.pickupLng != null && raw.pickupLng !== "" ? +raw.pickupLng : null,
+      dropoffLat: isFinite(+raw.dropoffLat) && raw.dropoffLat != null && raw.dropoffLat !== "" ? +raw.dropoffLat : null, dropoffLng: isFinite(+raw.dropoffLng) && raw.dropoffLng != null && raw.dropoffLng !== "" ? +raw.dropoffLng : null,
+      estKey: String(raw.estKey || ""), estText: String(raw.estText || ""), estLoCents: Number(raw.estLoCents) || 0, estHiCents: Number(raw.estHiCents) || 0, estBy: String(raw.estBy || ""), /* v75s */
+      meterDiscount: raw.meterDiscount && typeof raw.meterDiscount === "object" ? raw.meterDiscount : null, discountPct: Number(raw.discountPct) || 0,
+      trip: raw.trip && typeof raw.trip === "object" ? raw.trip : null
     };
   }
 
@@ -440,6 +446,364 @@
         return refresh();
       });
     });
+  }
+  /* v75s: God-mode copy of the driver app's meter estimate math (generated from app/app.js by /workspace/pcs-sched-ride/v2/gen.py;
+     keep in step: tests compare God and driver estimates for the same rides). Own scope, so no name clashes. */
+  var GEST = (function () {
+  var SCHED_EST_WORKER = PAY_WORKER;
+    var EXTRA_FEE = 0;
+    var INTL_ARRIVAL_CENTS = 1500;
+    var INTL_ARRIVAL_LABEL = "International arrivals service fee";
+    var BASE_CENTS = 1100;
+    var METER_START_BASE = 11.00;
+    var METER_PROFILES = {
+    day:   { name: "Day Trip",   hours: "Mon–Fri 6:00 am–5:59 pm",                   perMile: 1.10, perMinute: 0.40, entry: null, includedMiles: 1, minimum: null, step: 0.25, slowMph: 10, freeWaitSec: 120 },
+    night: { name: "Night Trip", hours: "6:00–9:59 pm, weekends and holidays",       perMile: 1.38, perMinute: 0.40, entry: null, includedMiles: 1, minimum: null, step: 0.25, slowMph: 10, freeWaitSec: 120 },
+    late:  { name: "Late Night", hours: "10:00 pm–5:59 am, every day",               perMile: 1.43, perMinute: 0.40, entry: null, includedMiles: 1, minimum: null, step: 0.25, slowMph: 10, freeWaitSec: 120 }
+  };
+    var METER_TAX_RATE = 0.0825;
+    var METER_HOLIDAY_RATE = true;
+    var AIRPORT = {
+    daytime: { drop: 1550, pick: 2500 },
+    weekendNight: { drop: 2000, pick: 3000 },
+    late: { drop: 3000, pick: 5000 }
+  };
+    var METER_DISC_PCT = { senior: 10, military: 10 };
+    var METER_DISC_NAME = { senior: "Senior discount", military: "Military discount", other: "Discount" };
+    var METER_AIRPORTS = [["IAH", "Bush Intercontinental (IAH)"], ["HOU", "Hobby (HOU)"], ["DFW", "Dallas Fort Worth (DFW)"], ["DAL", "Dallas Love Field (DAL)"]];
+    var METER_TIER_AIRPORT = { day: "daytime", night: "weekendNight", late: "late" };
+    function pad2(n) {
+    return String(n).padStart(2, "0");
+  }
+    function chicagoParts(when) {
+    var parts = {};
+    new Intl.DateTimeFormat("en-US", {
+      timeZone: "America/Chicago",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      hourCycle: "h23"
+    }).formatToParts(when || new Date()).forEach(function (part) {
+      if (part.type !== "literal") parts[part.type] = part.value;
+    });
+    var hour = parts.hour === "24" ? "00" : parts.hour;
+    return {
+      date: parts.year + "-" + parts.month + "-" + parts.day,
+      time: hour + ":" + parts.minute
+    };
+  }
+    function chicagoWallToMs(dateStr, timeStr) {
+    if (!dateStr || !timeStr) return NaN;
+    var wantDate = String(dateStr);
+    var hm = String(timeStr).split(":");
+    var wantTime = pad2(Number(hm[0]) || 0) + ":" + pad2(Number(hm[1]) || 0);
+    var offsets = ["-05:00", "-06:00"];
+    var i;
+    for (i = 0; i < offsets.length; i += 1) {
+      var iso = wantDate + "T" + wantTime + ":00" + offsets[i];
+      var ms = Date.parse(iso);
+      if (!isFinite(ms)) continue;
+      var parts = chicagoParts(new Date(ms));
+      if (parts.date === wantDate && parts.time === wantTime) return ms;
+    }
+    return Date.parse(wantDate + "T" + wantTime + ":00-05:00");
+  }
+    function chicagoWeekday(dateStr) {
+    var ms = chicagoWallToMs(dateStr, "12:00");
+    if (!isFinite(ms)) return -1;
+    var map = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
+    var wd = new Intl.DateTimeFormat("en-US", { timeZone: "America/Chicago", weekday: "short" }).format(new Date(ms));
+    return map[wd] != null ? map[wd] : -1;
+  }
+    function pcsHolidayName(ymd) {
+    var p = String(ymd || "").split("-");
+    var y = Number(p[0]), m = Number(p[1]), d = Number(p[2]);
+    if (!y || !m || !d) return "";
+    var wd = new Date(Date.UTC(y, m - 1, d)).getUTCDay();
+    var dim = new Date(Date.UTC(y, m, 0)).getUTCDate();
+    var nth = Math.floor((d - 1) / 7) + 1, last = d + 7 > dim;
+    var fixed = function (mm, dd) { /* the date itself, plus the federal observed Fri/Mon */
+      if (m === mm && d === dd) return true;
+      var t = Date.UTC(y, mm - 1, dd), w = new Date(t).getUTCDay(), o = w === 6 ? t - 86400000 : w === 0 ? t + 86400000 : 0;
+      if (!o) return false; var od = new Date(o); return od.getUTCFullYear() === y && od.getUTCMonth() + 1 === m && od.getUTCDate() === d;
+    };
+    if (fixed(1, 1) || (m === 12 && d === 31 && wd === 5)) return "New Year's Day";
+    if (m === 1 && wd === 1 && nth === 3) return "Martin Luther King Jr. Day";
+    if (m === 2 && wd === 1 && nth === 3) return "Presidents' Day";
+    if (m === 5 && wd === 1 && last) return "Memorial Day";
+    if (fixed(6, 19)) return "Juneteenth";
+    if (fixed(7, 4)) return "Independence Day";
+    if (m === 9 && wd === 1 && nth === 1) return "Labor Day";
+    if (m === 10 && wd === 1 && nth === 2) return "Columbus Day / Indigenous Peoples' Day";
+    if (fixed(11, 11)) return "Veterans Day";
+    if (m === 11 && wd === 4 && nth === 4) return "Thanksgiving";
+    if (fixed(12, 25)) return "Christmas Day";
+    return "";
+  }
+    function meterIsHoliday(ymd) {
+    if (!METER_HOLIDAY_RATE) return false;
+    return !!pcsHolidayName(ymd);
+  }
+    function meterBand(when) {
+    var parts = chicagoParts(when || new Date());
+    var hour = Number(String(parts.time).split(":")[0]);
+    var wd = chicagoWeekday(parts.date);
+    var holiday = meterIsHoliday(parts.date);
+    var key = hour >= 22 || hour < 6 ? "late" : (wd === 0 || wd === 6 || holiday || hour >= 18) ? "night" : "day";
+    var why = key === "late" ? "" : holiday ? " · holiday" : (wd === 0 || wd === 6) ? " · weekend" : "";
+    return meterProfileBand(key, why, holiday);
+  }
+    function meterProfileBand(key, why, holiday) {
+    var P = METER_PROFILES[key] || METER_PROFILES.day;
+    var c = function (d) { var n = Math.round(Number(d) * 100); return isFinite(n) && n > 0 ? n : 0; };
+    var start = P.entry != null && P.entry !== "" ? Number(P.entry) : Number(METER_START_BASE) + Number(P.perMile);
+    return {
+      key: key, name: String(P.name || key), label: String(P.name || key) + (why || ""), hours: String(P.hours || ""), holiday: !!holiday,
+      cents: c(P.perMile), perMinCents: c(P.perMinute), entryCents: c(start),
+      includedMiles: P.includedMiles != null && P.includedMiles !== "" && isFinite(Number(P.includedMiles)) ? Math.max(0, Number(P.includedMiles)) : 1,
+      minCents: c(P.minimum != null && P.minimum !== "" ? P.minimum : start), stepCents: c(P.step),
+      slowMph: Number(P.slowMph) > 0 ? Number(P.slowMph) : 10, freeWaitSec: Math.max(0, Number(P.freeWaitSec) || 0)
+    };
+  }
+    function meterDiscountCents(M, sub) {
+    var d = M && M.discount;
+    if (!d || !d.type) return { cents: 0, type: "", label: "" };
+    var c = 0, lab = "";
+    if (METER_DISC_PCT[d.type]) { c = Math.round(sub * METER_DISC_PCT[d.type] / 100); lab = METER_DISC_NAME[d.type] + " (" + METER_DISC_PCT[d.type] + "%)"; }
+    else if (d.type === "other" && d.status === "approved") {
+      if (Number(d.cents) > 0) { c = Math.round(Number(d.cents)); lab = "Discount (approved by owner)"; }
+      else if (Number(d.pct) > 0) { c = Math.round(sub * Math.min(100, Number(d.pct)) / 100); lab = "Discount " + Number(d.pct) + "% (approved by owner)"; }
+    }
+    c = Math.max(0, Math.min(sub, c));
+    return { cents: c, type: c > 0 ? d.type : "", label: lab };
+  }
+    function meterTripOf(M) {
+    var t = (M && M.trip) || {};
+    var kind = t.kind === "airport-drop" ? "airport-drop" : "local"; /* v72t (Matthew): one Airport toggle = to-airport pricing */
+    var code = METER_AIRPORTS.some(function (a) { return a[0] === t.code; }) ? t.code : "IAH";
+    return { kind: kind, code: code, intl: false, landedAt: 0 }; /* Matthew: no intl fee / airport wait rules on metered rides (curbside pickups) */
+  }
+    function meterAirportLines(M) {
+    var t = meterTripOf(M), lines = [], airportCents = 0, intlCents = 0;
+    if (t.kind !== "local") {
+      var band = AIRPORT[METER_TIER_AIRPORT[M.tier] || "daytime"] || AIRPORT.daytime;
+      var airBase = t.kind === "airport-drop" ? band.drop : band.pick;
+      airportCents = Math.max(0, airBase - BASE_CENTS);
+      if (airportCents) lines.push({ key: "airport", label: "Airport drop-off fee", cents: airportCents, taxed: true });
+      if (t.intl) { intlCents = INTL_ARRIVAL_CENTS; lines.push({ key: "intl", label: INTL_ARRIVAL_LABEL, cents: intlCents, taxed: true }); }
+    }
+    return { lines: lines, cents: airportCents + intlCents, airportCents: airportCents, intlCents: intlCents };
+  }
+    function meterFare(M) {
+    var miles = Math.max(0, Number(M && M.miles) || 0);
+    var incl = M.includedMiles != null && isFinite(Number(M.includedMiles)) ? Math.max(0, Number(M.includedMiles)) : 0;
+    var afterMiles = Math.max(0, miles - incl);
+    var mileCents = Math.round(afterMiles * (Number(M.perMileCents) || 0));
+    var waitMin = Math.max(0, Math.floor(Number(M.waitMin) || 0));
+    var waitCents = waitMin * (Number(M.waitCentsPerMin) || 0);
+    var base = Number(M.baseCents) || 0;
+    var raw = base + mileCents + waitCents;
+    var step = Math.max(0, Math.round(Number(M.stepCents) || 0));
+    /* v71: clean quarter-dollar steps after the start (v70 counted the steps from the start: $12.10 -> $12.35 -> $12.60) */
+    var stepped = raw <= base ? base : (step > 0 ? Math.max(base, Math.ceil(raw / step) * step) : raw);
+    var min = Math.max(0, Math.round(Number(M.minCents) || 0));
+    var final = !!M.status && M.status !== "running";
+    var sub = final ? Math.max(min, stepped) : stepped;
+    var air = meterAirportLines(M); /* v72t: airport fee + international arrival (taxed, like the quote page / app) */
+    var meterSub = sub;
+    sub += air.cents;
+    var setFare = Math.round(Number(M && M.setFareCents) || 0) > 0 ? Math.round(Number(M.setFareCents)) : 0;
+    var meterReadingCents = sub; /* v73: what the meter would have charged (kept for testing on set-fare rides) */
+    if (setFare) sub = setFare; /* v73: PCS set the fare before the ride -> charge it, not the meter price */
+    var disc = setFare ? { cents: 0, type: null, label: "" } : meterDiscountCents(M, sub); /* v73: Senior / Military 10% or an owner-approved Other discount, before tax */
+    var grossSub = sub;
+    sub = Math.max(0, sub - disc.cents);
+    var bp = Math.round((Number(M.taxRate) || 0) * 1000000); /* rate in millionths: whole-number math, half-cent rounds up */
+    var tax = bp > 0 ? Math.round(sub * bp / 1000000) : 0;
+    return { grossSub: grossSub, discountCents: disc.cents, discountType: disc.type, discountLabel: disc.label, base: base, miles: Math.round(miles * 100) / 100, includedMiles: incl, afterMiles: Math.round(afterMiles * 100) / 100,
+      mileCents: mileCents, waitMin: waitMin, waitCents: waitCents, raw: raw,
+      roundCents: stepped - raw, meter: stepped, minAdd: meterSub - stepped, minApplied: meterSub > stepped, /* v73: meter vs minimum only (airport fee / discount are their own lines) */ minCents: min, freeMin: Math.max(0, Number(M.freeUsed) || 0),
+      feeLines: air.lines, airportCents: air.airportCents, intlCents: air.intlCents, meterSub: meterSub,
+      sub: sub, tax: tax, total: sub + tax, setFare: !!setFare, meterReadingCents: meterReadingCents };
+  }
+  /* ===== v75s SHARED scheduled-ride estimate (IDENTICAL text in app/app.js and god/god.js; tests compare them) =====
+     Same meter rates as the driver meter for the PICKUP time (day / night / late, holidays = night rate), airport fee from
+     row.trip when PCS set one, the ride's one discount (meterDiscount, or God's discountPct as an approved discount), tax.
+     Range = road miles (low) .. +10 % miles and 20 % of the drive time as slow minutes (high), like the meter's estimate.
+     Set-fare (account) rides show "Set fare $X". Saved on the ride row (est*) so the driver app and God mode show one number. */
+  function schedEstDisc(r) {
+    if (r && r.meterDiscount && typeof r.meterDiscount === "object" && r.meterDiscount.type) return r.meterDiscount;
+    var p = Number(r && r.discountPct);
+    return p > 0 ? { type: "other", status: "approved", pct: p } : null;
+  }
+  function schedEstSetFare(r) { return !!r && r.fixedFare === true && r.fareBeforeTax != null && isFinite(Number(r.fareBeforeTax)) && Number(r.fareBeforeTax) > 0; }
+  function schedEstKey(r) {
+    var st = (r && r.stopsGeo || [])[0], d = schedEstDisc(r);
+    return ["v1", r.pickup || "", r.pickupLat == null ? "" : r.pickupLat, r.dropoff || "", r.dropoffLat == null ? "" : r.dropoffLat, st ? st.address : "",
+      r.start || "", schedEstSetFare(r) ? "F" + Number(r.fareBeforeTax) : "", d ? JSON.stringify(d) : "", r.trip ? JSON.stringify(r.trip) : ""].join("|");
+  }
+  function schedEstCalc(r, miles, minutes) {
+    if (schedEstSetFare(r)) {
+      var sc = Math.round(Number(r.fareBeforeTax) * 100);
+      return { setFare: true, loCents: sc, hiCents: sc, miles: miles, minutes: minutes, text: "Set fare $" + (sc / 100).toFixed(2) };
+    }
+    var t = Date.parse(r.start || "");
+    var band = meterBand(new Date(isFinite(t) ? t : Date.now()));
+    var base = { baseCents: band.entryCents, includedMiles: band.includedMiles, perMileCents: band.cents, waitCentsPerMin: band.perMinCents, minCents: band.minCents,
+      stepCents: band.stepCents, taxRate: Number(METER_TAX_RATE) > 0 && Number(METER_TAX_RATE) < 0.5 ? Number(METER_TAX_RATE) : 0, status: "ended", tier: band.key,
+      trip: r.trip || null, discount: schedEstDisc(r) };
+    var mi = Math.max(0, Number(miles) || 0), mn = Math.max(0, Number(minutes) || 0);
+    var lo = meterFare(Object.assign({}, base, { miles: mi, waitMin: 0 }));
+    var hi = meterFare(Object.assign({}, base, { miles: mi * 1.1, waitMin: Math.round(mn * 0.2) }));
+    var loD = Math.floor(lo.total / 100), hiD = Math.max(loD + 1, Math.ceil(hi.total / 100));
+    var extra = (lo.feeLines || []).map(function (f) { return f.label + " $" + (f.cents / 100).toFixed(2); });
+    if (lo.discountCents > 0) extra.push(lo.discountLabel + " \u2212$" + (lo.discountCents / 100).toFixed(2));
+    return { setFare: false, loCents: loD * 100, hiCents: hiD * 100, miles: Math.round(mi * 10) / 10, minutes: Math.round(mn), band: band.label,
+      discountLabel: lo.discountCents > 0 ? lo.discountLabel : "", feeLines: lo.feeLines || [],
+      text: "$" + loD + "\u2013$" + hiD + " (about " + (Math.round(mi * 10) / 10) + " mi, " + band.label + " rate, tax included" + (extra.length ? "; " + extra.join("; ") : "") + ")" };
+  }
+  /* road route: the Worker (/route, Google Routes) -> public OSRM -> straight line x1.3 at 30 mph, same order as the meter */
+  function schedEstRoute(pts) {
+    var to = function (p, ms) { return Promise.race([p, new Promise(function (_, rej) { setTimeout(function () { rej(new Error("timeout")); }, ms); })]); };
+    var straight = function () { var mi = 0, i; for (i = 1; i < pts.length; i += 1) mi += schedEstHav(pts[i - 1], pts[i]) * 1.3; return { miles: mi, minutes: mi * 2, approx: true }; };
+    var pick = function (d) { var r = d && d.routes && d.routes[0]; return r && isFinite(+r.distance) && isFinite(+r.duration) ? { miles: +r.distance / 1609.344, minutes: +r.duration / 60, approx: false } : null; };
+    if (typeof fetch !== "function") return Promise.resolve(straight());
+    return to(fetch(SCHED_EST_WORKER + "/route", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ points: pts.map(function (p) { return { lat: +p.lat, lng: +p.lng }; }) }) })
+      .then(function (x) { return x.json(); }), 6000).then(function (d) { return d && d.ok && !d.fallback ? pick(d) : null; }).catch(function () { return null; })
+      .then(function (r) {
+        if (r) return r;
+        return to(fetch("https://router.project-osrm.org/route/v1/driving/" + pts.map(function (p) { return p.lng + "," + p.lat; }).join(";") + "?overview=false").then(function (x) { return x.json(); }), 9000)
+          .then(pick).catch(function () { return null; });
+      }).then(function (r) { return r || straight(); });
+  }
+  function schedEstHav(a, b) {
+    var R = 3958.8, k = Math.PI / 180, dLa = (b.lat - a.lat) * k, dLo = (b.lng - a.lng) * k;
+    var h = Math.sin(dLa / 2) * Math.sin(dLa / 2) + Math.cos(a.lat * k) * Math.cos(b.lat * k) * Math.sin(dLo / 2) * Math.sin(dLo / 2);
+    return 2 * R * Math.asin(Math.min(1, Math.sqrt(h)));
+  }
+  /* the saved estimate when it was figured for these exact ride details */
+  function schedEstSaved(r) { return r && r.estKey && r.estKey === schedEstKey(r) && r.estText ? { text: String(r.estText), loCents: Number(r.estLoCents), hiCents: Number(r.estHiCents) } : null; }
+  function schedEstPatch(r, e, by) {
+    return { estKey: schedEstKey(r), estText: e.text, estLoCents: e.loCents, estHiCents: e.hiCents, estMiles: e.miles == null ? null : Math.round(Number(e.miles) * 10) / 10,
+      estMinutes: e.minutes == null ? null : Math.round(Number(e.minutes)), estAt: Date.now(), estBy: by };
+  }
+  /* ===== end shared estimate ===== */
+  return { key: schedEstKey, calc: schedEstCalc, route: schedEstRoute, saved: schedEstSaved, patch: schedEstPatch, setFare: schedEstSetFare, band: meterBand, fare: meterFare };
+  })();
+  window.__pcsGodEst = GEST; /* test hook */
+  /* ---------- v75r: change a scheduled ride's drop-off / stop from the board (Google Places search via the Worker) ----------
+     Saved on /rides/PCSCALND/{id} with dropoffEdited:true so the calendar sync never overwrites it. The driver app picks it up
+     on its next refresh: new route, turn-by-turn and estimate; the meter charges for where the rider actually gets out. */
+  var dbDrop = { id: "", field: "drop", list: [], seq: 0, timer: 0, sess: "" };
+  function dbDropRow(id) { var row = null; (state.calendar || []).forEach(function (r) { if (r && r.id === id) row = r; }); return row; }
+  function dbDropClose() { var m = document.getElementById("db-drop-modal"); if (m) m.remove(); dbDrop.id = ""; }
+  function dbDropOpen(id, field) {
+    var r = dbDropRow(id); if (!r) return;
+    dbDropClose();
+    dbDrop.id = id; dbDrop.field = field === "stop" ? "stop" : "drop"; dbDrop.list = [];
+    var cur = dbDrop.field === "stop" ? ((r.stopsGeo && r.stopsGeo[0] && r.stopsGeo[0].address) || (r.stops && r.stops[0]) || "") : (r.dropoff || "");
+    var big = "display:block;width:100%;min-height:56px;font-size:20px;font-weight:800;border-radius:12px;margin:8px 0;cursor:pointer;";
+    var m = document.createElement("div");
+    m.id = "db-drop-modal"; m.setAttribute("role", "dialog"); m.setAttribute("aria-modal", "true");
+    m.style.cssText = "position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,.6);display:flex;align-items:flex-start;justify-content:center;padding:56px 12px 12px;overflow:auto";
+    m.innerHTML = '<div style="background:#fff;color:#111;border:3px solid #0b6b3a;border-radius:16px;max-width:560px;width:100%;padding:16px">' +
+      '<button type="button" id="db-drop-close" style="' + big + 'background:#0b3d23;color:#fff;border:0;margin-top:0">Close</button>' +
+      '<h2 style="margin:4px 0 6px;color:#0b3d23">' + (dbDrop.field === "stop" ? "Stop" : "Drop-off") + " \u00b7 " + esc(r.rider || "ride") + "</h2>" +
+      '<p style="margin:0 0 8px;color:#374151">Pickup: ' + esc(r.pickup || "") + "</p>" +
+      '<label for="db-drop-q" style="display:block;font-weight:800;color:#111;margin:0 0 4px">Search a place or type the address</label>' +
+      '<input id="db-drop-q" type="text" autocomplete="off" spellcheck="false" value="' + esc(cur) + '" style="width:100%;font-size:18px;padding:10px;border:2px solid #0b3d23;border-radius:10px;background:#fff;color:#111">' +
+      '<div id="db-drop-list"></div>' +
+      '<p id="db-drop-msg" role="status" style="color:#7c2d12;font-weight:700;margin:6px 0"></p>' +
+      '<p id="db-drop-est" role="status" style="display:' + (GEST.saved(r) || GEST.setFare(r) ? "block" : "none") + ';color:#111;background:#ecfdf5;border:2px solid #0b6b3a;border-radius:10px;padding:10px;font-size:17px;font-weight:700;margin:6px 0">' + esc(GEST.setFare(r) ? "Price: " + GEST.calc(r, 0, 0).text : GEST.saved(r) ? "Current estimate: " + GEST.saved(r).text : "") + "</p>" +
+      '<button type="button" id="db-drop-typed" style="' + big + 'background:#0b6b3a;color:#fff;border:0">Save as typed</button>' +
+      (dbDrop.field === "stop" ? '<button type="button" id="db-drop-clear" style="' + big + 'background:#fff;color:#0b3d23;border:2px solid #0b3d23">Remove the stop</button>' : "") +
+      '<p style="color:#374151;font-size:14px;margin:6px 0 0">The driver app updates the route and estimate. Metered rides charge for where the rider actually gets out; a set fare stays as saved in the Fare box.</p>' +
+      "</div>";
+    document.body.appendChild(m);
+    var q = document.getElementById("db-drop-q");
+    try { q.focus(); q.select(); } catch (e) {}
+    document.getElementById("db-drop-close").addEventListener("click", dbDropClose);
+    q.addEventListener("input", function () {
+      clearTimeout(dbDrop.timer);
+      var my = ++dbDrop.seq, text = String(q.value || "").trim();
+      if (text.length < 3) { document.getElementById("db-drop-list").innerHTML = ""; return; }
+      dbDrop.timer = setTimeout(function () {
+        if (!dbDrop.sess) dbDrop.sess = "god-" + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+        arPlacesPost("/autocomplete", { input: text, sessionToken: dbDrop.sess, lat: 29.7604, lng: -95.3698, radius: 80000 }).then(function (d) {
+          if (my !== dbDrop.seq || !document.getElementById("db-drop-list")) return;
+          dbDrop.list = d && Array.isArray(d.predictions) ? d.predictions.slice(0, 6) : [];
+          var box = document.getElementById("db-drop-list");
+          box.innerHTML = dbDrop.list.map(function (p, i) {
+            return '<button type="button" class="db-drop-pick" data-i="' + i + '" style="display:block;width:100%;text-align:left;background:#fff;color:#111;border:1px solid #9ca3af;border-radius:10px;padding:10px;margin:6px 0;font-size:16px;min-height:48px"><strong style="color:#111">' + esc(p.main || "") + '</strong><br><span style="color:#374151;font-size:14px">' + esc(p.sub || "") + "</span></button>";
+          }).join("") + (dbDrop.list.length ? '<p style="text-align:right;margin:0;font-size:12px;color:#374151">Powered by Google</p>' : "");
+          Array.prototype.forEach.call(box.querySelectorAll(".db-drop-pick"), function (b) {
+            b.addEventListener("click", function () {
+              var p = dbDrop.list[+b.getAttribute("data-i")]; if (!p) return;
+              arPlacesPost("/details", { placeId: p.placeId, sessionToken: dbDrop.sess }).then(function (dd) {
+                dbDrop.sess = "";
+                var pl = dd && dd.place;
+                dbDropSave(pl && pl.formatted ? String(pl.formatted).replace(/,\s*(USA|United States)$/i, "") : [p.main, p.sub].filter(Boolean).join(", "), pl ? pl.lat : null, pl ? pl.lng : null);
+              });
+            });
+          });
+        });
+      }, 250);
+    });
+    document.getElementById("db-drop-typed").addEventListener("click", function () {
+      var text = String(q.value || "").trim(); if (!text) return;
+      arPlacesPost("/geocode", { address: text.slice(0, 200) }).then(function (d) { var pl = d && d.place; dbDropSave(text, pl ? pl.lat : null, pl ? pl.lng : null); }); /* saved exactly as typed */
+    });
+    var clr = document.getElementById("db-drop-clear");
+    if (clr) clr.addEventListener("click", function () { dbDropSave("", null, null); });
+  }
+  function dbDropPt(text, lat, lng) {
+    if (lat != null && lng != null && isFinite(+lat) && isFinite(+lng)) return Promise.resolve({ lat: +lat, lng: +lng });
+    text = String(text || "").trim();
+    if (text.length < 5) return Promise.resolve(null);
+    return arPlacesPost("/geocode", { address: text.slice(0, 200) }).then(function (d) { var p = d && d.place; return p && isFinite(+p.lat) && isFinite(+p.lng) && p.lat != null ? { lat: +p.lat, lng: +p.lng } : null; });
+  }
+  /* v75s: the new price with the driver app's math (GEST); resolves { text } or null */
+  function dbDropEstimate(r) {
+    if (GEST.setFare(r)) return Promise.resolve(GEST.calc(r, 0, 0));
+    if (!r.dropoff) return Promise.resolve(null);
+    var st = (r.stopsGeo || [])[0];
+    var jobs = [dbDropPt(r.pickup, r.pickupLat, r.pickupLng)];
+    if (st) jobs.push(dbDropPt(st.address, st.lat, st.lng));
+    jobs.push(dbDropPt(r.dropoff, r.dropoffLat, r.dropoffLng));
+    return Promise.all(jobs).then(function (pts) {
+      if (pts.some(function (p) { return !p; })) return null;
+      return GEST.route(pts).then(function (rt) { return GEST.calc(r, rt.miles, rt.minutes); });
+    }).catch(function () { return null; });
+  }
+  function dbDropSave(text, lat, lng) {
+    var id = dbDrop.id, field = dbDrop.field, r = dbDropRow(id); if (!id || !r) return Promise.resolve();
+    var ok = function (v) { return v != null && v !== "" && isFinite(+v); };
+    var now = Date.now(), t = String(text || "").trim().slice(0, 400), patch;
+    if (field === "stop") patch = { stops: t ? [t] : [], stopsGeo: t ? [{ address: t, lat: ok(lat) ? +lat : null, lng: ok(lng) ? +lng : null }] : [], stopsEdited: true, stopsEditedBy: "god", stopsEditedAt: now, updatedAt: now };
+    else patch = { dropoff: t, dropoffLat: ok(lat) ? +lat : null, dropoffLng: ok(lng) ? +lng : null, dropoffEdited: true, dropoffEditedBy: "god", dropoffEditedAt: now, updatedAt: now };
+    var msg = function (txt) { var m = document.getElementById("db-drop-msg"); if (m) m.textContent = txt; };
+    var est = function (txt) { var m = document.getElementById("db-drop-est"); if (m) { m.style.display = "block"; m.textContent = txt; } };
+    msg("Saving\u2026");
+    return godFetch(calendarUrl(id), { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(patch) }).then(function (res) {
+      if (!res.ok) throw new Error("save");
+      Object.keys(patch).forEach(function (k) { r[k] = patch[k]; });
+      msg("");
+      est((field === "stop" ? "Stop" : "Drop-off") + " saved. Figuring the new price\u2026");
+      return dbDropEstimate(r).then(function (e) {
+        var line = (field === "stop" ? "Stop" : "Drop-off") + " saved for " + (r.rider || "ride") + (t ? ": " + t : "") + ".";
+        if (!e) { est(line + " The price shows once the addresses are found on the map."); state.boardNotice = line; return refresh(); }
+        est(line + " " + (e.setFare ? "Price: " : "New estimate: ") + e.text);
+        state.boardNotice = line + " " + (e.setFare ? "Price: " : "New estimate: ") + e.text;
+        if (e.setFare) return refresh();
+        var ep = GEST.patch(r, e, "god");
+        return godFetch(calendarUrl(id), { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(ep) }).then(function (res2) {
+          if (res2.ok) Object.keys(ep).forEach(function (k) { r[k] = ep[k]; });
+          return refresh();
+        });
+      });
+    }).catch(function () { msg(/^Not saved/.test(state.boardNotice || "") ? state.boardNotice : "Save did not go through. Check the signal and tap again."); });
   }
   function rideStartMs(row) { var t = Date.parse(row && row.start || ""); return isFinite(t) ? t : 0; }
   function completedEarly(row) { return !!row && row.status === "completed" && (row.completedEarly === true || (rideStartMs(row) && Number(row.completedAt) && Number(row.completedAt) < rideStartMs(row))); }
@@ -1298,6 +1662,72 @@
     });
   }
 
+  /* v75o: amber "Time conflict" badge for bookings that hit busy.json / overlap another booking */
+  function conflictBadgeHtml(r) {
+    if (!r || !r.conflict) return "";
+    var why = r.conflictReason || (r.conflict === "unchecked" ? "busy schedule could not be checked" : "time conflict");
+    return ' <span class="badge time-conflict" style="background:#ffb020;color:#1a1200;border:1px solid #7a4d00;font-weight:700">\u26a0 Time conflict: ' + esc(why) + "</span>";
+  }
+
+  /* v75p: Resolve conflict (+ new agreed pickup time) and Send payment page (copy/share only, never auto-sent). */
+  function conflictToolsHtml(r) {
+    if (!r || !r.code) return "";
+    var code = esc(r.code);
+    if (r.conflict && !r.conflictResolvedAt) {
+      return '<div class="commission-row conflict-tools" style="margin-top:8px;flex-wrap:wrap;gap:8px;align-items:center">' +
+        '<label class="fine" style="display:flex;gap:6px;align-items:center">New pickup date <input type="date" class="conflict-date" data-ride-code="' + code + '" value="' + esc(r.date || "") + '"></label>' +
+        '<label class="fine" style="display:flex;gap:6px;align-items:center">time <input type="time" class="conflict-time" data-ride-code="' + code + '" value="' + esc(r.time || "") + '"></label>' +
+        '<button type="button" class="btn btn-gold btn-resolve-conflict" data-ride-code="' + code + '">Resolve conflict</button>' +
+        "</div>";
+    }
+    if (r.conflictResolvedAt) {
+      var open = !!(state.payPageOpen && state.payPageOpen[r.code]);
+      var url = payPageUrl(r.code);
+      return '<div class="commission-row conflict-tools" style="margin-top:8px;flex-wrap:wrap;gap:8px">' +
+        '<span class="fine">Conflict resolved ' + esc(new Date(r.conflictResolvedAt).toLocaleString("en-US", { timeZone: "America/Chicago" })) + " CT by " + esc(r.conflictResolvedBy || "God mode") + "</span>" +
+        '<button type="button" class="btn btn-ghost btn-send-paypage" data-ride-code="' + code + '">Send payment page</button>' +
+        (open ? '<div class="paypage-box" style="width:100%;background:#fff;color:#111;padding:8px;border-radius:8px"><input readonly style="width:100%;color:#111" value="' + esc(url) + '">' +
+          '<button type="button" class="btn btn-ghost btn-paypage-copy" style="color:#111;background:#e6e6e6" data-url="' + esc(url) + '">Copy</button> ' +
+          '<button type="button" class="btn btn-ghost btn-paypage-share" style="color:#111;background:#e6e6e6" data-url="' + esc(url) + '">Share</button>' +
+          '<p class="fine" style="color:#333">You send this yourself. Nothing is sent automatically.</p></div>' : "") +
+        "</div>";
+    }
+    return "";
+  }
+
+  function payPageUrl(code) {
+    return new URL("../app/?pay=" + encodeURIComponent(code), location.href).href;
+  }
+
+  function resolveConflict(code, date, time) {
+    code = String(code || "").toUpperCase();
+    return getRide(code).then(function (ride) {
+      if (!ride) throw new Error("missing");
+      var now = Date.now();
+      var patch = {
+        conflict: null,
+        conflictResolvedAt: now,
+        conflictResolvedBy: "Matthew (God mode)",
+        conflictPrev: { conflict: ride.conflict || null, reason: ride.conflictReason || "", date: ride.date || "", time: ride.time || "" },
+        updatedAt: now
+      };
+      if (date) patch.date = date;
+      if (time) patch.time = time;
+      return patchRide(code, patch).then(function () {
+        var next = Object.assign({}, ride, patch);
+        return putOpenSummary(code, next).catch(function () {});
+      }).then(function () {
+        state.payPageOpen = state.payPageOpen || {};
+        state.payPageOpen[code] = true;
+        state.actionNotice = "Conflict resolved for " + code + (time ? " (pickup " + (date || ride.date || "") + " " + time + ")" : "") + ". Payment is allowed now.";
+        return true;
+      });
+    }).catch(function () {
+      state.actionNotice = "Could not resolve the conflict for " + code + ".";
+      return false;
+    });
+  }
+
   function isPendingOwner(ride) {
     var st = String((ride && ride.status) || "").toLowerCase();
     return st === "pending_owner" || st === "pending-owner";
@@ -1330,6 +1760,8 @@
       dropState: (ride && ride.dropState) || "",
       date: (ride && ride.date) || "",
       time: (ride && ride.time) || "",
+      conflict: ride && ride.conflict && !ride.conflictResolvedAt ? ride.conflict : null, /* v75p */
+      conflictResolvedAt: (ride && ride.conflictResolvedAt) || null,
       asap: !!(ride && (ride.asap === true || String(ride.asap).toLowerCase() === "true" || String(ride.when || "").toLowerCase() === "asap")),
       when: (ride && ride.when) || "",
       status: (ride && ride.status) || "requested",
@@ -1556,7 +1988,7 @@
       var who = displayName(r.name, "Rider") + " · " + fmtWhen(r.date, r.time, r);
       return (
         '<div class="banner-ride" style="margin:10px 0;padding:10px;border:1px solid rgba(240,212,138,.35);border-radius:12px">' +
-        '<p class="lede" style="margin:0 0 8px"><strong>' + esc(who) + "</strong> · " + esc(code) + "</p>" +
+        '<p class="lede" style="margin:0 0 8px"><strong>' + esc(who) + "</strong> · " + esc(code) + conflictBadgeHtml(r) + "</p>" +
         '<p class="fine" style="margin:0 0 8px">' + esc(rideAddressText(r, "pickup") || "Pickup") + " → " + esc(rideAddressText(r, "drop") || "Drop-off") + "</p>" +
         '<div class="row-actions" style="display:flex;flex-wrap:wrap;gap:8px">' +
         '<button type="button" class="btn btn-gold btn-approve-booking" data-ride-code="' + esc(code) + '">Approve booking</button>' +
@@ -1661,6 +2093,7 @@
     var key = "request:" + code;
     var el = godPopupShell(needsOk ? "gp-request gp-waiting" : "gp-request",
       '<p class="gp-title">' + (needsOk ? "Ride waiting for your OK" : "New ride request") + "</p>" +
+      (ride.conflict ? '<p class="gp-row">' + conflictBadgeHtml(ride) + "</p>" : "") +
       (ride.isTest ? '<p class="gp-row" style="background:#7a1f1f;padding:6px 10px;border-radius:8px;text-align:center">TEST ride</p>' : "") +
       '<div class="gp-row"><b>Rider</b>' + esc(displayName(ride.name, "Rider")) + "</div>" +
       '<div class="gp-row"><b>Pickup</b>' + esc(rideAddressText(ride, "pickup") || "—") + "</div>" +
@@ -3321,7 +3754,7 @@
       (old ? ' style="color:#b45309;background:#fef3c7;border-radius:6px;padding:2px 6px;display:inline-block;font-weight:600"' : "") +
       "><strong>App</strong> " + esc(v || "older than v72r") + (old ? " (update needed, current " + esc(cur) + ")" : "") + "</p>";
   }
-  /* ===== v72r hours of service: config (rides/HOSLIMIT) + per-driver driving / on-duty display + alerts =====
+  /* ===== v72r hours of service: config (rides/HSLGLMTS) + per-driver driving / on-duty display + alerts =====
      Default = Houston Code Ch. 46 (limousine drivers): max 12 h DRIVING in any rolling 24 h. On-duty caps optional (0 = off). */
   /* PCS HOS policy (Matthew, CDL / Motive "USA Property 70 hour / 8 day"): 12 h drive, 14 h shift (v74b; was 11 h drive), 30-min break after 8 h
      driving, 70 h / 8 days; 10 h off resets drive + shift, 34 h off restarts ALL clocks incl. the cycle (Matthew). All editable here. */
@@ -3331,14 +3764,14 @@
     ["hos-cyc", "cycleHours", 0, 200, "CYCLE: max on-duty hours (0 = off)"], ["hos-cycd", "cycleDays", 1, 14, "CYCLE rolling days"],
     ["hos-reset", "resetHours", 1, 48, "Off-duty hours that reset DRIVE + SHIFT"], ["hos-restart", "restartHours", 1, 96, "Consecutive off hours (Offline / logged out / off duty) that reset ALL clocks incl. the 70 h CYCLE"],
     ["hos-break", "breakAfterMin", 0, 600, "Soft take-a-break nudge after continuous driving (minutes, 0 = off)"]];
-  /* v72r overrides: rides/HOSOVRDE/{driver} = { request, override, restUntil }; log at rides/DRVRHOSL/{driver}/overrides/{at} */
+  /* v72r overrides: rides/HSLGVRDE/{driver} = { request, override, restUntil }; log at rides/DRVRHSLG/{driver}/overrides/{at} */
   state.hosOvr = {};
   state.hosOvrFor = "";
   state.hosOvrDraft = { hours: "2", reason: "" };
-  /* v72v: Firebase rules refuse God mode's (unauthenticated) writes to HOSOVRDE, so overrides go through the Worker (KV),
+  /* v72v: Firebase rules refuse God mode's (unauthenticated) writes to HSLGVRDE, so overrides go through the Worker (KV),
      signed with the God-mode device token (same as the queue panel). Firebase is still read for old records. */
   function hosOvrLoad() {
-    var fb = fetch(baseUrl() + "/rides/HOSOVRDE.json").then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; });
+    var fb = fetch(baseUrl() + "/rides/HSLGVRDE.json").then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; });
     var wk = (gqTok() || gq.pw) ? workerJson("/hos/ovr/all", gqAuth()).then(function (d) { if (d && d.godToken) { gqSetTok(d.godToken); gq.tokOn = true; gq.pw = ""; } return d && d.records; }).catch(function () { return null; }) : Promise.resolve(null);
     return Promise.all([fb, wk]).then(function (r) {
       var all = Object.assign({}, r[0] && typeof r[0] === "object" ? r[0] : {});
@@ -3415,7 +3848,7 @@
         var patch = { startOdometer: fval, odoRepaired: { at: fnow, from: Number(frq.entered) || 0, to: fval, by: godWho(), reason: fw || "Corrected in God mode", why: fw || "Corrected in God mode" }, odoCorrectedAt: fnow };
         var endO = row && Number(row.endOdometer); if (endO > 0 && endO >= fval) patch.odoMiles = endO - fval; /* recalc day miles */
         return fetch(rowUrl, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(patch) });
-      }).then(function () { return fetch(baseUrl() + "/rides/DRVRHOSL/" + encodeURIComponent(fid) + "/overrides/" + fnow + ".json", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ kind: "odometer corrected to " + fval, at: fnow, grantedAt: fnow, by: godWho(), reason: fw || "Corrected in God mode", from: Number(frq.entered) || 0, to: fval }) }); })
+      }).then(function () { return fetch(baseUrl() + "/rides/DRVRHSLG/" + encodeURIComponent(fid) + "/overrides/" + fnow + ".json", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ kind: "odometer corrected to " + fval, at: fnow, grantedAt: fnow, by: godWho(), reason: fw || "Corrected in God mode", from: Number(frq.entered) || 0, to: fval }) }); })
         .then(function () { return hosOvrSave(fid, { odoDismiss: { reason: ("Corrected to " + fval + (fw ? ": " + fw : "")).slice(0, 200), by: godWho() } }).catch(function () {}); })
         .then(hosOvrLoad).catch(function () { ofs.disabled = false; if (fe) fe.textContent = "Couldn't save. Try again."; });
       return;
@@ -3458,9 +3891,9 @@
   setInterval(hosOvrLoad, 10000);
   state.hosCfg = Object.assign({}, HOS_DEF);
   state.hosDraft = null;
-  function hosUrl() { return baseUrl() + "/rides/HOSLIMIT.json"; }
+  function hosUrl() { return baseUrl() + "/rides/HSLGLMTS.json"; }
   function hosLoad() {
-    /* v72v: Worker (KV) first; Firebase HOSLIMIT reads are refused for God mode now */
+    /* v72v: Worker (KV) first; Firebase HSLGLMTS reads are refused for God mode now */
     return workerJson("/hos/limits/get", {}).then(function (d) { return d && d.limits; }).catch(function () { return null; }).then(function (w) {
       return w || fetch(hosUrl()).then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; });
     }).then(function (c) {
@@ -3562,7 +3995,7 @@
       "h · break " + esc(String(k.breakMinutes)) + "m after " + esc(String(k.breakAfterDriveHours)) + "h · cycle " + esc(String(k.cycleHours)) + "h/" + esc(String(k.cycleDays)) + " days</summary>" +
       '<p class="fine">PCS company policy (Matthew\'s CDL / ELD "USA Property 70 hour / 8 day"). Drive time = vehicle moving (GPS over 3 mph) during a shift. ' + esc(String(k.resetHours)) + " h off resets Drive + Shift; " + esc(String(k.restartHours)) + " h off restarts the Cycle.</p>" +
       rows + '<button type="button" class="btn btn-gold" id="hos-save">Save limits</button> <span id="hos-msg" class="fine"></span>' +
-      '<p class="fine">Drivers see four countdown clocks (Break, Drive, Shift, Cycle), get a banner + chime at 1 hour and 30 minutes left, and at a limit new ride offers stop (a ride in progress can finish) until the off-duty reset or a God override. Every shift, driving interval, alert and override is logged at /rides/DRVRHOSL.</p></details>';
+      '<p class="fine">Drivers see four countdown clocks (Break, Drive, Shift, Cycle), get a banner + chime at 1 hour and 30 minutes left, and at a limit new ride offers stop (a ride in progress can finish) until the off-duty reset or a God override. Every shift, driving interval, alert and override is logged at /rides/DRVRHSLG.</p></details>';
   }
   function hosPaint() {
     var box = document.getElementById("hos-box-god");
@@ -4223,7 +4656,7 @@
       var badge = active
         ? '<span class="badge on-trip">' + esc(r.status || "on trip") + "</span>"
         : (pending
-          ? '<span class="badge pending">Needs your OK</span>'
+          ? '<span class="badge pending">Needs your OK</span>' + conflictBadgeHtml(r)
           : (cancelled
             ? '<span class="badge">Cancelled' + (r.cancelledBy === "rider" ? " by rider" : (r.cancelledBy === "owner" ? " by PCS" : "")) + "</span>"
             : (denied
@@ -4241,6 +4674,7 @@
         : (okCardBtn ? '<div class="commission-row" style="margin-top:8px">' + okCardBtn + "</div>" : "");
       var ownerBtns = ownerRideButtonsHtml(r); /* v64g: Cancel ride + Refund… */
       if (ownerBtns) actions += '<div class="commission-row owner-ride-actions" style="margin-top:8px">' + ownerBtns + "</div>";
+      actions += conflictToolsHtml(r); /* v75p */
       var cancelTxt = cancelled ? cancelFeeText(r, (state.payments || {})[r.code] || null) : "";
       var cancelLine = cancelled
         ? "<br><strong>Cancelled</strong> " + esc(fmtClock(r.cancelledAt || r.updatedAt)) +
@@ -4412,6 +4846,7 @@
     if (d) d.innerHTML = driversPanelHtml();
     if (r) r.innerHTML = ridesPanelHtml();
     var pl = document.getElementById("payments-list");
+    syncPayHead(); /* v75m */
     if (pl) {
       /* v58: only redraw when something changed, so a Refund / Charge tap is never lost to the 5 s poll. */
       var payHtml = paymentsPanelHtml();
@@ -4518,6 +4953,9 @@
         });
       });
     });
+    Array.prototype.forEach.call(board.querySelectorAll(".btn-edit-drop"), function (btn) { /* v75r */
+      btn.addEventListener("click", function () { dbDropOpen(btn.getAttribute("data-event-id"), btn.getAttribute("data-field")); });
+    });
     Array.prototype.forEach.call(board.querySelectorAll(".btn-save-fare"), function (btn) {
       btn.addEventListener("click", function () {
         var id = btn.getAttribute("data-event-id");
@@ -4623,8 +5061,38 @@
       if ((Number(p.updatedAt) || 0) < cutoff) return;
       out.push(p);
     });
-    out.sort(function (a, b) { return (Number(b.updatedAt) || 0) - (Number(a.updatedAt) || 0); });
+    out.sort(function (a, b) { return payTimeOf(b) - payTimeOf(a); }); /* v75m: newest first by ended/updated */
     return out.slice(0, 40);
+  }
+  /* v75m: sort key = metered ended time, else updatedAt. */
+  function payTimeOf(p) {
+    var m = p && p.meter || {};
+    return Number(m.endedAt) || Number(p && p.unpaidFinishedAt) || Number(p && p.updatedAt) || 0;
+  }
+  /* v75m: collapsible Payments header (collapsed by default, remembered). */
+  var PAY_OPEN_KEY = "pcs_god_payments_open";
+  function payOpen() { try { return localStorage.getItem(PAY_OPEN_KEY) === "1"; } catch (e) { return false; } }
+  function payHeadHtml() {
+    var n = 0, unpaid = 0;
+    if (!state.paymentsError) {
+      var l = payEntries(); n = l.length;
+      unpaid = l.filter(function (p) { return isMeteredPay(p) && meterStatusOf(p) === "unpaid"; }).length;
+    }
+    return (payOpen() ? "▼" : "▶") + " Payments (" + n + ")" +
+      (unpaid ? ' <span class="badge" style="background:#c62828;color:#fff">' + unpaid + " unpaid</span>" : "");
+  }
+  function syncPayHead() {
+    var h = document.getElementById("payments-head");
+    var pl = document.getElementById("payments-list");
+    if (h) { var hh = payHeadHtml(); if (h.innerHTML !== hh) h.innerHTML = hh; h.setAttribute("aria-expanded", payOpen() ? "true" : "false"); }
+    if (pl) pl.style.display = payOpen() ? "" : "none";
+    if (h && !h.getAttribute("data-bound")) {
+      h.setAttribute("data-bound", "1");
+      h.addEventListener("click", function () {
+        try { localStorage.setItem(PAY_OPEN_KEY, payOpen() ? "0" : "1"); } catch (e) {}
+        syncPayHead();
+      });
+    }
   }
 
   /* Rides that still might need a God-mode charge: re-read them (max every 30s each) to know completed/cancelled. */
@@ -4722,6 +5190,7 @@
   }
   function meterUnpaidFlagHtml(list) {
     var rows = list.filter(function (p) { return isMeteredPay(p) && meterStatusOf(p) === "unpaid"; });
+    rows.sort(function (a, b) { return payTimeOf(b) - payTimeOf(a); }); /* v75m */
     if (!rows.length) return "";
     return '<div class="card" id="meter-unpaid-flag" style="border:2px solid #ff6b6b;background:#3a1212">' +
       '<h3 style="color:#ff8a8a;margin-top:0"><span class="badge" style="background:#c62828;color:#fff">' + rows.length + "</span> Unpaid metered ride" + (rows.length === 1 ? "" : "s") + "</h3>" +
@@ -4732,7 +5201,13 @@
           "<strong>" + esc(p.code) + "</strong> · " + esc(fmtCents(m.fareTotal)) + " · ended " + esc(m.endedAt ? fmtClock(m.endedAt) : "—") +
           " · " + esc(m.driverName || "driver") + "<br>" +
           "<strong>Pickup</strong> " + meterSpotHtml(m, "pickup") + "<br>" +
-          '<span style="color:#ff8a8a">' + (finished ? "Driver finished without payment" : "Waiting for the rider to pay (QR)") + "</span></p>";
+          '<span style="color:#ff8a8a">' + (finished ? "Driver finished without payment" : "Waiting for the rider to pay (QR)") + "</span><br>" +
+          /* v75m: clear this ride */
+          '<select class="meter-clear-sel" data-code="' + esc(p.code) + '" style="margin-top:6px;padding:8px;font-size:15px">' +
+            '<option value="">Clear this ride…</option><option value="cash">Paid in cash</option><option value="other">Paid another way</option>' +
+            '<option value="waived">Waive it (no charge)</option><option value="link">Send rider a pay link</option><option value="test">Dismiss as test ride</option></select> ' +
+          '<button type="button" class="btn meter-clear-apply" data-code="' + esc(p.code) + '" style="margin-top:6px">Apply</button>' +
+          '<span class="meter-clear-link" data-code="' + esc(p.code) + '"></span></p>';
       }).join("") + "</div>";
   }
   function meterPayLines(p) {
@@ -4903,6 +5378,7 @@
       pl.removeAttribute("data-bound");
       bindPaymentActions();
     }
+    syncPayHead(); /* v75m */
   }
 
   function afterPayAction(code, msg) {
@@ -5023,10 +5499,75 @@
     return h;
   }
 
+  /* v75m: clear an unpaid metered ride from God mode. Records who/how/when; never deletes. Writes only under /rides/. */
+  var METER_CLEAR_WORD = { cash: "Paid in cash", other: "Paid another way", waived: "Waive it (no charge)", test: "Dismiss as test ride" };
+  function meterClearLinkUrl(code) {
+    var p = (state.payments || {})[code] || {};
+    var rr = payRideOf(code) || {};
+    var u = String((p.meterLink && p.meterLink.url) || rr.meterLinkUrl || "");
+    return /^https:\/\//i.test(u) && !rr.meterLinkVoidedAt ? u : "";
+  }
+  function meterClearShowLink(root, code) {
+    var box = root.querySelector('.meter-clear-link[data-code="' + code + '"]');
+    if (!box) return;
+    var url = meterClearLinkUrl(code);
+    if (!url) { box.innerHTML = '<br><span style="color:#ffc96b">No open pay link for this ride (the QR link was not created or was closed). Nothing was sent.</span>'; return; }
+    box.innerHTML = '<br><input type="text" readonly value="' + esc(url) + '" style="width:100%;margin-top:6px;padding:6px;font-size:13px"> ' +
+      '<button type="button" class="btn meter-link-copy">Copy</button> ' +
+      (navigator.share ? '<button type="button" class="btn meter-link-share">Share</button>' : "") +
+      '<br><span style="opacity:.85">Not sent automatically. Send it to the rider yourself.</span>';
+    var inp = box.querySelector("input");
+    var cp = box.querySelector(".meter-link-copy");
+    cp.addEventListener("click", function () {
+      var done = function () { cp.textContent = "Copied"; };
+      if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(url).then(done, function () { inp.select(); try { document.execCommand("copy"); done(); } catch (e) {} });
+      else { inp.select(); try { document.execCommand("copy"); done(); } catch (e) {} }
+    });
+    var sh = box.querySelector(".meter-link-share");
+    if (sh) sh.addEventListener("click", function () { navigator.share({ title: "PCS ride payment", text: "Pay for your PCS ride (" + code + "):", url: url }).catch(function () {}); });
+  }
+  function meterClearApply(code, how) {
+    var p = (state.payments || {})[code] || {};
+    var m = p.meter || {};
+    var fare = Number(m.fareTotal) || 0;
+    var now = Date.now(), who = godWho();
+    var amount = how === "waived" || how === "test" ? 0 : fare;
+    var cleared = { at: now, how: how, label: METER_CLEAR_WORD[how], by: who, fareCents: fare };
+    var ridePatch = { paymentStatus: "paid_other", paidVia: how, paidOtherCents: amount, tipCents: 0, paidAt: now,
+      paidOtherBy: who, godCleared: cleared, updatedAt: now };
+    if (how === "test") ridePatch.isTest = true;
+    var idxPatch = { paymentStatus: "paid_other", updatedAt: now, godCleared: cleared,
+      paidOther: { at: now, method: how, amountCents: amount, tipCents: 0, by: who, clearedInGod: true, fareTotal: fare } };
+    var j = function (o) { return { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(o) }; };
+    return godFetch(rideUrl(code), j(ridePatch)).then(function (res) {
+      if (!res.ok) throw new Error("ride " + res.status);
+      return godFetch(baseUrl() + "/rides/" + PAY_HUB + "/" + encodeURIComponent(code) + ".json", j(idxPatch));
+    }).then(function (res) {
+      if (!res.ok) throw new Error("payments " + res.status);
+      var cur = state.payments[code] || {};
+      state.payments[code] = Object.assign({}, cur, idxPatch, { meter: Object.assign({}, cur.meter || {}, { status: "paid_other" }) });
+      setPayNotice(code + ": " + METER_CLEAR_WORD[how] + " (cleared by " + who + ").");
+    }).catch(function (err) {
+      setPayNotice("Couldn't clear " + code + ": " + ((err && err.message) || "error") + ". Nothing changed; try again.");
+    });
+  }
   function bindPaymentActions() {
     var root = document.getElementById("payments-list");
     if (!root || root.getAttribute("data-bound") === "1") return;
     root.setAttribute("data-bound", "1");
+    Array.prototype.forEach.call(root.querySelectorAll(".meter-clear-apply"), function (btn) { /* v75m */
+      btn.addEventListener("click", function () {
+        var code = btn.getAttribute("data-code");
+        var sel = root.querySelector('.meter-clear-sel[data-code="' + code + '"]');
+        var how = sel ? sel.value : "";
+        if (!how) { window.alert("Pick an option first."); return; }
+        if (how === "link") { meterClearShowLink(root, code); return; }
+        var p = (state.payments || {})[code] || {};
+        if (!window.confirm("Clear " + code + " (" + fmtCents((p.meter || {}).fareTotal) + ") as \"" + METER_CLEAR_WORD[how] + "\"? It leaves the unpaid alert and is recorded as cleared by you now.")) return;
+        btn.disabled = true;
+        meterClearApply(code, how);
+      });
+    });
     Array.prototype.forEach.call(root.querySelectorAll(".pay-refund-btn"), function (btn) {
       btn.addEventListener("click", function () {
         openRefundPopup(btn.getAttribute("data-code"), btn.getAttribute("data-purpose"), Number(btn.getAttribute("data-left")) || 0);
@@ -5056,6 +5597,38 @@
         });
       });
     }
+    eachBtn(".btn-resolve-conflict", function (btn) { /* v75p */
+      btn.addEventListener("click", function () {
+        var code = btn.getAttribute("data-ride-code");
+        if (!code) return;
+        var d = document.querySelector('.conflict-date[data-ride-code="' + code + '"]');
+        var tm = document.querySelector('.conflict-time[data-ride-code="' + code + '"]');
+        if (!window.confirm("Resolve the time conflict for " + code + (tm && tm.value ? " with pickup " + (d && d.value ? d.value + " " : "") + tm.value : "") + "? Payment will be allowed.")) return;
+        btn.disabled = true;
+        resolveConflict(code, d && d.value, tm && tm.value).then(function () { btn.disabled = false; refresh(); });
+      });
+    });
+    eachBtn(".btn-send-paypage", function (btn) {
+      btn.addEventListener("click", function () {
+        var code = btn.getAttribute("data-ride-code");
+        state.payPageOpen = state.payPageOpen || {};
+        state.payPageOpen[code] = !state.payPageOpen[code];
+        refresh();
+      });
+    });
+    eachBtn(".btn-paypage-copy", function (btn) {
+      btn.addEventListener("click", function () {
+        var u = btn.getAttribute("data-url");
+        try { navigator.clipboard.writeText(u).then(function () { btn.textContent = "Copied"; }); } catch (e) { window.prompt("Copy this link", u); }
+      });
+    });
+    eachBtn(".btn-paypage-share", function (btn) {
+      btn.addEventListener("click", function () {
+        var u = btn.getAttribute("data-url");
+        if (navigator.share) navigator.share({ title: "PCS ride payment", url: u }).catch(function () {});
+        else window.prompt("Copy this link", u);
+      });
+    });
     eachBtn(".btn-approve-booking", function (btn) {
       btn.addEventListener("click", function () {
         var code = btn.getAttribute("data-ride-code");
@@ -5136,11 +5709,32 @@
   function dbCardSet() { try { var o = JSON.parse(localStorage.getItem(DB_CARDS_KEY) || "{}"); return o && typeof o === "object" ? o : {}; } catch (e) { return {}; } }
   function dbHeaderHtml(count) {
     var c = dbBoardCollapsed();
-    return '<h2 class="day-board-h" style="margin:0"><button type="button" id="day-board-toggle" aria-expanded="' + (c ? "false" : "true") + '" aria-controls="day-board-body"' +
-      ' style="all:unset;cursor:pointer;display:flex;align-items:center;gap:8px;width:100%">' +
+    return '<h2 class="day-board-h" style="margin:0;display:flex;align-items:center"><button type="button" id="day-board-toggle" aria-expanded="' + (c ? "false" : "true") + '" aria-controls="day-board-body"' +
+      ' style="all:unset;cursor:pointer;display:flex;align-items:center;gap:8px;flex:1 1 auto;min-width:0">' +
       '<span class="db-caret" aria-hidden="true">' + (c ? "\u25B6" : "\u25BC") + "</span>Scheduled rides" +
-      ' <span class="badge" id="day-board-count">' + count + "</span></button></h2>";
+      ' <span class="badge" id="day-board-count">' + count + "</span></button>" +
+      '<button type="button" id="cal-sync-now" title="Pull new rides from your calendar now" style="flex:0 0 auto;margin-left:8px;padding:8px 12px;border-radius:12px;border:2px solid #c9a227;background:#1f2937;color:#fff;font-size:14px;font-weight:800;cursor:pointer;white-space:nowrap">\u27F3 Sync calendar now</button></h2>' +
+      '<div id="cal-sync-msg" role="status" style="font-size:13px;opacity:.85;margin:2px 0 4px"></div>';
   }
+  /* v75n (Matthew, Oct 14): "Sync calendar now". Asks the Worker (God token) to flag a sync; the calendar routine picks the flag up
+     on its next check and copies new calendar rides to the board. Never touches the calendar from the browser. */
+  function calSyncNow(btn) {
+    var msg = document.getElementById("cal-sync-msg");
+    var a = gqAuth();
+    if (!a.godPassword && !a.godToken) { if (msg) msg.textContent = "Sign in to God mode first."; return; }
+    btn.disabled = true; btn.textContent = "Requesting\u2026";
+    workerJson("/cal/sync-request", a).then(function (d) {
+      if (d && d.godToken) { gqSetTok(d.godToken); gq.tokOn = true; gq.pw = ""; }
+      var last = d && d.lastSyncAt ? new Date(d.lastSyncAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }) : "";
+      if (msg) msg.textContent = "Sync requested. New rides should appear within a few minutes." + (last ? " Last sync " + last + "." : "");
+    }).catch(function (e) {
+      if (msg) msg.textContent = "Couldn't request a sync: " + ((e && e.message) || "error");
+    }).then(function () { setTimeout(function () { btn.disabled = false; btn.textContent = "\u27F3 Sync calendar now"; }, 30000); });
+  }
+  document.addEventListener("click", function (ev) {
+    var b = ev.target && ev.target.closest && ev.target.closest("#cal-sync-now");
+    if (!b) return; ev.preventDefault(); ev.stopPropagation(); if (!b.disabled) calSyncNow(b);
+  }, true);
   function dbBindOnce() {
     if (window.__pcsDbBound) return;
     window.__pcsDbBound = true;
@@ -5314,7 +5908,13 @@
           '<h3 class="day-rider">' + esc(r.rider) + "</h3>" +
           '<div class="day-card-body"' + (dbCards[r.id] ? ' style="display:none"' : "") + ">" +
           '<p class="day-line"><span>Pickup</span> ' + esc(r.pickup || "—") + "</p>" +
-          '<p class="day-line"><span>Drop-off</span> ' + esc(r.dropoff || "—") + "</p>" +
+          ((r.stopsGeo && r.stopsGeo[0] && r.stopsGeo[0].address) || (r.stops && r.stops[0]) ? '<p class="day-line"><span>Stop</span> ' + esc((r.stopsGeo && r.stopsGeo[0] && r.stopsGeo[0].address) || r.stops[0]) + "</p>" : "") +
+          '<p class="day-line"><span>Drop-off</span> ' + esc(r.dropoff || "Add the drop-off") + (r.dropoffEdited ? ' <span class="fine">(set in ' + (r.dropoffEditedBy === "driver" ? "driver app" : "God mode") + ")</span>" : "") + "</p>" +
+          (GEST.setFare(r) ? '<p class="day-line db-est" id="db-est-' + esc(r.id) + '"><span>Price</span> ' + esc(GEST.calc(r, 0, 0).text) + "</p>"
+            : GEST.saved(r) ? '<p class="day-line db-est" id="db-est-' + esc(r.id) + '"><span>Estimate</span> ' + esc(GEST.saved(r).text) + "</p>" : "") + /* v75s */
+          (r.description && r.description !== r.dropoff ? '<p class="day-line"><span>Calendar note</span> ' + esc(r.description) + "</p>" : "") +
+          (st !== "completed" && st !== "cancelled" ? '<button type="button" class="btn btn-gold btn-edit-drop" data-event-id="' + esc(r.id) + '" data-field="drop" style="margin:4px 6px 4px 0">' + (r.dropoff ? "Change drop-off" : "Add drop-off") + "</button>" +
+            '<button type="button" class="btn btn-ghost btn-edit-drop" data-event-id="' + esc(r.id) + '" data-field="stop" style="margin:4px 0">Stop…</button>' : "") +
           (r.assignedDriverName
             ? '<p class="day-line"><span>Driver</span> ' + esc(r.assignedDriverName) + "</p>"
             : "") +
@@ -5985,7 +6585,7 @@
     }).then(function () {
       if (!past) return null; /* v74b: Driver's Log entry for the backdated ride */
       var owes = arCollects(row.payMethod) ? Math.round(row.balance * 100) : 0;
-      return fetch(baseUrl() + "/rides/DRVRHOSL/" + encodeURIComponent(row.assignedDriverId) + "/overrides/" + now + ".json", { method: "PUT", headers: { "Content-Type": "application/json" },
+      return fetch(baseUrl() + "/rides/DRVRHSLG/" + encodeURIComponent(row.assignedDriverId) + "/overrides/" + now + ".json", { method: "PUT", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ kind: "past ride added", at: now, grantedAt: now, by: godWho(), code: row.code, day: f.date, time: f.time, payWeek: past, payMethod: row.payMethod, fare: row.fare,
           reason: "Past ride " + row.code + " on " + f.date + " " + f.time + " (" + row.payMethod + ")" + (owes ? ", driver owes PCS " + fmtCents(owes) : "") }) }).catch(function () {});
     }).then(function () {
@@ -6358,8 +6958,8 @@
               '<div id="queue-list">' + gqPanelHtml() + "</div>" +
             "</section>" +
             '<section class="side-section" id="payments-section">' +
-              "<h2>Payments</h2>" +
-              '<div id="payments-list">' + paymentsPanelHtml() + "</div>" +
+              '<h2 id="payments-head" role="button" tabindex="0" style="cursor:pointer;user-select:none">' + payHeadHtml() + "</h2>" + /* v75m */
+              '<div id="payments-list" style="' + (payOpen() ? "" : "display:none") + '">' + paymentsPanelHtml() + "</div>" +
             "</section>" +
             '<section class="side-section" id="daily-miles-section">' +
               "<h2>Daily miles</h2>" +
@@ -6786,7 +7386,7 @@
   function godDriverLogData(id, now) {
     now = now || Date.now();
     var j = function (u) { return fetch(u).then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }); };
-    return Promise.all([j(milesUrl(id)), j(baseUrl() + "/rides/DRVRHOSL/" + encodeURIComponent(id) + ".json"), j(rosterUrl(id))]).then(function (res) {
+    return Promise.all([j(milesUrl(id)), j(baseUrl() + "/rides/DRVRHSLG/" + encodeURIComponent(id) + ".json"), j(rosterUrl(id))]).then(function (res) {
       var miles = res[0] || {}, hl = res[1] || {}, ro = res[2] || {}, duty = [], drive = [], breaks = [], offline = [], overrides = [];
       var iv = function (o, arr) { if (o && typeof o === "object") Object.keys(o).forEach(function (k) { var v = o[k] || {}; var s0 = Number(v.s), e0 = Number(v.e) || s0; if (v.open && !(e0 > s0)) e0 = now; if (s0 > 0 && e0 > s0) arr.push([s0, e0]); }); };
       Object.keys(hl).forEach(function (k) { if (/^\d+$/.test(k)) { var v = hl[k] || {}; if (Number(v.s) > 0 && Number(v.e) > Number(v.s)) duty.push([Number(v.s), Number(v.e)]); } });
@@ -6814,11 +7414,11 @@
     var ids = {}; Object.keys(state.roster || {}).forEach(function (k) { ids[k] = 1; }); (state.drivers || []).concat(state.offlineDrivers || []).forEach(function (d) { if (d && d.id) ids[d.id] = 1; });
     var since = Date.now() - 15 * 86400000;
     return Promise.all(Object.keys(ids).map(function (id) {
-      return fetch(baseUrl() + "/rides/DRVRHOSL/" + encodeURIComponent(id) + "/dvir.json").then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }).then(function (o) {
+      return fetch(baseUrl() + "/rides/DRVRHSLG/" + encodeURIComponent(id) + "/dvir.json").then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }).then(function (o) {
         var out = []; Object.keys(o || {}).forEach(function (d) { ["pre", "post", "avail"].forEach(function (k) { var r = o[d] && o[d][k]; if (r && (r.unsafe || r.defects > 0 || r.notes > 0 || r.motion === "unverified") && (Number(r.at) > since || (r.unsafe && !r.cleared))) out.push({ id: id, day: d, kind: k, r: r }); }); });
         return out; });
     })).then(function (lists) { state.dvirFlags = [].concat.apply([], lists).sort(function (a, b) { return Number(b.r.at) - Number(a.r.at); });
-      return fetch(baseUrl() + "/rides/DVIRMISS.json").then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }); }).then(function (m) {
+      return fetch(baseUrl() + "/rides/DVRMSSNG.json").then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }); }).then(function (m) {
       state.dvirMiss = Object.keys(m || {}).map(function (k) { return m[k]; }).filter(function (x) { return x && x.driver && !x.resolvedAt; }); dvirPaint(); });
   }
   state.dvirVeh = {};
@@ -6854,23 +7454,23 @@
     var ap = b.hasAttribute("data-dvir-approve"), rj = b.hasAttribute("data-dvir-reject");
     var a = b.getAttribute(ap ? "data-dvir-approve" : rj ? "data-dvir-reject" : "data-dvir-clear").split("|"), reason = (window.prompt(ap ? "Approve the windshield photo. Note (logged):" : rj ? "Reason for rejecting the photo (logged; the driver stays blocked):" : "Reason for clearing this unsafe defect (logged):", ap ? "Photo approved" : "") || "").trim();
     if (reason.length < 3) return;
-    if (rj) { var rr = { by: godWho(), at: Date.now(), reason: reason.slice(0, 200) }, ub = baseUrl() + "/rides/DRVRHOSL/" + encodeURIComponent(a[0]);
+    if (rj) { var rr = { by: godWho(), at: Date.now(), reason: reason.slice(0, 200) }, ub = baseUrl() + "/rides/DRVRHSLG/" + encodeURIComponent(a[0]);
       fetch(ub + "/dvir/" + a[1] + "/" + a[2] + "/rejected.json", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(rr) })
         .then(function () { return fetch(ub + "/overrides/" + rr.at + ".json", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(Object.assign({ kind: "dvir-photo-rejected", day: a[1], inspection: a[2] }, rr)) }); })
         .then(dvirLoad).catch(function () { window.alert("Couldn't save. Try again."); }); return; }
     var rec = { by: godWho(), at: Date.now(), reason: reason.slice(0, 200) }; if (ap) rec.photoApproved = true;
     var put = function (u, body) { return fetch(u, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }); };
-    put(baseUrl() + "/rides/DRVRHOSL/" + encodeURIComponent(a[0]) + "/dvir/" + a[1] + "/" + a[2] + "/cleared.json", rec)
-      .then(function () { return put(baseUrl() + "/rides/DRVRHOSL/" + encodeURIComponent(a[0]) + "/overrides/" + rec.at + ".json", Object.assign({ kind: ap ? "dvir-photo-approved" : "dvir-unsafe-cleared", day: a[1], inspection: a[2], grantedAt: rec.at }, rec)); })
+    put(baseUrl() + "/rides/DRVRHSLG/" + encodeURIComponent(a[0]) + "/dvir/" + a[1] + "/" + a[2] + "/cleared.json", rec)
+      .then(function () { return put(baseUrl() + "/rides/DRVRHSLG/" + encodeURIComponent(a[0]) + "/overrides/" + rec.at + ".json", Object.assign({ kind: ap ? "dvir-photo-approved" : "dvir-unsafe-cleared", day: a[1], inspection: a[2], grantedAt: rec.at }, rec)); })
       .then(dvirLoad).catch(function () { window.alert("Couldn't clear it. Try again."); });
   });
   /* v74b (Matthew): God mode "Log out driver": ends the shift, Offline / logged out, reason + time in the Driver's Log
-     (rides/DRVRHOSL/{id}/overrides/{at} kind "forced logout"); the driver app sees rides/DRVRHOSL/{id}/forceLogout on its next sync. */
+     (rides/DRVRHSLG/{id}/overrides/{at} kind "forced logout"); the driver app sees rides/DRVRHSLG/{id}/forceLogout on its next sync. */
   document.addEventListener("click", function (e) {
     var b = e.target && e.target.closest ? e.target.closest("[data-force-logout]") : null; if (!b || b.disabled) return;
     var id = b.getAttribute("data-force-logout"), reason = (window.prompt("Log out " + gqName(id) + "? Reason (logged in the Driver\u2019s Log):") || "").trim();
     if (reason.length < 3) return;
-    var at = Date.now(), rec = { at: at, by: godWho(), reason: reason.slice(0, 200) }, ub = baseUrl() + "/rides/DRVRHOSL/" + encodeURIComponent(id);
+    var at = Date.now(), rec = { at: at, by: godWho(), reason: reason.slice(0, 200) }, ub = baseUrl() + "/rides/DRVRHSLG/" + encodeURIComponent(id);
     var send = function (u, m, body) { return fetch(u, { method: m, headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }); };
     b.disabled = true;
     send(ub + "/forceLogout.json", "PUT", rec)
@@ -6967,4 +7567,19 @@
   }
   setTimeout(dlwLoad, 2500); setInterval(dlwLoad, 15000);
   window.pcsGodDriverAlerts = { load: dlwLoad, ack: dlwAck }; /* test hook */
+})();
+/* v75p+numpad (Matthew): every money/number box in God mode opens the number pad. decimal = dollars/percent/hours, numeric = whole counts (miles, days, PIN). Runs after every render. */
+(function () { if (typeof document === "undefined" || typeof MutationObserver === "undefined") return;
+  function fix(el) { if (!el || el.tagName !== "INPUT" || el.readOnly || el.dataset.pcsPad) return;
+    var t = el.type, im = el.getAttribute("inputmode"); if (t !== "number" && im !== "decimal" && im !== "numeric") return;
+    var whole = im === "numeric" || (t === "number" && el.step && Number(el.step) % 1 === 0 && !/decimal/.test(im || ""));
+    if (t === "number") el.type = "text";
+    if (t === "password") { el.setAttribute("pattern", "[0-9]*"); el.dataset.pcsPad = "1"; return; }
+    el.setAttribute("inputmode", whole ? "numeric" : "decimal");
+    if (!el.getAttribute("pattern")) el.setAttribute("pattern", whole ? "[0-9]*" : "[0-9]*[.]?[0-9]*");
+    el.setAttribute("autocomplete", "off"); el.setAttribute("autocorrect", "off"); el.setAttribute("spellcheck", "false"); el.dataset.pcsPad = "1"; }
+  function scan(root) { if (!root || !root.querySelectorAll) return; if (root.tagName === "INPUT") fix(root); [].forEach.call(root.querySelectorAll("input"), fix); }
+  function go() { scan(document.body); new MutationObserver(function (ms) { ms.forEach(function (m) { [].forEach.call(m.addedNodes, scan); }); }).observe(document.body, { childList: true, subtree: true }); }
+  if (document.body) go(); else document.addEventListener("DOMContentLoaded", go);
+  window.pcsNumPad = scan; /* test hook */
 })();
