@@ -3547,7 +3547,7 @@
     return { now: now, days: Math.max(15, Number(state.dlDays) || 15), snapshots: snaps, more: function (n) { state.dlDays = n; openDriverLog("history:" + (n - 1)); }, currentStatus: cur, currentNote: qOffline() ? "Offline (logged in)" : qOnBreak() ? "On break" : qAutoBreak() ? "Break (auto, available)" : "",
       fluidsDays: (function () { try { return Number(localStorage.getItem("pcs-dvir-fluids-days")) || 7; } catch (e) { return 7; } })(), /* v74: God-editable fluids interval */
       dvirItems: (function () { try { return JSON.parse(localStorage.getItem("pcs-dvir-cfg") || "null"); } catch (e) { return null; } })(), /* God-mode checklist (rides/DVIRCFG) */
-      cityAt: dlCityAt, canSign: true, odoNow: state.milesStartOdo,
+      cityAt: dlCityAt, canSign: true, odoNow: state.milesStartOdo, odoCheck: dvirOdoCheck, /* v75u */
       signOf: function (d) { return dlRec("signs")[d] || (hist.signs || {})[d] || null; },
       onSign: function (d, rec) { dlPut("signs", d, rec); },
       dvirOf: function (d, k) { var a = dlRec("dvir")[d] || {}, b2 = (hist.dvir || {})[d] || {}; var r = a[k] || b2[k] || null; if (r && b2[k] && b2[k].cleared) r = Object.assign({}, r, { cleared: b2[k].cleared }); return r; },
@@ -3568,7 +3568,7 @@
           if (syncOn()) { var rz = { resolvedAt: Date.now(), resolvedBy: "late post-trip" }; authFetch(databaseURL() + "/rides/DRVRHSLG/" + encodeURIComponent(driverPresenceId()) + "/missedPost/" + d + ".json", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(rz) }).catch(function () {});
             authFetch(databaseURL() + "/rides/DVRMSSNG/" + encodeURIComponent(driverPresenceId() + "_" + d) + ".json", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(rz) }).catch(function () {}); }
           setTimeout(function () { var o = document.getElementById("dl-overlay"); if (o) o.remove(); availFlow(); }, 300); }
-        if (k === "post" && state.logoutAfterPost) { state.logoutAfterPost = false; setTimeout(endOfDayOdo, 300); } },
+        if (k === "post" && state.logoutAfterPost) { state.logoutAfterPost = false; setTimeout(function () { driverLogoutStart(rec); }, 300); } },
       duty: hosDutySegs(now), drive: hosAllDrive(now), breaks: hosBreaks(now), offline: hosOffline(now), rows: rows,
       overrides: (hist.ovr || []).concat(hosOvr && hosOvr.override ? [hosOvr.override] : []).concat(hosRestarts(now)),
       driver: acc.name || state.driverName || "", vehicle: { year: acc.carYear || "", make: acc.carMake || "", model: acc.carModel || "", plate: normalizePlate(acc.carPlate || ""), vin: acc.carVin || acc.vin || "" } };
@@ -3687,7 +3687,8 @@
       if (b.id === "q-off-no") { goOfflineNow(); return; } /* v75q (Matthew 10/14): pause = Offline (unavailable, shift stays open, clocks pause per the logged-out rule); Available brings him back */
       goOfflineNow(); endOfDay(); });
   }
-  function endOfDay() {
+  function endOfDay() { driverLogoutStart(); }
+  function endOfDayOld() {
     var r = dlDvirRec(dlToday(), "post");
     if (!(r && Number(r.at) > 0 && (!r.plate || !dlPlate() || r.plate === dlPlate()))) { state.logoutAfterPost = true; openDriverLog("day:" + dlToday() + ":insp-post");
       return; }
@@ -3699,6 +3700,76 @@
       clearDriverPresence(); state.milesEndPrompt = true; state.milesEndDraft = ""; state.milesEndError = ""; state.milesEndWarnedFor = ""; state.milesEndSaving = false; state.hubOpen = false; render(); return; }
     var lo = document.getElementById("log-out"); if (lo) { lo.click(); return; }
     forceDriverLogout({ at: Date.now(), reason: "" }); state.loginError = ""; render();
+  }
+
+  /* v75u (Matthew 10/16): mileage is asked ONCE, inside the inspection. Pre-trip odometer = opening odometer,
+     post-trip odometer = ending odometer. Every Log out (Available, Offline, Break, or with an unopened shift) goes
+     through the post-trip inspection; logout only finishes after it is saved. God mode "Log out driver" stays immediate. */
+  function dvirOdoCheck(kind, odo) {
+    var floor = 0; try { floor = odoOverrideActive() ? 0 : (lastKnownOdometer() || 0); } catch (e) {}
+    if (floor > 0 && odo < floor) return "Odometer can't be lower than your last reading (" + floor.toFixed(1) + "). If the odometer really reads lower, ask God mode for an override.";
+    if (kind === "post") { var si = null; try { si = currentShiftInfo(); } catch (e) {} if (si && si.startOdo != null && !state.milesNeedStart && odo < si.startOdo && !odoOverrideActive()) return "The ending odometer can't be less than the opening odometer (" + si.startOdo.toFixed(1) + ")."; }
+    return "";
+  }
+  function postTripSince(t) { var r = dlDvirRec(dlToday(), "post"); return !!(r && Number(r.at) > 0 && Number(r.at) >= (Number(t) || 0) && (!r.plate || !dlPlate() || r.plate === dlPlate())) ? r : null; }
+  function driverLogoutStart(postRec) {
+    if (ROLE !== "driver" || !signedIn()) { finishLogoutHook(); return; }
+    var open = !state.milesNeedStart && !!(todayMilesRow() || readShift());
+    var since = 0; try { since = open ? (Number(currentShiftInfo().shiftStartedAt) || 0) : (Number(localStorage.getItem("pcs-login-at")) || 0); } catch (e) {}
+    var post = postRec && Number(postRec.odometer) > 0 ? postRec : postTripSince(since);
+    if (!post) { state.logoutAfterPost = true; clearDriverPresence(); state.hubOpen = false; render(); openDriverLog("day:" + dlToday() + ":insp-post"); return; }
+    if (open) { /* the post-trip odometer closes the shift through the normal ending-odometer save (same rules) */
+      clearDriverPresence(); state.milesEndPrompt = true; state.milesEndFromDvir = true; state.milesEndDraft = String(Math.floor(Number(post.odometer)));
+      state.milesEndError = ""; state.milesEndWarnedFor = ""; state.milesEndSaving = false; state.hubOpen = false; render();
+      setTimeout(function () { var fm = document.getElementById("miles-end-form"); if (fm) { if (fm.requestSubmit) fm.requestSubmit(); else fm.dispatchEvent(new Event("submit", { cancelable: true })); } }, 0);
+      return;
+    }
+    try { noteLastOdometer(post.odometer); } catch (e) {}
+    finishLogoutHook();
+  }
+  var finishLogoutHook = function () {};
+  /* v75u: an app opened with a session from an earlier Chicago day (or a shift never closed) closes that old shift, flags it
+     for God mode (missing ending odometer + post-trip), and requires today's pre-trip (its odometer opens the shift). */
+  function driverNewDayGate() {
+    if (ROLE !== "driver" || !signedIn()) return false;
+    try { if (driverMidRide() || meterActive()) return false; } catch (e) { return false; }
+    var today = chicagoToday(), loginAt = 0; try { loginAt = Number(localStorage.getItem("pcs-login-at")) || 0; } catch (e) {}
+    var loginDay = loginAt > 0 ? new Intl.DateTimeFormat("en-CA", { timeZone: "America/Chicago", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date(loginAt)) : "";
+    var map = readMilesLocal(), closedAny = false;
+    for (var i = 1; i <= 3; i += 1) {
+      var d = addDaysYmd(today, -i), row = map[d];
+      if (row && typeof row === "object" && shiftOpen(row)) {
+        var now = Date.now(); try { closeOnlineSegment(row, now); } catch (e) {}
+        row.shiftClosed = true; row.staleClosedAt = now; row.lastUpdate = now;
+        row.autoClosed = { at: now, why: "app opened next day; ending odometer and post-trip missing" };
+        var sh = row.shifts && typeof row.shifts === "object" ? Object.assign({}, row.shifts) : {};
+        sh[String(row.shiftStartAt || row.startedAt || now)] = { startOdo: Number(row.startOdometer), endOdo: null, odoMiles: null, shiftStartedAt: Number(row.shiftStartAt) || null, shiftEndedAt: now, day: d, skippedEnd: true, missingEnd: true };
+        row.shifts = sh;
+        try { persistMilesRow(row, d); } catch (e) {}
+        driverFlagMissing(d, !dlDvirRec(d, "post"));
+        closedAny = true;
+      }
+    }
+    if (!closedAny && loginDay && loginDay < today && !postTripDay(loginDay)) driverFlagMissing(loginDay, true, true);
+    if (!closedAny && !(loginDay && loginDay < today)) return false;
+    if (closedAny) { try { writeShift(null); } catch (e) {} }
+    try { localStorage.setItem("pcs-login-at", String(Date.now())); } catch (e) {}
+    state.loginGate = true; state.milesNeedStart = true; state.hubOpen = false; state.hubView = "menu"; state.meterOpen = false; state.screen = "home";
+    return true;
+  }
+  function postTripDay(d) { var r = dlDvirRec(d, "post"); return !!(r && Number(r.at) > 0); }
+  function driverFlagMissing(d, post, sessionOnly) {
+    if (!syncOn()) return;
+    var rec = { at: Date.now(), day: d, driver: driverPresenceId(), missingEndOdometer: !sessionOnly, missingPostTrip: !!post, autoClosed: true, why: sessionOnly ? "left signed in overnight without logging out" : "shift left open overnight; closed by the app" };
+    try { authFetch(databaseURL() + "/rides/DVRMSSNG/" + encodeURIComponent(driverPresenceId() + "_" + d) + ".json", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(rec) }).catch(function () {}); } catch (e) {}
+    if (post) try { authFetch(databaseURL() + "/rides/DRVRHSLG/" + encodeURIComponent(driverPresenceId()) + "/missedPost/" + d + ".json", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ at: rec.at, by: "app v75u" }) }).catch(function () {}); } catch (e) {}
+  }
+  /* login / new day: open the pre-trip first instead of a separate opening-odometer prompt */
+  function maybeOpenPreTripGate() {
+    if (!state.loginGate || ROLE !== "driver" || !signedIn() || !state.milesNeedStart || state.preGateOpenedAt) return;
+    try { if (driverMidRide() || meterActive() || document.getElementById("dl-overlay")) return; } catch (e) { return; }
+    state.preGateOpenedAt = Date.now();
+    setTimeout(function () { openDriverLog("day:" + dlToday() + ":insp"); }, 50);
   }
   function dvirCfgPull() {
     if (!syncOn()) return Promise.resolve();
@@ -3948,7 +4019,7 @@
     if (!u || ROLE !== "driver" || !signedIn()) return "";
     var pend = hosOvr.request && !(hosOvr.override && Number(hosOvr.override.grantedAt) >= Number(hosOvr.request.at));
     return '<div class="card miles-gate" id="hos-rest-gate"><p class="tag" style="color:#b91c1c">Mandatory rest</p>' +
-      '<p class="lede">You used up your ' + esc(hosClockName(hosStatus().by)) + ' clock. PCS policy: stay off duty until <strong>' + esc(fmtClockCt(u)) + "</strong> (" + esc(hosFmt(u - Date.now())) + " left). You can still log in and drive (miles are tracked), but no ride offers until then.</p>" +
+      '<p class="lede">You used up your ' + esc(hosClockName(hosStatus().by)) + ' clock. PCS policy: stay off duty until <strong>' + esc(fmtClockCt(u)) + "</strong> (" + esc(hosFmt(u - Date.now())) + " left). You can still log in and drive (miles are tracked). Ride offers are paused while you rest.</p>" +
       (pend ? '<p class="fine" id="hos-ovr-pending">Override requested. Waiting for PCS.</p>' : '<button class="btn ghost" type="button" id="hos-request-ovr">Request override from PCS</button>') + "</div>";
   }
   function fmtClockCt(ms) {
@@ -4642,7 +4713,7 @@
 
   function milesStartCard() {
     if (ROLE !== "driver" || !signedIn() || !state.milesNeedStart) return "";
-    try { if (qOffline()) return ""; } catch (e) {} /* v73: no odometer prompt while Offline (asked when he taps Available) */
+    try { if (qOffline() && !state.loginGate) return ""; } catch (e) {} /* v75u: login gate shows it while Offline; v73: no odometer prompt while Offline (asked when he taps Available) */
     var restNote = hosRestUntil() ? hosRestCard() : ""; /* v72w: shown as a notice; the shift can still start */
     if (!hasCompleteCar(readDriverAccount())) return "";
     if (driverMidRide()) return "";
@@ -13661,11 +13732,12 @@
       );
     }
     if (odometerGatePending()) {
+      maybeOpenPreTripGate(); /* v75u */
       /* v71 login fix: opening odometer first, before anything else (miles don't count until it's saved) */
       return (
         milesStartCard() +
         approvalGateCard() +
-        '<div class="app-nav"><button class="btn secondary" type="button" id="gate-stay-offline">Stay Offline (Home menu, no shift)</button>' + logoutLine() + "</div>"
+        '<div class="app-nav"><button class="btn secondary" type="button" id="gate-stay-offline">Stay logged in</button>' + logoutLine() + "</div>"
       );
     }
     if (state.hubOpen) return driverHub();
@@ -14129,7 +14201,7 @@
           if (ROLE === "driver") {
             /* v50: pull the saved car details + photos from the server (or back them up if only here). */
             syncDriverProfile().then(function () { render(); });
-            noteFreshLogin(); /* v72w */
+            noteFreshLogin(); /* v72w */ state.loginGate = true; state.preGateOpenedAt = 0; /* v75u */
             try { if (!driverMidRide() && !meterActive()) localStorage.setItem(qOffKey(), "1"); localStorage.setItem("pcs-login-at", String(Date.now())); } catch (e) {} /* v73: every login lands on Offline; v74b login time (forced logouts before it are ignored) */
             mergeMidnightSplit(); /* v72r */
             ensureMilesDayReady();
@@ -14272,7 +14344,7 @@
           if (ROLE === "driver") {
             /* v50: pull the saved car details + photos from the server (or back them up if only here). */
             syncDriverProfile().then(function () { render(); });
-            noteFreshLogin(); /* v72w */
+            noteFreshLogin(); /* v72w */ state.loginGate = true; state.preGateOpenedAt = 0; /* v75u */
             try { if (!driverMidRide() && !meterActive()) localStorage.setItem(qOffKey(), "1"); localStorage.setItem("pcs-login-at", String(Date.now())); } catch (e) {} /* v73: every login lands on Offline; v74b login time (forced logouts before it are ignored) */
             mergeMidnightSplit(); /* v72r */
             ensureMilesDayReady();
@@ -14342,21 +14414,14 @@
     var logout = document.getElementById("log-out");
     if (logout) {
       logout.addEventListener("click", function () {
-        if (ROLE === "driver" && !state.milesNeedStart && (todayMilesRow() || readShift()) && !state.milesEndPrompt) {
-          clearDriverPresence();
-          state.milesEndPrompt = true;
-          state.milesEndDraft = "";
-          state.milesEndError = "";
-          state.milesEndWarnedFor = "";
-          state.milesEndSaving = false;
-          render();
-          return;
-        }
+        if (ROLE === "driver" && !state.milesEndPrompt) { finishLogoutHook = finishDriverLogout; driverLogoutStart(); return; } /* v75u: every logoff = post-trip (its odometer ends the shift) */
         finishDriverLogout();
       });
     }
+    finishLogoutHook = finishDriverLogout;
     function finishDriverLogout() {
       stopOpenRideAlert();
+      state.milesEndFromDvir = false; state.logoutAfterPost = false; state.loginGate = false; state.preGateOpenedAt = 0;
       if (ROLE === "driver") {
         var openRow = todayMilesRow();
         if (openRow && Number(openRow.shiftStartAt) > 0) {
@@ -14510,7 +14575,7 @@
         writeShift({ startOdo: odo, shiftStartedAt: now, startDay: milesDay(), trackedMiles: 0, filledInMiles: 0 });
         noteLastOdometer(odo);
         state.shiftClosedElsewhere = false; state.shiftClosedElsewhereAt = 0; /* v72v: a fresh shift on this phone */
-        clearFreshLogin(); /* v72w */
+        clearFreshLogin(); /* v72w */ state.loginGate = false; state.preGateOpenedAt = 0; /* v75u */
         persistMilesRow(row).then(function () {
           try { hosPullHistory().then(function () { hosCheck(); render(); }); } catch (e) {} /* v72u: a new shift never resets HOS */
           followGps();
@@ -14553,7 +14618,7 @@
         }
         var odoMiles = info.startOdo != null ? Math.round((odo - info.startOdo) * 10) / 10 : null;
         var warn = odoCheckWarning(odoMiles, info.trackedMiles);
-        if (warn && state.milesEndWarnedFor !== String(odo)) {
+        if (warn && state.milesEndWarnedFor !== String(odo) && !state.milesEndFromDvir) {
           state.milesEndWarnedFor = String(odo);
           state.milesEndError = warn;
           render();
@@ -16645,7 +16710,9 @@
         if (!force && day === odoDayChecked) return;
         odoDayChecked = day;
         var before = !!state.milesNeedStart;
+        try { driverNewDayGate(); } catch (e) {} /* v75u: app resumed on a new day */
         ensureMilesDayReady();
+        if (state.loginGate) state.milesNeedStart = true;
         if (state.milesNeedStart && !driverMidRide() && !meterActive()) {
           var wasOver = !!state.hubOpen || !!state.meterOpen || state.screen !== "home";
           if (state.screen !== "home" && state.screen !== "trip") state.screen = "home";
@@ -16669,7 +16736,9 @@
     if (ROLE === "driver" && signedIn()) {
       loadRideHistory();
       mergeMidnightSplit(); /* v72r */
+      try { driverNewDayGate(); } catch (e) {} /* v75u */
       ensureMilesDayReady();
+      if (state.loginGate) state.milesNeedStart = true;
       hosLoadCfg().then(hosPollOvr).then(function () { hosCheck(); render(); });
       hosPullHistory().then(function () { hosCheck(); render(); }); /* v72u: full duty history from Firebase */
       try { repairLowOpeningOdo(); } catch (e) {}
@@ -17097,7 +17166,7 @@
       (qd.brkMsg ? '<p class="fine" id="q-break-msg" role="alert" style="color:#b91c1c;font-weight:700">' + esc(qd.brkMsg) + "</p>" : "") +
       (brk && brkEarly ? '<p class="fine" id="q-break-early">Won\u2019t count as your 30-min break until ' + esc(String(hosCfg.breakMinOnDutyHours)) + " h on duty since your last break. Shift and Cycle are paused.</p>" : "") +
       '<p class="fine" id="q-avail-note">' + esc(off
-        ? "Offline: you are logged in but not online. No ride offers, and your Shift and Cycle clocks are stopped (off duty). Tap Available to go online."
+        ? "Offline: you are logged in but not online. Ride offers are paused, and your Shift and Cycle clocks are stopped (off duty). Tap Available to go online."
         : auto
         ? "Set automatically during your PCS ride. You switch back to Available when it ends."
         : qAutoBreak() ? "Break (auto, available): you haven\u2019t moved for 10+ minutes, so this counts as break time from when you stopped. You are still Available and ride offers still come in. Moving or accepting a ride ends it."

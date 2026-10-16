@@ -278,7 +278,7 @@
           '<label class="dl-photo-btn" style="display:inline-block;padding:8px 14px;border-radius:8px;background:#374151;color:#fff;font-weight:600;cursor:pointer">\ud83d\udcf7 Take photo<input type="file" accept="image/*" capture="environment" name="photo-' + esc(it.k) + '" data-photo="' + esc(it.k) + '" style="position:absolute;width:1px;height:1px;opacity:0;overflow:hidden"></label> <span class="dl-photo-count" data-photo-count="' + esc(it.k) + '" style="font-size:13px;color:#555"></span>' +
           '<div class="dl-photo-thumbs" data-photo-thumbs="' + esc(it.k) + '"></div>') + "</div></div>";
       }).join("") +
-      '<label style="display:block;margin-top:8px">Odometer <input type="text" inputmode="numeric" pattern="[0-9]*" name="odometer" id="dl-dvir-odo" autocomplete="off" autocorrect="off" spellcheck="false" maxlength="7" value="' + esc(kind === "pre" && meta.odoNow != null && isFinite(Number(meta.odoNow)) ? String(Math.floor(Number(meta.odoNow))) : "") + '" style="width:140px"></label>' +
+      '<label style="display:block;margin-top:8px">' + (kind === "pre" ? "Odometer (opening odometer for this shift)" : "Odometer (ending odometer for this shift)") + ' <input type="text" inputmode="numeric" pattern="[0-9]*" name="odometer" id="dl-dvir-odo" autocomplete="off" autocorrect="off" spellcheck="false" maxlength="7" value="' + esc(kind === "pre" && meta.odoNow != null && isFinite(Number(meta.odoNow)) ? String(Math.floor(Number(meta.odoNow))) : "") + '" style="width:140px"></label>' +
       '<p style="margin:10px 0 4px">Driver signature</p><canvas id="dl-sig-pad" width="680" height="140" style="width:100%;height:140px;touch-action:none;display:block;background:#fafafa"></canvas><div style="border-top:1px solid #333"></div>' +
       '<p style="margin:8px 0;text-align:center"><a href="#" id="dl-sig-clear" style="color:#2f6fe0;text-decoration:none">Clear Signature</a></p>' +
       '<p id="dl-dvir-err" role="alert" style="color:#b91c1c"></p><button type="button" id="dl-dvir-save" style="width:100%;padding:12px;border:0;border-radius:8px;background:#2f6fe0;color:#fff;font-weight:700">Submit inspection</button></form>';
@@ -448,6 +448,7 @@
         if (f.__startedAt && Date.now() - f.__startedAt < f.__minMs) { err.textContent = "Take at least " + Math.round(f.__minMs / 1000) + " seconds to inspect the vehicle (" + Math.ceil((f.__startedAt + f.__minMs - Date.now()) / 1000) + " s left)."; return; }
         if (odoRaw && !/^\d+$/.test(odoRaw)) { err.textContent = "Odometer: whole miles only (no decimal point)."; return; } /* v74 */
         if (!(odo > 0)) { err.textContent = "Enter the odometer reading."; return; }
+        if (typeof meta.odoCheck === "function") { var oErr = ""; try { oErr = meta.odoCheck(f.getAttribute("data-kind"), odo) || ""; } catch (eO) {} if (oErr) { err.textContent = oErr; return; } } /* v75u: same floor rule as the shift odometer */
         if (!pad || !pad.__ink) { err.textContent = "Sign with your finger to submit."; return; }
         t.disabled = true;
         var mo = f.__motion || {}; if (mo.moving) { err.textContent = "Stop the vehicle to complete inspection"; t.disabled = false; return; }
