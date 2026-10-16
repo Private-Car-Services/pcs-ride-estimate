@@ -702,15 +702,15 @@
   function dbDropOpen(id, field) {
     var r = dbDropRow(id); if (!r) return;
     dbDropClose();
-    dbDrop.id = id; dbDrop.field = field === "stop" ? "stop" : "drop"; dbDrop.list = [];
-    var cur = dbDrop.field === "stop" ? ((r.stopsGeo && r.stopsGeo[0] && r.stopsGeo[0].address) || (r.stops && r.stops[0]) || "") : (r.dropoff || "");
+    dbDrop.id = id; dbDrop.field = field === "stop" ? "stop" : field === "pick" ? "pick" : "drop"; /* v75t: pick = pickup */ dbDrop.list = [];
+    var cur = dbDrop.field === "stop" ? ((r.stopsGeo && r.stopsGeo[0] && r.stopsGeo[0].address) || (r.stops && r.stops[0]) || "") : dbDrop.field === "pick" ? (r.pickup || "") : (r.dropoff || "");
     var big = "display:block;width:100%;min-height:56px;font-size:20px;font-weight:800;border-radius:12px;margin:8px 0;cursor:pointer;";
     var m = document.createElement("div");
     m.id = "db-drop-modal"; m.setAttribute("role", "dialog"); m.setAttribute("aria-modal", "true");
     m.style.cssText = "position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,.6);display:flex;align-items:flex-start;justify-content:center;padding:56px 12px 12px;overflow:auto";
     m.innerHTML = '<div style="background:#fff;color:#111;border:3px solid #0b6b3a;border-radius:16px;max-width:560px;width:100%;padding:16px">' +
       '<button type="button" id="db-drop-close" style="' + big + 'background:#0b3d23;color:#fff;border:0;margin-top:0">Close</button>' +
-      '<h2 style="margin:4px 0 6px;color:#0b3d23">' + (dbDrop.field === "stop" ? "Stop" : "Drop-off") + " \u00b7 " + esc(r.rider || "ride") + "</h2>" +
+      '<h2 style="margin:4px 0 6px;color:#0b3d23">' + (dbDrop.field === "stop" ? "Stop" : dbDrop.field === "pick" ? "Pickup" : "Drop-off") + " \u00b7 " + esc(r.rider || "ride") + "</h2>" +
       '<p style="margin:0 0 8px;color:#374151">Pickup: ' + esc(r.pickup || "") + "</p>" +
       '<label for="db-drop-q" style="display:block;font-weight:800;color:#111;margin:0 0 4px">Search a place or type the address</label>' +
       '<input id="db-drop-q" type="text" autocomplete="off" spellcheck="false" value="' + esc(cur) + '" style="width:100%;font-size:18px;padding:10px;border:2px solid #0b3d23;border-radius:10px;background:#fff;color:#111">' +
@@ -781,7 +781,9 @@
     var id = dbDrop.id, field = dbDrop.field, r = dbDropRow(id); if (!id || !r) return Promise.resolve();
     var ok = function (v) { return v != null && v !== "" && isFinite(+v); };
     var now = Date.now(), t = String(text || "").trim().slice(0, 400), patch;
-    if (field === "stop") patch = { stops: t ? [t] : [], stopsGeo: t ? [{ address: t, lat: ok(lat) ? +lat : null, lng: ok(lng) ? +lng : null }] : [], stopsEdited: true, stopsEditedBy: "god", stopsEditedAt: now, updatedAt: now };
+    var lbl = field === "stop" ? "Stop" : field === "pick" ? "Pickup" : "Drop-off";
+    if (field === "pick") patch = { pickup: t, pickupLat: ok(lat) ? +lat : null, pickupLng: ok(lng) ? +lng : null, pickupEdited: true, pickupEditedBy: "god", pickupEditedAt: now, updatedAt: now }; /* v75t */
+    else if (field === "stop") patch = { stops: t ? [t] : [], stopsGeo: t ? [{ address: t, lat: ok(lat) ? +lat : null, lng: ok(lng) ? +lng : null }] : [], stopsEdited: true, stopsEditedBy: "god", stopsEditedAt: now, updatedAt: now };
     else patch = { dropoff: t, dropoffLat: ok(lat) ? +lat : null, dropoffLng: ok(lng) ? +lng : null, dropoffEdited: true, dropoffEditedBy: "god", dropoffEditedAt: now, updatedAt: now };
     var msg = function (txt) { var m = document.getElementById("db-drop-msg"); if (m) m.textContent = txt; };
     var est = function (txt) { var m = document.getElementById("db-drop-est"); if (m) { m.style.display = "block"; m.textContent = txt; } };
@@ -790,9 +792,9 @@
       if (!res.ok) throw new Error("save");
       Object.keys(patch).forEach(function (k) { r[k] = patch[k]; });
       msg("");
-      est((field === "stop" ? "Stop" : "Drop-off") + " saved. Figuring the new price\u2026");
+      est(lbl + " saved. Figuring the new price\u2026");
       return dbDropEstimate(r).then(function (e) {
-        var line = (field === "stop" ? "Stop" : "Drop-off") + " saved for " + (r.rider || "ride") + (t ? ": " + t : "") + ".";
+        var line = lbl + " saved for " + (r.rider || "ride") + (t ? ": " + t : "") + ".";
         if (!e) { est(line + " The price shows once the addresses are found on the map."); state.boardNotice = line; return refresh(); }
         est(line + " " + (e.setFare ? "Price: " : "New estimate: ") + e.text);
         state.boardNotice = line + " " + (e.setFare ? "Price: " : "New estimate: ") + e.text;
@@ -5913,7 +5915,8 @@
           (GEST.setFare(r) ? '<p class="day-line db-est" id="db-est-' + esc(r.id) + '"><span>Price</span> ' + esc(GEST.calc(r, 0, 0).text) + "</p>"
             : GEST.saved(r) ? '<p class="day-line db-est" id="db-est-' + esc(r.id) + '"><span>Estimate</span> ' + esc(GEST.saved(r).text) + "</p>" : "") + /* v75s */
           (r.description && r.description !== r.dropoff ? '<p class="day-line"><span>Calendar note</span> ' + esc(r.description) + "</p>" : "") +
-          (st !== "completed" && st !== "cancelled" ? '<button type="button" class="btn btn-gold btn-edit-drop" data-event-id="' + esc(r.id) + '" data-field="drop" style="margin:4px 6px 4px 0">' + (r.dropoff ? "Change drop-off" : "Add drop-off") + "</button>" +
+          (st !== "completed" && st !== "cancelled" ? '<button type="button" class="btn btn-gold btn-edit-drop" data-event-id="' + esc(r.id) + '" data-field="pick" style="margin:4px 6px 4px 0">' + (r.pickup ? "Change pickup" : "Add pickup") + "</button>" + /* v75t */
+            '<button type="button" class="btn btn-gold btn-edit-drop" data-event-id="' + esc(r.id) + '" data-field="drop" style="margin:4px 6px 4px 0">' + (r.dropoff ? "Change drop-off" : "Add drop-off") + "</button>" +
             '<button type="button" class="btn btn-ghost btn-edit-drop" data-event-id="' + esc(r.id) + '" data-field="stop" style="margin:4px 0">Stop…</button>' : "") +
           (r.assignedDriverName
             ? '<p class="day-line"><span>Driver</span> ' + esc(r.assignedDriverName) + "</p>"

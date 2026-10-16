@@ -1,5 +1,5 @@
-/* PCS Monthly Goal (Matthew) - v76f: 'Set year total' - one real year-to-date starting amount through yesterday (optional per-source split) replaces every old YTD/year set (backup kept, 'Restore previous year totals'); entries on or before that date are inside it (never counted twice), later entries add on. Also 'Start year fresh' clears every YTD/year adjustment set (and any leftover old year adjustment entries) for all sources, keeps a backup inside the encrypted store with 'Restore previous year totals'; real entries, month sets, week/month/today math untouched; Year remaining shows 'ahead by' past goal. v76e: 'Fuel & expenses' replaced by 'Other' (positive income, in every total); expense and negative rows removed; work days Mon-Sat; partial weeks at the month's edges count only their in-month days; Sunday is the catch-up day and counts only if 'Working this Sunday' is on or Sunday income is logged; month daily pace uses work days left including today (Oct 14 = 15); Saturday shows 'Sunday catch-up needed'; on a worked Sunday today's goal = week remaining before Sunday. v76d: lock screens - 4th PIN digit unlocks by itself, keypad Done submits, Unlock works on the first tap (the pointerdown that closed the keypad shifted the page so the click missed the button). v76c: full step-by-step line only after Recalculate today; setup text reworded positively. v76b: today's goal is SNAPSHOT once a day {date, goal, weekly, weekBeforeToday, daysLeft} on first open/unlock and stays fixed all day; big Recalculate today button; 'Set today's goal' box counts for today only; Today remaining shows 'ahead by'; 'Rolled over from yesterday' removed; Week check card lists every entry Mon..yesterday so extra past entries are easy to spot. v76a: matches Matthew's morning math. Weeks left = whole Monday weeks left in the month (this week counts 1); weekly = month remaining at the start of this week / weeks left, optional round up (weekRound, e.g. 100); days left = Mon-Sat left this week including today (typed days only count on the day typed); today = week remaining before today / days left, rounded UP to the cent; month pace line; migrated month sets built from old year adjustments are dropped (doubling fix); week income comes from real entries only. v75z: weeks left prorated by working days (Mon-Sat) in the month; 'How today's goal was figured' line with every number; warning when month income before this week already passes the monthly goal; Adjustments show which past entries sit inside a YTD set. v75y: Adjustments are SET values (YTD and Month to date replace, never add); one-time migration of old adjustment entries keeping totals; Adjustments list + Past entries with Undo; month > year blocked; old heuristic repair removed. v75w: foolproof month repair - per source, if Month > Year, or Month > 40% of Year (March on), every adjustment dated this month (any scope) moves to Jan 1 and merges; a single non-adjustment entry this month bigger than 40% of Year moves too; visible 'goal v75w' label. v75v: robust repair - a month-to-date adjustment that is really a year figure (>40% of that source's YTD from March on, or >2x a plausible month) is re-dated to Jan 1 and netted with Apply's negative year remainder; Apply treats MTD >= 90% of YTD as YTD only. v75u: big on-screen 9-key pad (1-9 . 0 del, Clear, Done) on every money/number box; 'Use iPad keyboard' fallback. v75t: every money/number box opens the number pad (numPad helper after each render). v75s: tappable goal overrides, adjustment re-dating/repair, goals never negative. v75r: goal cascade + YTD totals. v75g: runs INSIDE God mode as its own Home panel (God Home > Monthly Goal).
-   Own password + PIN, separate from God sign-in. Data stays on this device only (never Firebase, no network calls).
+/* PCS Monthly Goal (Matthew) - v76g: end-to-end encrypted backup + phone/iPad sync through the pcs-pay Worker (/ledger/vault/get|put, God sign-in token); server holds ciphertext only; per-entry merge with tombstones, settings last-write-wins; status line Backed up / Saving; new device restores with the ledger password. v76f: 'Set year total' - one real year-to-date starting amount through yesterday (optional per-source split) replaces every old YTD/year set (backup kept, 'Restore previous year totals'); entries on or before that date are inside it (never counted twice), later entries add on. Also 'Start year fresh' clears every YTD/year adjustment set (and any leftover old year adjustment entries) for all sources, keeps a backup inside the encrypted store with 'Restore previous year totals'; real entries, month sets, week/month/today math untouched; Year remaining shows 'ahead by' past goal. v76e: 'Fuel & expenses' replaced by 'Other' (positive income, in every total); expense and negative rows removed; work days Mon-Sat; partial weeks at the month's edges count only their in-month days; Sunday is the catch-up day and counts only if 'Working this Sunday' is on or Sunday income is logged; month daily pace uses work days left including today (Oct 14 = 15); Saturday shows 'Sunday catch-up needed'; on a worked Sunday today's goal = week remaining before Sunday. v76d: lock screens - 4th PIN digit unlocks by itself, keypad Done submits, Unlock works on the first tap (the pointerdown that closed the keypad shifted the page so the click missed the button). v76c: full step-by-step line only after Recalculate today; setup text reworded positively. v76b: today's goal is SNAPSHOT once a day {date, goal, weekly, weekBeforeToday, daysLeft} on first open/unlock and stays fixed all day; big Recalculate today button; 'Set today's goal' box counts for today only; Today remaining shows 'ahead by'; 'Rolled over from yesterday' removed; Week check card lists every entry Mon..yesterday so extra past entries are easy to spot. v76a: matches Matthew's morning math. Weeks left = whole Monday weeks left in the month (this week counts 1); weekly = month remaining at the start of this week / weeks left, optional round up (weekRound, e.g. 100); days left = Mon-Sat left this week including today (typed days only count on the day typed); today = week remaining before today / days left, rounded UP to the cent; month pace line; migrated month sets built from old year adjustments are dropped (doubling fix); week income comes from real entries only. v75z: weeks left prorated by working days (Mon-Sat) in the month; 'How today's goal was figured' line with every number; warning when month income before this week already passes the monthly goal; Adjustments show which past entries sit inside a YTD set. v75y: Adjustments are SET values (YTD and Month to date replace, never add); one-time migration of old adjustment entries keeping totals; Adjustments list + Past entries with Undo; month > year blocked; old heuristic repair removed. v75w: foolproof month repair - per source, if Month > Year, or Month > 40% of Year (March on), every adjustment dated this month (any scope) moves to Jan 1 and merges; a single non-adjustment entry this month bigger than 40% of Year moves too; visible 'goal v75w' label. v75v: robust repair - a month-to-date adjustment that is really a year figure (>40% of that source's YTD from March on, or >2x a plausible month) is re-dated to Jan 1 and netted with Apply's negative year remainder; Apply treats MTD >= 90% of YTD as YTD only. v75u: big on-screen 9-key pad (1-9 . 0 del, Clear, Done) on every money/number box; 'Use iPad keyboard' fallback. v75t: every money/number box opens the number pad (numPad helper after each render). v75s: tappable goal overrides, adjustment re-dating/repair, goals never negative. v75r: goal cascade + YTD totals. v75g: runs INSIDE God mode as its own Home panel (God Home > Monthly Goal).
+   Own password + PIN, separate from God sign-in. v76g: encrypted copy also backed up to the pcs-pay Worker (ciphertext only).
    Ported from the former standalone /ledger/ app; same IndexedDB vault.
    Local-first: all data lives on this device in IndexedDB, AES-GCM encrypted with a key derived from Matthew's own
    password (PBKDF2-SHA256, 600,000 rounds, random salt) via a random data key. Password once per 24 h; a 4-digit PIN
@@ -30,7 +30,72 @@
   function sealData(obj, key) { var iv = rnd(12); return crypto.subtle.encrypt({ name: "AES-GCM", iv: iv }, key, enc.encode(JSON.stringify(obj))).then(function (ct) { return { iv: Array.from(iv), ct: new Uint8Array(ct) }; }); }
   function openData(v, key) { return crypto.subtle.decrypt({ name: "AES-GCM", iv: new Uint8Array(v.iv) }, key, v.ct).then(function (pt) { return JSON.parse(dec.decode(pt)); }); }
   function openWithPassword(v, pw) { return kek(pw, new Uint8Array(v.salt), v.iter || ITER).then(function (k) { return unwrap(k, v.pw); }).then(function (key) { return openData(v, key).then(function (d) { return { key: key, d: d }; }); }); }
-  function save() { return kvGet("vault").then(function (v) { return sealData(D, dek).then(function (x) { v.iv = x.iv; v.ct = x.ct; return kvPut("vault", v); }); }).catch(function (e) { alert("Not saved: " + e.message); }); }
+  function save(local) { if (!D || !dek) return Promise.resolve(); stamp(D); var key = dek, d = D; return kvGet("vault").then(function (v) { return sealData(d, key).then(function (x) { v.iv = x.iv; v.ct = x.ct; return kvPut("vault", v); }); }).then(function () { if (!local) { SY.state = "saving"; syncLine(); syncSoon(); } }).catch(function (e) { alert("Not saved: " + e.message); }); }
+  /* ---------- v76g: end-to-end encrypted backup + phone/iPad sync ----------
+     The same vault record kept in IndexedDB (salt, password-wrapped data key, AES-GCM ciphertext with a fresh IV every save)
+     is sent to the pcs-pay Worker (/ledger/vault/get|put, God sign-in token). The server only ever holds ciphertext.
+     Merge: entries by id (newer edit wins, tombstones remove), settings / adjustments / year total last-write-wins per key. */
+  var SYNC_URL = ((typeof window !== "undefined" && window.PCS_PAY_WORKER) || "https://pcs-pay.pcsrides.workers.dev").replace(/\/+$/, "") + "/ledger/vault/";
+  var KEYED = ["settings", "adj"], SKIP = { entries: 1, _sync: 1 };
+  function hsh(x) { var s = JSON.stringify(x === undefined ? null : x), h = 5381; for (var i = 0; i < s.length; i++) h = ((h * 33) ^ s.charCodeAt(i)) >>> 0; return h.toString(36) + s.length.toString(36); }
+  function keyMap(d) { var o = {}; Object.keys(d).forEach(function (k) { if (SKIP[k]) return; if (KEYED.indexOf(k) !== -1 && d[k] && typeof d[k] === "object") Object.keys(d[k]).forEach(function (j) { o[k + "." + j] = d[k][j]; }); else o[k] = d[k]; }); return o; }
+  function keySet(d, p, v) { var i = p.indexOf("."); if (i > 0 && KEYED.indexOf(p.slice(0, i)) !== -1) { var t = d[p.slice(0, i)] = d[p.slice(0, i)] || {}; if (v === undefined) delete t[p.slice(i + 1)]; else t[p.slice(i + 1)] = v; } else if (v === undefined) delete d[p]; else d[p] = v; }
+  /* record what changed since the last stamp: new/edited entries and keys get a time, removed ones a tombstone */
+  function stamp(d, now) { now = now || Date.now(); var S = d._sync = d._sync || {}; ["mt", "tomb", "kt", "kdel", "es", "ks"].forEach(function (k) { S[k] = S[k] || {}; }); var ch = 0;
+    Object.keys(d.entries).forEach(function (id) { var h = hsh(d.entries[id]); if (S.es[id] !== h) { S.es[id] = h; S.mt[id] = now; ch++; } });
+    Object.keys(S.es).forEach(function (id) { if (!d.entries[id]) { delete S.es[id]; delete S.mt[id]; S.tomb[id] = now; ch++; } });
+    var km = keyMap(d); Object.keys(km).forEach(function (k) { var h = hsh(km[k]); if (S.ks[k] !== h) { S.ks[k] = h; S.kt[k] = now; delete S.kdel[k]; ch++; } });
+    Object.keys(S.ks).forEach(function (k) { if (!(k in km)) { delete S.ks[k]; delete S.kt[k]; S.kdel[k] = now; ch++; } });
+    return ch; }
+  function merge(a, b) { stamp(a); stamp(b); var A = a._sync, B = b._sync, out = { entries: {}, _sync: { mt: {}, tomb: {}, kt: {}, kdel: {}, es: {}, ks: {} } }, O = out._sync, ids = {};
+    [a.entries, b.entries, A.tomb, B.tomb].forEach(function (m) { Object.keys(m).forEach(function (id) { ids[id] = 1; }); });
+    Object.keys(ids).forEach(function (id) { var ea = a.entries[id], eb = b.entries[id], ta = ea ? A.mt[id] || 0 : -1, tb = eb ? B.mt[id] || 0 : -1, tomb = Math.max(A.tomb[id] || 0, B.tomb[id] || 0);
+      var e = tb > ta ? eb : ea, t = Math.max(ta, tb);
+      if (e && t > tomb) { out.entries[id] = JSON.parse(JSON.stringify(e)); O.mt[id] = t; O.es[id] = hsh(e); } else if (tomb) O.tomb[id] = tomb; });
+    var ka = keyMap(a), kb = keyMap(b), ks = {}; [ka, kb, A.kdel, B.kdel].forEach(function (m) { Object.keys(m).forEach(function (k) { ks[k] = 1; }); });
+    Object.keys(ks).forEach(function (k) { var c = [[k in ka ? A.kt[k] || 0 : -1, ka[k], 1], [k in kb ? B.kt[k] || 0 : -1, kb[k], 1], [A.kdel[k] || -1, undefined, 0], [B.kdel[k] || -1, undefined, 0]].sort(function (x, y) { return y[0] - x[0] || y[2] - x[2]; })[0];
+      if (c[2]) { keySet(out, k, JSON.parse(JSON.stringify(c[1] === undefined ? null : c[1]))); O.kt[k] = c[0]; O.ks[k] = hsh(c[1]); } else O.kdel[k] = c[0]; });
+    out.settings = out.settings || {}; return out; }
+  function b64(u) { var s = ""; u = new Uint8Array(u); for (var i = 0; i < u.length; i += 0x8000) s += String.fromCharCode.apply(null, u.subarray(i, i + 0x8000)); return btoa(s); }
+  function unb64(s) { var b = atob(s), u = new Uint8Array(b.length); for (var i = 0; i < b.length; i++) u[i] = b.charCodeAt(i); return u; }
+  function packVault(v) { return { v: v.v || 2, kdf: v.kdf || "PBKDF2-SHA256", salt: b64(v.salt), iter: v.iter || ITER, pw: { iv: b64(v.pw.iv), w: b64(v.pw.w) }, iv: b64(v.iv), ct: b64(v.ct) }; }
+  function unpackVault(p) { return { v: p.v, kdf: p.kdf, salt: Array.from(unb64(p.salt)), iter: p.iter, pw: { iv: Array.from(unb64(p.pw.iv)), w: unb64(p.pw.w) }, iv: Array.from(unb64(p.iv)), ct: unb64(p.ct) }; }
+  var SY = { ver: 0, busy: false, again: false, t: null, retry: null, state: "", at: 0, pw: "" };
+  function godTok() { try { var t = localStorage.getItem("pcs-god-queue-token") || ""; return (Number(t.split(".")[1]) || 0) > Date.now() + 60000 ? t : ""; } catch (e) { return ""; } }
+  function godTokSet(t) { try { if (t) localStorage.setItem("pcs-god-queue-token", t); } catch (e) {} }
+  function api(op, body) { var tk = godTok(); if (!tk) return Promise.reject({ auth: 1 });
+    return fetch(SYNC_URL + op, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(Object.assign({ godToken: tk }, body || {})) })
+      .then(function (r) { return r.json().catch(function () { return {}; }).then(function (j) { if (j && j.godToken) godTokSet(j.godToken); if (r.status === 409) return j; if (r.status === 401 || r.status === 403) throw { auth: 1 }; if (!r.ok) throw new Error(j.error || "HTTP " + r.status); return j; }); }); }
+  function syncLine() { var el = document.getElementById("gl-sync"); if (!el) return; var t = SY.at ? new Date(SY.at).toLocaleTimeString("en-US", { timeZone: "America/Chicago", hour: "numeric", minute: "2-digit" }) : "";
+    el.textContent = SY.state === "saving" ? "Saving\u2026" : SY.state === "ok" ? "Backed up " + t : SY.state === "wait" ? "Saved on this device \u00b7 backup resumes when online" : SY.state === "auth" ? "Saved on this device \u00b7 sign in to God mode to back up" : SY.state === "pw" ? "Saved on this device \u00b7 enter your ledger password once to link the backup" : "Saved on this device"; }
+  function syncSoon(ms) { if (!dek) return; clearTimeout(SY.t); SY.t = setTimeout(syncNow, ms == null ? 2500 : ms); }
+  function kvSync(o) { return kvGet("sync").then(function (s) { s = s || {}; if (o) { Object.assign(s, o); return kvPut("sync", s).then(function () { return s; }); } return s; }); }
+  /* pull, merge, push. Safe to call any time; queued while one is running, retried when offline */
+  function syncNow() { if (!dek || !D) return Promise.resolve(); if (SY.busy) { SY.again = true; return Promise.resolve(); }
+    SY.busy = true; SY.state = "saving"; syncLine(); var key = dek;
+    return kvSync().then(function (st) { SY.ver = st.ver || 0; return api("get"); }).then(function step(r) {
+      var rv = r && r.vault ? unpackVault(r.vault) : null, p = Promise.resolve();
+      if (rv && r.ver !== SY.ver) p = openData(rv, key).catch(function () { return SY.pw ? openWithPassword(rv, SY.pw).then(function (o) { return o.d; }) : Promise.reject({ pw: 1 }); })
+        .then(function (rd) { if (key !== dek) throw new Error("locked"); D = merge(D, rd); return save(true).then(function () { if (app && document.getElementById("gl-top")) paint(); }); });
+      return p.then(function () { stamp(D); return kvGet("vault"); }).then(function (v) { return sealData(D, key).then(function (x) { v.iv = x.iv; v.ct = x.ct; return api("put", { vault: packVault(v), baseVer: r ? r.ver || 0 : 0 }); }); })
+        .then(function (w) { if (w && w.conflict) return step(w); SY.ver = w.ver; return kvSync({ ver: w.ver, at: w.updatedAt, dirty: false }).then(function () { SY.state = "ok"; SY.at = w.updatedAt; }); }); })
+      .catch(function (e) { SY.state = e && e.auth ? "auth" : e && e.pw ? "pw" : "wait"; kvSync({ dirty: true }); if (!(e && (e.auth || e.pw))) { clearTimeout(SY.retry); SY.retry = setTimeout(syncNow, 30000); } })
+      .then(function () { SY.busy = false; syncLine(); if (SY.again) { SY.again = false; syncSoon(500); } }); }
+  if (typeof window !== "undefined" && window.addEventListener) window.addEventListener("online", function () { syncSoon(500); });
+  /* new device: pull the backup, unlock it with the ledger password, keep it here */
+  function restoreScreen(msg) {
+    var err = shell('<form id="gl-f-rest"><p>Bring your ledger from your backup. Enter your ledger password (the one from your iPad).</p><p><input type="password" id="gl-rpw" autocomplete="current-password" placeholder="Ledger password" style="width:100%"></p>' +
+      '<p><input type="password" id="gl-rpin" inputmode="numeric" maxlength="4" autocomplete="off" placeholder="4-digit PIN for this device (optional)" style="width:100%"></p><button class="btn" type="submit">Restore my ledger</button> <button class="btn ghost" type="button" id="gl-b-new">Start a new ledger instead</button></form>', msg);
+    document.getElementById("gl-b-new").onclick = function () { firstRun(); };
+    var fm = document.getElementById("gl-f-rest"); lockWire(fm, document.getElementById("gl-rpw"));
+    fm.onsubmit = function (e) { e.preventDefault(); if (lockBusy) return; var pw = val("gl-rpw"), pin = val("gl-rpin"); if (!pw) { err.textContent = "Type your ledger password."; return; } if (pin && !/^\d{4}$/.test(pin)) { err.textContent = "The PIN is 4 digits."; return; }
+      lockBusy = true; err.textContent = "Restoring\u2026"; var rv;
+      api("get").then(function (r) { if (!r || !r.vault) throw { empty: 1 }; rv = unpackVault(r.vault); SY.ver = 0; return openWithPassword(rv, pw); })
+        .then(function (o) { dek = o.key; D = o.d; if (pin) D.pin = pin; return kvPut("vault", rv).then(function () { return save(true); }).then(function () { return D.pin ? pinArm(D.pin) : null; }); })
+        .then(function () { SY.pw = pw; start(); })
+        .catch(function (x) { lockBusy = false; dek = null; D = null; err.textContent = x && x.auth ? "Sign in to God mode on this device first, then open Monthly Goal again." : x && x.empty ? "Your backup isn\u2019t on the server yet. Open Monthly Goal on your iPad once to upload it." : x && x.name === "OperationError" ? "That password doesn\u2019t match your ledger. Try again." : "Couldn\u2019t reach the backup right now. Try again in a minute."; }); };
+  }
+
   function blank() { return { settings: {}, entries: {}, lastLine: "uber" }; }
 
   /* ---------- PIN window: after a password unlock the data key is also wrapped with a PIN KEK, valid 24 h ---------- */
@@ -94,13 +159,14 @@
   function lockWire(fm, inp) { [].forEach.call(fm.querySelectorAll("button[type=submit]"), function (b) { b.addEventListener("pointerdown", function (e) { e.preventDefault(); }); b.addEventListener("mousedown", function (e) { e.preventDefault(); }); });
     if (inp) { inp.setAttribute("enterkeyhint", "go"); setTimeout(function () { try { inp.focus(); } catch (e) {} }, 0); } }
   function shell(inner, msg) { kpClose(); lockBusy = false; app.innerHTML = '<div class="lock card"><h1>Monthly Goal</h1>' + inner + '<p class="err" id="gl-err">' + (msg || "") + "</p></div>"; numPad(app); return document.getElementById("gl-err"); }
-  function lockNow(msg) { dek = null; D = null; if (!app) return; kvGet("vault").then(function (v) { if (!v) return firstRun(); pinValid().then(function (p) { if (p) pinScreen(p, msg); else pwScreen(msg); }); }); }
+  function lockNow(msg) { dek = null; D = null; SY.pw = ""; clearTimeout(SY.t); if (!app) return; kvGet("vault").then(function (v) { if (!v) return godTok() ? restoreScreen() : firstRun(); pinValid().then(function (p) { if (p) pinScreen(p, msg); else pwScreen(msg); }); }); }
   function firstRun(msg) {
     var err = shell('<p>Create your ledger password (not your God mode password), at least ' + MINPW + ' characters, and a 4-digit PIN. ' +
       'The password is needed once every 24 hours; in between, the PIN unlocks. Keep your password somewhere safe. It\u2019s the only way back into your ledger, so keep an encrypted backup too.</p>' +
       '<form id="gl-f-set"><p><input type="password" id="gl-pw1" autocomplete="new-password" placeholder="New password" style="width:100%"></p><p><input type="password" id="gl-pw2" autocomplete="new-password" placeholder="Repeat password" style="width:100%"></p>' +
       '<p><input type="password" id="gl-pin1" inputmode="numeric" maxlength="4" autocomplete="off" placeholder="4-digit PIN" style="width:48%"> <input type="password" id="gl-pin2" inputmode="numeric" maxlength="4" autocomplete="off" placeholder="Repeat PIN" style="width:48%"></p>' +
-      '<button class="btn" type="submit">Set password &amp; PIN</button></form>', msg);
+      '<button class="btn" type="submit">Set password &amp; PIN</button>' + (godTok() ? ' <button class="btn ghost" type="button" id="gl-b-rest">Restore from backup</button>' : '') + '</form>', msg);
+    var rb0 = document.getElementById("gl-b-rest"); if (rb0) rb0.onclick = function () { restoreScreen(); };
     document.getElementById("gl-f-set").onsubmit = function (e) { e.preventDefault();
       var a = val("gl-pw1"), b = val("gl-pw2"), p1 = val("gl-pin1"), p2 = val("gl-pin2");
       if (a.length < MINPW) { err.textContent = "Use at least " + MINPW + " characters."; return; }
@@ -118,8 +184,8 @@
     var err = shell('<form id="gl-f-unlock"><p class="fine">Password needed (once every 24 hours).</p><p><input type="password" id="gl-pw" autocomplete="current-password" placeholder="Ledger password" style="width:100%" autofocus></p><button class="btn" type="submit">Unlock</button></form>', msg);
     lockWire(document.getElementById("gl-f-unlock"), document.getElementById("gl-pw"));
     document.getElementById("gl-f-unlock").onsubmit = function (e) { e.preventDefault(); if (lockBusy) return; if (!val("gl-pw")) { err.textContent = "Type your password."; return; } lockBusy = true; err.textContent = "Unlocking\u2026";
-      kvGet("vault").then(function (v) { return openWithPassword(v, val("gl-pw")); }).then(function (r) { dek = r.key; D = r.d; return D.pin ? pinArm(D.pin) : null; })
-        .then(start).catch(function () { lockBusy = false; err.textContent = "Wrong password."; var x = document.getElementById("gl-pw"); if (x) { x.value = ""; x.focus(); } }); };
+      kvGet("vault").then(function (v) { SY.pw = val("gl-pw"); return openWithPassword(v, SY.pw); }).then(function (r) { dek = r.key; D = r.d; return D.pin ? pinArm(D.pin) : null; })
+        .then(start).catch(function () { SY.pw = ""; lockBusy = false; err.textContent = "Wrong password."; var x = document.getElementById("gl-pw"); if (x) { x.value = ""; x.focus(); } }); };
   }
   function pinScreen(p, msg) {
     var left = PIN_TRIES - (p.fails || 0), hrs = Math.max(0, Math.round((p.exp - Date.now()) / 360000) / 10);
@@ -143,7 +209,7 @@
   /* v76b: once-a-day snapshot of today's goal */
   function snapToday(force) { var s = D.settings = D.settings || {}, t = today(); if (!force && s.daySnap && s.daySnap.date === t) return false; var c = calc(t);
     if (c.dailyAuto == null) return false; s.daySnap = { date: t, goal: c.dailyAuto, weekly: c.weekGoal, weekBeforeToday: r2(c.wBefore), daysLeft: c.dLeft, at: Date.now(), recalc: !!force }; return true; }
-  function start() { lastAct = Date.now(); var fixed = 0; try { fixed = migrate(); } catch (e) {} if (snapToday()) fixed = 1; paint(); if (fixed) save(); }
+  function start() { lastAct = Date.now(); var fixed = 0; try { fixed = migrate(); } catch (e) {} if (snapToday()) fixed = 1; paint(); if (fixed) save(true); syncSoon(0); /* v76g: pull + merge + push on every unlock (first v76g unlock uploads the iPad vault) */ }
   ["click", "keydown", "touchstart", "input"].forEach(function (t) { document.addEventListener(t, function () { lastAct = Date.now(); }, true); });
   setInterval(function () { if (app && dek && Date.now() - lastAct > LOCK_MS) lockNow("Locked after 5 quiet minutes."); }, 15000);
   document.addEventListener("visibilitychange", function () { if (document.hidden) lastAct = Math.min(lastAct, Date.now()); else if (app && dek && Date.now() - lastAct > LOCK_MS) lockNow("Locked."); });
@@ -339,11 +405,11 @@
     h += WEEKCHK(c);
     h += ADJHTML(c);
     h += REST(c);
-    app.innerHTML = h; bind(); bindAdj(); updGoalTags(c); numPad(app);
+    app.innerHTML = h; bind(); bindAdj(); updGoalTags(c); numPad(app); syncLine();
     var qa = document.getElementById("gl-q-amt"); if (qa && paint.focusQ) { qa.focus(); paint.focusQ = false; }
   }
   /* v75l: everything above the Goals form; re-rendered on each goal keystroke without touching the Goals inputs (keeps the keyboard up) */
-  function paintTop() { var top = document.getElementById("gl-top"); if (!top || !D) return; if (snapToday()) save(); var c = calc(); top.innerHTML = topHtml(c); bindTop(); numPad(top); updGoalTags(c); updYtd(c); }
+  function paintTop() { var top = document.getElementById("gl-top"); if (!top || !D) return; if (snapToday()) save(); var c = calc(); top.innerHTML = topHtml(c); syncLine(); bindTop(); numPad(top); updGoalTags(c); updYtd(c); }
   function updGoalTags(c) { function t(id, ov, auto, cents) { var el = document.getElementById(id); if (el) el.textContent = ov != null ? "override (auto " + $m(auto, cents) + ")" : "auto " + $m(auto, cents); }
     t("gl-t-month", c.monthOv, c.monthAuto); t("gl-t-week", c.weekOv, c.weekAuto); t("gl-t-day", c.dayOv, c.dailyAuto, true);
     var f = document.getElementById("gl-formula"); if (f) f.innerHTML = "Monthly = (year goal \u2212 year income before this month " + $m(c.yBefore) + ") \u00f7 " + c.mLeft + " months left \u00b7 Weekly = (monthly \u2212 month income before this week " + $m(c.mBefore) + ") \u00f7 " + c.wLeft + " weeks left \u00b7 Today = (weekly \u2212 week income before today " + $m(c.wBefore, true) + ") \u00f7 days left. Adjustments count as income."; }
@@ -355,7 +421,7 @@
   function topHtml(c) {
     var g = c.g, h = "";
     h += '<div class="row" style="justify-content:space-between"><h1>Monthly Goal</h1><button class="btn ghost" id="gl-b-lock">Lock</button></div>';
-    h += '<div class="fine" id="gl-ver" style="text-align:right;opacity:.7">goal v76f</div>';
+    h += '<div class="row" style="justify-content:space-between"><span id="gl-sync" style="color:#7ee08f;font-weight:700;font-size:15px"></span><span class="fine" id="gl-ver" style="opacity:.7">goal v76g</span></div>';
     var roll = '<div class="fine">' + (c.dayOv != null ? "you set it for today" : c.snap ? "fixed for today" : "") + '</div>', tr = c.todayRem;
     h += '<div class="card hero"><b class="t">TODAY \u00b7 ' + esc(c.t) + '</b><div class="grid">' + big("Weekly goal", $m(c.weekGoal)) + big("Days left in week", c.dLeft == null ? "\u2014" : String(c.dLeft), '<div class="fine">counts down daily</div>') +
       big("Today's goal", $m(c.daily, true), roll + '<button type="button" class="btn" id="gl-b-recalc" style="font-size:20px;padding:12px 22px;margin-top:6px">Recalculate today</button>') + big("Today remaining", tr != null && tr < 0 ? "ahead by " + $m(-tr, true) : $m(tr, true)) + big("Week remaining", $m(left(c.weekRem), true), '<div class="fine">before today ' + $m(c.weekRemBefore, true) + '</div>') + big("Month remaining", $m(left(c.monthRem), true), '<div class="fine">before today ' + $m(c.monthRemBefore, true) + '</div>') + big("Month daily pace", $m(c.monthPace, true), '<div class="fine">' + c.mdLeft + ' days, ' + (c.sunWork ? "6 a week + this Sunday" : "6 a week") + '</div>') +
@@ -475,8 +541,8 @@
     lastAct = Date.now();
     idb().then(function () { lockNow(); }).catch(function () { app.innerHTML = '<p class="err">This browser cannot store the ledger (private browsing?).</p>'; });
   }
-  function glClose() { kpClose(); kpEl = null; dek = null; D = null; app = null; var ov = document.getElementById("gl-screen"); if (ov) ov.remove(); }
-  if (typeof module !== "undefined" && module.exports) module.exports = { migrate: migrate, applySets: applySets, derived: derived, mtd: mtd, _set: function (d) { D = d; }, calc: calc, ytdTotal: ytdTotal, ADJ: ADJ, weeksLeft: weeksLeft, numPad: numPad, kpPress: kpPress, glOpen: glOpen };
+  function glClose() { kpClose(); kpEl = null; if (D && dek) { try { stamp(D); } catch (e) {} } dek = null; D = null; SY.pw = ""; clearTimeout(SY.t); app = null; var ov = document.getElementById("gl-screen"); if (ov) ov.remove(); }
+  if (typeof module !== "undefined" && module.exports) module.exports = { stamp: stamp, merge: merge, packVault: packVault, unpackVault: unpackVault, sealData: sealData, openData: openData, openWithPassword: openWithPassword, kek: kek, wrap: wrap, setYearTotal: setYearTotal, _get: function () { return D; }, migrate: migrate, applySets: applySets, derived: derived, mtd: mtd, _set: function (d) { D = d; }, calc: calc, ytdTotal: ytdTotal, ADJ: ADJ, weeksLeft: weeksLeft, numPad: numPad, kpPress: kpPress, glOpen: glOpen };
   window.__pcsGoalOpen = glOpen; window.__pcsGoalClose = glClose;
   document.addEventListener("click", function (e) { var t = e.target.closest ? e.target.closest("[data-god-menu=goal]") : null; if (t) { e.stopPropagation(); glOpen(); } }, true);
 })();
