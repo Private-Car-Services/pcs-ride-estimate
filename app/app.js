@@ -8851,6 +8851,12 @@
     return schedPatch(id, { dropoff: String(text || "").slice(0, 400), dropoffLat: isCoord(lat) ? +lat : null, dropoffLng: isCoord(lng) ? +lng : null,
       dropoffEdited: true, dropoffEditedBy: "driver", dropoffEditedAt: Date.now() });
   }
+  function schedSavePick(id, text, lat, lng) { /* v75t */
+    if (state.schedEst) delete state.schedEst[id];
+    schedNavRoute = null;
+    return schedPatch(id, { pickup: String(text || "").slice(0, 400), pickupLat: isCoord(lat) ? +lat : null, pickupLng: isCoord(lng) ? +lng : null,
+      pickupEdited: true, pickupEditedBy: "driver", pickupEditedAt: Date.now() });
+  }
   function schedSaveStop(id, text, lat, lng) {
     if (state.schedEst) delete state.schedEst[id];
     var t = String(text || "").trim().slice(0, 400);
@@ -8966,10 +8972,10 @@
   function schedEditHtml(r) {
     var E = state.schedEdit;
     if (!E || E.id !== r.id) return "";
-    var isStop = E.field === "stop";
+    var isStop = E.field === "stop", isPick = E.field === "pick";
     var list = E.list || [];
     return '<div class="sched-edit" id="sched-edit" style="background:#f0fdf4;border:2px solid #0b6b3a;border-radius:12px;padding:10px;margin:8px 0;color:#111">' +
-      '<label for="sched-edit-q" style="display:block;font-weight:800;color:#111 !important;margin:0 0 6px">' + (isStop ? "Stop address" : "Drop-off address") + "</label>" +
+      '<label for="sched-edit-q" style="display:block;font-weight:800;color:#111 !important;margin:0 0 6px">' + (isStop ? "Stop address" : isPick ? "Pickup address" : "Drop-off address") + "</label>" +
       '<input id="sched-edit-q" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Search a place or type the address" value="' + esc(E.q || "") + '" style="width:100%;font-size:18px;padding:10px;border:2px solid #0b3d23;border-radius:10px;background:#fff;color:#111">' +
       '<div id="sched-edit-list" role="listbox">' + schedEditListHtml(list, E.busy) + "</div>" +
       '<button type="button" id="sched-edit-typed" style="' + SCHED_BTN_2 + '">Save as typed</button>' +
@@ -9032,6 +9038,7 @@
         (notes ? '<p style="margin:0 0 6px;color:#1a1a1a"><strong style="' + SCHED_LBL + '">Calendar note:</strong> ' + esc(notes) + "</p>" : "") +
         (r.payMethod === "cash" ? '<p style="color:#7c2d12;background:#ffedd5;padding:6px 8px;border-radius:8px"><strong style="color:#7c2d12 !important">CASH ride:</strong> you collect the fare' + (r.fareBeforeTax != null ? " ($" + (Number(r.fareBeforeTax) + (Number(r.taxFees) || 0)).toFixed(2) + ")" : "") + "; the PCS share is taken from your weekly balance.</p>" : "") +
         (r.notes ? '<p style="margin:0 0 6px;color:#374151;font-size:14px">' + esc(r.notes) + "</p>" : "") +
+        (onMeter || inTrip ? "" : '<button type="button" data-sched-edit="pick" data-sched-id="' + esc(r.id) + '" style="' + SCHED_BTN_2 + '">' + (r.pickup ? "Change pickup" : "Add pickup") + "</button>") + /* v75t: before the ride starts */
         (onMeter ? "" : '<div style="display:flex;gap:8px"><button type="button" data-sched-edit="drop" data-sched-id="' + esc(r.id) + '" style="' + SCHED_BTN_2 + ';flex:1">' + (r.dropoff ? "Change drop-off" : "Add drop-off") + "</button>" +
           '<button type="button" data-sched-edit="stop" data-sched-id="' + esc(r.id) + '" style="' + SCHED_BTN_2 + ';flex:1">' + (st ? "Change stop" : "Add a stop") + "</button></div>") +
         schedEditHtml(r) +
@@ -9098,7 +9105,7 @@
     Array.prototype.forEach.call(document.querySelectorAll("[data-sched-edit]"), function (b) {
       b.addEventListener("click", function () {
         var id = b.getAttribute("data-sched-id"), f = b.getAttribute("data-sched-edit"), r = schedFind(id) || {};
-        state.schedEdit = { id: id, field: f, q: f === "stop" ? (((r.stopsGeo || [])[0] || {}).address || "") : (r.dropoff || ""), list: [] };
+        state.schedEdit = { id: id, field: f, q: f === "stop" ? (((r.stopsGeo || [])[0] || {}).address || "") : f === "pick" ? (r.pickup || "") : (r.dropoff || ""), list: [] };
         render();
         var q = document.getElementById("sched-edit-q");
         if (q) try { q.focus(); q.select(); } catch (e) {}
@@ -9114,7 +9121,7 @@
       state.schedEdit = null;
       meterDestSess = "";
       try { q.blur(); } catch (e) {}
-      (f === "stop" ? schedSaveStop(id, text, lat, lng) : schedSaveDrop(id, text, lat, lng)).then(function () { render(); });
+      (f === "stop" ? schedSaveStop(id, text, lat, lng) : f === "pick" ? schedSavePick(id, text, lat, lng) : schedSaveDrop(id, text, lat, lng)).then(function () { render(); });
       render();
     }
     function bindPicks() {
