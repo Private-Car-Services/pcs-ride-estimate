@@ -89,6 +89,7 @@
   function phaseOf(d) {
     if (!d) return "none";
     if (d.pay && d.pay.paid) return d.pay.other ? "settled" : "paid";
+    if (d.status === "running" && d.prepaid) return "run|inv";
     if (d.status === "running") return "run|" + (d.card && d.card.onFile ? 1 : 0);
     return "end|" + (d.card && d.card.onFile ? 1 : 0) + "|" + (d.pay && d.pay.linkOpen ? 1 : 0);
   }
@@ -169,7 +170,7 @@
       '<p class="rm-eta" id="rm-eta"></p>' + /* v71: minutes + miles to the destination (if the driver set one) */
       '<p class="rm-updated" id="rm-updated"></p>' +
       '<p class="error" id="rm-net" role="status"></p>' +
-      shareHtml() + ratesHtml(d) + formHtml(d);
+      shareHtml() + ratesHtml(d) + (d.prepaid ? invoiceHtml(d) : formHtml(d)); /* v75v: prepaid ride, card form stays hidden */
   }
   /* v73 Share this ride: a read-only follow link for family (separate random token; it can't control this meter). */
   function shareHtml() {
@@ -287,7 +288,15 @@
       '<button class="btn rm-big" type="button" id="rm-paylink"' + (S.busy ? " disabled" : "") + ">" + (S.busy ? esc(S.busy) : "Pay " + esc(money(f.total)) + " on Square\u2019s secure page") + "</button>" +
       '<p class="fine">Tip is optional on the next page. Apple Pay / Google Pay / card.</p></div>';
   }
+  /* v75v: prepaid on a Square invoice: balance due $0, the pay buttons stay hidden */
+  function invoiceHtml(d) {
+    return '<div class="card" id="rm-invoice" style="background:#0b6b3a;color:#fff;border:2px solid #b8f0c8;text-align:center">' +
+      '<p class="rm-paid" id="rm-paid-invoice" style="color:#fff">\u2713 Paid by invoice</p>' +
+      '<p class="rm-sub" id="rm-balance" style="color:#e8fff0;font-weight:700">Balance due $0.00' + (d.prepaid && d.prepaid.invoiceNo ? " \u00b7 Square invoice #" + esc(d.prepaid.invoiceNo) : "") + "</p>" +
+      '<p class="fine" style="color:#e8fff0">You\u2019re all set. Thank you for riding with PCS!</p></div>';
+  }
   function endedHtml(d) {
+    if (d.prepaid) return testTag(d) + '<p class="tag">Ride ended</p>' + invoiceHtml(d);
     return testTag(d) + '<p class="tag">Ride ended · your fare</p>' + modeHtml(d) +
       '<p class="rm-fare" id="rm-fare">' + money(d.final && d.final.total) + "</p>" +
       '<p class="rm-sub">Total incl. tax</p>' + breakdownHtml(d) + payHtml(d) +
@@ -295,6 +304,7 @@
   }
   function paidHtml(d) {
     var p = d.pay || {};
+    if (d.prepaid || p.invoice) return testTag(d) + '<p class="tag">Ride complete</p>' + invoiceHtml(d);
     return testTag(d) + '<p class="tag">Ride ' + (p.other ? "settled" : "paid") + "</p>" +
       (p.other
         ? '<p class="rm-paid" id="rm-paid">Paid \u2014 thank you!</p><p class="rm-sub">Your driver marked this ride as paid.</p>'
