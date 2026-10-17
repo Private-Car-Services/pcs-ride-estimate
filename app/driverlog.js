@@ -278,7 +278,8 @@
           '<label class="dl-photo-btn" style="display:inline-block;padding:8px 14px;border-radius:8px;background:#374151;color:#fff;font-weight:600;cursor:pointer">\ud83d\udcf7 Take photo<input type="file" accept="image/*" capture="environment" name="photo-' + esc(it.k) + '" data-photo="' + esc(it.k) + '" style="position:absolute;width:1px;height:1px;opacity:0;overflow:hidden"></label> <span class="dl-photo-count" data-photo-count="' + esc(it.k) + '" style="font-size:13px;color:#555"></span>' +
           '<div class="dl-photo-thumbs" data-photo-thumbs="' + esc(it.k) + '"></div>') + "</div></div>";
       }).join("") +
-      '<label style="display:block;margin-top:8px">' + (kind === "pre" ? "Odometer (opening odometer for this shift)" : "Odometer (ending odometer for this shift)") + ' <input type="text" inputmode="numeric" pattern="[0-9]*" name="odometer" id="dl-dvir-odo" autocomplete="off" autocorrect="off" spellcheck="false" maxlength="7" value="' + esc(kind === "pre" && meta.odoNow != null && isFinite(Number(meta.odoNow)) ? String(Math.floor(Number(meta.odoNow))) : "") + '" style="width:140px"></label>' +
+      '<label style="display:block;margin-top:8px">' + (kind === "pre" ? "Odometer (opening odometer for this shift)" : "Odometer (ending odometer for this shift)") + ' <input type="text" inputmode="none" pattern="[0-9]*" name="odometer" id="dl-dvir-odo" data-odopad-in="1" autocomplete="off" autocorrect="off" spellcheck="false" maxlength="7" value="' + esc(kind === "pre" && meta.odoNow != null && isFinite(Number(meta.odoNow)) ? String(Math.floor(Number(meta.odoNow))) : "") + '" style="width:140px"></label>' +
+      odoPadHtml() + /* v75z: big on-screen number pad (iPadOS ignores inputmode="numeric" and opens the full keyboard) */
       '<p style="margin:10px 0 4px">Driver signature</p><canvas id="dl-sig-pad" width="680" height="140" style="width:100%;height:140px;touch-action:none;display:block;background:#fafafa"></canvas><div style="border-top:1px solid #333"></div>' +
       '<p style="margin:8px 0;text-align:center"><a href="#" id="dl-sig-clear" style="color:#2f6fe0;text-decoration:none">Clear Signature</a></p>' +
       '<p id="dl-dvir-err" role="alert" style="color:#b91c1c"></p><button type="button" id="dl-dvir-save" style="width:100%;padding:12px;border:0;border-radius:8px;background:#2f6fe0;color:#fff;font-weight:700">Submit inspection</button></form>';
@@ -483,6 +484,44 @@
   if (typeof window !== "undefined" && window.addEventListener) {
     window.addEventListener("popstate", function () { if (closing) { closing = false; return; } if (document.getElementById("dl-overlay")) close(true); });
     document.addEventListener("keydown", function (e) { if ((e.key === "Escape" || e.key === "Esc") && document.getElementById("dl-overlay") && !document.getElementById("dl-fuel-pop")) close(); });
+  }
+  /* v75z (Matthew 10/16, iPad screenshot): odometer boxes get a big 9-key number pad on screen. iPadOS has no number-only
+     keyboard: inputmode="numeric" still opens the full keyboard (numbers + symbols row). The box uses inputmode="none" so the
+     system keyboard stays down while the pad is on screen; a physical keyboard still types (digits only, filtered below).
+     Whole miles, up to 7 digits (8 with data-odopad-max). Shared with God mode (odometer override box) via window.pcsOdoPadHtml. */
+  function odoPadHtml() {
+    var key = "min-height:56px;font-size:24px;font-weight:800;border-radius:10px;border:2px solid #0b3d23;background:#e8f5ec;color:#0b3d23;cursor:pointer;touch-action:manipulation";
+    return '<div class="pcs-odopad" data-odopad="1" role="group" aria-label="Number pad" style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;max-width:340px;margin:8px 0 4px">' +
+      ["1", "2", "3", "4", "5", "6", "7", "8", "9", "clr", "0", "back"].map(function (k) {
+        var lbl = k === "back" ? "\u232b" : k === "clr" ? "Clear" : k;
+        return '<button type="button" data-odopad-key="' + k + '" aria-label="' + (k === "back" ? "Delete" : k === "clr" ? "Clear" : k) + '" style="' + key + (k === "clr" ? ";font-size:17px" : "") + '">' + lbl + "</button>";
+      }).join("") + "</div>";
+  }
+  /* the box a pad types into: the [data-odopad-in] input in the pad's nearest form / [data-odopad-box] container */
+  function odoPadTarget(pad) {
+    var box = pad && pad.closest ? (pad.closest("[data-odopad-box]") || pad.closest("form")) : null;
+    return box ? box.querySelector("input[data-odopad-in]") : null;
+  }
+  function odoPadPress(inp, k) {
+    var max = Math.max(1, Math.min(8, Number(inp.getAttribute("data-odopad-max")) || Number(inp.getAttribute("maxlength")) || 7));
+    var v = String(inp.value || "").replace(/\D/g, "");
+    if (k === "back") v = v.slice(0, -1);
+    else if (k === "clr") v = "";
+    else if (/^\d$/.test(k) && v.length < max) v = (v === "0" ? "" : v) + k;
+    inp.value = v;
+    try { inp.dispatchEvent(new Event("input", { bubbles: true })); } catch (e) {}
+    return v;
+  }
+  if (typeof window !== "undefined") { window.pcsOdoPadHtml = odoPadHtml; window.pcsOdoPadPress = odoPadPress; }
+  if (typeof document !== "undefined") {
+    document.addEventListener("pointerdown", function (e) { var b = e.target && e.target.closest ? e.target.closest("[data-odopad-key]") : null; if (b) e.preventDefault(); }); /* keep focus / caret in the box */
+    document.addEventListener("click", function (e) {
+      var b = e.target && e.target.closest ? e.target.closest("[data-odopad-key]") : null;
+      if (!b) return;
+      e.preventDefault();
+      var inp = odoPadTarget(b.closest("[data-odopad]"));
+      if (inp) odoPadPress(inp, b.getAttribute("data-odopad-key"));
+    });
   }
   /* v75: auto-insert slashes while typing a DVIR date (numeric keypad has no "/"); odometer = digits only */
   if (typeof document !== "undefined") document.addEventListener("input", function (e) {
