@@ -14236,13 +14236,25 @@
         ? '<div class="card notice-card" role="status"><p class="lede">' + esc(state.driverNotice) + "</p>" +
           '<button class="btn ghost" type="button" id="dismiss-driver-notice">OK</button></div>'
         : "") +
-      (gated ? scheduledRidesCard() : "") + /* v75h: assigned rides show on Home right away; v75y: below the map whenever the map shows */
       approvalGateCard() +
       vehicleNeededCard() +
       milesStartCard() +
       (gated
-        ? bgGpsTipCard() + (state.meter ? "" : '<button class="btn secondary" type="button" id="open-meter">Metered ride</button>') +
-          '<p class="lede">Finish the steps above to go online and see open requests.</p>'
+        ? ( /* v76a (Matthew 10/17: Offline Home had the scheduled rides but no map): same layout as Available. Metered ride + the
+             gating line on one row, then the map pinned on top (just you, open requests stay hidden while Offline), then the
+             collapsible Scheduled rides section below it. homeMapFit sizes it the same way (half screen open, full when collapsed). */
+          '<div class="home-row" id="home-row" style="display:flex;align-items:center;gap:8px;margin:4px 0">' +
+          (state.meter ? "" : '<button class="btn secondary" type="button" id="open-meter" style="flex:0 0 auto;width:auto;margin:0;padding:8px 14px;min-height:0">Metered ride</button>') +
+          '<p class="lede" id="home-gated-note" style="flex:1 1 auto;margin:0;font-size:14px">Finish the steps above to go online and see open requests.</p>' +
+          (bgGpsTipDismissed() && !state.bgTipPeek ? bgGpsTipCard() : "") + "</div>" +
+          (bgGpsTipDismissed() && !state.bgTipPeek ? "" : bgGpsTipCard()) +
+          '<div class="map-stage board-map home-map" id="home-map-stage">' +
+          '<div id="live-map" role="img" aria-label="Map showing where you are"></div>' +
+          '<p class="map-caption">You are here</p>' +
+          "</div>" +
+          (isFinite(state.hereLat) ? "" : '<p class="fine">Allow location so the map can show where you are.</p>') +
+          scheduledRidesCard() /* v75h: assigned rides show on Home right away; v75y/v76a: below the map */
+        )
         : (
           '<div class="home-row" id="home-row" style="display:flex;align-items:center;gap:8px;margin:4px 0">' +
           (state.meter ? "" : '<button class="btn secondary" type="button" id="open-meter" style="flex:0 0 auto;width:auto;margin:0;padding:8px 14px;min-height:0">Metered ride</button>') + /* v70 */
@@ -14564,6 +14576,14 @@
     if (keptBoard) {
       var slot = app.querySelector(".map-stage.board-map");
       if (slot && slot.parentNode) {
+        try { /* v76a: Offline <-> Available keeps the same map; carry over the new caption + label */
+          if (keptBoard.id === "home-map-stage" && slot.id === "home-map-stage") {
+            var kc = keptBoard.querySelector(".map-caption"), nc = slot.querySelector(".map-caption");
+            if (kc && nc && kc.textContent !== nc.textContent) kc.textContent = nc.textContent;
+            var km = keptBoard.querySelector("#live-map"), nm = slot.querySelector("#live-map");
+            if (km && nm) km.setAttribute("aria-label", nm.getAttribute("aria-label") || "");
+          }
+        } catch (e) {}
         slot.parentNode.replaceChild(keptBoard, slot);
         setTimeout(function () {
           if (liveMap) liveMap.invalidateSize();
@@ -16799,7 +16819,7 @@
       navRotateMarker();
       bounds.push(here);
     }
-    (state.openRides || []).forEach(function (ride) {
+    (ROLE === "driver" && !canGoOnline() ? [] : (state.openRides || [])).forEach(function (ride) { /* v76a: Offline/gated map = just you, open requests stay hidden */
       if (!isCoord(ride.pickupLat) || !isCoord(ride.pickupLng)) return;
       var selected = ride.code === state.selectedOpenCode;
       var marker = window.L.marker([+ride.pickupLat, +ride.pickupLng], {
