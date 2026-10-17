@@ -4024,14 +4024,16 @@
     (state.drivers || []).forEach(function (d) { if (d && d.id) ids[d.id] = d; });
     Object.keys(state.hosOvr || {}).forEach(function (id) { if (!ids[id]) ids[id] = { id: id, name: ((state.hosOvr[id] || {}).request || {}).name || id }; });
     /* v72u: lower-odometer requests (driver typed an opening odometer below the last reading) */
+    var odoPad = typeof window !== "undefined" && typeof window.pcsOdoPadHtml === "function"; /* v75z: driverlog.js v75z+ */
     var odoHtml = Object.keys(state.hosOvr || {}).filter(function (id) { var o = state.hosOvr[id] || {}; return o.odoRequest && !(o.odoOverride && Number(o.odoOverride.grantedAt) >= Number(o.odoRequest.at)) && !(o.odoDismissed && Number(o.odoDismissed.at) >= Number(o.odoRequest.at)); }).map(function (id) {
       var r = state.hosOvr[id].odoRequest, zero = Number(r.entered) === 0;
       return '<div class="odo-req" style="background:#fee2e2;border:2px solid #b91c1c;border-radius:10px;padding:8px 10px;margin:8px 0;color:#7f1d1d">' + esc(displayName((ids[id] || {}).name || r.name || id, "Driver")) +
         (zero ? ": logged a <strong>zero</strong> opening odometer (refused by the app; day miles were NOT reset)" : ": opening odometer <strong>" + esc(String(r.entered)) + "</strong> is lower than the last reading <strong>" + esc(String(r.last)) + "</strong>") + " (" + esc(ctClock(Number(r.at))) + ") " +
         '<button type="button" class="btn btn-gold" data-odo-ovr="' + esc(id) + '">' + (zero ? "Allow (reset to this reading)" : "Allow lower odometer") + "</button> " +
         '<button type="button" class="btn btn-ghost" data-odo-fix="' + esc(id) + '">Correct mileage</button>' + /* v74b */
-        '<div class="odo-fix-form" data-odo-fix-form="' + esc(id) + '" hidden style="margin-top:8px"><label style="display:block;font-weight:700">Correct odometer reading (whole miles)' +
-        '<input type="text" inputmode="numeric" pattern="[0-9]*" autocomplete="off" class="odo-fix-val" data-odo-fix-val="' + esc(id) + '" value="' + esc(String(Math.floor(Number(r.entered) || 0))) + '" style="display:block;width:100%;min-height:44px;font-size:18px;margin-top:4px"></label>' +
+        '<div class="odo-fix-form" data-odo-fix-form="' + esc(id) + '" data-odopad-box="1" hidden style="margin-top:8px"><label style="display:block;font-weight:700">Correct odometer reading (whole miles)' +
+        '<input type="text" inputmode="' + (odoPad ? "none" : "numeric") + '" pattern="[0-9]*" autocomplete="off" class="odo-fix-val" data-odo-fix-val="' + esc(id) + '" data-odopad-in="1" data-odopad-max="8" value="' + esc(String(Math.floor(Number(r.entered) || 0))) + '" style="display:block;width:100%;min-height:44px;font-size:18px;margin-top:4px"></label>' +
+        (odoPad ? window.pcsOdoPadHtml() : "") + /* v75z: big number pad (iPad), from driverlog.js */
         '<label style="display:block;margin-top:6px">Reason (logged, optional)<input type="text" class="odo-fix-why" data-odo-fix-why="' + esc(id) + '" maxlength="200" style="display:block;width:100%;min-height:44px;margin-top:4px"></label>' +
         '<p class="odo-fix-err" data-odo-fix-err="' + esc(id) + '" role="alert" style="color:#7f1d1d;font-weight:700"></p>' +
         '<button type="button" class="btn btn-gold" data-odo-fix-save="' + esc(id) + '">Save corrected reading</button></div>' +
