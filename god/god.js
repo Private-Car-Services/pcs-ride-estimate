@@ -269,6 +269,7 @@
       completedAt: raw.completedAt || null,
       source: String(raw.source || ""), payMethod: String(raw.payMethod || ""), stops: Array.isArray(raw.stops) ? raw.stops : [], /* v72d */
       riderPhone: String(raw.riderPhone || ""), balance: raw.balance != null ? Number(raw.balance) : null,
+      paidSquareCents: raw.paidSquareCents != null && isFinite(+raw.paidSquareCents) ? Math.round(+raw.paidSquareCents) : null, paidEdits: Array.isArray(raw.paidEdits) ? raw.paidEdits : [], /* v75w */
       tipCents: Number(raw.tipCents) || 0, tipVia: raw.tipVia ? String(raw.tipVia) : null, tipEdits: Array.isArray(raw.tipEdits) ? raw.tipEdits : [], /* v73 */
       cancelledAt: Number(raw.cancelledAt) || null, cancelledBy: raw.cancelledBy ? String(raw.cancelledBy) : null, cancelReason: raw.cancelReason ? String(raw.cancelReason) : null,
       cancelFee: raw.cancelFee ? String(raw.cancelFee) : null, cancelFeeStatus: raw.cancelFeeStatus ? String(raw.cancelFeeStatus) : null,
@@ -279,8 +280,68 @@
       dropoffLat: isFinite(+raw.dropoffLat) && raw.dropoffLat != null && raw.dropoffLat !== "" ? +raw.dropoffLat : null, dropoffLng: isFinite(+raw.dropoffLng) && raw.dropoffLng != null && raw.dropoffLng !== "" ? +raw.dropoffLng : null,
       estKey: String(raw.estKey || ""), estText: String(raw.estText || ""), estLoCents: Number(raw.estLoCents) || 0, estHiCents: Number(raw.estHiCents) || 0, estBy: String(raw.estBy || ""), /* v75s */
       meterDiscount: raw.meterDiscount && typeof raw.meterDiscount === "object" ? raw.meterDiscount : null, discountPct: Number(raw.discountPct) || 0,
-      trip: raw.trip && typeof raw.trip === "object" ? raw.trip : null
+      trip: raw.trip && typeof raw.trip === "object" ? raw.trip : null,
+      prepaid: raw.prepaid === true, prepaidAmountCents: raw.prepaidAmountCents != null && isFinite(+raw.prepaidAmountCents) ? Math.round(+raw.prepaidAmountCents) : null, /* v75v prepaid (Square invoice) */
+      prepaidTaxCents: raw.prepaidTaxCents != null && isFinite(+raw.prepaidTaxCents) ? Math.round(+raw.prepaidTaxCents) : null, prepaidInvoiceNo: String(raw.prepaidInvoiceNo || "")
     };
+  }
+
+  /* ---------- v75v (Matthew 2026-10-16): Prepaid (Square invoice) ----------
+     Matthew charges some rides ahead on a Square invoice. Saved on the board row with prepaidEdited:true so the calendar
+     sync keeps it (same as edited pickups / drop-offs). Driver app: green PAID badge and End ride finishes with zero
+     charge; the driver's pay week is credited from the invoice amount. Pure helper (tested): */
+  function prepaidPatch(on, amount, invoiceNo, now, by) {
+    now = now || Date.now();
+    if (!on) return { ok: true, patch: { prepaid: false, prepaidVia: null, prepaidAmountCents: null, prepaidTaxCents: null, prepaidInvoiceNo: "", prepaidEdited: true, prepaidBy: by || "god", prepaidAt: now, updatedAt: now } };
+    var raw = String(amount == null ? "" : amount).replace(/[$,\s]/g, ""), cents = null;
+    if (raw !== "") {
+      var n = Number(raw);
+      if (!isFinite(n) || n < 0 || n > 100000) return { ok: false, error: "Enter the invoice amount as a number, like 26.81." };
+      cents = Math.round(n * 100);
+    }
+    var inv = String(invoiceNo || "").replace(/^#/, "").trim().slice(0, 40);
+    return { ok: true, patch: { prepaid: true, prepaidVia: "square_invoice", prepaidAmountCents: cents, prepaidInvoiceNo: inv, prepaidEdited: true, prepaidBy: by || "god", prepaidAt: now, updatedAt: now } };
+  }
+  function prepaidLabel(r) {
+    if (!r || r.prepaid !== true) return "";
+    return "PAID, Square invoice" + (r.prepaidInvoiceNo ? " #" + r.prepaidInvoiceNo : "") + (r.prepaidAmountCents != null ? " \u00b7 " + fmtCents(r.prepaidAmountCents) : "");
+  }
+  window.__pcsGodPrepaid = { patch: prepaidPatch, label: function (r) { return prepaidLabel(r); } }; /* test hook */
+  function dbPrepaidClose() { var m = document.getElementById("db-prepaid-modal"); if (m) m.remove(); }
+  function dbPrepaidOpen(id) {
+    var r = dbDropRow(id); if (!r) return;
+    dbPrepaidClose();
+    var big = "display:block;width:100%;min-height:56px;font-size:20px;font-weight:800;border-radius:12px;margin:8px 0;cursor:pointer;";
+    var m = document.createElement("div");
+    m.id = "db-prepaid-modal"; m.setAttribute("role", "dialog"); m.setAttribute("aria-modal", "true");
+    m.style.cssText = "position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,.6);display:flex;align-items:flex-start;justify-content:center;padding:56px 12px 12px;overflow:auto";
+    m.innerHTML = '<div style="background:#fff;color:#111;border:3px solid #0b6b3a;border-radius:16px;max-width:560px;width:100%;padding:16px">' +
+      '<button type="button" id="db-prepaid-close" style="' + big + 'background:#0b3d23;color:#fff;border:0;margin-top:0">Close</button>' +
+      '<h2 style="margin:4px 0 6px;color:#0b3d23">Prepaid (Square invoice) \u00b7 ' + esc(r.rider || "ride") + "</h2>" +
+      '<label style="display:flex;gap:10px;align-items:center;font-size:20px;font-weight:800;color:#111;margin:8px 0"><input type="checkbox" id="db-prepaid-on" style="width:28px;height:28px"' + (r.prepaid ? " checked" : "") + "> Paid on a Square invoice</label>" +
+      '<label for="db-prepaid-amt" style="display:block;font-weight:800;color:#111;margin:8px 0 4px">Amount for this ride before tax (optional)</label>' +
+      '<input id="db-prepaid-amt" type="text" inputmode="decimal" pattern="[0-9]*[.]?[0-9]{0,2}" autocomplete="off" value="' + esc(r.prepaidAmountCents != null ? (r.prepaidAmountCents / 100).toFixed(2) : "") + '" style="width:100%;font-size:20px;padding:10px;border:2px solid #0b3d23;border-radius:10px;background:#fff;color:#111">' +
+      '<label for="db-prepaid-inv" style="display:block;font-weight:800;color:#111;margin:8px 0 4px">Invoice number (optional)</label>' +
+      '<input id="db-prepaid-inv" type="text" autocomplete="off" value="' + esc(r.prepaidInvoiceNo || "") + '" style="width:100%;font-size:20px;padding:10px;border:2px solid #0b3d23;border-radius:10px;background:#fff;color:#111">' +
+      '<p id="db-prepaid-msg" role="status" style="color:#7c2d12;font-weight:700;margin:6px 0"></p>' +
+      '<button type="button" id="db-prepaid-save" style="' + big + 'background:#0b6b3a;color:#fff;border:0">Save</button>' +
+      '<p style="color:#374151;font-size:14px;margin:6px 0 0">The driver sees a green PAID badge and End ride finishes with a $0 balance. The driver\u2019s week is credited from this amount.</p>' +
+      "</div>";
+    document.body.appendChild(m);
+    document.getElementById("db-prepaid-close").addEventListener("click", dbPrepaidClose);
+    document.getElementById("db-prepaid-save").addEventListener("click", function () {
+      var out = prepaidPatch(document.getElementById("db-prepaid-on").checked, document.getElementById("db-prepaid-amt").value, document.getElementById("db-prepaid-inv").value, Date.now(), "god");
+      var msg = document.getElementById("db-prepaid-msg");
+      if (!out.ok) { msg.textContent = out.error; return; }
+      msg.textContent = "Saving\u2026";
+      godFetch(calendarUrl(id), { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(out.patch) }).then(function (res) {
+        if (!res.ok) throw new Error("save");
+        Object.keys(out.patch).forEach(function (k) { r[k] = out.patch[k]; });
+        state.boardNotice = (r.prepaid ? prepaidLabel(r) + " saved for " : "Regular payment saved for ") + (r.rider || "ride") + ".";
+        dbPrepaidClose();
+        return refresh();
+      }).catch(function () { msg.textContent = "Saving didn\u2019t finish. Check the connection and tap Save again."; });
+    });
   }
 
   function listCalendarRides() {
@@ -837,6 +898,8 @@
     if (!isFinite(fare) || fare < 0) fare = Number(row.fareBeforeTax) || 0;
     var pct = commissionPctFor(row.assignedDriverId);
     var fareCentsV72d = Math.round(fare * 100); /* v72d: fare box is dollars; history is cents */
+    var paidTaxV75w = 0;
+    if (row.paidSquareCents != null) { var pm = paidSquareMath((row.paidSquareCents / 100).toFixed(2), "", pct, 0); fareCentsV72d = pm.preTaxCents; paidTaxV75w = pm.taxCents; } /* v75w: paid in Square (incl. tax) wins; driver % on the pre-tax part */
     var commissionCents = Math.round(fareCentsV72d * (pct / 100));
     var day = boardDayKey(row.start) || chicagoToday();
     var code = row.code || makeScheduleCode(eventId);
@@ -850,13 +913,14 @@
       rawMiles: null,
       billedMiles: null,
       fareSub: fareCentsV72d,
-      fareTax: 0,
-      fareTotal: fareCentsV72d,
+      fareTax: paidTaxV75w,
+      fareTotal: fareCentsV72d + paidTaxV75w,
       commissionPct: pct,
       commissionCents: commissionCents,
       riderName: row.rider || "",
       source: row.source === "manual" ? "manual" : "calendar",
-      tipCents: Number(row.tipCents) || 0, tipVia: Number(row.tipCents) > 0 ? "card" : null, cardTipCents: Number(row.tipCents) || 0 /* v73: 100% driver, not in commission */
+      tipCents: Number(row.tipCents) || 0, tipVia: Number(row.tipCents) > 0 ? "card" : null, cardTipCents: Number(row.tipCents) || 0, /* v73: 100% driver, not in commission */
+      paidSquareCents: row.paidSquareCents != null ? row.paidSquareCents : null /* v75w */
     };
     var next = Object.assign({}, row, {
       status: "completed",
@@ -3370,15 +3434,19 @@
 
   /* v72u: driver arrow points the way they're heading (bearing from their last two reported positions) */
   var godHead = {};
+  /* v75w: hold the arrow while the driver is stopped (speed under 3 mph) or barely moved; ease toward new headings */
   function godHeading(d) {
     if (!d || !d.id || !isCoord(d.lat) || !isCoord(d.lng)) return 0;
     var h = godHead[d.id], p = { lat: +d.lat, lng: +d.lng };
-    if (d.heading != null && isFinite(+d.heading)) { godHead[d.id] = { p: p, deg: +d.heading }; return +d.heading; }
-    if (!h) { godHead[d.id] = { p: p, deg: 0 }; return 0; }
+    if (!h) { godHead[d.id] = { p: p, deg: d.heading != null && isFinite(+d.heading) ? +d.heading : 0 }; return godHead[d.id].deg; }
     var dLat = (p.lat - h.p.lat) * 111000, dLng = (p.lng - h.p.lng) * 111000 * Math.cos(p.lat * Math.PI / 180);
-    if (Math.sqrt(dLat * dLat + dLng * dLng) > 8) { h.deg = (Math.atan2(dLng, dLat) * 180 / Math.PI + 360) % 360; h.p = p; }
+    var moved = Math.sqrt(dLat * dLat + dLng * dLng), slow = d.speedMph != null && isFinite(+d.speedMph) && +d.speedMph < 3;
+    if (slow || moved < 6) return h.deg; /* stopped at a light: keep the last good heading */
+    var raw = d.heading != null && isFinite(+d.heading) ? +d.heading : (Math.atan2(dLng, dLat) * 180 / Math.PI + 360) % 360;
+    h.deg = ((h.deg + 0.5 * ((((raw - h.deg) % 360) + 540) % 360 - 180)) % 360 + 360) % 360; h.p = p;
     return h.deg;
   }
+  window.__pcsGodHeading = godHeading; /* test hook */
   function markerIcon(kind, label, focused, deg) {
     var svg = kind === "car" ? CAR_SVG : kind === "paired" ? PAIRED_SVG : PERSON_SVG;
     var cls = "god-marker" + (kind === "paired" ? " paired" : "") + (focused ? " focused" : "");
@@ -4899,11 +4967,17 @@
     Array.prototype.forEach.call(board.querySelectorAll(".day-tip-in"), function (input) {
       input.addEventListener("input", function () { state.tipDrafts[input.getAttribute("data-event-id")] = input.value; });
     });
+    Array.prototype.forEach.call(board.querySelectorAll(".day-paid-in"), function (input) { /* v75w */
+      input.addEventListener("input", function () { state.paidDrafts = state.paidDrafts || {}; var eid = input.getAttribute("data-event-id"); state.paidDrafts[eid] = input.value;
+        var pl = document.getElementById("paid-pre-" + eid), row = arFindRow(eid), v = String(input.value || "").replace(/[$,\s]/g, "");
+        if (pl) pl.textContent = paidSquareLine(v !== "" && isFinite(+v) ? Math.round(+v * 100) : null, row && row.assignedDriverId ? commissionPctFor(row.assignedDriverId) : null); }); /* each driver's own % */
+    });
     Array.prototype.forEach.call(board.querySelectorAll(".btn-save-tip"), function (btn) {
       btn.addEventListener("click", function () {
         var id = btn.getAttribute("data-event-id"), inp = document.getElementById("tip-" + id);
         btn.disabled = true;
-        saveCalendarTip(id, inp ? inp.value : state.tipDrafts[id]).catch(function () { btn.disabled = false; state.boardNotice = "Could not save the tip."; renderBoardLists(); });
+        var pin = document.getElementById("paid-" + id);
+        saveCalendarTip(id, inp ? inp.value : state.tipDrafts[id], pin ? pin.value : (state.paidDrafts || {})[id]).catch(function (e) { btn.disabled = false; state.boardNotice = (e && e.message && e.message !== "missing" ? e.message : "Saving didn\u2019t finish. Try again."); renderBoardLists(); });
       });
     });
     Array.prototype.forEach.call(board.querySelectorAll(".btn-cancel-open,.btn-cancel-close"), function (btn) {
@@ -4954,6 +5028,9 @@
           renderBoardLists();
         });
       });
+    });
+    Array.prototype.forEach.call(board.querySelectorAll(".btn-prepaid"), function (btn) { /* v75v */
+      btn.addEventListener("click", function () { dbPrepaidOpen(btn.getAttribute("data-event-id")); });
     });
     Array.prototype.forEach.call(board.querySelectorAll(".btn-edit-drop"), function (btn) { /* v75r */
       btn.addEventListener("click", function () { dbDropOpen(btn.getAttribute("data-event-id"), btn.getAttribute("data-field")); });
@@ -5793,27 +5870,64 @@
   window.__pcsGodDayBoard = { collapsed: dbBoardCollapsed, cards: dbCardSet };
 
   /* v73: Tip (paid in Square), 100% to the driver, never in the commission; editable before and after Complete; edits logged */
+  /* v75w (Matthew 10/16): "Paid in Square $" next to the tip = what the client actually paid for the ride (before the tip).
+     When it's filled in, the driver's commission (driver %), the pay-week record and the board use it. One Save button
+     saves both boxes. Pure helper (tested): */
+  var PAID_TAX_RATE = 0.0825; /* same Texas 8.25% as the fare code (METER_TAX_RATE) */
+  function paidSquareMath(paidText, tipText, pct, fallbackFareCents) {
+    var cents = function (v) { var t = String(v == null ? "" : v).replace(/[$,\s]/g, ""); if (t === "") return null; var n = Number(t); return isFinite(n) && n >= 0 && n <= 100000 ? Math.round(n * 100) : NaN; };
+    var paid = cents(paidText), tip = cents(tipText);
+    if (isNaN(paid)) return { ok: false, error: "Enter the amount paid in Square as a number, like 42.50." };
+    if (isNaN(tip)) return { ok: false, error: "Enter the tip as a number, like 5.00." };
+    /* Matthew 10/16: the Square amount includes Texas tax; the driver % is on the pre-tax part: pre-tax = paid / (1 + rate) */
+    var pre = paid != null ? Math.round(paid / (1 + PAID_TAX_RATE)) : null;
+    var base = pre != null ? pre : (Number(fallbackFareCents) || 0);
+    return { ok: true, paidCents: paid, tipCents: tip || 0, preTaxCents: pre, taxCents: paid != null ? paid - pre : null, baseCents: base, commissionCents: Math.round(base * (Number(pct) || 0) / 100) };
+  }
+  function paidSquareLine(paidCents, pct) {
+    if (paidCents == null) return "";
+    var m = paidSquareMath((paidCents / 100).toFixed(2), "", pct, 0);
+    if (pct == null) return "before tax " + fmtCents(m.preTaxCents) + " (assign a driver to see their share)";
+    return "before tax " + fmtCents(m.preTaxCents) + ", driver " + (Number(pct) || 0) + "% " + fmtCents(m.commissionCents);
+  }
+  window.__pcsGodPaidSquare = paidSquareMath; /* test hook */
   function dbTipHtml(r) {
     var v = state.tipDrafts && state.tipDrafts[r.id] != null ? state.tipDrafts[r.id] : (Number(r.tipCents) > 0 ? (Number(r.tipCents) / 100).toFixed(2) : "");
-    return '<div class="day-tip" style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin:4px 0"><label for="tip-' + esc(r.id) + '">Tip (paid in Square) $</label>' +
+    var pv = state.paidDrafts && state.paidDrafts[r.id] != null ? state.paidDrafts[r.id] : (r.paidSquareCents != null ? (r.paidSquareCents / 100).toFixed(2) : "");
+    return '<div class="day-tip" style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin:4px 0">' +
+      '<label for="paid-' + esc(r.id) + '">Paid in Square $</label>' +
+      '<input id="paid-' + esc(r.id) + '" class="day-paid-in" data-event-id="' + esc(r.id) + '"' + moneyRegAttrs() + ' value="' + esc(pv) + '" style="width:110px">' +
+      '<label for="tip-' + esc(r.id) + '">Tip (paid in Square) $</label>' +
       '<input id="tip-' + esc(r.id) + '" class="day-tip-in" data-event-id="' + esc(r.id) + '"' + moneyRegAttrs() + ' value="' + esc(v) + '" style="width:110px">' +
-      '<button type="button" class="btn btn-ghost btn-save-tip" data-event-id="' + esc(r.id) + '">Save tip</button>' +
+      '<button type="button" class="btn btn-gold btn-save-tip" data-event-id="' + esc(r.id) + '">Save</button>' +
+      (r.paidSquareCents != null ? '<span class="fine" id="paid-saved-' + esc(r.id) + '">Paid ' + esc(fmtCents(r.paidSquareCents)) + " in Square</span>" : "") +
+      '<p class="fine day-paid-pre" id="paid-pre-' + esc(r.id) + '" style="flex-basis:100%;margin:0;font-weight:700">' + esc(paidSquareLine(pv !== "" && isFinite(+pv) ? Math.round(+pv * 100) : null, r.assignedDriverId ? commissionPctFor(r.assignedDriverId) : null)) + "</p>" +
       (Number(r.tipCents) > 0 ? '<span class="fine" id="tip-saved-' + esc(r.id) + '">Saved ' + esc(fmtCents(r.tipCents)) + " card tip</span>" : "") + "</div>";
   }
-  function saveCalendarTip(eventId, val) {
+  function saveCalendarTip(eventId, val, paidVal) {
     var row = null; (state.calendar || []).forEach(function (r) { if (r && r.id === eventId) row = r; });
     if (!row) return Promise.reject(new Error("missing"));
-    var cents = Math.max(0, Math.round(Number(String(val || "").replace(/[^0-9.]/g, "")) * 100) || 0);
-    var now = Date.now();
+    var pct = row.assignedDriverId ? commissionPctFor(row.assignedDriverId) : DEFAULT_COMMISSION_PCT;
+    var m = paidSquareMath(paidVal, val, pct, Math.round((Number(row.fareBeforeTax) || 0) * 100));
+    if (!m.ok) return Promise.reject(new Error(m.error));
+    var cents = m.tipCents, now = Date.now();
     var edits = Array.isArray(row.tipEdits) ? row.tipEdits.slice(-20) : [];
-    edits.push({ at: now, cents: cents, prevCents: Number(row.tipCents) || 0, by: "Matthew" });
-    var next = Object.assign({}, row, { tipCents: cents, tipVia: "card", tipEdits: edits, updatedAt: now });
+    if (cents !== (Number(row.tipCents) || 0)) edits.push({ at: now, cents: cents, prevCents: Number(row.tipCents) || 0, by: "Matthew" });
+    var pEdits = Array.isArray(row.paidEdits) ? row.paidEdits.slice(-20) : [];
+    if (m.paidCents !== row.paidSquareCents) pEdits.push({ at: now, cents: m.paidCents, prevCents: row.paidSquareCents, by: "Matthew" });
+    var next = Object.assign({}, row, { tipCents: cents, tipVia: "card", tipEdits: edits, paidSquareCents: m.paidCents, paidEdits: pEdits, updatedAt: now });
+    if (m.paidCents != null && row.status === "completed") next.commissionCents = m.commissionCents;
     return putCalendarRide(next).then(function () {
       if (row.status === "completed" && row.assignedDriverId) {
-        return godFetch(historyUrl(row.assignedDriverId, next.code || makeScheduleCode(eventId)), { method: "PATCH", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ tipCents: cents, tipVia: "card", cardTipCents: cents, tipEditedAt: now }) });
+        var hp = { tipCents: cents, tipVia: "card", cardTipCents: cents, tipEditedAt: now };
+        if (m.paidCents != null) Object.assign(hp, { paidSquareCents: m.paidCents, fareSub: m.preTaxCents, fareTax: m.taxCents, fareTotal: m.paidCents, commissionPct: pct, commissionCents: m.commissionCents, paidEditedAt: now });
+        return godFetch(historyUrl(row.assignedDriverId, next.code || makeScheduleCode(eventId)), { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(hp) });
       }
-    }).then(function () { if (state.tipDrafts) delete state.tipDrafts[eventId]; state.boardNotice = "Card tip " + fmtCents(cents) + " saved (100% to the driver)"; return refresh(); });
+    }).then(function () {
+      if (state.tipDrafts) delete state.tipDrafts[eventId]; if (state.paidDrafts) delete state.paidDrafts[eventId];
+      state.boardNotice = (m.paidCents != null ? "Paid in Square " + fmtCents(m.paidCents) + " (" + paidSquareLine(m.paidCents, pct) + ")" + (row.status === "completed" ? " · commission " + fmtCents(m.commissionCents) : "") + " · " : "") + "Card tip " + fmtCents(cents) + " saved (100% to the driver)";
+      return refresh();
+    });
   }
   /* v73: Cancel ride from God mode: Waive fee (default) or Charge cancellation fee, required reason, confirm */
   function dbCancelHtml(r) {
@@ -5918,6 +6032,8 @@
           (st !== "completed" && st !== "cancelled" ? '<button type="button" class="btn btn-gold btn-edit-drop" data-event-id="' + esc(r.id) + '" data-field="pick" style="margin:4px 6px 4px 0">' + (r.pickup ? "Change pickup" : "Add pickup") + "</button>" + /* v75t */
             '<button type="button" class="btn btn-gold btn-edit-drop" data-event-id="' + esc(r.id) + '" data-field="drop" style="margin:4px 6px 4px 0">' + (r.dropoff ? "Change drop-off" : "Add drop-off") + "</button>" +
             '<button type="button" class="btn btn-ghost btn-edit-drop" data-event-id="' + esc(r.id) + '" data-field="stop" style="margin:4px 0">Stop…</button>' : "") +
+          (r.prepaid ? '<p class="day-line db-prepaid" style="background:#0b6b3a;color:#fff;font-weight:800;border-radius:8px;padding:4px 8px">\u2713 ' + esc(prepaidLabel(r)) + "</p>" : "") + /* v75v */
+          (st !== "cancelled" ? '<button type="button" class="btn btn-ghost btn-prepaid" data-event-id="' + esc(r.id) + '" style="margin:4px 0">' + (r.prepaid ? "Prepaid (Square invoice) \u2713" : "Prepaid (Square invoice)") + "</button>" : "") +
           (r.assignedDriverName
             ? '<p class="day-line"><span>Driver</span> ' + esc(r.assignedDriverName) + "</p>"
             : "") +
@@ -6468,7 +6584,10 @@
       nums[spec[i][0]] = ar2(v);
     }
     var notes = String(f.notes || "").trim().slice(0, 2000);
-    var row = Object.assign({}, prev || {}, {
+    var pp = prepaidPatch(f.prepaid === true || f.prepaid === "true", f.prepaidAmount, f.prepaidInvoiceNo, now, "god"); /* v75v */
+    if (!pp.ok) return { ok: false, error: pp.error };
+    if (!pp.patch.prepaid && !(prev && prev.prepaid)) pp.patch = {};
+    var row = Object.assign({}, prev || {}, pp.patch, {
       id: (prev && prev.id) || addRideNewId(now),
       source: "manual",
       title: "PCS – " + name,
@@ -6634,6 +6753,7 @@
       pickupLat: r.pickupLat, pickupLng: r.pickupLng, dropoffLat: r.dropoffLat, dropoffLng: r.dropoffLng, discountPct: r.discountPct != null ? String(r.discountPct) : "",
       stopsArr: (Array.isArray(r.stopsGeo) && r.stopsGeo.length ? r.stopsGeo.map(function (x) { return { text: x.address, lat: x.lat, lng: x.lng }; }) : (r.stops || []).map(function (t) { return { text: t }; })),
       date: parts.year ? parts.year + "-" + parts.month + "-" + parts.day : "", time: parts.hour ? (parts.hour === "24" ? "00" : parts.hour) + ":" + parts.minute : "",
+      prepaid: r.prepaid === true, prepaidAmount: r.prepaidAmountCents != null ? (Number(r.prepaidAmountCents) / 100).toFixed(2) : "", prepaidInvoiceNo: r.prepaidInvoiceNo || "", /* v75v */
       fare: s2(r.fare != null ? r.fare : r.fareBeforeTax), discount: s2(r.discount || 0), taxFees: s2(r.taxFees || 0), total: s2(r.total),
       commissionPct: r.commissionPct != null ? String(r.commissionPct) : "", commission: s2(r.commissionDollars), balance: s2(r.balance),
       payMethod: r.payMethod || "", flat: !!r.flatPrice, notes: r.notes || "", audit: "" };
@@ -6784,6 +6904,8 @@
       "<div>" + inp("taxFees", "Tax / fees ($)", "text", money) + "</div><div>" + inp("total", "Total charged ($)", "text", money) + "</div>" +
       "<div>" + inp("commissionPct", "Commission %", "text", ' inputmode="decimal" pattern="[0-9]*[.]?[0-9]*" autocomplete="off"') + "</div><div>" + inp("commission", "Driver commission ($)", "text", money) + "</div>" +
       '<div style="grid-column:1/3">' + inp("balance", cash ? "Driver owes PCS ($) — driver collects" : "PCS owes driver ($)", "text", money + ' style="font-weight:800;font-size:18px"') + "</div>" +
+      '<div style="grid-column:1/3;background:#0b3d23;border:2px solid #0b6b3a;border-radius:10px;padding:8px 10px"><label class="ar-c" style="display:block;font-weight:800;font-size:17px"><input type="checkbox" id="ar-prepaid" data-ar="prepaid"' + (d.prepaid ? " checked" : "") + "> Prepaid (Square invoice)</label>" + /* v75v */
+        '<div style="display:grid;grid-template-columns:1fr 1fr;gap:6px 12px">' + "<div>" + inp("prepaidAmount", "Invoice amount for this ride ($, optional)", "text", money) + "</div><div>" + inp("prepaidInvoiceNo", "Invoice # (optional)") + "</div></div></div>" +
       '<div style="grid-column:1/3"><label class="ar-l" for="ar-notes">Notes</label><textarea id="ar-notes" data-ar="notes" rows="2" style="width:100%">' + esc(d.notes || "") + "</textarea></div>" +
       '<div style="grid-column:1/3">' + inp("audit", state.addRideEditId ? "Audit note (required): what changed and why" : "Audit note (optional)") + "</div>" +
       "</div>" +
@@ -7178,7 +7300,13 @@
         tryLogin(state.emailInput, state.passwordInput).then(function (ok) {
           if (submitBtn) submitBtn.disabled = false;
           if (ok) {
+            /* v76h-test (only with ?goalsync=1): the good God PIN also links this device's Monthly Goal backup (30-day God device token; the PIN is never stored) */
+            try { if (window.__pcsGoalSyncOn && window.__pcsGoalSyncOn() && window.__pcsGoalGodLink) window.__pcsGoalGodLink(state.passwordInput); } catch (e) {}
+            /* v75x (Matthew): close the iPad number keypad on a good PIN sign-in: blur the PIN box + whatever has focus, clear and hide it before the board renders */
+            try { if (passEl) { passEl.blur(); passEl.value = ""; passEl.style.display = "none"; } if (emailEl) emailEl.blur(); if (document.activeElement && document.activeElement.blur) document.activeElement.blur(); } catch (e) {}
+            state.passwordInput = "";
             render();
+            try { if (document.activeElement && document.activeElement !== document.body && document.activeElement.blur) document.activeElement.blur(); } catch (e) {}
             startPoll();
           } else {
             var err = document.getElementById("god-login-error");
