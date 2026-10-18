@@ -3620,9 +3620,60 @@
   function dlToday() { return new Intl.DateTimeFormat("en-CA", { timeZone: "America/Chicago", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date()); }
   function dlPlate() { return normalizePlate((readDriverAccount() || {}).carPlate || ""); }
   function dlDvirRec(d, k) { var a = (dlRec("dvir")[d] || {})[k], b = ((hosReadHist().dvir || {})[d] || {})[k]; if (a && b && b.cleared) a = Object.assign({}, a, { cleared: b.cleared }); return a || b || null; }
+  /* v76c (Matthew 10/18, 12:20 AM mid-shift): a pre-trip is only required after a post-trip / shift end. An OPEN shift (opening
+     odometer, no ending odometer, no post-trip since it started, last activity less than resetHours (10 h) ago) carries across
+     midnight and across an app update / reload: approval, car and opening odometer carry; Available and the meter Start pass.
+     10 h off in a row (HOS reset) or a post-trip ends it, and the next shift needs a pre-trip + new opening odometer. */
+  function postTripSinceAny(t) { var pl = dlPlate(), hit = null; [dlRec("dvir"), hosReadHist().dvir || {}].forEach(function (m) { Object.keys(m || {}).forEach(function (d) { var r = m[d] && m[d].post; if (r && Number(r.at) > 0 && Number(r.at) >= (Number(t) || 0) && (!r.plate || !pl || r.plate === pl)) hit = r; }); }); return hit; }
+  function shiftResetMs() { return ((hosCfg && Number(hosCfg.resetHours)) || 10) * 3600000; }
+  function shiftContinues(row, now) {
+    if (!row || typeof row !== "object" || !shiftOpen(row)) return false;
+    var st = Number(row.shiftStartAt) || 0; if (!(st > 0)) return false;
+    if ((now || Date.now()) - shiftLastActive(row) >= shiftResetMs()) return false;
+    return !postTripSinceAny(st);
+  }
+  function continuingShift(now) {
+    if (ROLE !== "driver" || !signedIn()) return null;
+    now = now || Date.now();
+    var map = readMilesLocal(), today = chicagoToday();
+    for (var i = 0; i <= 3; i += 1) { var d = addDaysYmd(today, -i); if (shiftContinues(map[d], now)) return { day: d, row: map[d] }; }
+    return null;
+  }
+  /* v76c: undo the v75u "app opened next day" auto-close of a shift that was really still going (no post-trip, closed less
+     than 10 h ago, no newer shift opened since). Restores the open shift locally and on Firebase (miles + time continue). */
+  function reopenAutoClosedShift(now) {
+    if (ROLE !== "driver" || !signedIn()) return false;
+    try { if (state.shiftClosedElsewhere) return false; } catch (e) {}
+    now = now || Date.now();
+    var map = readMilesLocal(), today = chicagoToday(), done = false;
+    for (var j = 0; j <= 3; j += 1) { if (shiftOpen(map[addDaysYmd(today, -j)])) return false; } /* a shift is already open */
+    for (var i = 0; i <= 3 && !done; i += 1) {
+      var d = addDaysYmd(today, -i), row = map[d];
+      if (!row || typeof row !== "object" || !row.autoClosed || !/app opened next day/.test(String(row.autoClosed.why || ""))) continue;
+      if (row.endOdometer != null && row.endOdometer !== "") continue;
+      var st = Number(row.shiftStartAt) || 0, at = Number(row.autoClosed.at) || 0;
+      if (!(st > 0) || !(at > 0) || now - at >= shiftResetMs() || postTripSinceAny(st)) continue;
+      if (Object.keys(map).some(function (k) { var r = map[k]; return k > d && r && typeof r === "object" && Number(r.shiftStartAt) > at; })) continue;
+      var key = String(row.shiftStartAt || row.startedAt), sh = row.shifts && typeof row.shifts === "object" ? Object.assign({}, row.shifts) : {};
+      var drop = sh[key] && sh[key].missingEnd && sh[key].endOdo == null; if (drop) delete sh[key];
+      row.shifts = sh; if (!Object.keys(sh).length) delete row.shifts;
+      row.v76cReopened = { at: now, autoClosedAt: at, why: "v76c: shift still open past midnight (pre-trip only after post-trip)" };
+      delete row.shiftClosed; delete row.staleClosedAt; delete row.autoClosed; row.lastUpdate = now;
+      map[d] = row; writeMilesLocal(map);
+      try { if (!readShift()) { var inf = currentShiftInfo(); writeShift({ startOdo: Number(row.startOdometer), shiftStartedAt: st, startDay: d, trackedMiles: inf.trackedMiles || 0, filledInMiles: inf.filledInMiles || 0 }); } } catch (e) {}
+      if (syncOn()) {
+        var fix = { shiftClosed: false, staleClosedAt: null, autoClosed: null, lastUpdate: now, v76cReopened: row.v76cReopened };
+        if (drop) fix["shifts/" + key] = null;
+        try { authFetch(milesUrl(driverPresenceId(), d), { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(fix) }).catch(function () {}); } catch (e) {}
+      }
+      state.milesNeedStart = false; state.loginGate = false; done = true;
+    }
+    return done;
+  }
   function preTripDoneToday() { /* v75 (Matthew): a completed pre-trip counts for that vehicle through 11:59 PM Chicago that day, whatever the
        online/offline/logout toggles and whichever day page it was saved under (e.g. a shift that started before midnight) */
-    var t = dlToday(), pl = dlPlate(), ok = function (r) { return !!(r && Number(r.at) > 0 && (!r.plate || !pl || r.plate === pl)); };
+    try { if (continuingShift()) return true; } catch (e) {} /* v76c: the open shift's pre-trip carries past midnight until its post-trip */
+    var t = dlToday(), pl = dlPlate(), ok = function (r) { return !!(r && Number(r.at) > 0 && (!r.plate || !pl || r.plate === pl) && !(r.carriedOver && postTripSinceAny(Number(r.at)))); }; /* v76c: a carried-over pre-trip ends at the post-trip */
     if (ok(dlDvirRec(t, "pre"))) return true;
     var day = function (ms) { try { return new Intl.DateTimeFormat("en-CA", { timeZone: "America/Chicago", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date(ms)); } catch (e) { return ""; } };
     var hit = false; [dlRec("dvir"), hosReadHist().dvir || {}].forEach(function (m) { Object.keys(m || {}).forEach(function (d) { var r = m[d] && m[d].pre; if (ok(r) && day(Number(r.at)) === t) hit = true; }); });
@@ -3751,6 +3802,8 @@
     try { if (driverMidRide() || meterActive()) return false; } catch (e) { return false; }
     var today = chicagoToday(), loginAt = 0; try { loginAt = Number(localStorage.getItem("pcs-login-at")) || 0; } catch (e) {}
     var loginDay = loginAt > 0 ? new Intl.DateTimeFormat("en-CA", { timeZone: "America/Chicago", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date(loginAt)) : "";
+    try { reopenAutoClosedShift(); } catch (e) {} /* v76c: repair a shift the old gate closed while it was still going */
+    try { if (continuingShift()) return false; } catch (e) {} /* v76c: an open shift carries across midnight / reload until post-trip */
     var map = readMilesLocal(), closedAny = false;
     for (var i = 1; i <= 3; i += 1) {
       var d = addDaysYmd(today, -i), row = map[d];
@@ -3766,7 +3819,7 @@
         closedAny = true;
       }
     }
-    if (!closedAny && loginDay && loginDay < today && !postTripDay(loginDay)) driverFlagMissing(loginDay, true, true);
+    if (!closedAny && loginDay && loginDay < today && !postTripDay(loginDay) && !postTripSinceAny(loginAt)) driverFlagMissing(loginDay, true, true);
     if (!closedAny && !(loginDay && loginDay < today)) return false;
     if (closedAny) { try { writeShift(null); } catch (e) {} }
     try { localStorage.setItem("pcs-login-at", String(Date.now())); } catch (e) {}
