@@ -282,7 +282,9 @@
       meterDiscount: raw.meterDiscount && typeof raw.meterDiscount === "object" ? raw.meterDiscount : null, discountPct: Number(raw.discountPct) || 0,
       trip: raw.trip && typeof raw.trip === "object" ? raw.trip : null,
       prepaid: raw.prepaid === true, prepaidAmountCents: raw.prepaidAmountCents != null && isFinite(+raw.prepaidAmountCents) ? Math.round(+raw.prepaidAmountCents) : null, /* v75v prepaid (Square invoice) */
-      prepaidTaxCents: raw.prepaidTaxCents != null && isFinite(+raw.prepaidTaxCents) ? Math.round(+raw.prepaidTaxCents) : null, prepaidInvoiceNo: String(raw.prepaidInvoiceNo || "")
+      prepaidTaxCents: raw.prepaidTaxCents != null && isFinite(+raw.prepaidTaxCents) ? Math.round(+raw.prepaidTaxCents) : null, prepaidInvoiceNo: String(raw.prepaidInvoiceNo || ""),
+      rideCommissionPct: raw.rideCommissionPct != null && raw.rideCommissionPct !== "" && isFinite(+raw.rideCommissionPct) ? Math.round(+raw.rideCommissionPct) : null, /* v76d */
+      sqInvoice: raw.sqInvoice && typeof raw.sqInvoice === "object" ? raw.sqInvoice : null, contractId: raw.contractId ? String(raw.contractId) : ""
     };
   }
 
@@ -290,7 +292,21 @@
      Matthew charges some rides ahead on a Square invoice. Saved on the board row with prepaidEdited:true so the calendar
      sync keeps it (same as edited pickups / drop-offs). Driver app: green PAID badge and End ride finishes with zero
      charge; the driver's pay week is credited from the invoice amount. Pure helper (tested): */
-  function prepaidPatch(on, amount, invoiceNo, now, by) {
+  /* v76d: what the card keeps from a Square lookup; "overridden" when Matthew changed the amounts */
+  function sqInvoiceRecord(q, patch) {
+    var rec = { number: String(q.number || patch.prepaidInvoiceNo || ""), subtotalCents: Math.round(+q.subtotalCents) || 0, taxCents: Math.round(+q.taxCents) || 0, totalCents: Math.round(+q.totalCents) || 0,
+      status: String(q.status || ""), paid: q.paid === true, serviceDate: String(q.serviceDate || ""), source: String(q.source || "square"), fetchedAt: q.fetchedAt || Date.now() };
+    rec.overridden = (patch.prepaidAmountCents != null && patch.prepaidAmountCents !== rec.subtotalCents) || (patch.prepaidTaxCents != null && patch.prepaidTaxCents !== rec.taxCents);
+    return rec;
+  }
+  function sqInvoiceShared(rows, id, inv) { /* v76d: how many OTHER board rides carry this invoice number */
+    var n = String(inv || "").replace(/^#/, "").replace(/^0+/, "");
+    if (!n) return 0;
+    return (rows || []).filter(function (x) { return x && x.id !== id && x.status !== "canceled" && String(x.prepaidInvoiceNo || (x.sqInvoice && x.sqInvoice.number) || "").replace(/^#/, "").replace(/^0+/, "") === n; }).length;
+  }
+  window.__pcsV76dSqRecord = sqInvoiceRecord;
+  window.__pcsV76dSqShared = sqInvoiceShared;
+  function prepaidPatch(on, amount, invoiceNo, now, by, taxText) {
     now = now || Date.now();
     if (!on) return { ok: true, patch: { prepaid: false, prepaidVia: null, prepaidAmountCents: null, prepaidTaxCents: null, prepaidInvoiceNo: "", prepaidEdited: true, prepaidBy: by || "god", prepaidAt: now, updatedAt: now } };
     var raw = String(amount == null ? "" : amount).replace(/[$,\s]/g, ""), cents = null;
@@ -300,7 +316,13 @@
       cents = Math.round(n * 100);
     }
     var inv = String(invoiceNo || "").replace(/^#/, "").trim().slice(0, 40);
-    return { ok: true, patch: { prepaid: true, prepaidVia: "square_invoice", prepaidAmountCents: cents, prepaidInvoiceNo: inv, prepaidEdited: true, prepaidBy: by || "god", prepaidAt: now, updatedAt: now } };
+    var patch = { prepaid: true, prepaidVia: "square_invoice", prepaidAmountCents: cents, prepaidInvoiceNo: inv, prepaidEdited: true, prepaidBy: by || "god", prepaidAt: now, updatedAt: now };
+    if (taxText != null && String(taxText).trim() !== "") { /* v76d: invoice tax kept on the ride (never paid to the driver) */
+      var tn = Number(String(taxText).replace(/[$,\s]/g, ""));
+      if (!isFinite(tn) || tn < 0 || tn > 100000) return { ok: false, error: "Enter the tax as a number, like 4.67." };
+      patch.prepaidTaxCents = Math.round(tn * 100);
+    }
+    return { ok: true, patch: patch };
   }
   function prepaidLabel(r) {
     if (!r || r.prepaid !== true) return "";
@@ -321,18 +343,46 @@
       '<label style="display:flex;gap:10px;align-items:center;font-size:20px;font-weight:800;color:#111;margin:8px 0"><input type="checkbox" id="db-prepaid-on" style="width:28px;height:28px"' + (r.prepaid ? " checked" : "") + "> Paid on a Square invoice</label>" +
       '<label for="db-prepaid-amt" style="display:block;font-weight:800;color:#111;margin:8px 0 4px">Amount for this ride before tax (optional)</label>' +
       '<input id="db-prepaid-amt" type="text" inputmode="decimal" pattern="[0-9]*[.]?[0-9]{0,2}" autocomplete="off" value="' + esc(r.prepaidAmountCents != null ? (r.prepaidAmountCents / 100).toFixed(2) : "") + '" style="width:100%;font-size:20px;padding:10px;border:2px solid #0b3d23;border-radius:10px;background:#fff;color:#111">' +
-      '<label for="db-prepaid-inv" style="display:block;font-weight:800;color:#111;margin:8px 0 4px">Invoice number (optional)</label>' +
+      '<label for="db-prepaid-inv" style="display:block;font-weight:800;color:#111;margin:8px 0 4px">Invoice # (optional)</label>' +
       '<input id="db-prepaid-inv" type="text" autocomplete="off" value="' + esc(r.prepaidInvoiceNo || "") + '" style="width:100%;font-size:20px;padding:10px;border:2px solid #0b3d23;border-radius:10px;background:#fff;color:#111">' +
+      '<button type="button" id="db-prepaid-lookup" style="' + big + 'background:#fff;color:#0b3d23;border:3px solid #0b6b3a">Look up in Square</button>' + /* v76d */
+      '<label for="db-prepaid-tax" style="display:block;font-weight:800;color:#111;margin:8px 0 4px">Tax on the invoice (never paid to the driver)</label>' +
+      '<input id="db-prepaid-tax" type="text" inputmode="decimal" autocomplete="off" value="' + esc(r.prepaidTaxCents != null ? (r.prepaidTaxCents / 100).toFixed(2) : "") + '" style="width:100%;font-size:20px;padding:10px;border:2px solid #0b3d23;border-radius:10px;background:#fff;color:#111">' +
+      '<p id="db-prepaid-sq" style="color:#0b3d23;font-weight:800;margin:6px 0">' + esc(r.sqInvoice ? sqInvoiceLine(r.sqInvoice) : "") + "</p>" +
       '<p id="db-prepaid-msg" role="status" style="color:#7c2d12;font-weight:700;margin:6px 0"></p>' +
       '<button type="button" id="db-prepaid-save" style="' + big + 'background:#0b6b3a;color:#fff;border:0">Save</button>' +
       '<p style="color:#374151;font-size:14px;margin:6px 0 0">The driver sees a green PAID badge and End ride finishes with a $0 balance. The driver\u2019s week is credited from this amount.</p>' +
       "</div>";
     document.body.appendChild(m);
     document.getElementById("db-prepaid-close").addEventListener("click", dbPrepaidClose);
+    var sqGot = r.sqInvoice || null; /* v76d */
+    document.getElementById("db-prepaid-lookup").addEventListener("click", function () {
+      var msg = document.getElementById("db-prepaid-msg"), inv = document.getElementById("db-prepaid-inv").value;
+      if (!String(inv).trim()) { msg.textContent = "Type the invoice number first."; return; }
+      msg.textContent = "Looking up #" + String(inv).replace(/^#/, "") + " in Square\u2026";
+      sqInvoiceLookup(inv).then(function (out) {
+        if (!out.ok) { msg.textContent = out.error; return; }
+        var q = out.invoice; sqGot = Object.assign({ source: "square", fetchedAt: Date.now() }, q);
+        var shared = sqInvoiceShared(state.calendar, r.id, inv); /* v76d: one invoice split over several rides (e.g. #000513) */
+        var amtEl = document.getElementById("db-prepaid-amt");
+        if (shared && String(amtEl.value || "").trim()) {
+          if (q.paid) document.getElementById("db-prepaid-on").checked = true;
+          document.getElementById("db-prepaid-sq").textContent = sqInvoiceLine(sqGot);
+          msg.textContent = "Invoice #" + q.number + " covers " + (shared + 1) + " rides, so this ride keeps its own share. Change it if needed, then tap Save.";
+          return;
+        }
+        amtEl.value = (q.subtotalCents / 100).toFixed(2);
+        document.getElementById("db-prepaid-tax").value = (q.taxCents / 100).toFixed(2);
+        if (q.paid) document.getElementById("db-prepaid-on").checked = true;
+        document.getElementById("db-prepaid-sq").textContent = sqInvoiceLine(sqGot);
+        msg.textContent = q.paid ? "Found it. Check the amounts and tap Save (you can change them)." : "Found it, but Square says " + q.status + " (not paid yet).";
+      });
+    });
     document.getElementById("db-prepaid-save").addEventListener("click", function () {
-      var out = prepaidPatch(document.getElementById("db-prepaid-on").checked, document.getElementById("db-prepaid-amt").value, document.getElementById("db-prepaid-inv").value, Date.now(), "god");
+      var out = prepaidPatch(document.getElementById("db-prepaid-on").checked, document.getElementById("db-prepaid-amt").value, document.getElementById("db-prepaid-inv").value, Date.now(), "god", document.getElementById("db-prepaid-tax").value);
       var msg = document.getElementById("db-prepaid-msg");
       if (!out.ok) { msg.textContent = out.error; return; }
+      if (out.patch.prepaid && sqGot) { out.patch.sqInvoice = sqInvoiceRecord(sqGot, out.patch); if (out.patch.prepaidAmountCents != null) out.patch.fareBeforeTax = out.patch.prepaidAmountCents / 100; }
       msg.textContent = "Saving\u2026";
       godFetch(calendarUrl(id), { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(out.patch) }).then(function (res) {
         if (!res.ok) throw new Error("save");
@@ -370,8 +420,11 @@
 
   function putCalendarRide(row) {
     if (!row || !row.id) return Promise.reject(new Error("calendar-id"));
+    /* v76d: PATCH, not PUT. The row here is the normalized copy, so a PUT erased every field it doesn't list
+       (prepaidEdited, prepaidVia, stopsEdited, rideCommissionPctEdited, partial-paid notes ...) and the next calendar
+       sync then dropped the prepaid mark. PATCH writes the listed fields and keeps the rest. */
     return godFetch(calendarUrl(row.id), {
-      method: "PUT",
+      method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(row)
     }).then(function (res) {
@@ -434,22 +487,76 @@
     });
   }
 
-  function makeScheduleCode(eventId) {
-    var raw = "PCS" + String(eventId || "").replace(/[^A-Za-z0-9]/g, "").toUpperCase();
-    var alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-    var out = "";
-    var i;
-    for (i = 0; i < raw.length && out.length < 8; i += 1) {
-      var ch = raw.charAt(i);
-      if (alphabet.indexOf(ch) >= 0) out += ch;
-    }
-    i = 0;
-    while (out.length < 8) {
-      out += alphabet[i % alphabet.length];
-      i += 1;
-    }
-    return out.slice(0, 8);
+  /* v76d (Matthew 10/18): ride codes come from the FULL ride id. The old code kept only the first letters of the id, so every
+     iCloud ride got "PCSCLUD" + one character and finished rides overwrote each other in the drivers' pay history.
+     Same function in app/app.js and /workspace/v76d/tools/ridecode.py (tested to match). */
+  var V76D_ALPHA = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  function v76dFnv(s) { var h = 0x811c9dc5, i; for (i = 0; i < s.length; i += 1) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619) >>> 0; } return h >>> 0; }
+  function rideCodeV76d(id, salt) {
+    var s = String(id || "") + (salt ? "|" + salt : ""), h1 = v76dFnv(s), h2 = v76dFnv("#" + s), out = "P", i;
+    for (i = 0; i < 4; i += 1) { out += V76D_ALPHA[h1 & 31]; h1 = h1 >>> 5; }
+    for (i = 0; i < 3; i += 1) { out += V76D_ALPHA[h2 & 31]; h2 = h2 >>> 5; }
+    return out;
   }
+  function makeScheduleCode(eventId) {
+    var taken = {};
+    (state.calendar || []).forEach(function (r) { if (r && r.code && r.id !== eventId) taken[r.code] = 1; });
+    var salt;
+    for (salt = 0; salt < 50; salt += 1) { var c = rideCodeV76d(eventId, salt); if (!taken[c]) return c; }
+    return rideCodeV76d(eventId + "|" + Date.now(), 0);
+  }
+  /* the ride's own code: keep it unless another board ride shares it (old PCSCLUD* codes), then give it a unique one */
+  function ownCode(row) {
+    if (!row) return "";
+    var c = String(row.code || "");
+    if (!c) return makeScheduleCode(row.id);
+    var shared = (state.calendar || []).some(function (r) { return r && r.id !== row.id && r.code === c; });
+    return shared ? makeScheduleCode(row.id) : c;
+  }
+  /* v76d: a pay-history write never overwrites a DIFFERENT ride's entry, and a canceled $0 never overwrites a finished one.
+     Pure (tested): "write" | "skip" | "rekey" */
+  function historyDecision(existing, entry) {
+    if (!existing || typeof existing !== "object" || !Object.keys(existing).length) return "write";
+    var finished = function (e) { return !e.canceled && String(e.status || "") !== "canceled" && ((Number(e.fareTotal) || 0) > 0 || (Number(e.commissionCents) || 0) > 0 || (Number(e.fareSub) || 0) > 0); };
+    var same = (existing.scheduleId && entry.scheduleId) ? existing.scheduleId === entry.scheduleId
+      : (String(existing.riderName || "") === String(entry.riderName || "") && String(existing.day || "") === String(entry.day || ""));
+    if (entry.canceled && finished(existing)) return "skip";
+    if (same) return "write";
+    if (!existing.code && !existing.day && !existing.fareSub && !existing.riderName) return "write"; /* stray tip-only stub */
+    return entry.canceled ? "skip" : "rekey";
+  }
+  function godHistoryGuard(driverId, code, entry) {
+    var tries = 0;
+    function look(c) {
+      return fetch(historyUrl(driverId, c)).then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }).then(function (ex) {
+        var d = historyDecision(ex, entry);
+        if (d !== "rekey" || tries > 6) return { code: c, skip: d === "skip" };
+        tries += 1;
+        return look(rideCodeV76d((entry.scheduleId || c) + "|h", tries));
+      });
+    }
+    return look(code);
+  }
+  /* v76d: per-ride Commission % (God mode, this ride only) wins over the driver's own % */
+  function ridePctOf(row) {
+    var p = row && row.rideCommissionPct;
+    if (p == null || p === "" || !isFinite(+p)) return null;
+    p = Math.round(+p);
+    return p >= 0 && p <= 100 ? p : null;
+  }
+  function ridePctFor(row) {
+    var p = ridePctOf(row);
+    if (p != null) return p;
+    return row && row.assignedDriverId ? commissionPctFor(row.assignedDriverId) : DEFAULT_COMMISSION_PCT;
+  }
+  /* v76d: finishing with a $0 fare and nothing paid in Square / on an invoice / on the meter credits the driver $0 */
+  function zeroFareWarn(row, fareText) {
+    var n = Number(String(fareText == null ? "" : fareText).replace(/[$,\s]/g, ""));
+    if (isFinite(n) && n > 0) return false;
+    if (row && (row.paidSquareCents != null || (row.prepaid && row.prepaidAmountCents != null) || row.meterCode || (Number(row.fareBeforeTax) || 0) > 0)) return false;
+    return true;
+  }
+  window.__pcsV76d = { rideCode: rideCodeV76d, historyDecision: historyDecision, ridePctOf: ridePctOf, zeroFareWarn: zeroFareWarn };
 
   function assignCalendarRide(eventId, driverId) {
     var row = null;
@@ -470,7 +577,7 @@
       assignedDriverId: driver.id,
       assignedDriverName: driver.name || driver.id,
       status: row.status === "completed" ? "completed" : "assigned",
-      code: row.code || makeScheduleCode(eventId),
+      code: ownCode(row), /* v76d */
       updatedAt: Date.now()
     });
     return putCalendarRide(next).then(function () {
@@ -897,13 +1004,16 @@
     var fare = Number(fareBeforeTax);
     if (!isFinite(fare) || fare < 0) fare = Number(row.fareBeforeTax) || 0;
     var pct = commissionPctFor(row.assignedDriverId);
+    if (ridePctOf(row) != null) pct = ridePctOf(row); /* v76d: per-ride % wins over the driver's own % */
     var fareCentsV72d = Math.round(fare * 100); /* v72d: fare box is dollars; history is cents */
+    if (row.prepaid && row.prepaidAmountCents != null && row.paidSquareCents == null) { fareCentsV72d = Math.round(+row.prepaidAmountCents); } /* v76d: invoice (pre-tax) wins; tax never to the driver */
     var paidTaxV75w = 0;
     if (row.paidSquareCents != null) { var pm = paidSquareMath((row.paidSquareCents / 100).toFixed(2), "", pct, 0); fareCentsV72d = pm.preTaxCents; paidTaxV75w = pm.taxCents; } /* v75w: paid in Square (incl. tax) wins; driver % on the pre-tax part */
     var commissionCents = Math.round(fareCentsV72d * (pct / 100));
     var day = boardDayKey(row.start) || chicagoToday();
-    var code = row.code || makeScheduleCode(eventId);
+    var code = ownCode(row); /* v76d */
     var entry = {
+      scheduleId: eventId, rideCommissionPct: ridePctOf(row),
       code: code,
       day: day,
       completedAt: Date.now(),
@@ -931,11 +1041,15 @@
       commissionCents: commissionCents,
       updatedAt: Date.now()
     });
-    return putCalendarRide(next).then(function () {
-      return godFetch(historyUrl(row.assignedDriverId, code), {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(entry)
+    return godHistoryGuard(row.assignedDriverId, code, entry).then(function (g) { /* v76d: never overwrite another ride's entry */
+      entry.code = g.code; next.code = g.code;
+      return putCalendarRide(next).then(function () {
+        if (g.skip) return null;
+        return godFetch(historyUrl(row.assignedDriverId, g.code), {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(entry)
+        });
       });
     }).then(function (res) {
       if (res && !res.ok) throw new Error("history");
@@ -1021,10 +1135,8 @@
   }
 
   function commissionPctFor(driverId) {
-    if (state.commissionDrafts && state.commissionDrafts[driverId] != null && state.commissionDrafts[driverId] !== "") {
-      var draft = clampPct(state.commissionDrafts[driverId]);
-      if (draft != null) return draft;
-    }
+    /* v76d (Matthew 10/18 "I reset it every day. It doesn't stay."): only the SAVED rate counts. A number typed in the
+       box but not saved (or refused by the database) used to drive every God-mode calculation until the page reloaded. */
     var row = state.roster && state.roster[driverId];
     if (row && row.commissionPct != null && isFinite(+row.commissionPct)) {
       return clampPct(row.commissionPct) != null ? clampPct(row.commissionPct) : DEFAULT_COMMISSION_PCT;
@@ -1097,6 +1209,7 @@
     var rideTotal = 0;
     var commissionTotal = 0;
     var tipTotal = 0, tollTotal = 0, tollFeeTotal = 0;
+    entries = entries.filter(function (e) { return !isTestRide(e); }); /* v76d: test rides count for nothing */
     entries.forEach(function (e) {
       rideTotal += Number(e.fareTotal) || 0;
       commissionTotal += Number(e.commissionCents) || 0;
@@ -1495,10 +1608,14 @@
     ["pwHash", "pwSalt", "pwIter", "pwAlgo", "pwSetAt"].forEach(function (k) {
       if (row[k] == null && prevRow[k] != null) row[k] = prevRow[k];
     });
+    var existed = !!(state.roster && state.roster[id]); /* v76d: existing record -> PATCH the changed fields only, never the rate */
+    var body = row;
+    if (existed) { body = {}; Object.keys(row).forEach(function (k) { if (k !== "commissionPct" && ["pwHash", "pwSalt", "pwIter", "pwAlgo", "pwSetAt"].indexOf(k) < 0) body[k] = row[k]; }); }
+    else body = Object.assign({}, row, { newDriver: true }); /* Worker v76d: a whole-record PUT is only for a brand-new driver */
     return godFetch(rosterUrl(id), {
-      method: "PUT",
+      method: existed ? "PATCH" : "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(row)
+      body: JSON.stringify(body)
     }).then(function (res) {
       if (res.status === 401 || res.status === 403) {
         var err = new Error("roster-write-denied");
@@ -1516,41 +1633,43 @@
   }
 
   function saveCommission(driverId, pctRaw) {
+    /* v76d: PATCH only the rate (never rewrite the whole driver record), read it back, clear the draft. Failure: red NOT SAVED and the box goes back. */
+    state.commissionErrors = state.commissionErrors || {};
+    var name = ((state.roster && state.roster[driverId]) || {}).name || driverId;
     var pct = clampPct(pctRaw);
     if (pct == null) {
-      state.actionNotice = "Commission must be a whole number from 0 to 100.";
+      delete state.commissionDrafts[driverId];
+      state.commissionErrors[driverId] = "NOT SAVED: commission must be a whole number from 0 to 100. Still " + commissionPctFor(driverId) + "%.";
+      state.actionNotice = state.commissionErrors[driverId];
       return Promise.resolve(false);
     }
-    var existing = (state.roster && state.roster[driverId]) || {};
-    var online = null;
-    (state.drivers || []).forEach(function (d) {
-      if (d && d.id === driverId) online = d;
-    });
-    var row = {
-      name: existing.name || (online && online.name) || driverId,
-      phone: existing.phone || (online && online.phone) || "",
-      email: existing.email || (online && online.email) || "",
-      commissionPct: pct,
-      active: existing.active !== false,
-      approvalStatus: existing.approvalStatus || (existing.active === false ? "fired" : "approved"),
-      hiredAt: existing.hiredAt || Date.now(),
-      updatedAt: Date.now()
-    };
-    if (!row.email && driverId.indexOf("_") >= 0) {
-      /* id is sanitized email; keep blank email if unknown */
-    }
-    return putRosterRow(driverId, row).then(function () {
-      state.roster[driverId] = Object.assign({ id: driverId }, row);
-      delete state.commissionDrafts[driverId];
-      state.actionNotice = "Saved " + pct + "% commission for " + (row.name || driverId) + ".";
+    var now = Date.now();
+    var patch = { commissionPct: pct, commissionSetAt: now, commissionSetBy: "god", updatedAt: now };
+    return godFetch(rosterUrl(driverId), { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(patch) }).then(function (res) {
+      if (!res || !res.ok) { var e = new Error("roster-write"); e.denied = !!res && (res.status === 401 || res.status === 403); throw e; }
+      return res.text().then(function (t) {
+        var back = null; try { back = JSON.parse(t); } catch (e2) { back = null; }
+        if (!back || Number(back.commissionPct) !== pct) throw new Error("readback");
+        return back;
+      });
+    }).then(function (back) {
+      state.roster[driverId] = Object.assign({}, state.roster[driverId] || {}, back, { id: driverId });
+      delete state.commissionDrafts[driverId]; delete state.commissionErrors[driverId];
+      state.actionNotice = "Saved " + pct + "% for " + name + ".";
       return true;
     }).catch(function (err) {
-      state.actionNotice = err && err.denied
-        ? "Cannot save commission (Firebase permission denied on /rides/" + ROSTER_HUB + ")."
-        : "Could not save commission.";
+      delete state.commissionDrafts[driverId];
+      state.commissionErrors[driverId] = "NOT SAVED: " + (err && err.denied ? "the God password is needed on this device." : "the database did not keep " + pct + "%.") + " Still " + commissionPctFor(driverId) + "%.";
+      state.actionNotice = state.commissionErrors[driverId];
       return false;
     });
   }
+  window.__pcsGodSaveCommission = saveCommission; /* test hook */
+  function commissionUnsaved() {
+    var d = state.commissionDrafts || {};
+    return Object.keys(d).some(function (id) { return d[id] !== "" && d[id] != null && String(clampPct(d[id])) !== String(commissionPctFor(id)); });
+  }
+  if (typeof window !== "undefined" && window.addEventListener) window.addEventListener("beforeunload", function (e) { if (commissionUnsaved()) { e.preventDefault(); e.returnValue = ""; } });
 
   function hireDriver() {
     state.hireError = "";
@@ -3829,11 +3948,11 @@
      Default = Houston Code Ch. 46 (limousine drivers): max 12 h DRIVING in any rolling 24 h. On-duty caps optional (0 = off). */
   /* PCS HOS policy (Matthew, CDL / Motive "USA Property 70 hour / 8 day"): 12 h drive, 14 h shift (v74b; was 11 h drive), 30-min break after 8 h
      driving, 70 h / 8 days; 10 h off resets drive + shift, 34 h off restarts ALL clocks incl. the cycle (Matthew). All editable here. */
-  var HOS_DEF = { maxDriveHours: 12, shiftWindowHours: 14, breakAfterDriveHours: 8, breakMinutes: 30, cycleHours: 70, cycleDays: 8, resetHours: 10, restartHours: 34, breakAfterMin: 150, breakMinOnDutyHours: 3 };
+  var HOS_DEF = { maxDriveHours: 12, shiftWindowHours: 14, breakAfterDriveHours: 8, breakMinutes: 30, cycleHours: 70, cycleDays: 8, resetHours: 6, restartHours: 34, breakAfterMin: 150, breakMinOnDutyHours: 3 }; /* v76d-pretrip (Matthew 10/18): 6 h off resets Drive + Shift */
   var HOS_FIELDS = [["hos-drive", "maxDriveHours", 0, 24, "DRIVE: max moving time (hours, 0 = off)"], ["hos-shift", "shiftWindowHours", 0, 24, "SHIFT: on-duty window (hours, 0 = off)"],
     ["hos-brkh", "breakAfterDriveHours", 0, 24, "BREAK: required after this many hours of driving (0 = off)"], ["hos-brkm", "breakMinutes", 5, 120, "BREAK length (minutes)"], ["hos-brkmin", "breakMinOnDutyHours", 0, 14, "BREAK counts as the 30-min break only if it starts this many hours on duty after shift start or the last qualifying break (0 = any time)"],
     ["hos-cyc", "cycleHours", 0, 200, "CYCLE: max on-duty hours (0 = off)"], ["hos-cycd", "cycleDays", 1, 14, "CYCLE rolling days"],
-    ["hos-reset", "resetHours", 1, 48, "Off-duty hours that reset DRIVE + SHIFT"], ["hos-restart", "restartHours", 1, 96, "Consecutive off hours (Offline / logged out / off duty) that reset ALL clocks incl. the 70 h CYCLE"],
+    ["hos-reset", "resetHours", 1, 48, "Off-duty hours in a row (Offline / logged out) that reset DRIVE + SHIFT and require a new pre-trip (never the 70 h CYCLE)"], ["hos-restart", "restartHours", 1, 96, "Consecutive off hours (Offline / logged out / off duty) that reset ALL clocks incl. the 70 h CYCLE"],
     ["hos-break", "breakAfterMin", 0, 600, "Soft take-a-break nudge after continuous driving (minutes, 0 = off)"]];
   /* v72r overrides: rides/HSLGVRDE/{driver} = { request, override, restUntil }; log at rides/DRVRHSLG/{driver}/overrides/{at} */
   state.hosOvr = {};
@@ -3973,6 +4092,7 @@
         var n = {};
         HOS_FIELDS.forEach(function (f) { var v = Number(c[f[1]]); n[f[1]] = isFinite(v) && v >= f[2] && v <= f[3] ? v : HOS_DEF[f[1]]; });
         if (c.rule !== "v74b" && n.maxDriveHours === 11) n.maxDriveHours = 12; /* v74b (Matthew): old 11 h default -> 12 h */
+        if (c.defaults) n.resetHours = HOS_DEF.resetHours; /* v76d-pretrip: nothing saved yet -> 6 h */
         state.hosCfg = n;
       }
       hosPaint();
@@ -4180,6 +4300,7 @@
     var dayComm = 0;
     var dayTips = 0, dayTolls = 0, dayTollFees = 0;
     entries.forEach(function (e) {
+      if (isTestRide(e)) return; /* v76d */
       dayRide += Number(e.fareTotal) || 0;
       dayComm += Number(e.commissionCents) || 0;
       dayTips += Number(e.tipCents) || 0;
@@ -4218,7 +4339,10 @@
           (tollFeeCents(e) ? '<br><strong class="tollfee-line">' + esc(e.tollLabel || "Toll road fee") + "</strong> " + esc(fmtCents(tollFeeCents(e))) + " (fare income, in the commission split)" : "") +
           (e.cashReceivedCents != null ? "<br><strong>Cash received</strong> " + esc(fmtCents(e.cashReceivedCents)) + " · <strong>change</strong> " + esc(fmtCents(Number(e.changeCents) || 0)) : "") +
           (String(e.rideType || "") === "metered" && e.paymentStatus ? "<br><strong>Payment</strong> " + esc(meterPayWord(e.paymentStatus, e.paidVia)) : "") +
-          "</p></article>"
+          "</p>" + (isTestRide(e) ? '<p class="fine" style="color:#ffb3b3;font-weight:700">' + esc(testRideLabel(e)) + " ride: counts for nothing" + (e.testFareCents ? " (meter read " + esc(fmtCents(e.testFareCents)) + ")" : "") + "</p>" : "") +
+          rideNoteEditHtml(driverId, e.code || "", e.rideNote) + /* v76d */
+          '<button type="button" class="btn btn-ghost" data-test-toggle="' + esc(e.code || "") + '" data-driver="' + esc(driverId) + '" data-on="' + (isTestRide(e) ? "1" : "0") + '">' + (isTestRide(e) ? "Make it a real ride" : "Mark as test ride") + "</button>" +
+          "</article>"
         );
       }).join("");
     }
@@ -4259,7 +4383,71 @@
      (pay week Mon-Sun, week ride total / commission / cash tips, per-day expandable rides, Prev / Next week) + Owed to PCS + ride details. */
   state.earnWeek = state.earnWeek || {};
   state.earnDayOpen = state.earnDayOpen || {};
-  function earnIsTest(e) { return e && (e.isTest === true || String(e.paidVia || "") === "test"); }
+  function earnIsTest(e) { return isTestRide(e); }
+  /* v76d (Matthew 10/18): practice, test and rate comparison rides count for NOTHING: earnings, commission, pay week, tips,
+     Penny's income and ride totals all skip them. They stay in the list with a badge so nothing is lost. */
+  function isTestRide(e) { return !!e && (e.isTest === true || e.testRide === true || String(e.paidVia || "") === "test" || !!e.testKind); }
+  function testRideLabel(e) { return String(e.testKind || "") === "practice" ? "Practice" : String(e.paidVia || "") === "test" && !e.testKind ? "Rate comparison" : "TEST"; }
+  /* Pure: pay-week patch to mark / unmark a test ride. Marking keeps the real amounts in testOriginal so it can be undone. */
+  var TEST_MONEY_KEYS = ["fareSub", "fareTax", "fareTotal", "commissionCents", "commissionPct", "tipCents", "tollCents", "tollRoadFeeCents", "discountCents", "paidVia", "riderName"];
+  function testRidePatch(e, on, by, now) {
+    e = e || {};
+    if (on) {
+      if (isTestRide(e) && e.testOriginal) return null; /* already a test ride */
+      var orig = {}; TEST_MONEY_KEYS.forEach(function (k) { if (e[k] !== undefined) orig[k] = e[k]; });
+      return { isTest: true, testRide: true, testKind: "practice", paidVia: "test", testFareCents: Number(e.fareTotal) || 0, testOriginal: orig,
+        fareSub: 0, fareTax: 0, fareTotal: 0, commissionCents: 0, tipCents: 0, tollCents: 0, tollRoadFeeCents: 0, testMarkedAt: now, testMarkedBy: by || "god" };
+    }
+    var o = e.testOriginal;
+    if (!o) return null; /* amounts were zeroed by the driver app (rate comparison): fix them by hand */
+    var back = { isTest: false, testRide: false, testKind: null, testOriginal: null, testFareCents: null, testMarkedAt: null, testMarkedBy: null, testUnmarkedAt: now, testUnmarkedBy: by || "god" };
+    TEST_MONEY_KEYS.forEach(function (k) { back[k] = o[k] !== undefined ? o[k] : null; });
+    return back;
+  }
+  function godTestToggle(driverId, code, on) {
+    var e = ((state.history && state.history[driverId]) || {})[code];
+    if (!e) return;
+    var now = Date.now(), patch = testRidePatch(e, on, state.sessionEmail || "god", now);
+    if (!patch) { state.boardNotice = on ? code + " is already a test ride." : code + ": the real amounts were never saved, so enter them by hand in Add / edit ride."; render(); return; }
+    if (!window.confirm(on ? "Mark " + code + " as a test ride? It will count for nothing (earnings, commission, pay week, tips, Penny's income). You can undo it." : "Make " + code + " a real ride again with its saved amounts?")) return;
+    godFetch(historyUrl(driverId, code), { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(patch) }).then(function (res) {
+      if (!res.ok) throw new Error("x");
+      return godFetch(rideUrl(code), { method: "GET" }).then(function (r) { return r.text(); }).then(function (t) {
+        if (!t || t === "null") return null; /* calendar / manual rides have no ride record */
+        return godFetch(rideUrl(code), { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ isTest: !!on, testRide: !!on, testKind: on ? "practice" : null, updatedAt: now }) });
+      });
+    }).then(function () {
+      Object.assign(e, patch);
+      state.boardNotice = on ? code + " marked as a test ride (counts for nothing)." : code + " is a real ride again.";
+      return refresh();
+    }).catch(function () { state.boardNotice = "NOT SAVED: could not update " + code + "."; render(); });
+  }
+  /* v76d: ride notes (Matthew keeps cash tips and other details here). Saved on the ride, payment and pay-week records. */
+  var RIDE_NOTE_MAX = 500;
+  function rideNoteClean(t) { return String(t == null ? "" : t).replace(/\r\n?/g, "\n").replace(/[ \t]+\n/g, "\n").trim().slice(0, RIDE_NOTE_MAX); }
+  function rideNotePatch(text, by, now) { var n = rideNoteClean(text); return { rideNote: n || null, rideNoteAt: n ? now : null, rideNoteBy: n ? (by || "god") : null }; }
+  var RIDE_NOTE_STYLE = "display:block;width:100%;min-height:96px;font-size:20px;line-height:1.4;color:#111;background:#fff;font-weight:600;border:2px solid #333;border-radius:10px;padding:10px;box-sizing:border-box";
+  function rideNoteShowHtml(n) { return n ? '<div class="ride-note" style="margin:6px 0;padding:8px 10px;background:#fff;color:#111;font-size:18px;font-weight:600;line-height:1.4;border-radius:8px;white-space:pre-wrap"><strong>Notes:</strong> ' + esc(n) + "</div>" : ""; }
+  function rideNoteEditHtml(driverId, code, n) {
+    var id = "god-note-" + String(code).replace(/[^A-Za-z0-9_-]/g, "");
+    return '<label for="' + id + '" style="display:block;font-weight:800;font-size:18px;margin:8px 0 4px">Notes</label><textarea id="' + id + '" maxlength="500" rows="3" style="' + RIDE_NOTE_STYLE + '" placeholder="Anything to remember about this ride (optional)" data-note-code="' + esc(code) + '">' + esc(state.noteDrafts && state.noteDrafts[code] != null ? state.noteDrafts[code] : n || "") + "</textarea>" +
+      (state.noteDrafts && state.noteDrafts[code] != null && state.noteDrafts[code] !== (n || "") ? '<p class="fine" style="color:#ffb35c;font-weight:700">Unsaved note</p>' : "") +
+      '<button type="button" class="btn" data-note-save="' + esc(code) + '" data-driver="' + esc(driverId) + '" data-note-box="' + id + '">Save note</button>';
+  }
+  function godRideNoteSave(driverId, code, text) {
+    var e = ((state.history && state.history[driverId]) || {})[code];
+    var now = Date.now(), patch = rideNotePatch(text, state.sessionEmail || "god", now);
+    var patchIfThere = function (url) { return godFetch(url, { method: "GET" }).then(function (r) { return r.text(); }).then(function (t) { if (!t || t === "null") return null; return godFetch(url, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(patch) }); }); };
+    godFetch(historyUrl(driverId, code), { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(patch) }).then(function (res) {
+      if (!res.ok) throw new Error("x");
+      return Promise.all([patchIfThere(rideUrl(code)), patchIfThere(baseUrl() + "/rides/PAYMENTS/" + encodeURIComponent(code) + ".json")]);
+    }).then(function () { if (e) Object.assign(e, patch); if (state.noteDrafts) delete state.noteDrafts[code]; state.boardNotice = "Note saved for " + code + "."; return refresh(); })
+      .catch(function () { state.boardNotice = "NOT SAVED: note for " + code + " (check the connection and tap Save note again)."; render(); });
+  }
+  if (typeof document !== "undefined") document.addEventListener("input", function (ev) { /* v76d: keep a typed note across re-renders */
+    var t = ev.target; if (!t || !t.getAttribute || !t.getAttribute("data-note-code")) return;
+    state.noteDrafts = state.noteDrafts || {}; state.noteDrafts[t.getAttribute("data-note-code")] = t.value; }, true);
+  if (typeof window !== "undefined") window.__pcsV76dTest = { isTestRide: isTestRide, testRidePatch: testRidePatch, rideNotePatch: rideNotePatch, rideNoteClean: rideNoteClean };
   function earnPayWord(e) {
     if (isCardFailedCollect(e)) return "Card failed - collect";
     if (isCashEntry(e)) return "Cash";
@@ -4272,9 +4460,9 @@
     var row = function (k, v, cls) { return '<div class="money-row' + (cls ? " " + cls : "") + '" style="display:flex;justify-content:space-between;gap:8px"><span>' + k + "</span><span>" + v + "</span></div>"; };
     return '<article class="card earn-ride" data-code="' + esc(e.code || "") + '" style="margin:6px 0;padding:8px 10px' + (earnIsTest(e) ? ";opacity:.6" : "") + '">' +
       '<p class="tag" style="margin:0 0 2px">' + esc(e.code || "Ride") + (e.rideType === "metered" ? " · Metered" : "") + (e.source === "manual" ? " · Added in God mode" : "") +
-      (earnIsTest(e) ? ' <span class="badge earn-test" style="background:#7a1f1f;color:#fff">' + (String(e.paidVia || "") === "test" ? "Rate comparison" : "TEST") + " (not counted)</span>" : "") +
+      (earnIsTest(e) ? ' <span class="badge earn-test" style="background:#7a1f1f;color:#fff">' + esc(testRideLabel(e)) + " (not counted)</span>" : "") +
       (e.status === "canceled" ? ' <span class="badge" style="color:#ff9b9b">CANCELED</span>' : "") + "</p>" +
-      "<p style=\"margin:0\"><strong>" + esc(e.riderName || "Rider") + "</strong> · " + esc(e.day || "") + "</p>" +
+      "<p style=\"margin:0\"><strong>" + esc(e.riderName || "Rider") + "</strong> · " + esc(e.day || "") + "</p>" + rideNoteShowHtml(e.rideNote) + /* v76d */
       '<p class="fine" style="margin:0 0 4px">' + esc(e.pickup || "") + " \u2192 " + esc(e.drop || "") + "</p>" +
       row("Fare (before discount)", esc(fmtCents(fare))) +
       (Number(e.discountCents) > 0 ? row((cash && e.discountType !== "other" ? "Cash discount" : "Discount") + (e.discountType ? " (" + esc(({ senior: "Senior", military: "Military", other: "Other" })[e.discountType] || e.discountType) + ")" : ""), "\u2212" + esc(fmtCents(e.discountCents))) : "") +
@@ -4479,8 +4667,10 @@
               '<button type="button" class="btn btn-ghost btn-open-driver" data-driver-id="' + esc(d.id) + '">Calendar & history</button>' +
               '<div class="commission-row">' +
                 '<label class="commission-label" for="comm-' + esc(d.id) + '">Commission %</label>' +
-                '<input class="commission-input" id="comm-' + esc(d.id) + '" data-driver-id="' + esc(d.id) + '" type="text" inputmode="decimal" pattern="[0-9]*" min="0" max="100" step="1" value="' + esc(String(pct)) + '"' + (approval === "approved" ? "" : " disabled") + ">" +
+                '<input class="commission-input" id="comm-' + esc(d.id) + '" data-driver-id="' + esc(d.id) + '" type="text" inputmode="decimal" pattern="[0-9]*" min="0" max="100" step="1" value="' + esc(String(state.commissionDrafts[d.id] != null && state.commissionDrafts[d.id] !== "" ? state.commissionDrafts[d.id] : pct)) + '"' + (approval === "approved" ? "" : " disabled") + ">" +
                 '<button type="button" class="btn btn-ghost btn-save-comm" data-driver-id="' + esc(d.id) + '"' + (approval === "approved" ? "" : " disabled") + ">Save</button>" +
+                '<span class="comm-unsaved" id="comm-unsaved-' + esc(d.id) + '" style="color:#ffb35c;font-weight:800;margin-left:6px">' + (state.commissionDrafts[d.id] != null && state.commissionDrafts[d.id] !== "" && String(state.commissionDrafts[d.id]) !== String(pct) ? "Unsaved (saved: " + esc(String(pct)) + "%)" : "") + "</span>" + /* v76d */
+                ((state.commissionErrors || {})[d.id] ? '<p class="comm-error" role="alert" style="background:#b91c1c;color:#fff;font-weight:800;padding:6px 10px;border-radius:8px;margin:6px 0">' + esc(state.commissionErrors[d.id]) + "</p>" : "") +
                 (approval === "pending"
                   ? '<button type="button" class="btn btn-gold btn-approve" data-driver-id="' + esc(d.id) + '">Approve</button>' +
                     '<button type="button" class="btn btn-fire btn-reject" data-driver-id="' + esc(d.id) + '">Reject</button>'
@@ -5045,6 +5235,13 @@
         });
       });
     });
+    Array.prototype.forEach.call(board.querySelectorAll(".btn-save-rcomm"), function (btn) { /* v76d */
+      btn.addEventListener("click", function () {
+        var id = btn.getAttribute("data-event-id"), inp = document.getElementById("rcomm-" + id);
+        btn.disabled = true;
+        saveRideCommission(id, inp ? inp.value : "").then(function () { btn.disabled = false; });
+      });
+    });
     Array.prototype.forEach.call(board.querySelectorAll(".btn-prepaid"), function (btn) { /* v75v */
       btn.addEventListener("click", function () { dbPrepaidOpen(btn.getAttribute("data-event-id")); });
     });
@@ -5083,6 +5280,7 @@
         if (startMs && startMs > Date.now()) {
           if (!window.confirm("This ride doesn't start until " + fmtBoardWhen(crow.start) + ". Completing it now hides it from the driver app. Complete it early anyway?")) return;
         }
+        if (zeroFareWarn(crow, fare) && !window.confirm("This ride has a $0 fare and nothing paid in Square. The driver gets $0 for it. Finish it anyway?")) return; /* v76d */
         if (!window.confirm("Complete this ride and credit commission into this driver's Mon–Sun pay week?")) return;
         btn.disabled = true;
         completeCalendarRide(id, fare).then(function () {
@@ -5324,6 +5522,7 @@
         " · tip " + esc(fmtCents(Number(o.tipCents) || 0)) +
         (o.cashReceivedCents != null ? " · cash received " + esc(fmtCents(o.cashReceivedCents)) + " · change " + esc(fmtCents(Number(o.changeCents) || 0)) : "") + " · reported by " + esc(o.by || m.driverName || "driver") + " · not checked by Square</span>");
     } else if (st === "unpaid") lines.push('<span style="color:#ff8a8a"><strong>NOT PAID</strong></span>');
+    if (p.rideNote) lines.push(rideNoteShowHtml(p.rideNote)); /* v76d */
     if (p.meterLink && !payRecOk(p.final)) lines.push('<span style="opacity:.8">QR link ' + esc(String(p.meterLink.status || "").toLowerCase()) + "</span>");
     var rr = payRideOf(p.code) || {};
     var who = rr.meterRider && typeof rr.meterRider === "object" ? rr.meterRider : null;
@@ -5909,6 +6108,55 @@
     return "before tax " + fmtCents(m.preTaxCents) + ", driver " + (Number(pct) || 0) + "% " + fmtCents(m.commissionCents);
   }
   window.__pcsGodPaidSquare = paidSquareMath; /* test hook */
+  /* v76d: Commission % for THIS ride only (e.g. Anson 100% on Barbara Curry's DAL rides). Blank = the driver's own %. */
+  function rideCommHtml(r) {
+    var p = ridePctOf(r), own = commissionPctFor(r.assignedDriverId);
+    return '<div class="db-ridecomm" style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin:4px 0">' +
+      '<label for="rcomm-' + esc(r.id) + '">Commission % this ride</label>' +
+      '<input id="rcomm-' + esc(r.id) + '" class="db-rcomm-in" data-event-id="' + esc(r.id) + '" type="text" inputmode="numeric" pattern="[0-9]*" placeholder="' + esc(String(own)) + '" value="' + esc(p != null ? String(p) : "") + '" style="width:80px">' +
+      '<button type="button" class="btn btn-gold btn-save-rcomm" data-event-id="' + esc(r.id) + '">Save</button>' +
+      '<span class="fine">' + (p != null ? esc(r.assignedDriverName || "Driver") + " gets " + p + "% on this ride (usual " + own + "%)" : "Blank = " + esc(r.assignedDriverName || "driver") + "'s usual " + own + "%") + "</span></div>";
+  }
+  function rideCommPatch(raw, now) { /* pure (tested) */
+    var t = String(raw == null ? "" : raw).replace(/[%\s]/g, "");
+    if (t === "") return { ok: true, patch: { rideCommissionPct: null, rideCommissionPctEdited: true, rideCommissionPctBy: "god", rideCommissionPctAt: now, updatedAt: now } };
+    var n = Number(t);
+    if (!isFinite(n) || n < 0 || n > 100 || Math.round(n) !== n) return { ok: false, error: "Enter a whole number from 0 to 100, or leave it blank." };
+    return { ok: true, patch: { rideCommissionPct: n, rideCommissionPctEdited: true, rideCommissionPctBy: "god", rideCommissionPctAt: now, updatedAt: now } };
+  }
+  function saveRideCommission(eventId, raw) {
+    var row = null; (state.calendar || []).forEach(function (r) { if (r && r.id === eventId) row = r; });
+    if (!row) return Promise.reject(new Error("missing"));
+    var out = rideCommPatch(raw, Date.now());
+    if (!out.ok) { state.boardNotice = "NOT SAVED: " + out.error; renderBoardLists(); return Promise.resolve(false); }
+    return godFetch(calendarUrl(eventId), { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(out.patch) }).then(function (res) {
+      if (!res.ok) throw new Error("save");
+      return res.text().then(function (t) { var back = null; try { back = JSON.parse(t); } catch (e) {} if (back && typeof back === "object" && (back.rideCommissionPct == null ? null : Number(back.rideCommissionPct)) !== out.patch.rideCommissionPct) throw new Error("readback"); });
+    }).then(function () {
+      row.rideCommissionPct = out.patch.rideCommissionPct;
+      state.boardNotice = "Saved: " + (row.assignedDriverName || "driver") + " gets " + ridePctFor(row) + "% on " + (row.rider || "this ride") + ".";
+      return refresh();
+    }).catch(function () { state.boardNotice = "NOT SAVED: the ride commission % did not save. Try again."; renderBoardLists(); return false; });
+  }
+  window.__pcsV76dRideComm = { patch: rideCommPatch };
+  /* v76d: Square invoice lookup (read-only, through the Worker). Amounts are pre-tax subtotal / tax / total in cents. */
+  function sqInvoiceLine(q) {
+    if (!q) return "";
+    return (q.source === "square" ? "From Square: " : "Typed in: ") + "before tax " + fmtCents(q.subtotalCents) + ", tax " + fmtCents(q.taxCents) + ", total " + fmtCents(q.totalCents) +
+      (q.status ? " \u00b7 " + String(q.status) : "") + (q.serviceDate ? " \u00b7 service " + String(q.serviceDate) : "") + (q.overridden ? " \u00b7 changed by Matthew" : "");
+  }
+  function sqInvoiceLookup(invoiceNo) {
+    var auth = godWriteAuth();
+    if (!auth) return Promise.resolve({ ok: false, error: "The God password is needed once on this device." });
+    return fetch(PAY_WORKER + "/sq/invoice", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(Object.assign({ invoiceNo: String(invoiceNo || "") }, auth)) })
+      .then(function (res) { return res.json().catch(function () { return {}; }).then(function (d) {
+        if (d && d.godToken) { try { gqSetTok(d.godToken); } catch (e) {} }
+        if (res.status === 404) return { ok: false, error: "Square lookup isn\u2019t live yet (Worker v76d). Type the amounts from the invoice." };
+        if (!res.ok || !d || d.ok !== true) return { ok: false, error: (d && d.error) || "Square lookup failed. Type the amounts from the invoice." };
+        return { ok: true, invoice: d.invoice };
+      }); }).catch(function () { return { ok: false, error: "Square lookup failed (connection). Type the amounts from the invoice." }; });
+  }
+  window.__pcsV76dSq = { line: sqInvoiceLine };
   function dbTipHtml(r) {
     var v = state.tipDrafts && state.tipDrafts[r.id] != null ? state.tipDrafts[r.id] : (Number(r.tipCents) > 0 ? (Number(r.tipCents) / 100).toFixed(2) : "");
     var pv = state.paidDrafts && state.paidDrafts[r.id] != null ? state.paidDrafts[r.id] : (r.paidSquareCents != null ? (r.paidSquareCents / 100).toFixed(2) : "");
@@ -5919,13 +6167,14 @@
       '<input id="tip-' + esc(r.id) + '" class="day-tip-in" data-event-id="' + esc(r.id) + '"' + moneyRegAttrs() + ' value="' + esc(v) + '" style="width:110px">' +
       '<button type="button" class="btn btn-gold btn-save-tip" data-event-id="' + esc(r.id) + '">Save</button>' +
       (r.paidSquareCents != null ? '<span class="fine" id="paid-saved-' + esc(r.id) + '">Paid ' + esc(fmtCents(r.paidSquareCents)) + " in Square</span>" : "") +
-      '<p class="fine day-paid-pre" id="paid-pre-' + esc(r.id) + '" style="flex-basis:100%;margin:0;font-weight:700">' + esc(paidSquareLine(pv !== "" && isFinite(+pv) ? Math.round(+pv * 100) : null, r.assignedDriverId ? commissionPctFor(r.assignedDriverId) : null)) + "</p>" +
+      '<p class="fine day-paid-pre" id="paid-pre-' + esc(r.id) + '" style="flex-basis:100%;margin:0;font-weight:700">' + esc(paidSquareLine(pv !== "" && isFinite(+pv) ? Math.round(+pv * 100) : null, r.assignedDriverId ? ridePctFor(r) : null)) + "</p>" +
       (Number(r.tipCents) > 0 ? '<span class="fine" id="tip-saved-' + esc(r.id) + '">Saved ' + esc(fmtCents(r.tipCents)) + " card tip</span>" : "") + "</div>";
   }
   function saveCalendarTip(eventId, val, paidVal) {
     var row = null; (state.calendar || []).forEach(function (r) { if (r && r.id === eventId) row = r; });
     if (!row) return Promise.reject(new Error("missing"));
     var pct = row.assignedDriverId ? commissionPctFor(row.assignedDriverId) : DEFAULT_COMMISSION_PCT;
+    if (ridePctOf(row) != null) pct = ridePctOf(row); /* v76d: per-ride % wins */
     var m = paidSquareMath(paidVal, val, pct, Math.round((Number(row.fareBeforeTax) || 0) * 100));
     if (!m.ok) return Promise.reject(new Error(m.error));
     var cents = m.tipCents, now = Date.now();
@@ -5939,7 +6188,7 @@
       if (row.status === "completed" && row.assignedDriverId) {
         var hp = { tipCents: cents, tipVia: "card", cardTipCents: cents, tipEditedAt: now };
         if (m.paidCents != null) Object.assign(hp, { paidSquareCents: m.paidCents, fareSub: m.preTaxCents, fareTax: m.taxCents, fareTotal: m.paidCents, commissionPct: pct, commissionCents: m.commissionCents, paidEditedAt: now });
-        return godFetch(historyUrl(row.assignedDriverId, next.code || makeScheduleCode(eventId)), { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(hp) });
+        return godFetch(historyUrl(row.assignedDriverId, row.meterCode || next.code || ownCode(row)) /* v76d: a metered ride's earnings live under its meter code */, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(hp) });
       }
     }).then(function () {
       if (state.tipDrafts) delete state.tipDrafts[eventId]; if (state.paidDrafts) delete state.paidDrafts[eventId];
@@ -5962,15 +6211,17 @@
   function cancelCalendarRide(eventId, fee, reason) {
     var row = null; (state.calendar || []).forEach(function (r) { if (r && r.id === eventId) row = r; });
     if (!row) return Promise.reject(new Error("missing"));
-    var now = Date.now(), code = row.code || makeScheduleCode(eventId);
+    var now = Date.now(), code = ownCode(row); /* v76d */
     var next = Object.assign({}, row, { status: "cancelled", cancelledAt: now, cancelledBy: "owner", cancelReason: reason, cancelFee: fee === "charge" ? "charge" : "waived",
       cancelFeeStatus: fee === "charge" ? "to_charge" : "waived", code: code, updatedAt: now });
     return putCalendarRide(next).then(function () {
       if (!row.assignedDriverId) return null;
-      return godFetch(historyUrl(row.assignedDriverId, code), { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({
-        code: code, day: boardDayKey(row.start) || chicagoToday(), completedAt: now, when: fmtBoardWhen(row.start), pickup: row.pickup || "", drop: row.dropoff || "",
+      var cEntry = { scheduleId: eventId, canceled: true, riderName: row.rider || "", day: boardDayKey(row.start) || chicagoToday() };
+      return godHistoryGuard(row.assignedDriverId, code, cEntry).then(function (g) { if (g.skip) return null; /* v76d: a canceled $0 never overwrites a finished ride */
+      return godFetch(historyUrl(row.assignedDriverId, g.code), { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({
+        scheduleId: eventId, code: g.code, day: boardDayKey(row.start) || chicagoToday(), completedAt: now, when: fmtBoardWhen(row.start), pickup: row.pickup || "", drop: row.dropoff || "",
         riderName: row.rider || "", status: "canceled", canceled: true, cancelReason: reason, cancelFee: next.cancelFee, fareSub: 0, fareTax: 0, fareTotal: 0,
-        commissionPct: commissionPctFor(row.assignedDriverId), commissionCents: 0, tipCents: 0, source: row.source === "manual" ? "manual" : "calendar" }) });
+        commissionPct: ridePctFor(row), commissionCents: 0, tipCents: 0, source: row.source === "manual" ? "manual" : "calendar" }) }); });
     }).then(function () {
       if (state.cancelOpen) delete state.cancelOpen[eventId];
       state.boardNotice = "Canceled " + (row.rider || "ride") + " (" + (fee === "charge" ? "cancellation fee to charge" : "fee waived") + ")" + (row.assignedDriverName ? "; " + row.assignedDriverName + " is notified" : "");
@@ -6128,6 +6379,8 @@
             ? '<p class="day-line"><span>Driver</span> ' + esc(r.assignedDriverName) + "</p>"
             : "") +
           (r.assignedDriverId ? dbTipHtml(r) : "") + /* v73 Tip (paid in Square) */
+          (r.assignedDriverId && st !== "cancelled" ? rideCommHtml(r) : "") + /* v76d per-ride Commission % */
+          (r.sqInvoice ? '<p class="day-line db-sqinv"><span>Invoice</span> #' + esc(r.prepaidInvoiceNo || r.sqInvoice.number || "") + " \u00b7 " + esc(sqInvoiceLine(r.sqInvoice)) + "</p>" : "") +
           gfolHtml(r) + /* v76b: Text my client a tracking link */
           (st === "completed"
             ? '<p class="day-line"><span>Commission</span> ' + esc(fmtCents(r.commissionCents)) + "</p>" +
@@ -6576,6 +6829,7 @@
   function payBalance(entries) {
     var out = { owedToDriver: 0, owedByDriver: 0, net: 0, cashRides: 0, cashTips: 0, tolls: 0, tollRoadFees: 0 };
     (entries || []).forEach(function (e) {
+      if (e && (e.isTest === true || e.testRide === true || String(e.paidVia || "") === "test" || e.testKind)) return; /* v76d: test rides count for nothing (same as isTestRide) */
       /* v72s: cash tips are the driver's own money (100% kept, not part of the 30% owed, not fare): record only */
       if (isCashEntry(e)) { out.owedByDriver += cashDriverOwesCents(e); out.cashRides += 1; out.cashTips += Number(e.tipCents) || 0; }
       else out.owedToDriver += (Number(e.commissionCents) || 0) + (Number(e.tipCents) || 0) + tollReimbCents(e); /* v76b: + tolls paid back */
@@ -7121,9 +7375,11 @@
     if (!window.__pcsArBound) {
       window.__pcsArBound = true;
       document.addEventListener("click", function (ev) {
-        var t = ev.target && ev.target.closest ? ev.target.closest("[data-add-ride-driver],[data-add-past-ride],[data-ar-edit],[data-ar-delete],[data-cardfail-toggle]") : null;
+        var t = ev.target && ev.target.closest ? ev.target.closest("[data-add-ride-driver],[data-add-past-ride],[data-ar-edit],[data-ar-delete],[data-cardfail-toggle],[data-test-toggle],[data-note-save]") : null;
         if (!t) return;
         ev.preventDefault();
+        if (t.hasAttribute("data-test-toggle")) { godTestToggle(t.getAttribute("data-driver"), t.getAttribute("data-test-toggle"), t.getAttribute("data-on") !== "1"); return; } /* v76d */
+        if (t.hasAttribute("data-note-save")) { var nb = document.getElementById(t.getAttribute("data-note-box")); godRideNoteSave(t.getAttribute("data-driver"), t.getAttribute("data-note-save"), nb ? nb.value : ""); return; } /* v76d */
         if (t.hasAttribute("data-cardfail-toggle")) { cardFailToggle(t.getAttribute("data-driver"), t.getAttribute("data-cardfail-toggle"), t.getAttribute("data-on") !== "1"); return; }
         if (t.hasAttribute("data-add-ride-driver")) { addRideOpenFor(t.getAttribute("data-add-ride-driver") || ""); return; }
         if (t.hasAttribute("data-add-past-ride")) { addPastRideOpen(t.getAttribute("data-add-past-ride") || "", t.getAttribute("data-week") || ""); return; }
@@ -7221,6 +7477,8 @@
         var id = input.getAttribute("data-driver-id");
         if (!id) return;
         state.commissionDrafts[id] = input.value;
+        var u = document.getElementById("comm-unsaved-" + id); /* v76d */
+        if (u) u.textContent = String(clampPct(input.value)) !== String(commissionPctFor(id)) ? "Unsaved (saved: " + commissionPctFor(id) + "%)" : "";
       });
     });
 
@@ -7444,11 +7702,15 @@
       bind();
       return;
     }
+    var nae = document.activeElement, ncode = nae && nae.getAttribute ? nae.getAttribute("data-note-code") : null; /* v76d: keep typing in a note box */
+    var nsel = ncode ? [nae.selectionStart, nae.selectionEnd] : null;
     root.innerHTML = renderBoard();
     bind();
     ensureMap();
     syncMap();
     setFocusBar();
+    if (ncode) { var nel = Array.prototype.filter.call(document.querySelectorAll("[data-note-code]"), function (x) { return x.getAttribute("data-note-code") === ncode; })[0];
+      if (nel) { try { nel.focus(); nel.setSelectionRange(nsel[0], nsel[1]); } catch (x) {} } }
   }
 
   function boot() {
