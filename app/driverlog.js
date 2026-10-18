@@ -165,7 +165,7 @@
     ch("dash", "Dash warning lights on", YN_YESBAD, "", { text: true, textLabel: "Which warning lights?", noPhoto: true, noCamera: true }),
     ch("interior", "Interior clean", YN_NOBAD), ch("exterior", "Exterior clean", YN_NOBAD),
     ch("fulltank", "Full tank of gas", YN_NOBAD, "", { kinds: ["post"], noteOnly: true }), /* v74 (Matthew): post-trip only; No = a note in God mode, never unsafe */
-    { k: "carwash", label: "Last date of car wash", type: "date", required: true, vehicle: true, block: true, maxAgeHours: 48 },
+    { k: "carwash", label: "Last date of car wash", type: "date", required: true, vehicle: true, block: true, maxAgeDays: 3 }, /* v76d-pretrip: 3 calendar days of reminders, then blocks going online */
     { k: "regexp", label: "Registration expiration (month/year)", type: "date", monthYear: true, required: true, vehicle: true, expiry: true },
     { k: "insexp", label: "Insurance card expiration date", type: "date", required: true, vehicle: true, expiry: true }
   ];
@@ -230,6 +230,17 @@
     if (my) { var yy = +my[1], mm = +my[2]; if (mm < 1 || mm > 12) return null; var last = new Date(Date.UTC(yy, mm, 0)).getUTCDate(); return parseMdy(mm + "/" + last + "/" + yy); } /* v75: YYYY-MM / MM/YYYY = end of that month */
     var m = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/.exec(String(v || "").trim()); if (!m) return null; var mo = +m[1], d = +m[2], y = +m[3]; if (mo < 1 || mo > 12 || d < 1 || d > 31) return null;
     var ds = y + "-" + ("0" + mo).slice(-2) + "-" + ("0" + d).slice(-2); var t = midnight(ds); return ymd(t + 3600000) === ds ? t : null; }
+  /* v76d-pretrip (Matthew 10/18): car wash = a reminder for the first maxAgeDays (default 3) CALENDAR days after the last wash
+     (America/Chicago dates, never hours); from the next calendar day on it blocks going online, only while the item's "Blocks"
+     box is on in God mode. Wash 10/15 -> reminders 10/16, 10/17, 10/18 -> blocked from 10/19. Checked at Available / the
+     inspection only, so it never interrupts a ride in progress. An old checklist with maxAgeHours: 48 reads as 3 days. */
+  function washGraceDays(it) { var d = Number(it && it.maxAgeDays); return d > 0 ? Math.round(d) : 3; }
+  function washState(v, now, it) {
+    var t = parseMdy(v); if (t == null) return null; now = now || Date.now();
+    var days = Math.round((midnight(ymd(now)) - t) / 86400000), g = washGraceDays(it);
+    var bf = ymd(t + (g + 1) * 86400000 + 3 * 3600000);
+    return { days: days, grace: g, block: !!(it && it.block) && days > g, remind: days >= 1 && days <= g, overdue: days > g, blockFrom: bf.slice(5, 7) + "/" + bf.slice(8, 10) };
+  }
   function expiryState(v, now) { var t = parseMdy(v); if (t == null) return ""; now = now || Date.now(); var end = t + 86400000; if (end <= now) return "expired"; if (end - now <= 30 * 86400000) return "soon"; return "ok"; }
   function myShow(v) { v = String(v || ""); var a = /^(\d{4})-(\d{2})$/.exec(v); if (a) return a[2] + "/" + a[1]; var b = /^(\d{1,2})\/\d{1,2}\/(\d{4})$/.exec(v); return b ? ("0" + b[1]).slice(-2) + "/" + b[2] : v; }
   function ansText(it, x) { if (!x) return "\u2014"; if (it.type === "date") return (it.monthYear ? myShow(x.date) : x.date) || "\u2014"; return x.answer || "\u2014"; }
@@ -249,7 +260,7 @@
           var h = grp(it, prevG); prevG = it.group;
           return h + '<div class="dl-dvir-row-' + esc(k) + '" style="padding:3px 0' + (it.group ? ";padding-left:12px" : "") + '">' + esc(it.label) + ': <b style="color:' + (x.noteFlag ? "#b45309" : x.bad ? (x.optional ? "#8a6d3b" : "#b91c1c") : "#2e7d32") + '">' + esc(ansText(it, x)) + "</b>" +
             (x.expiry === "expired" ? ' <b style="color:#b91c1c">EXPIRED</b>' : x.expiry === "soon" ? ' <b style="color:#b45309">expires within 30 days</b>' : "") +
-            (x.blocking ? ' \u00b7 <b style="color:#b91c1c">' + (x.needsApproval ? "blocked until God approves the photo" : x.stale ? "over 48 h: blocks Available" : "blocks Available") + "</b>" : x.bad && !x.optional ? " \u00b7 flagged to God (not blocking)" : "") + (x.bad && x.optional ? " (optional item, not a defect flag)" : "") + (x.noteFlag ? " (note for God mode, not a defect)" : "") +
+            (x.blocking ? ' \u00b7 <b style="color:#b91c1c">' + (x.needsApproval ? "blocked until God approves the photo" : x.stale ? "over 3 days since last wash: blocks going online" : "blocks Available") + "</b>" : x.remind ? ' \u00b7 <b style="color:#7a4b00">Reminder: wash the car' + (x.blockFrom ? " before " + esc(x.blockFrom) : "") + "</b>" : x.bad && !x.optional ? " \u00b7 flagged to God (not blocking)" : "") + (x.bad && x.optional ? " (optional item, not a defect flag)" : "") + (x.noteFlag ? " (note for God mode, not a defect)" : "") +
             (x.note ? " \u00b7 " + esc(x.note) : "") + (x.warn && x.bad ? ' <b style="color:#b91c1c">' + esc(x.warn) + "</b>" : "") + (x.photos && x.photos.length ? "<br>" + x.photos.map(function (ph) { return '<img src="' + esc(ph) + '" style="height:70px;margin:3px;border-radius:4px">'; }).join("") : "") + "</div>"; }).join("") + "</div>" +
         (rec.unsafe ? '<p class="dl-dvir-unsafe" style="color:#b91c1c;font-weight:700">' + (rec.cleared ? "Unsafe defect cleared by " + esc(rec.cleared.by || "God mode") + " on " + esc(clock(rec.cleared.at)) + " \u00b7 reason: " + esc(rec.cleared.reason || "") : "Unsafe defect: you can\u2019t go Available until God mode clears it.") + "</p>" : "") +
         (rec.sig ? '<img alt="Driver signature" src="' + esc(rec.sig) + '" style="height:70px"><div style="border-top:1px solid #333;width:240px"></div><p style="font-size:12px">Driver signature</p>' : "") + "</div>";
@@ -315,7 +326,7 @@
         if (!v) { if (it.required && !err) err = "Enter " + it.label + (it.monthYear ? " (MM/YYYY)." : " (MM/DD/YYYY)."); }
         else if (parseMdy(v) == null) { if (!err) err = it.label + (it.monthYear ? ": use MM/YYYY with a month 01-12 (e.g. 06/2027)." : ": use MM/DD/YYYY."); }
         else { x.date = v; if (it.vehicle) vehDates[it.k] = v;
-          if (it.block && it.maxAgeHours) { var age = (now - parseMdy(v)) / 3600000 - 24; /* a date counts until its end of day */ if (age > Number(it.maxAgeHours)) { x.stale = true; x.bad = true; x.blocking = true; unsafe = true; blocks.push({ k: it.k, label: it.label, why: "older than " + it.maxAgeHours + " h" }); } } if (it.expiry) { x.expiry = expiryState(v, now); if (x.expiry === "expired") { x.bad = true; if (it.required) defects++; else x.optional = true; } } }
+          if (it.maxAgeHours || it.maxAgeDays) { var ws = washState(v, now, it); /* v76d-pretrip: calendar days, not 48 h */ if (ws && ws.block) { x.stale = true; x.bad = true; x.blocking = true; unsafe = true; blocks.push({ k: it.k, label: it.label, why: "more than " + ws.grace + " days since last wash" }); } else if (ws && (ws.remind || ws.overdue)) { x.remind = true; x.blockFrom = ws.blockFrom; } } if (it.expiry) { x.expiry = expiryState(v, now); if (x.expiry === "expired") { x.bad = true; if (it.required) defects++; else x.optional = true; } } }
         out[it.k] = x; return;
       }
       var fk = form.getAttribute("data-kind"); if (Array.isArray(it.kinds) && it.kinds.length && it.kinds.indexOf(fk) < 0) return;
@@ -533,5 +544,5 @@
     if (mk === "mdy" && (d.length > 4 || (d.length === 4 && !del))) out = d.slice(0, 2) + "/" + d.slice(2, 4) + "/" + d.slice(4);
     if (out !== t.value) t.value = out;
   }, true);
-  window.PCSDriverLog = { minTimeGate: minTimeGate, fmtDur: fmtDur, motionGate: motionGate, fluidsDue: fluidsDue, readDvir: readDvir, parseMdy: parseMdy, expiryState: expiryState, EXTRAS: DVIR_EXTRAS, items: items, DVIR: DVIR, CERT: CERT, dayHash: dayHash, snapshot: snapshot, historyHtml: historyHtml, build: build, html: html, gridSvg: gridSvg, listHtml: listHtml, detailHtml: detailHtml, csv: csv, open: open, close: close, download: download, midnight: midnight, CARRIER: CARRIER };
+  window.PCSDriverLog = { minTimeGate: minTimeGate, fmtDur: fmtDur, motionGate: motionGate, fluidsDue: fluidsDue, readDvir: readDvir, parseMdy: parseMdy, expiryState: expiryState, washState: washState, EXTRAS: DVIR_EXTRAS, items: items, DVIR: DVIR, CERT: CERT, dayHash: dayHash, snapshot: snapshot, historyHtml: historyHtml, build: build, html: html, gridSvg: gridSvg, listHtml: listHtml, detailHtml: detailHtml, csv: csv, open: open, close: close, download: download, midnight: midnight, CARRIER: CARRIER };
 })();
