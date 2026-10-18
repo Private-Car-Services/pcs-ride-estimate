@@ -1,4 +1,4 @@
-/* PCS v76e: big live speed + ETA + heading arrow (computed here). v76b (Matthew 10/17): "Follow my ride" / driver tracking link. /follow/?t=<32-character token>.
+/* PCS v76f: 2.5 s updates, GPS speed/heading when shared, gliding arrow. v76e: big live speed + ETA + heading arrow (computed here). v76b (Matthew 10/17): "Follow my ride" / driver tracking link. /follow/?t=<32-character token>.
    Read-only. Reads ONE small public copy: /rides/FLWSHARE/<token> (written by the rider / driver / God apps, see app.js
    folClean). Shows: status, driver first name, car + plate, the car on a map with the route, pickup + drop-off, ETA and
    the PCS phone. Never the fare, payment, card or the rider's phone / email (they are never in the copy). Everything read
@@ -10,7 +10,7 @@
   if (!q) return; /* the older 22-character links (rider meter "Share this ride") run follow.js */
   var token = q[1];
   var DB = "https://pts-maps-rides-default-rtdb.firebaseio.com";
-  var POLL_MS = 5000, END_SHOW_MS = 30 * 60000, MAX_AGE_MS = 24 * 3600000, STALE_MS = 6 * 3600000;
+  var POLL_MS = 1000, END_SHOW_MS = 30 * 60000, MAX_AGE_MS = 24 * 3600000, STALE_MS = 6 * 3600000;
   var PCS_PHONE = "936-261-7878", PCS_TEL = "tel:+19362617878";
   var app = document.getElementById("app");
   var S = { trk: [], mph: null, brg: null, d: null, map: null, layers: null, fitted: false, timer: 0, ended: false, misses: 0, lastKey: "" };
@@ -96,15 +96,56 @@
     dot(d.pickup, "#2e9d4f", "Pickup");
     dot(d.dest, "#c0392b", "Drop-off");
     var car = showCar ? pt(d.pos) : null;
-    if (car) { pts.push(car);
-      if (S.brg !== null && L.divIcon) { /* v76e: arrow pointed the way the car is heading */
-        var ic = L.divIcon({ className: "fl-carico", iconSize: [44, 44], iconAnchor: [22, 22],
-          html: '<svg id="fl-arrow" width="44" height="44" viewBox="0 0 44 44" style="transform:rotate(' + Math.round(S.brg) + 'deg)"><circle cx="22" cy="22" r="20" fill="#0b3d23" stroke="#fff" stroke-width="3"/><path d="M22 7 L33 33 L22 27 L11 33 Z" fill="#bef1c6" stroke="#fff" stroke-width="1.5"/></svg>' });
-        L.marker(car, { icon: ic, interactive: true, keyboard: false }).bindTooltip("Your PCS car").addTo(S.layers);
-      } else L.circleMarker(car, { radius: 12, color: "#fff", weight: 4, fillColor: "#0b3d23", fillOpacity: 1 }).bindTooltip("Your PCS car", { permanent: false }).addTo(S.layers); }
+    if (car) pts.push(car);
+    carMove(car);
     var key = (d.status || "") + (car ? "c" : "");
     if (!S.fitted || S.lastKey !== key) { S.fitted = true; S.lastKey = key; if (pts.length === 1) S.map.setView(pts[0], 15); else if (pts.length) S.map.fitBounds(pts, { padding: [36, 36], maxZoom: 16 }); }
-    else if (car) S.map.panTo(car);
+    else if (car && !S.map.getBounds().pad(-0.15).contains(car)) S.map.panTo(car);
+  }
+  /* v76f: ONE car marker, painted at 60 fps (requestAnimationFrame). Between fixes (~1 s apart) it keeps rolling along
+     the heading at the current speed for up to 2 s (dead reckoning), easing toward each new fix; turns take the short way. */
+  var ARROW = '<svg id="fl-arrow" width="44" height="44" viewBox="0 0 44 44" style="transform:rotate(0deg)"><circle cx="22" cy="22" r="20" fill="#0b3d23" stroke="#fff" stroke-width="3"/><path d="M22 7 L33 33 L22 27 L11 33 Z" fill="#bef1c6" stroke="#fff" stroke-width="1.5"/></svg>';
+  var DR_MS = 2000;
+  function carMove(car) {
+    var L = window.L;
+    if (!car) { if (S.car) { try { S.car.remove(); } catch (e) {} S.car = null; } S.fix = null; return; }
+    if (!S.fix || S.fix.p[0] !== car[0] || S.fix.p[1] !== car[1]) S.fix = { p: car, t: Date.now() };
+    if (!S.car) {
+      S.car = L.marker(car, { icon: L.divIcon({ className: "fl-carico", iconSize: [44, 44], iconAnchor: [22, 22], html: ARROW }), keyboard: false, zIndexOffset: 1000 }).bindTooltip("Your PCS car").addTo(S.map);
+      S.carAt = car; S.carDeg = S.brg !== null ? S.brg : 0; carPaint(car, S.carDeg);
+    }
+    if (!S.loop) { S.loop = 1; S.lastFrame = Date.now(); (window.requestAnimationFrame || function (f) { return setTimeout(f, 16); })(frame); }
+  }
+  function ahead(p, deg, mi) { /* point mi miles from p along deg (flat-earth, fine for a few metres) */
+    var r = Math.PI / 180, dLat = (mi / 69.0) * Math.cos(deg * r), dLng = (mi / (69.0 * Math.cos(p[0] * r))) * Math.sin(deg * r);
+    return [p[0] + dLat, p[1] + dLng];
+  }
+  function target(now) {
+    if (!S.fix) return null;
+    var dt = Math.min(DR_MS, Math.max(0, now - S.fix.t)), mph = S.spdLive && S.mph !== null ? S.mph : 0;
+    return mph >= 2 && S.brg !== null ? ahead(S.fix.p, S.brg, mph * dt / 3600000) : S.fix.p;
+  }
+  function frame() {
+    if (!S.car || S.ended) { S.loop = 0; return; }
+    var now = Date.now(), dt = Math.min(200, now - (S.lastFrame || now)); S.lastFrame = now;
+    var k = 1 - Math.exp(-dt / 250), tg = target(now), at = S.carAt || tg;
+    if (tg) {
+      if (hav(at, tg) > 0.3) at = tg; /* big jump (GPS reset / page woke up): snap */
+      else at = [at[0] + (tg[0] - at[0]) * k, at[1] + (tg[1] - at[1]) * k];
+    }
+    if (S.brg !== null) { var dd = ((S.brg - S.carDeg + 540) % 360) - 180; S.carDeg = Math.abs(dd) < 0.5 ? S.brg : (S.carDeg + dd * k + 360) % 360; }
+    S.carAt = at; carPaint(at, S.carDeg);
+    if (S.spdLive && S.mph !== null) { /* speed number glides too */
+      S.mphShown = S.mphShown == null ? S.mph : S.mphShown + (S.mph - S.mphShown) * k;
+      var m = Math.round(S.mphShown); setText("fl-mph", m < 2 ? "0" : String(m)); setText("fl-mph-l", m < 2 ? "mph \u00b7 Stopped" : "mph");
+    }
+    (window.requestAnimationFrame || function (f) { return setTimeout(f, 16); })(frame);
+  }
+  function carPaint(at, deg) {
+    try { S.car.setLatLng(at); } catch (e) {}
+    var el = document.getElementById("fl-arrow"); if (!el) return;
+    el.style.transform = "rotate(" + Math.round(deg) + "deg)";
+    var path = el.querySelector("path"); if (path) path.style.display = S.brg === null ? "none" : ""; /* until a heading is known: a round dot */
   }
   /* v76e (parents 10/18): speed + heading worked out ON THIS PAGE from the car points the driver app already shares
      (pos.lat/lng/at, ~every 8 s). Nothing new is read or written. mph = distance / time between fresh points, smoothed;
@@ -118,14 +159,18 @@
     var T = S.trk, last = T[T.length - 1];
     if (last && at <= last.at) return;
     if (last && at - last.at > 90000) { T.length = 0; S.mph = null; last = null; } /* gap: start fresh */
-    T.push({ p: p, at: at }); if (T.length > 6) T.shift();
-    if (!last) return;
-    var dt = (at - last.at) / 3600000, mi = hav(last.p, p);
-    if (dt < 2 / 3600) return;
-    var v = mi < 0.012 ? 0 : mi / dt; /* under ~20 m between updates counts as standing still (GPS rounding) */
-    if (v > 110) return; /* GPS jump */
-    S.mph = S.mph === null || v === 0 ? v : S.mph * 0.4 + v * 0.6;
-    for (var i = T.length - 2; i >= 0; i -= 1) { if (hav(T[i].p, p) >= 0.0093) { S.brg = bearing(T[i].p, p); break; } }
+    T.push({ p: p, at: at }); if (T.length > 12) T.shift();
+    var gm = num(d.pos.mph), gh = num(d.pos.hdg);
+    if (gm !== null && gm >= 0 && gm < 130) S.mph = gm; /* v76f: the phone's own GPS speed */
+    else if (last) { /* fallback: distance / time over the last 6-20 s of points */
+      var b = null; for (var k = T.length - 2; k >= 0; k -= 1) { if (at - T[k].at >= 6000) { b = T[k]; break; } }
+      if (b && at - b.at <= 20000) {
+        var mi = hav(b.p, p), v = mi < 0.005 ? 0 : mi / ((at - b.at) / 3600000); /* under ~8 m counts as standing still */
+        if (v <= 110) S.mph = S.mph === null || v === 0 ? v : S.mph * 0.4 + v * 0.6;
+      }
+    }
+    if (gh !== null && gh >= 0 && gh <= 360) S.brg = gh;
+    else for (var i = T.length - 2; i >= 0; i -= 1) { if (hav(T[i].p, p) >= 0.0093) { S.brg = bearing(T[i].p, p); break; } }
   }
   function placeName(o) { var l = o && typeof o === "object" ? txt(o.label, 120) : ""; return l.split(",")[0].trim(); }
   function bigBox(d, now, live) {
@@ -135,7 +180,8 @@
     var etaOk = live && e && num(e.min) !== null && num(e.miles) !== null && now - eAt <= 180000;
     big.hidden = !live;
     if (!live) return;
-    if (fresh && S.mph !== null) { var m = Math.round(S.mph); setText("fl-mph", m < 2 ? "0" : String(m)); setText("fl-mph-l", m < 2 ? "mph \u00b7 Stopped" : "mph"); setText("fl-mph-n", "Live speed"); }
+    S.spdLive = !!(fresh && S.mph !== null); if (!S.spdLive) S.mphShown = null;
+    if (fresh && S.mph !== null) { var m = Math.round(S.mphShown != null ? S.mphShown : S.mph); setText("fl-mph", m < 2 ? "0" : String(m)); setText("fl-mph-l", m < 2 ? "mph \u00b7 Stopped" : "mph"); setText("fl-mph-n", "Live speed"); }
     else { setText("fl-mph", "--"); setText("fl-mph-l", "mph"); setText("fl-mph-n", pAt ? "Last updated " + Math.max(1, Math.round((now - pAt) / 60000)) + " min ago" : "Waiting for the car"); }
     var dest = e && e.to === "dest";
     var nm = dest ? placeName(d.dest) : placeName(d.pickup);
@@ -184,9 +230,46 @@
     if ((made && now - made > MAX_AGE_MS) || (upd && now - upd > STALE_MS)) return "This follow link has expired. Thanks for following along with PCS.";
     return "";
   }
+  /* v76f: live stream. Firebase REST streaming (EventSource on the SAME public .json read the poll uses; nothing new is
+     opened up). Each "put" / "patch" lands in about a second. If the stream errors 3 times, or the browser lacks
+     EventSource, the page falls back to reading every 1 s. While the stream is healthy the poll only checks on it. */
+  function setPath(root, path, data, merge) {
+    var segs = String(path || "/").split("/").filter(Boolean);
+    if (!segs.length) { if (!merge) return data; var o = root && typeof root === "object" ? Object.assign({}, root) : {}; Object.keys(data || {}).forEach(function (k) { if (data[k] === null) delete o[k]; else o[k] = data[k]; }); return o; }
+    var top = root && typeof root === "object" ? Object.assign({}, root) : {}, cur = top;
+    for (var i = 0; i < segs.length - 1; i += 1) { cur[segs[i]] = cur[segs[i]] && typeof cur[segs[i]] === "object" ? Object.assign({}, cur[segs[i]]) : {}; cur = cur[segs[i]]; }
+    var last = segs[segs.length - 1];
+    var v = merge ? setPath(cur[last], "/", data, true) : data;
+    if (v === null) delete cur[last]; else cur[last] = v;
+    return top;
+  }
+  function streamStop() { if (S.es) { try { S.es.close(); } catch (e) {} S.es = null; } }
+  function streamGot() {
+    S.streamAt = Date.now();
+    var d = S.raw, now = Date.now();
+    if (!d || typeof d !== "object") return;
+    var why = over(d, now);
+    if (why) { streamStop(); message("Ride ended", why, true); return; }
+    S.misses = 0; S.d = d; update(d);
+    if ($("fl-net")) setText("fl-net", "");
+  }
+  function stream() {
+    if (S.es || S.ended || S.noStream || typeof window.EventSource !== "function") return;
+    var es;
+    try { es = new window.EventSource(DB + "/rides/FLWSHARE/" + token + ".json"); } catch (e) { S.noStream = true; return; }
+    S.es = es;
+    function ev(merge) { return function (m) { try { var x = JSON.parse(m.data); if (!x || typeof x !== "object") return; S.raw = setPath(S.raw, x.path, x.data, merge); S.sErr = 0; streamGot(); } catch (e) {} }; }
+    es.addEventListener("put", ev(false));
+    es.addEventListener("patch", ev(true));
+    es.addEventListener("keep-alive", function () { S.streamAt = Date.now(); });
+    es.addEventListener("cancel", function () { S.noStream = true; streamStop(); });
+    es.addEventListener("auth_revoked", function () { S.noStream = true; streamStop(); });
+    es.onerror = function () { streamStop(); S.streamAt = 0; S.sErr = (S.sErr || 0) + 1; if (S.sErr >= 3) S.noStream = true; };
+  }
   function poll() {
     S.timer = 0;
     if (S.ended) return;
+    if (S.es && S.streamAt && Date.now() - S.streamAt < 40000) { S.timer = setTimeout(poll, 3000); return; } /* stream is live */
     if (document.visibilityState === "hidden") { S.timer = setTimeout(poll, POLL_MS); return; }
     fetch(DB + "/rides/FLWSHARE/" + token + ".json", { cache: "no-store" }).then(function (r) {
       if (r.status === 401 || r.status === 403) { var e = new Error("denied"); e.denied = true; throw e; }
@@ -196,15 +279,16 @@
       var now = Date.now();
       if (!d || typeof d !== "object") {
         S.misses += 1;
-        if (S.misses >= 12) { message("Follow the ride", "This follow link isn\u2019t active. Ask for a new link, or call PCS.", true); return; }
+        if (S.misses >= 60) { message("Follow the ride", "This follow link isn\u2019t active. Ask for a new link, or call PCS.", true); return; }
         if (!$("fl-live")) message("Follow the ride", "Getting the ride ready\u2026");
         S.timer = setTimeout(poll, POLL_MS); return;
       }
       S.misses = 0;
       var why = over(d, now);
       if (why) { message("Ride ended", why, true); return; }
-      S.d = d; update(d);
+      S.d = d; S.raw = d; update(d);
       if ($("fl-net")) setText("fl-net", "");
+      stream();
       S.timer = setTimeout(poll, POLL_MS);
     }).catch(function (e) {
       if (e && e.denied) { message("Follow the ride", "This follow link can\u2019t be opened right now. Please call PCS.", true); return; }
@@ -216,6 +300,6 @@
   document.addEventListener("visibilitychange", function () { if (document.visibilityState === "visible" && !S.ended && !S.timer) poll(); });
   (function qr() { var el = $("fw-qr"); if (!el || typeof window.qrcode !== "function") return; try { var x = window.qrcode(0, "M"); x.addData("https://www.PCSrides.com"); x.make(); el.innerHTML = x.createSvgTag(4, 0); } catch (e) {} })();
   setInterval(function () { if (S.d && !S.ended && $("fl-live")) { try { bigBox(S.d, Date.now(), /^(on_way|arrived|picked_up)$/.test(String(S.d.status))); } catch (e) {} } }, 15000);
-  window.__pcsFollowLive = { update: update, track: track, state: S, over: over, statusText: statusText };
+  window.__pcsFollowLive = { setPath: setPath, update: update, track: track, state: S, over: over, statusText: statusText };
   poll();
 })();
