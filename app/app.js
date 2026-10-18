@@ -154,6 +154,22 @@
   var METER_SPEED_STALE_MS = 25000;        /* v71: no fresh GPS speed for this long -> MPH shows "--" (never a made-up number) */
   var METER_RIDER_QR_SEC = 30;             /* "Watch your meter" QR shows this long at Start / "Show rider meter", then closes */
   var METER_VIEW_PATH = "../meter/";       /* rider live meter page, relative to app/app.js */
+  /* v76b (Matthew, Oct 17): METER TOLLS. Big "+ Toll $1.75" button on the running meter; each tap = one toll of
+     METER_TOLL_CENTS. Tap the toll line to change the LAST toll's amount (cash-register number pad: 3 5 0 = $3.50);
+     "Undo last toll" removes the last tap. Tolls are part of the fare before tax, so the 8.25% tax applies the same way as
+     the meter's other charges. They are added after the minimum / $0.25 steps / set fare and are never discounted.
+     Two kinds, picked per ride from the car:
+       "toll"     rentals, the van, every other driver's car = real tolls the driver paid: a pass-through, 100% to the driver
+                  as a reimbursement (pay week tollCents, like tips), kept OUT of the commission split.
+       "road_fee" Matthew's Disabled Veteran-plated Cadillac XT6 / Ford Edge / Ford Ranger (they pay $0 in tolls): labeled
+                  "Toll road fee"; fare income, the normal commission split applies (tollRoadFeeCents, its own report line).
+     The "This car pays tolls" switch is ON by default on every metered ride (Matthew, Oct 17, his own cars too); the driver
+     can switch it off for one ride. Hidden on prepaid (invoice) rides (balance $0). Quote page / booked rides: unchanged. */
+  var METER_TOLL_CENTS = 175;
+  var METER_TOLL_MAX = 30;                 /* taps per ride */
+  var METER_TOLL_MAX_CENTS = 5000;         /* one toll at most $50.00 */
+  var METER_DV_CARS = [[/cadillac/i, /xt\s*6/i], [/\bford\b/i, /edge/i], [/\bford\b/i, /ranger/i]];
+  var METER_OWNER_EXTRA_EMAILS = ["mwragge@pcsrides.com"]; /* Matthew's sign-ins besides OWNER_EMAILS */
   /* Airport bases = estimator app.js RATES (dollars→cents). Local base remains BASE_CENTS ($11). */
   var AIRPORT = {
     daytime: { drop: 1550, pick: 2500 },
@@ -9120,7 +9136,7 @@
     var leg = !!(ROLE === "driver" && schedNavTrip() && stage);
     var openB = document.getElementById("sched-fs-open"), top = document.getElementById("sched-fs-top"), bot = document.getElementById("sched-fs-bottom");
     if (!leg) {
-      if (openB) openB.remove(); if (top) top.remove(); if (bot) bot.remove();
+      if (openB) openB.remove(); if (top) top.remove(); if (bot) bot.remove(); if (stage) fsMphDrop(stage); /* v76b */
       if (stage && stage.classList.contains("pcs-fullmap")) { stage.classList.remove("pcs-fullmap"); document.body.style.overflow = ""; schedFullResize(); }
       return;
     }
@@ -9149,7 +9165,8 @@
         stage.appendChild(bot);
       }
       if (navTestOn()) navTestBottom(bot); /* v75y test flag */
-    } else { if (top) top.remove(); if (bot) bot.remove(); }
+      fsMphPlace(stage, (navTestOn() ? 262 : 172) + "px"); /* v76b: MPH badge */
+    } else { if (top) top.remove(); if (bot) bot.remove(); fsMphDrop(stage); }
     if (full !== was) {
       stage.classList.toggle("pcs-fullmap", full);
       document.body.style.overflow = full ? "hidden" : "";
@@ -9157,6 +9174,574 @@
       setTimeout(schedFullResize, 120);
       if (!full) { var card = document.getElementById("sched-trip"); if (card && card.scrollIntoView) try { card.scrollIntoView({ block: "start" }); } catch (e) {} }
     }
+  }
+  /* ---------- v76b (Matthew 10/17, his screenshots): SPEED on the full-screen map + FULL SCREEN during the ride ----------
+     1) A big MPH badge on the full-screen map in every phase. Same GPS speed math as the meter's MPH box (meterSpeedSample /
+        meterMphNow: phone GPS speed, else distance over ~12 s; "--" after 25 s without a fresh reading). On the way to the
+        pickup the same function runs on its own sample list (fsSpd); once the meter runs it reads the meter's own number.
+     2) After pickup (scheduled ride on the meter) and on any metered ride: a big "Full screen" button on the in-ride map.
+        Full screen = the SAME map (kept, never recreated), turn card on top, Heading up / Follow chips, and a slim bar at the
+        very bottom: fare (big), miles, time, rate, PAID if prepaid, "+ Toll $1.75" / Tolls line, big End ride + Close map.
+        The choice is remembered per ride and the last choice carries to the next ride. Nothing here touches fares or pay. */
+  var fsSpd = {}, fsSpdPts = [];
+  function fsSpeedOnGps(pos) {
+    if (ROLE !== "driver" || !pos || !pos.coords) return;
+    var M = state.meter;
+    if (M && M.status === "running") { fsMphPaint(); return; } /* the meter samples its own reading (same function) */
+    var lat = Number(pos.coords.latitude), lng = Number(pos.coords.longitude), acc = Number(pos.coords.accuracy);
+    if (!isCoord(lat) || !isCoord(lng) || (isFinite(acc) && acc > METER_MAX_ACCURACY_M)) return;
+    var keep = meterSpdPts; meterSpdPts = fsSpdPts;
+    try { meterSpeedSample(fsSpd, lat, lng, Date.now(), pos.coords.speed); } finally { fsSpdPts = meterSpdPts; meterSpdPts = keep; }
+    fsMphPaint();
+  }
+  function fsMphNow(now) { var M = state.meter; return M && M.status === "running" ? meterMphNow(M, now) : meterMphNow(fsSpd, now); }
+  function fsMphLabel(v) { return v === null ? "Speed: waiting for GPS" : "Speed " + v + " miles per hour"; }
+  function fsMphHtml() {
+    var v = fsMphNow();
+    return '<div id="fs-mph" class="fs-mph' + (v === null ? " is-none" : "") + '" role="status" aria-label="' + esc(fsMphLabel(v)) + '"><b id="fs-mph-num">' + (v === null ? "--" : v) + "</b><span>MPH</span></div>";
+  }
+  function fsMphPaint() {
+    if (typeof document === "undefined") return;
+    var el = document.getElementById("fs-mph"); if (!el) return;
+    var v = fsMphNow(), n = document.getElementById("fs-mph-num"), t = v === null ? "--" : String(v);
+    if (n && n.textContent !== t) n.textContent = t;
+    if (el.classList.contains("is-none") !== (v === null)) el.classList.toggle("is-none", v === null);
+    var a = fsMphLabel(v); if (el.getAttribute("aria-label") !== a) el.setAttribute("aria-label", a);
+  }
+  function fsMphPlace(stage, bottom) {
+    if (!stage) return;
+    fsStyle();
+    var el = document.getElementById("fs-mph");
+    if (el && el.parentNode !== stage) { el.remove(); el = null; }
+    if (!el) { stage.insertAdjacentHTML("beforeend", fsMphHtml()); el = document.getElementById("fs-mph"); if (el) navStopTouch(el); }
+    if (el && bottom) el.style.bottom = bottom;
+    fsMphPaint();
+  }
+  function fsMphDrop(stage) { var el = typeof document !== "undefined" ? document.getElementById("fs-mph") : null; if (el && (!stage || el.parentNode === stage)) el.remove(); }
+  function fsStyle() {
+    if (document.getElementById("pcs-fs76b-style")) return;
+    var st = document.createElement("style"); st.id = "pcs-fs76b-style";
+    st.textContent =
+      ".fs-mph{position:absolute;left:10px;bottom:172px;z-index:1003;min-width:86px;padding:6px 10px 5px;background:#fff;color:#0b3d23;border:3px solid #0b3d23;border-radius:16px;text-align:center;box-shadow:0 3px 10px rgba(0,0,0,.45);font-family:system-ui,-apple-system,sans-serif;pointer-events:none}" +
+      ".fs-mph b{display:block;font-size:40px;line-height:1;font-weight:900;color:#0b3d23;font-variant-numeric:tabular-nums}" +
+      ".fs-mph span{display:block;font-size:14px;font-weight:900;letter-spacing:.08em;color:#0b3d23;margin-top:2px}.fs-mph.is-none b{color:#4b5563}" +
+      "#meter-map-stage.pcs-rfs{position:fixed !important;left:0;right:0;top:0;bottom:0;width:100vw;height:100vh !important;height:100dvh !important;min-height:0 !important;margin:0 !important;z-index:2147481900;background:#0b3d23;border-radius:0}" +
+      "#meter-map-stage.pcs-rfs .map-caption{display:none}" +
+      "#meter-map-stage.pcs-rfs .meter-topstack{top:8px;top:calc(env(safe-area-inset-top,0px) + 8px)}" +
+      "#meter-map-stage.pcs-rfs .nav-toggle{bottom:calc(var(--rfs-bar,230px) + 12px) !important}#meter-map-stage.pcs-rfs .nav-recenter{bottom:calc(var(--rfs-bar,230px) + 58px) !important}" +
+      "#meter-map-stage.pcs-rfs #rfs-open{display:none}" +
+      "#rfs-open{position:absolute;left:8px;bottom:34px;z-index:1002;width:auto;min-height:52px;margin:0;padding:10px 16px;font-size:18px;font-weight:800;border-radius:12px;border:2px solid #0b3d23;background:#d1fae5;color:#0b3d23;box-shadow:0 2px 6px rgba(0,0,0,.35);cursor:pointer}" +
+      "#rfs-bar{position:absolute;left:0;right:0;bottom:0;z-index:1003;background:#f0fdf4;color:#0b3d23;border-top:4px solid #0b6b3a;border-radius:16px 16px 0 0;padding:8px 10px 18px;padding-bottom:calc(env(safe-area-inset-bottom,0px) + 18px);box-shadow:0 -4px 14px rgba(0,0,0,.45);font-family:system-ui,-apple-system,sans-serif}" +
+      "#rfs-bar *{box-sizing:border-box}.rfs-row{display:flex;align-items:center;gap:8px;margin:0 0 6px}" +
+      ".rfs-fare{flex:0 0 auto;font-size:38px;line-height:1;font-weight:900;color:#0b3d23;font-variant-numeric:tabular-nums}" +
+      ".rfs-stats{flex:1 1 auto;min-width:0;display:flex;flex-wrap:wrap;justify-content:flex-end;gap:4px 12px;font-size:17px;font-weight:800;color:#0b3d23}" +
+      ".rfs-stats b{font-size:21px;font-variant-numeric:tabular-nums}.rfs-tier{flex:1 0 100%;text-align:right;font-size:14px;font-weight:800;color:#14532d;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}" +
+      ".rfs-paid{margin:0 0 6px;background:#0b6b3a;color:#fff;border-radius:10px;padding:6px 10px;font-size:16px;font-weight:800;text-align:center}" +
+      ".rfs-toll{display:flex;gap:6px;margin:0 0 6px}#rfs-bar .rfs-toll-add{flex:1 1 50%;min-height:54px;margin:0;font-size:20px;font-weight:900;border-radius:12px;background:#bef1c6;color:#0b3d23;border:3px solid #2e9d4f;cursor:pointer}" +
+      "#rfs-bar .rfs-toll-line{flex:1 1 40%;min-height:54px;margin:0;font-size:15px;font-weight:800;border-radius:12px;background:#e8f8ec;color:#0b3d23;border:2px solid #2e9d4f;text-align:left;padding:4px 8px;cursor:pointer}" +
+      "#rfs-bar .rfs-toll-undo{flex:0 0 auto;min-height:54px;margin:0;font-size:15px;font-weight:800;border-radius:12px;background:#f3f4f6;color:#1a1a1a;border:2px solid #6b7280;padding:4px 10px;cursor:pointer}" +
+      ".rfs-actions{display:flex;gap:8px}#rfs-bar .rfs-end{flex:2 1 0;min-height:62px;margin:0;font-size:24px;font-weight:900;border-radius:14px;background:#8b1c1c;color:#fff;border:3px solid #5c0f0f;cursor:pointer}" +
+      "#rfs-bar .rfs-close{flex:1 1 0;min-height:62px;margin:0;font-size:20px;font-weight:900;border-radius:14px;background:#d1fae5;color:#0b3d23;border:3px solid #0b3d23;cursor:pointer}" +
+      "#rfs-bar .rfs-keep{flex:1 1 0;min-height:62px;margin:0;font-size:17px;font-weight:800;border-radius:14px;background:#fff;color:#0b3d23;border:3px solid #0b3d23;cursor:pointer}" +
+      ".rfs-ask{margin:0 0 6px;font-size:18px;font-weight:800;color:#0b3d23;text-align:center}" +
+      "body.pcs-rfs-body #pcs-sos-btn{z-index:2147482100 !important;bottom:auto !important;top:150px;top:calc(env(safe-area-inset-top,0px) + 150px)}";
+    document.head.appendChild(st);
+  }
+  /* in-ride full screen (metered ride / scheduled ride after pickup) */
+  var RFS_LAST_KEY = "pcs-ridefull-last";
+  function rfsKey(M) { return "pcs-ridefull-" + String(M && M.code || ""); }
+  function rfsRunning() { var M = state.meter; return ROLE === "driver" && !!M && M.status === "running" && !state.meterOpen && !state.hubOpen; }
+  function rfsOn() {
+    if (!rfsRunning()) return false;
+    var M = state.meter;
+    try { var v = localStorage.getItem(rfsKey(M)); if (v === null) v = localStorage.getItem(RFS_LAST_KEY); return v === "1"; } catch (e) { return state.rfsLeg === M.code; }
+  }
+  function rfsSet(on) {
+    var M = state.meter; if (!M) return;
+    state.rfsLeg = on ? M.code : "";
+    try { localStorage.setItem(rfsKey(M), on ? "1" : "0"); localStorage.setItem(RFS_LAST_KEY, on ? "1" : "0"); } catch (e) {}
+    rfsApply();
+    if (!on) { var p = document.getElementById("meter-running"); if (p && p.scrollIntoView) try { p.scrollIntoView({ block: "start" }); } catch (e) {} }
+  }
+  function rfsStage() { return typeof document === "undefined" ? null : document.getElementById("meter-map-stage"); }
+  function rfsResize() {
+    if (!liveMap) return;
+    var box = liveMap.getContainer(), stage = rfsStage();
+    if (!box || !stage || box.parentNode !== stage) return;
+    if (box.__navRot) { box.setAttribute("style", box.__navRot.css); box.__navRot = null; } /* heading-up re-sizes to the new stage below */
+    if (stage.classList.contains("pcs-rfs")) { if (box.__rfsH === undefined) box.__rfsH = box.style.height || ""; box.style.height = stage.clientHeight + "px"; }
+    else if (box.__rfsH !== undefined) { box.style.height = box.__rfsH; box.__rfsH = undefined; }
+    try { liveMap.invalidateSize(false); } catch (e) {}
+    try { if (window.PCSMaps && PCSMaps.resize) PCSMaps.resize(); } catch (e) {}
+    try { navApplyOrient(); } catch (e) {}
+    try { navPlaceMap(nav.lastBounds, true); } catch (e) {}
+  }
+  function rfsSig(M) {
+    var t = meterTollInfo(M), ed = meterTollEditable(M) && t.on;
+    return [state.meterConfirmEnd ? 1 : 0, ed ? 1 : 0, t.count, t.cents, t.kind, M.prepaid ? 1 : 0, M.tierLabel || "", state.meterBusy ? 1 : 0].join("|");
+  }
+  function rfsBarHtml(M) {
+    var f = meterFare(M), t = meterTollInfo(M), pp = M.prepaid;
+    var html = '<div class="rfs-row"><div class="rfs-fare" id="rfs-fare" aria-label="Meter fare">' + money(f.sub) + "</div>" +
+      '<div class="rfs-stats"><span><b id="rfs-miles">' + f.miles.toFixed(2) + "</b> mi</span><span><b id=\"rfs-time\">" + meterClock(Date.now() - M.startedAt) + "</b></span>" +
+      '<span class="rfs-tier" id="rfs-tier">' + esc(M.tierLabel || "Meter") + (M.taxRate ? " \u00b7 tax at the end" : "") + "</span></div></div>";
+    if (pp) html += '<p class="rfs-paid" id="rfs-paid">\u2713 ' + esc(prepaidBadgeText(pp)) + " \u00b7 balance $0.00</p>";
+    if (meterTollEditable(M) && t.on) {
+      html += '<div class="rfs-toll"><button type="button" class="rfs-toll-add" id="rfs-toll-add" data-rfs="toll">+ ' + (t.kind === "road_fee" ? "Toll road fee" : "Toll") + " " + money(METER_TOLL_CENTS) + "</button>" +
+        (t.count ? '<button type="button" class="rfs-toll-line" id="rfs-toll-line" data-rfs="tollline" aria-label="' + esc(t.label + " " + money(t.cents) + ". Tap to change the amount") + '">' + esc(t.label) + " <b>" + money(t.cents) + "</b></button>" +
+          '<button type="button" class="rfs-toll-undo" id="rfs-toll-undo" data-rfs="tollundo">Undo</button>' : "") + "</div>";
+    }
+    if (state.meterConfirmEnd) {
+      html += '<p class="rfs-ask" id="rfs-ask">End this ride? Meter ' + money(f.sub) + ".</p>" +
+        '<div class="rfs-actions"><button type="button" class="rfs-end" id="rfs-end-yes" data-rfs="endyes">Yes, end ride</button>' +
+        '<button type="button" class="rfs-keep" id="rfs-end-keep" data-rfs="endkeep">Keep the meter running</button></div>';
+    } else {
+      html += '<div class="rfs-actions"><button type="button" class="rfs-end" id="rfs-end" data-rfs="end"' + (state.meterBusy ? " disabled" : "") + ">End ride</button>" +
+        '<button type="button" class="rfs-close" id="rfs-close" data-rfs="close">Close map</button></div>';
+    }
+    return html;
+  }
+  function rfsBarClick(e) {
+    e.stopPropagation();
+    var b = e.target && e.target.closest ? e.target.closest("[data-rfs]") : null; if (!b || b.disabled) return;
+    var a = b.getAttribute("data-rfs");
+    if (a === "toll") meterTollAdd();
+    else if (a === "tollundo") meterTollUndo();
+    else if (a === "tollline") { rfsSet(false); meterTollEditOpen(); setTimeout(function () { var el = document.getElementById("meter-toll"); if (el && el.scrollIntoView) try { el.scrollIntoView({ block: "center" }); } catch (x) {} }, 60); }
+    else if (a === "end") { state.meterConfirmEnd = true; render(); }
+    else if (a === "endkeep") { state.meterConfirmEnd = false; render(); }
+    else if (a === "endyes") { b.disabled = true; meterEnd(); }
+    else if (a === "close") rfsSet(false);
+    rfsApply();
+  }
+  function rfsTick() {
+    var bar = document.getElementById("rfs-bar"), M = state.meter;
+    if (!bar || !M || M.status !== "running") return;
+    var f = meterFare(M), set = function (id, v) { var el = document.getElementById(id); if (el && el.textContent !== v) el.textContent = v; };
+    set("rfs-fare", money(f.sub)); set("rfs-miles", f.miles.toFixed(2)); set("rfs-time", meterClock(Date.now() - M.startedAt));
+    var h = bar.offsetHeight, stage = rfsStage();
+    if (stage && h && stage.__rfsBarH !== h) { stage.__rfsBarH = h; stage.style.setProperty("--rfs-bar", h + "px"); var mp = document.getElementById("fs-mph"); if (mp) mp.style.bottom = (h + 12) + "px"; }
+  }
+  function rfsApply() {
+    if (typeof document === "undefined" || !document.body) return;
+    var stage = rfsStage();
+    if (!stage || !rfsRunning()) {
+      if (stage) { ["rfs-open", "rfs-bar"].forEach(function (id) { var el = document.getElementById(id); if (el) el.remove(); }); fsMphDrop(stage); if (stage.classList.contains("pcs-rfs")) { stage.classList.remove("pcs-rfs"); rfsResize(); } }
+      if (document.body.classList.contains("pcs-rfs-body")) { document.body.classList.remove("pcs-rfs-body"); document.body.style.overflow = ""; }
+      return;
+    }
+    fsStyle();
+    var M = state.meter;
+    var open = document.getElementById("rfs-open");
+    if (!open) {
+      open = document.createElement("button"); open.type = "button"; open.id = "rfs-open"; open.textContent = "Full screen";
+      open.setAttribute("aria-label", "Full screen map with the meter at the bottom");
+      navStopTouch(open);
+      open.addEventListener("click", function (e) { e.stopPropagation(); rfsSet(true); });
+      stage.appendChild(open);
+    }
+    var full = rfsOn(), was = stage.classList.contains("pcs-rfs"), bar = document.getElementById("rfs-bar");
+    if (full) {
+      if (!bar) { bar = document.createElement("div"); bar.id = "rfs-bar"; bar.setAttribute("role", "region"); bar.setAttribute("aria-label", "Meter"); navStopTouch(bar); bar.addEventListener("click", rfsBarClick); stage.appendChild(bar); }
+      var sig = rfsSig(M);
+      if (bar.__sig !== sig) { bar.__sig = sig; bar.innerHTML = rfsBarHtml(M); }
+      fsMphPlace(stage, ((bar.offsetHeight || 230) + 12) + "px");
+    } else { if (bar) bar.remove(); fsMphDrop(stage); }
+    if (full !== was) {
+      stage.classList.toggle("pcs-rfs", full);
+      document.body.classList.toggle("pcs-rfs-body", full);
+      document.body.style.overflow = full ? "hidden" : "";
+      rfsResize();
+      setTimeout(rfsResize, 120);
+    }
+    if (full) rfsTick();
+  }
+  if (typeof window !== "undefined") {
+    window.__pcsRideFull = { on: function () { return rfsOn(); }, set: function (v) { rfsSet(!!v); }, apply: function () { rfsApply(); }, mph: function () { return fsMphNow(); },
+      sample: function (lat, lng, now, speed) { var keep = meterSpdPts; meterSpdPts = fsSpdPts; try { meterSpeedSample(fsSpd, lat, lng, now, speed); } finally { fsSpdPts = meterSpdPts; meterSpdPts = keep; } return meterMphNow(fsSpd, now); } }; /* test hooks */
+    setInterval(function () { try { fsMphPaint(); if (document.getElementById("rfs-bar")) { rfsApply(); } } catch (e) {} }, 1000);
+  }
+  /* ---------- v76b (Matthew 10/17): "Follow my ride" (rider) + "Text my client a tracking link" (driver, God mode) ----------
+     ONE read-only page: /follow/?t=<token>. The token is 24 random bytes (192-bit), base64url, 32 characters, never derived
+     from the ride. The page reads ONLY /rides/FLWSHARE/<token>: a small public copy that holds just what folClean lets
+     through: driver first name, car (year, make, model, color, plate), the car's point (only on the way / at the pickup /
+     during the ride), pickup + drop-off (address + point), the route line, ETA, status and times. Never the fare, payment,
+     card, rider phone / email, ride code or driver id. One link per ride: /rides/FLWRDMAP/<key> (r_<ride code> for app
+     rides, c_<calendar row id> for God-board rides) holds the token, so the rider, the driver and God mode share it.
+     The driver app keeps the copy live (every ~8 s while it changes). After complete / cancel the car point stops moving,
+     30 min later the apps wipe the copy down to { status: "ended" } and the page shows "This ride has ended". Stop sharing
+     wipes it at once (a new tap makes a new link). Plain sub-hubs like the rest of /rides: nothing to deploy today
+     (hardened rules are staged for the Auth switch). A read or write refused by the database hides these buttons. */
+  var FOL_HUB = "FLWSHARE", FOL_MAP_HUB = "FLWRDMAP";
+  var FOL_TOKEN_RE = /^[A-Za-z0-9_-]{32}$/;
+  var FOL_KEY_RE = /^(r_[A-Z0-9]{4,16}|c_[A-Za-z0-9_-]{1,80})$/;
+  var FOL_END_SHOW_MS = 30 * 60000, FOL_MAX_AGE_MS = 24 * 3600000, FOL_PUSH_MS = 8000, FOL_BEAT_MS = 30000, FOL_MAP_POLL_MS = 30000;
+  var FOL_MINE_KEY = "pcs-follow-mine-v1", FOL_DRAFT_KEY = "pcs-follow-draft-v1";
+  var FOL_STATUSES = { assigned: 1, on_way: 1, arrived: 1, picked_up: 1, completed: 1, cancelled: 1, ended: 1, stopped: 1 };
+  var fol = { map: {}, mapAt: {}, mapBusy: {}, lastPush: {}, lastSig: {}, lastSt: {}, off: false };
+  function folNewToken() {
+    var c = typeof window !== "undefined" && (window.crypto || window.msCrypto);
+    if (!c || !c.getRandomValues || typeof btoa !== "function") return "";
+    var b = new Uint8Array(24), s = "", i;
+    c.getRandomValues(b);
+    for (i = 0; i < b.length; i += 1) s += String.fromCharCode(b[i]);
+    return btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  }
+  function folNodeUrl(t) { return databaseURL() + "/rides/" + FOL_HUB + "/" + t + ".json"; }
+  function folMapUrl(k) { return databaseURL() + "/rides/" + FOL_MAP_HUB + "/" + encodeURIComponent(k) + ".json"; }
+  function folLink(t) { try { return new URL("../follow/?t=" + t, APP_SCRIPT_SRC || window.location.href).href; } catch (e) { return ""; } }
+  function folTxt(v, n) { return String(v == null ? "" : v).replace(/[\u0000-\u001f\u007f<>]/g, " ").replace(/\s+/g, " ").trim().slice(0, n || 60); }
+  function folFirst(name) {
+    var w = String(name || "").trim().split(/\s+/)[0] || "";
+    return /^[A-Za-z][A-Za-z'.-]{0,30}$/.test(w) ? w.charAt(0).toUpperCase() + w.slice(1) : "";
+  }
+  function folPt(lat, lng, label) {
+    if (!isCoord(lat) || !isCoord(lng)) return null;
+    var la = +lat, ln = +lng;
+    if (Math.abs(la) > 90 || Math.abs(ln) > 180 || (la === 0 && ln === 0)) return null;
+    var p = { lat: Math.round(la * 1e4) / 1e4, lng: Math.round(ln * 1e4) / 1e4 }, l = folTxt(label, 120);
+    if (l) p.label = l;
+    return p;
+  }
+  function folPlace(o) {
+    if (!o) return null;
+    var p = folPt(o.lat, o.lng, o.label);
+    if (p) return p;
+    var l = folTxt(o.label, 120);
+    return l ? { label: l } : null;
+  }
+  function folRoute(line) {
+    if (!Array.isArray(line) || line.length < 2) return null;
+    var n = line.length, step = Math.max(1, Math.ceil(n / 80)), out = [], i;
+    var add = function (p) { var la = p && (p.lat != null ? p.lat : p[0]), ln = p && (p.lng != null ? p.lng : p[1]);
+      if (isCoord(la) && isCoord(ln) && Math.abs(+la) <= 90 && Math.abs(+ln) <= 180) out.push([Math.round(+la * 1e5) / 1e5, Math.round(+ln * 1e5) / 1e5]); };
+    for (i = 0; i < n; i += step) add(line[i]);
+    if ((n - 1) % step) add(line[n - 1]);
+    return out.length >= 2 ? out.slice(0, 90) : null;
+  }
+  function folCar(src) {
+    src = src || {};
+    var c = { make: folTxt(src.carMake, 30), model: folTxt(src.carModel, 30), color: folTxt(src.carColor, 20),
+      year: /^\d{4}$/.test(String(src.carYear || "")) ? String(src.carYear) : "", plate: folTxt(normalizePlate(src.carPlate), 12) };
+    Object.keys(c).forEach(function (k) { if (!c[k]) delete c[k]; });
+    return c.make || c.model || c.plate ? c : null;
+  }
+  /* The ONLY fields that ever reach the public copy. Add nothing here without a privacy review (Harry). */
+  function folClean(o, now) {
+    o = o || {}; now = now || Date.now();
+    var st = FOL_STATUSES[o.status] ? o.status : "assigned";
+    var live = st === "on_way" || st === "arrived" || st === "picked_up", done = st === "completed" || st === "cancelled";
+    var out = { v: 1, status: st, kind: o.kind === "sched" ? "sched" : "app", updatedAt: now };
+    if (st === "ended" || st === "stopped") { out.endedAt = Number(o.endedAt) || now; return out; }
+    var df = folFirst(o.driverName); if (df) out.driverFirst = df;
+    var car = folCar(o.car); if (car) out.car = car;
+    var pk = folPlace(o.pickup); if (pk) out.pickup = pk;
+    var dr = folPlace(o.dest); if (dr) out.dest = dr;
+    if ((live || done) && o.pos) { var p = folPt(o.pos.lat, o.pos.lng); if (p) { p.at = Math.round(Number(o.pos.at) || now); out.pos = p; } }
+    if (live && o.eta && isFinite(+o.eta.min) && isFinite(+o.eta.miles)) { out.eta = { min: Math.max(0, Math.round(+o.eta.min)), miles: Math.max(0, Math.round(+o.eta.miles * 10) / 10), to: o.eta.to === "dest" ? "dest" : "pickup" }; out.etaAt = now; }
+    if (live) { var r = folRoute(o.route); if (r) out.route = r; }
+    if (done) out.endedAt = Number(o.endedAt) || now;
+    if (Number(o.createdAt) > 0) out.createdAt = Math.round(Number(o.createdAt));
+    return out;
+  }
+  function folMine() { try { var o = JSON.parse(localStorage.getItem(FOL_MINE_KEY) || "{}"); return o && typeof o === "object" ? o : {}; } catch (e) { return {}; } }
+  function folMineSave(o) { try { localStorage.setItem(FOL_MINE_KEY, JSON.stringify(o)); } catch (e) {} }
+  function folMineNote(t, k, patch) {
+    if (!FOL_TOKEN_RE.test(t || "")) return {};
+    var o = folMine();
+    o[t] = Object.assign(o[t] || { k: k, at: Date.now() }, patch || {});
+    folMineSave(o);
+    return o[t];
+  }
+  function folWrite(url, method, body) {
+    if (!syncOn()) return Promise.resolve(false);
+    return authFetch(url, { method: method, headers: { "Content-Type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) })
+      .then(function (r) { if (r.status === 401 || r.status === 403) { fol.off = true; folRedraw(); } return !!r.ok; })
+      .catch(function () { return false; });
+  }
+  function folWipe(t, why) {
+    var now = Date.now();
+    return folWrite(folNodeUrl(t), "PUT", { v: 1, status: why === "stopped" ? "stopped" : "ended", endedAt: now, updatedAt: now });
+  }
+  function folMapLoad(k, force) {
+    if (!FOL_KEY_RE.test(k || "") || !syncOn() || fol.off || typeof fetch !== "function") return;
+    if (fol.mapBusy[k] || (!force && fol.mapAt[k] && Date.now() - fol.mapAt[k] < FOL_MAP_POLL_MS)) return;
+    fol.mapBusy[k] = true;
+    authFetch(folMapUrl(k)).then(function (r) {
+      if (r.status === 401 || r.status === 403) { fol.off = true; return undefined; }
+      if (!r.ok) throw new Error("map");
+      return r.json();
+    }).then(function (d) {
+      fol.mapBusy[k] = false;
+      if (d === undefined) { folRedraw(); return; }
+      var before = JSON.stringify(fol.map[k] || null);
+      fol.map[k] = d && FOL_TOKEN_RE.test(String(d.t || "")) ? { t: String(d.t), at: Number(d.at) || 0 } : { t: "" };
+      fol.mapAt[k] = Date.now();
+      if (JSON.stringify(fol.map[k]) !== before) folRedraw();
+    }).catch(function () { fol.mapBusy[k] = false; fol.mapAt[k] = Date.now() - FOL_MAP_POLL_MS + 5000; });
+  }
+  function folTokenFor(k) { var m = fol.map[k]; return m && m.t ? m.t : ""; }
+  /* a stable not-yet-used token per ride on this phone, so the text link is ready the moment the button is drawn */
+  function folDraft(k) {
+    var o = {}, now = Date.now();
+    try { o = JSON.parse(localStorage.getItem(FOL_DRAFT_KEY) || "{}") || {}; } catch (e) { o = {}; }
+    Object.keys(o).forEach(function (x) { if (!o[x] || now - (o[x].at || 0) > FOL_MAX_AGE_MS) delete o[x]; });
+    var d = o[k];
+    if (!d || !FOL_TOKEN_RE.test(String(d.t || ""))) { var t = folNewToken(); if (!FOL_TOKEN_RE.test(t)) return ""; d = o[k] = { t: t, at: now }; }
+    try { localStorage.setItem(FOL_DRAFT_KEY, JSON.stringify(o)); } catch (e) {}
+    return d.t;
+  }
+  function folDraftDrop(k) { try { var o = JSON.parse(localStorage.getItem(FOL_DRAFT_KEY) || "{}") || {}; delete o[k]; localStorage.setItem(FOL_DRAFT_KEY, JSON.stringify(o)); } catch (e) {} }
+  /* make t the live link for ride k: the map row + the first public copy */
+  function folCommit(k, t, role, ctx) {
+    if (!FOL_KEY_RE.test(k || "") || !FOL_TOKEN_RE.test(t || "")) return Promise.resolve(false);
+    var now = Date.now();
+    fol.map[k] = { t: t, at: now }; fol.mapAt[k] = now;
+    folMineNote(t, k, { role: role, at: now });
+    folDraftDrop(k);
+    fol.lastPush[t] = now; fol.lastSt[t] = ctx && ctx.status || "";
+    folWrite(folMapUrl(k), "PUT", { t: t, at: now, by: role === "rider" ? "rider" : role === "god" ? "god" : "driver" });
+    var c = folClean(Object.assign({}, ctx || {}, { createdAt: now }), now);
+    fol.lastSig[t] = folSig(c);
+    return folWrite(folNodeUrl(t), "PUT", c);
+  }
+  function folStop(k) {
+    var t = folTokenFor(k);
+    fol.map[k] = { t: "" }; fol.mapAt[k] = Date.now();
+    if (t) { folWipe(t, "stopped"); folMineNote(t, k, { endedAt: Date.now(), wiped: true }); }
+    folWrite(folMapUrl(k), "DELETE");
+    folRedraw();
+  }
+  function folSig(c) { return JSON.stringify([c.status, c.pos ? [c.pos.lat, c.pos.lng] : 0, c.eta || 0, c.pickup || 0, c.dest || 0, c.car || 0, c.driverFirst || "", c.route ? c.route.length + ":" + c.route[c.route.length - 1] : 0]); }
+  function folHere() {
+    if (!isCoord(state.hereLat) || !isCoord(state.hereLng)) return null;
+    var at = Number(state.gpsAt) || 0;
+    return at && Date.now() - at <= 90000 ? { lat: +state.hereLat, lng: +state.hereLng, at: at } : null;
+  }
+  function folStraight(a, b, to) {
+    if (!a || !b || !isCoord(a.lat) || !isCoord(b.lat)) return null;
+    var mi = haversineMi(+a.lat, +a.lng, +b.lat, +b.lng) * 1.3; /* same fallback as the meter: straight line x1.3 at 30 mph */
+    return { to: to, miles: mi, min: Math.max(1, Math.round(mi * 2)) };
+  }
+  function folMyId(r) { return String(r && r.assignedDriverId || "").toLowerCase().replace(/[^a-z0-9]/g, "_").replace(/^_+|_+$/g, "").slice(0, 48); }
+  /* every ride this driver can share: God-board rides assigned to me (any phase) + the app ride on screen */
+  function folDriverCtxs() {
+    if (ROLE !== "driver" || fol.off || !syncOn()) return [];
+    var out = [], me = driverPresenceId(), M = state.meter, trip = schedTripNow(), here = folHere();
+    var acc = readDriverAccount() || {};
+    var base = { driverName: acc.name || state.driverName || "", car: acc };
+    (state.scheduledRides || []).forEach(function (r) {
+      if (!r || !r.id || folMyId(r) !== me || !FOL_KEY_RE.test("c_" + r.id)) return;
+      var st = r.status === "cancelled" || r.status === "deleted" ? "cancelled" : r.status === "completed" ? "completed" : "assigned";
+      var onMeter = !!(M && M.schedId === r.id);
+      if (onMeter) st = M.status === "running" ? "picked_up" : "completed";
+      else if (trip && trip.id === r.id && st === "assigned") st = trip.phase === "arrived" ? "arrived" : "on_way";
+      var pickup = { lat: r.pickupLat, lng: r.pickupLng, label: r.pickup }, dest = { lat: r.dropoffLat, lng: r.dropoffLng, label: r.dropoff };
+      if (onMeter && M.dest && isCoord(M.dest.lat)) dest = { lat: M.dest.lat, lng: M.dest.lng, label: [M.dest.label, M.dest.sub].filter(Boolean).join(", ") || r.dropoff };
+      var eta = null, route = null;
+      if (st === "on_way") {
+        var R = schedNavRoute;
+        if (R && R.id === r.id && here && R.line) { var mi = navRemain(R.line, here); if (mi != null) { eta = { to: "pickup", miles: mi, min: R.miles > 0 ? Math.max(1, Math.round(R.minutes * Math.min(1, mi / R.miles))) : Math.max(1, Math.round(mi * 2)) }; route = R.line; } }
+        if (!eta) eta = folStraight(here, folPt(r.pickupLat, r.pickupLng), "pickup");
+      } else if (st === "picked_up") {
+        var e = meterEtaInfo(M);
+        if (e && !e.pending) eta = { to: "dest", miles: e.miles, min: e.min };
+        if (meterRoute && meterRoute.line) route = meterRoute.line;
+      }
+      out.push(Object.assign({ key: "c_" + r.id, kind: "sched", status: st, phone: r.riderPhone, pickup: pickup, dest: dest, eta: eta, route: route, pos: here }, base));
+    });
+    var code = state.screen === "trip" ? String(state.driverCode || readDriverCode() || "") : "";
+    if (code && FOL_KEY_RE.test("r_" + code)) {
+      var rs = String(state.rideStatus || "").toLowerCase();
+      var st2 = rs === "started" ? "picked_up" : rs === "completed" ? "completed" : rs === "cancelled" ? "cancelled" : "on_way";
+      var pk = placeCoords("pickup"), dr = placeCoords("drop");
+      out.push(Object.assign({ key: "r_" + code, kind: "app", status: st2, phone: state.phone,
+        pickup: { lat: pk && pk.lat, lng: pk && pk.lng, label: pickupLine() }, dest: { lat: dr && dr.lat, lng: dr && dr.lng, label: dropLine() },
+        eta: st2 === "on_way" ? folStraight(here, pk, "pickup") : st2 === "picked_up" ? folStraight(here, dr, "dest") : null, route: null, pos: here }, base));
+    }
+    return out;
+  }
+  function folDriverCtx(k) { var cs = folDriverCtxs(), i; for (i = 0; i < cs.length; i += 1) if (cs[i].key === k) return cs[i]; return null; }
+  function folPush(t, c, now, role) {
+    var done = c.status === "completed" || c.status === "cancelled";
+    var m = folMine()[t] || null;
+    if (m && (m.wiped || (done && m.endedAt))) return; /* the final copy is out; the sweep wipes it 30 min later */
+    var snap = folClean(Object.assign({}, c, { createdAt: m && m.at }), now), sig = folSig(snap);
+    var changed = fol.lastSt[t] !== snap.status;
+    if (!changed && !done) {
+      var since = now - (fol.lastPush[t] || 0);
+      if (since < FOL_PUSH_MS || (fol.lastSig[t] === sig && since < FOL_BEAT_MS)) return;
+    }
+    fol.lastPush[t] = now; fol.lastSig[t] = sig; fol.lastSt[t] = snap.status;
+    folMineNote(t, c.key, Object.assign({ role: (m && m.role) || role, seenAt: now, last: snap.status }, done ? { endedAt: now } : {}));
+    if (role === "rider") { /* the rider phone only refreshes what it knows: status + the car point it sees */
+      var p = { status: snap.status, updatedAt: now };
+      if (snap.pos) p.pos = snap.pos;
+      if (snap.endedAt) p.endedAt = snap.endedAt;
+      folWrite(folNodeUrl(t), "PATCH", p);
+    } else folWrite(folNodeUrl(t), "PUT", snap);
+  }
+  function folDriverTick() {
+    var now = Date.now(), seen = {};
+    folDriverCtxs().forEach(function (c) {
+      folMapLoad(c.key, false);
+      var t = folTokenFor(c.key);
+      if (!t) return;
+      seen[t] = 1;
+      folPush(t, c, now, "driver");
+    });
+    if (ROLE !== "driver") return;
+    var o = folMine(), ch = false;
+    Object.keys(o).forEach(function (t) { /* a ride that left this phone (Done / back to the list): close its copy */
+      var m = o[t];
+      if (!m || m.wiped || m.endedAt || seen[t] || m.role === "rider" || now - (m.seenAt || m.at || 0) < 120000) return;
+      m.endedAt = now; ch = true;
+      folWrite(folNodeUrl(t), "PATCH", { status: m.last === "picked_up" || m.last === "completed" ? "completed" : "ended", endedAt: now, updatedAt: now });
+    });
+    if (ch) folMineSave(o);
+  }
+  function folRiderCtx() {
+    if (ROLE !== "customer" || !state.code || !FOL_KEY_RE.test("r_" + state.code)) return null;
+    var rs = String(state.rideStatus || "").toLowerCase();
+    if (["accepted", "started", "completed", "cancelled"].indexOf(rs) < 0) return null;
+    var pk = placeCoords("pickup"), dr = placeCoords("drop"), d = savedDriverPoint();
+    var fresh = d && (!state.driverLocAt || Date.now() - Number(state.driverLocAt) <= 120000);
+    return { key: "r_" + state.code, kind: "app", status: rs === "started" ? "picked_up" : rs === "accepted" ? "on_way" : rs,
+      driverName: state.driverName, car: { carYear: state.driverCarYear, carMake: state.driverCarMake, carModel: state.driverCarModel, carPlate: state.driverCarPlate },
+      pickup: { lat: pk && pk.lat, lng: pk && pk.lng, label: pickupLine() }, dest: { lat: dr && dr.lat, lng: dr && dr.lng, label: dropLine() },
+      pos: fresh ? { lat: d.lat, lng: d.lng, at: Number(state.driverLocAt) || Date.now() } : null };
+  }
+  function folRiderTick() {
+    var c = folRiderCtx(); if (!c) return;
+    folMapLoad(c.key, false);
+    var t = folTokenFor(c.key);
+    if (t && folMine()[t]) folPush(t, c, Date.now(), "rider"); /* only the phone that shared keeps it fresh */
+  }
+  function folSweep() {
+    var o = folMine(), now = Date.now(), ch = false;
+    Object.keys(o).forEach(function (t) {
+      var m = o[t];
+      if (!FOL_TOKEN_RE.test(t) || !m) { delete o[t]; ch = true; return; }
+      if (m.wiped) { if (now - (m.endedAt || m.at || 0) > 2 * FOL_MAX_AGE_MS) { delete o[t]; ch = true; } return; }
+      if (now - (m.at || 0) > FOL_MAX_AGE_MS || (m.endedAt && now - m.endedAt > FOL_END_SHOW_MS)) {
+        folWipe(t, "ended"); m.wiped = true; m.endedAt = m.endedAt || now; ch = true;
+        if (m.k && FOL_KEY_RE.test(m.k)) authFetch(folMapUrl(m.k)).then(function (r) { return r.ok ? r.json() : null; }).then(function (d) {
+          if (d && d.t === t) { folWrite(folMapUrl(m.k), "DELETE"); if (fol.map[m.k] && fol.map[m.k].t === t) fol.map[m.k] = { t: "" }; }
+        }).catch(function () {});
+      }
+    });
+    if (ch) folMineSave(o);
+  }
+  function folPhoneE164(raw) {
+    var d = String(raw || "").replace(/\D/g, "");
+    if (d.length === 11 && d.charAt(0) === "1") d = d.slice(1);
+    return d.length === 10 && /^[2-9]/.test(d) ? "+1" + d : "";
+  }
+  function folPhoneShow(e) { var d = String(e || "").replace(/\D/g, "").slice(-10); return d.length === 10 ? "(" + d.slice(0, 3) + ") " + d.slice(3, 6) + "-" + d.slice(6) : ""; }
+  function folSmsHref(phone, body) { return "sms:" + folPhoneE164(phone) + "?&body=" + encodeURIComponent(body); }
+  function folDriverMsg(link, name) {
+    var f = folFirst(name);
+    return "Your PCS driver " + (f ? f + " " : "") + "is on the way. Follow along live: " + link + " - www.PCSrides.com";
+  }
+  function folRiderMsg(link) { return "Follow my PCS ride live: " + link + " - www.PCSrides.com"; }
+  function folStyle() {
+    if (typeof document === "undefined" || document.getElementById("pcs-fol-style")) return;
+    var st = document.createElement("style"); st.id = "pcs-fol-style";
+    st.textContent =
+      ".fol-big{display:block;width:100%;min-height:60px;margin:8px 0 4px;padding:12px 10px;box-sizing:border-box;font-size:21px;font-weight:900;line-height:1.2;text-align:center;text-decoration:none;" +
+      "border-radius:14px;background:#bef1c6 !important;color:#0b3d23 !important;-webkit-text-fill-color:#0b3d23;border:3px solid #2e9d4f !important;cursor:pointer}" +
+      ".fol-big[disabled]{opacity:.75}.fol-big:active{background:#8fd0a8 !important}" +
+      ".fol-btn2{display:inline-block;width:auto;min-height:48px;margin:4px 6px 4px 0;padding:8px 14px;font-size:16px;font-weight:800;text-decoration:none;border-radius:12px;background:#e8f8ec !important;color:#0b3d23 !important;-webkit-text-fill-color:#0b3d23;border:2px solid #2e9d4f !important;cursor:pointer;line-height:30px}" +
+      ".fol-note{margin:2px 0 6px;font-size:13.5px;line-height:1.35}.fol-card{border:2px solid #2e9d4f}.fol-msg{font-size:14px;font-weight:700;margin:4px 0;word-break:break-all}" +
+      ".fol-drv{margin:6px 0}";
+    document.head.appendChild(st);
+  }
+  function folDriverInner(k, phone, name) {
+    folStyle();
+    if (!fol.mapAt[k]) return '<button type="button" class="fol-big" disabled>Getting the tracking link ready\u2026</button>';
+    var live = folTokenFor(k), t = live || folDraft(k);
+    if (!t) return "";
+    var e = folPhoneE164(phone);
+    return '<a class="fol-big fol-sms" data-fol-act="dsms" data-fol-key="' + esc(k) + '" data-fol-tok="' + esc(t) + '" href="' + esc(folSmsHref(phone, folDriverMsg(folLink(t), name))) + '">Text my client a tracking link</a>' +
+      '<p class="fol-note">' + (e ? "Opens Messages to " + esc(folPhoneShow(e)) + ". You press Send." : "Opens Messages. Type the client\u2019s number, then press Send.") +
+      " They see your car and ETA on a map, nothing to download. Fare and payment stay private." + (live ? " This link is live." : "") + "</p>" +
+      (live ? '<button type="button" class="fol-btn2" data-fol-act="stop" data-fol-key="' + esc(k) + '">Stop the tracking link</button>' : "");
+  }
+  function folDriverBtnHtml(k, phone) {
+    if (ROLE !== "driver" || fol.off || !syncOn() || !FOL_KEY_RE.test(k || "")) return "";
+    folMapLoad(k, false);
+    var acc = readDriverAccount() || {}, name = acc.name || state.driverName || "";
+    return '<div class="fol-drv" data-fol-box="' + esc(k) + '" data-fol-role="driver" data-fol-phone="' + esc(String(phone || "")) + '">' + folDriverInner(k, phone, name) + "</div>";
+  }
+  function folRiderInner(c) {
+    folStyle();
+    var k = c.key, live = folTokenFor(k);
+    if (!fol.mapAt[k]) return '<button type="button" class="fol-big" disabled>Getting your follow link ready\u2026</button>';
+    var url = live ? folLink(live) : "";
+    return '<button type="button" class="fol-big" id="fol-share" data-fol-act="share" data-fol-key="' + esc(k) + '">Follow my ride</button>' +
+      '<p class="fol-note">Send a loved one a live link: they see your driver, the car and the ETA on a map until you arrive. Your fare, card and phone number stay private.</p>' +
+      (live ? '<div class="fol-alt" id="fol-alt"><a class="fol-btn2" id="fol-sms" href="' + esc("sms:?&body=" + encodeURIComponent(folRiderMsg(url))) + '">Send by text</a>' +
+        '<button type="button" class="fol-btn2" id="fol-copy" data-fol-act="copy" data-fol-key="' + esc(k) + '">Copy link</button>' +
+        '<button type="button" class="fol-btn2" id="fol-stop" data-fol-act="stop" data-fol-key="' + esc(k) + '">Stop sharing</button>' +
+        '<p class="fol-msg" id="fol-msg" role="status">' + esc(state.folMsg || "") + "</p></div>" : "");
+  }
+  function folRiderHtml() {
+    var c = folRiderCtx();
+    if (!c || fol.off || !syncOn() || c.status === "completed" || c.status === "cancelled") return "";
+    folMapLoad(c.key, false);
+    return '<div class="card fol-card" id="fol-rider-box" data-fol-box="' + esc(c.key) + '" data-fol-role="rider">' + folRiderInner(c) + "</div>";
+  }
+  function folRedraw() {
+    if (typeof document === "undefined") return;
+    Array.prototype.forEach.call(document.querySelectorAll("[data-fol-box]"), function (el) {
+      var k = el.getAttribute("data-fol-box"), role = el.getAttribute("data-fol-role"), h;
+      if (fol.off) { el.remove(); return; }
+      if (role === "rider") { var c = folRiderCtx(); h = c && c.key === k ? folRiderInner(c) : ""; }
+      else { var acc = readDriverAccount() || {}; h = folDriverInner(k, el.getAttribute("data-fol-phone"), acc.name || state.driverName || ""); }
+      if (el.__h !== h && el.innerHTML !== h) { el.innerHTML = h; }
+      el.__h = h;
+    });
+  }
+  function folOnClick(e) {
+    var b = e.target && e.target.closest ? e.target.closest("[data-fol-act]") : null;
+    if (!b) return;
+    var a = b.getAttribute("data-fol-act"), k = b.getAttribute("data-fol-key");
+    if (!FOL_KEY_RE.test(k || "")) return;
+    if (a === "dsms") { /* the link opens Messages by itself (the driver presses Send); here we only make the link live */
+      var t = b.getAttribute("data-fol-tok");
+      if (FOL_TOKEN_RE.test(t || "") && folTokenFor(k) !== t) folCommit(k, t, "driver", folDriverCtx(k) || { status: "assigned" });
+      setTimeout(folRedraw, 400);
+      return;
+    }
+    e.preventDefault();
+    if (a === "stop") { folStop(k); state.folMsg = ""; return; }
+    if (a === "copy") {
+      var u = folLink(folTokenFor(k));
+      var done = function (msg) { state.folMsg = msg; folRedraw(); };
+      if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(u).then(function () { done("Link copied."); }, function () { done(u); });
+      else done(u);
+      return;
+    }
+    if (a === "share") {
+      var c = folRiderCtx(); if (!c || c.key !== k) return;
+      var tok = folTokenFor(k) || folDraft(k);
+      if (!tok) return;
+      if (folTokenFor(k) !== tok) folCommit(k, tok, "rider", c);
+      var url = folLink(tok);
+      state.folMsg = "";
+      if (navigator.share) navigator.share({ title: "Follow my PCS ride", text: folRiderMsg(url), url: url }).catch(function () {});
+      else if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(url).then(function () { state.folMsg = "Link copied. Paste it in a text to your loved one."; folRedraw(); }, function () {});
+      folRedraw();
+    }
+  }
+  if (typeof document !== "undefined") document.addEventListener("click", folOnClick);
+  if (typeof window !== "undefined") {
+    setInterval(function () { try { if (ROLE === "driver") folDriverTick(); else folRiderTick(); } catch (e) {} }, 4000);
+    setInterval(function () { try { folSweep(); } catch (e) {} }, 60000);
+    setTimeout(function () { try { folSweep(); } catch (e) {} }, 5000);
+    window.__pcsFollow = { clean: folClean, token: folNewToken, link: folLink, sms: folSmsHref, msg: folDriverMsg, riderMsg: folRiderMsg, e164: folPhoneE164,
+      ctxs: function () { return folDriverCtxs(); }, rider: function () { return folRiderCtx(); }, state: fol, tick: function () { if (ROLE === "driver") folDriverTick(); else folRiderTick(); },
+      sweep: function () { folSweep(); }, mine: folMine, route: folRoute }; /* test hooks */
   }
   if (typeof window !== "undefined" && typeof location !== "undefined") try { var ntq = /[?&]navtest=([01])\b/.exec(location.search || ""); if (ntq) { if (ntq[1] === "1") localStorage.setItem(NAVTEST_KEY, "1"); else localStorage.removeItem(NAVTEST_KEY); } } catch (e) {} /* v75y */
   if (typeof window !== "undefined") window.__pcsSchedFull = { key: schedFullKey, on: function () { return schedFullOn(); }, set: function (v) { schedFullSet(v); }, apply: function () { schedFullApply(); } }; /* test hook */
@@ -9504,6 +10089,7 @@
           '<button type="button" data-sched-edit="stop" data-sched-id="' + esc(r.id) + '" style="' + SCHED_BTN_2 + ';flex:1">' + (st ? "Change stop" : "Add a stop") + "</button></div>") +
         schedEditHtml(r) +
         (state.schedMsg && state.schedMsgId === r.id ? '<p role="status" style="margin:6px 0;color:#7c2d12;font-weight:700">' + esc(state.schedMsg) + "</p>" : "") +
+        folDriverBtnHtml("c_" + r.id, r.riderPhone) + /* v76b: Text my client a tracking link */
         '<div class="row-actions" style="display:block">' + actions + "</div>" +
         '<p style="margin:6px 0 0;color:#374151;font-size:13px">Assigned by PCS. ' + (r.prepaid ? "This ride is paid on a Square invoice." : meterSetFareOk(r) ? "This ride charges the PCS set fare." : "The meter charges for where the rider actually gets out.") + " Completing credits your Mon\u2013Sun commission week" + (r.prepaid ? (r.prepaidAmountCents != null ? " from the invoice amount " + money(r.prepaidAmountCents) : " from the meter fare") : "") + ".</p>" +
         "</article>"
@@ -10089,7 +10675,8 @@
         completed: Number(row.completed) || 0,
         commissionCents: Number(row.commissionCents) || 0,
         rideTotalCents: Number(row.rideTotalCents) || 0,
-        tipCents: Number(row.tipCents) || 0 /* v70: metered-ride tips (100% to the driver) */
+        tipCents: Number(row.tipCents) || 0, /* v70: metered-ride tips (100% to the driver) */
+        tollCents: Number(row.tollCents) || 0 /* v76b: metered-ride tolls paid back (100% to the driver) */
       };
     } catch (err) {
       return { requested: 0, completed: 0, commissionCents: 0, rideTotalCents: 0, tipCents: 0 };
@@ -10143,8 +10730,8 @@
   function hubDayStats(day) {
     var local = readDayStats(day), rides = ridesForDay(day);
     if (!rides.length) return local;
-    var st = { requested: local.requested, completed: rides.length, commissionCents: 0, rideTotalCents: 0, tipCents: 0 };
-    rides.forEach(function (e) { st.commissionCents += Number(e.commissionCents) || 0; st.rideTotalCents += Number(e.fareTotal) || 0; st.tipCents += Number(e.tipCents) || 0; });
+    var st = { requested: local.requested, completed: rides.length, commissionCents: 0, rideTotalCents: 0, tipCents: 0, tollCents: 0 };
+    rides.forEach(function (e) { st.commissionCents += Number(e.commissionCents) || 0; st.rideTotalCents += Number(e.fareTotal) || 0; st.tipCents += Number(e.tipCents) || 0; st.tollCents += Number(e.tollCents) || 0; });
     return st;
   }
 
@@ -11483,6 +12070,7 @@
           : waitingStatusBlock(near || state.driverName ? "Driver on the way" : "Drivers are available"))) +
       driverIdentityLine() +
       driverEtaLine() +
+      folRiderHtml() + /* v76b: Follow my ride */
       (state.rideStatus === "accepted" && syncOn() && navigator.geolocation
         ? '<p class="fine" id="rider-share-note">&#128205; Sharing your location with your driver until pickup so they can find you.</p>'
         : "") +
@@ -12029,12 +12617,63 @@
   /* commission: Senior/Military = driver % of the discounted fare (PCS share shrinks in proportion);
      Other = PCS share figured on the undiscounted fare, so the whole discount comes out of the driver's portion */
   function meterCommissionCents(f, pct) {
+    var reimb = Math.max(0, Number(f && f.tollReimburseCents) || 0); /* v76b: real tolls = pass-through, paid to the driver 100% (tollCents), never split */
     if (f && f.discountType === "other") {
-      var gb = Math.max(0, (Number(f.grossSub) || 0) - EXTRA_FEE);
+      var gb = Math.max(0, (Number(f.grossSub) || 0) - reimb - EXTRA_FEE);
       return Math.max(0, Math.round(gb * (pct / 100)) - (Number(f.discountCents) || 0));
     }
-    return Math.round(Math.max(0, (Number(f.sub) || 0) - EXTRA_FEE) * (pct / 100));
+    return Math.round(Math.max(0, (Number(f.sub) || 0) - reimb - EXTRA_FEE) * (pct / 100));
   }
+  /* ---------- v76b: metered-ride tolls ---------- */
+  function meterOwnerDriver() {
+    try { if (isOwnerSession()) return true; } catch (e) {}
+    var s = String(readSession() || "").trim().toLowerCase();
+    return !!s && (OWNER_EMAILS.indexOf(s) !== -1 || METER_OWNER_EXTRA_EMAILS.indexOf(s) !== -1);
+  }
+  function meterDvCarProfile(acc) {
+    acc = acc || readDriverAccount() || {};
+    var mk = String(acc.carMake || ""), md = String(acc.carModel || "");
+    return METER_DV_CARS.some(function (p) { return p[0].test(mk) && p[1].test(md); });
+  }
+  /* Matthew only: "DV-plate car" remembered per vehicle (plate) on this phone, so a rental under his account can be switched once */
+  function meterTollCarKey(acc) { return normalizePlate((acc || readDriverAccount() || {}).carPlate || "") || "car"; }
+  function meterTollCarRead() { try { return JSON.parse(localStorage.getItem("pcs-toll-car-v1") || "{}") || {}; } catch (e) { return {}; } }
+  function meterTollCarRemember(dv) {
+    try { var m = meterTollCarRead(); m[meterTollCarKey()] = { dv: !!dv, at: Date.now() }; localStorage.setItem("pcs-toll-car-v1", JSON.stringify(m)); } catch (e) {}
+  }
+  function meterTollKindDefault() {
+    if (!meterOwnerDriver()) return "toll";
+    var acc = readDriverAccount() || {}, mem = meterTollCarRead()[meterTollCarKey(acc)];
+    if (mem && typeof mem.dv === "boolean") return mem.dv ? "road_fee" : "toll";
+    return meterDvCarProfile(acc) ? "road_fee" : "toll";
+  }
+  /* the ride's kind is fixed at Start (M.tollKind); a meter started before v76b picks it from the car the first time it is needed */
+  function meterTollKindOf(M) {
+    if (M && (M.tollKind === "road_fee" || M.tollKind === "toll")) return M.tollKind;
+    try { return meterTollKindDefault(); } catch (e) { return "toll"; }
+  }
+  function meterTollWord(kind) { return kind === "road_fee" ? "Toll road fee" : "Tolls"; }
+  function meterTollList(M) {
+    return (M && Array.isArray(M.tolls) ? M.tolls : []).map(function (c) { c = Math.round(Number(c)); return isFinite(c) && c > 0 ? Math.min(c, METER_TOLL_MAX_CENTS) : 0; })
+      .filter(function (c) { return c > 0; }).slice(0, METER_TOLL_MAX);
+  }
+  function meterTollInfo(M) {
+    var kind = meterTollKindOf(M);
+    var on = !!M && M.tollOn !== false && !M.prepaid;
+    var list = on ? meterTollList(M) : [];
+    var cents = list.reduce(function (t, c) { return t + c; }, 0);
+    var same = list.length > 0 && list.every(function (c) { return c === list[0]; });
+    var label = meterTollWord(kind) + (list.length ? " (" + list.length + (same ? " \u00d7 " + money(list[0]) : "") + ")" : "");
+    return { on: on, kind: kind, count: list.length, cents: cents, list: list, label: label,
+      reimburseCents: kind === "toll" ? cents : 0, roadFeeCents: kind === "road_fee" ? cents : 0,
+      line: cents > 0 ? { key: "tolls", label: label, cents: cents, taxed: true, tollKind: kind } : null };
+  }
+  /* what is saved on the ride record / payments index / pay week */
+  function meterTollFields(f) {
+    return { tollCount: f.tollCount || 0, tollCents: f.tollCents || 0, tollKind: f.tollKind || "toll", tollLabel: f.tollLabel || "",
+      tollReimburseCents: f.tollReimburseCents || 0, tollRoadFeeCents: f.tollRoadFeeCents || 0, tolls: (f.tolls || []).slice() };
+  }
+  function meterRideFeeLines(f) { return (f.feeLines || []).concat(f.tollLine ? [f.tollLine] : []); } /* rider meter page shows these */
   function meterFare(M) {
     var miles = Math.max(0, Number(M && M.miles) || 0);
     var incl = M.includedMiles != null && isFinite(Number(M.includedMiles)) ? Math.max(0, Number(M.includedMiles)) : 0;
@@ -12057,15 +12696,18 @@
     var meterReadingCents = sub; /* v73: what the meter would have charged (kept for testing on set-fare rides) */
     if (setFare) sub = setFare; /* v73: PCS set the fare before the ride -> charge it, not the meter price */
     var disc = setFare ? { cents: 0, type: null, label: "" } : meterDiscountCents(M, sub); /* v73: Senior / Military 10% or an owner-approved Other discount, before tax */
-    var grossSub = sub;
-    sub = Math.max(0, sub - disc.cents);
+    var toll = meterTollInfo(M); /* v76b: tolls after the minimum / set fare / discount (never discounted), before tax */
+    var grossSub = sub + toll.cents;
+    sub = Math.max(0, sub - disc.cents) + toll.cents;
     var bp = Math.round((Number(M.taxRate) || 0) * 1000000); /* rate in millionths: whole-number math, half-cent rounds up */
     var tax = bp > 0 ? Math.round(sub * bp / 1000000) : 0;
     return { grossSub: grossSub, discountCents: disc.cents, discountType: disc.type, discountLabel: disc.label, base: base, miles: Math.round(miles * 100) / 100, includedMiles: incl, afterMiles: Math.round(afterMiles * 100) / 100,
       mileCents: mileCents, waitMin: waitMin, waitCents: waitCents, raw: raw,
       roundCents: stepped - raw, meter: stepped, minAdd: meterSub - stepped, minApplied: meterSub > stepped, /* v73: meter vs minimum only (airport fee / discount are their own lines) */ minCents: min, freeMin: Math.max(0, Number(M.freeUsed) || 0),
       feeLines: air.lines, airportCents: air.airportCents, intlCents: air.intlCents, meterSub: meterSub,
-      sub: sub, tax: tax, total: sub + tax, setFare: !!setFare, meterReadingCents: meterReadingCents };
+      sub: sub, tax: tax, total: sub + tax, setFare: !!setFare, meterReadingCents: meterReadingCents,
+      tollCents: toll.cents, tollCount: toll.count, tollKind: toll.kind, tollLabel: toll.label, tollLine: toll.line, tolls: toll.list, tollOn: toll.on, /* v76b */
+      tollReimburseCents: toll.reimburseCents, tollRoadFeeCents: toll.roadFeeCents };
   }
   /* ---------- v72t: metered-ride trip type (Regular / To airport / From airport) ----------
      Same airport rules as the quote page + rider app: the airport base for the time band (drop-off / pick-up) replaces the
@@ -12150,9 +12792,10 @@
     M.fare = meterFare(M);
     var f = M.fare, d = M.discount || null;
     meterWrite(rideUrl(M.code), "PATCH", Object.assign({ fareSub: f.sub, fareTax: f.tax, fareTotal: f.total, estimateCents: f.total,
+      feeLines: meterRideFeeLines(f), fareBase: f.setFare ? Math.max(0, f.sub - (f.tollCents || 0)) : f.base /* v76b: set fare stays its own line, tolls separate */,
       fareGrossSub: f.grossSub, discountType: f.discountType || null, discountCents: f.discountCents || 0,
       discount: d ? { type: d.type, status: d.status || "applied", reason: d.reason || null, cents: d.cents || null, pct: d.pct || null, approvedBy: d.approvedBy || null, decidedAt: d.decidedAt || null } : null,
-      updatedAt: Date.now() }, extra || {}));
+      updatedAt: Date.now() }, meterTollFields(f), extra || {}));
     try { meterIndexPatch(M, "ended", { paymentStatus: (M.pay && M.pay.status) || "unpaid" }); } catch (e) {}
     try { meterLogPayWeek(M); } catch (e) {}
     meterSave();
@@ -12227,7 +12870,7 @@
       M.fare = meterFare(M);
       var f = M.fare;
       meterWrite(rideUrl(M.code), "PATCH", { meterTrip: t, tripType: t.kind, airportCode: t.kind === "local" ? null : t.code, internationalArrival: !!t.intl,
-        internationalFeeCents: f.intlCents || 0, airportFeeCents: f.airportCents || 0, feeLines: f.feeLines,
+        internationalFeeCents: f.intlCents || 0, airportFeeCents: f.airportCents || 0, feeLines: meterRideFeeLines(f), /* v76b: + toll line */
         fareSub: f.sub, fareTax: f.tax, fareTotal: f.total, estimateCents: f.total, updatedAt: Date.now() });
       try { meterIndexPatch(M, "ended", { paymentStatus: (M.pay && M.pay.status) || "unpaid" }); } catch (e) {}
       try { meterLogPayWeek(M); } catch (e) {}
@@ -12539,6 +13182,7 @@
       status: status, startedAt: M.startedAt, endedAt: M.endedAt || null, driverId: M.driverId, driverName: M.driverName,
       tierLabel: M.tierLabel, perMileCents: M.perMileCents, miles: f.miles, minutes: M.minutes || null, waitMinutes: f.waitMin,
       fareSub: f.sub, fareTotal: f.total,
+      tollCount: f.tollCount || 0, tollCents: f.tollCents || 0, tollKind: f.tollKind || "toll", tollLabel: f.tollLabel || "", /* v76b */
       pickupLat: M.startPt ? M.startPt.lat : null, pickupLng: M.startPt ? M.startPt.lng : null,
       dropLat: M.endPt ? M.endPt.lat : null, dropLng: M.endPt ? M.endPt.lng : null,
       pickupAddress: M.pickupAddress || "", dropAddress: M.dropAddress || ""
@@ -12614,7 +13258,8 @@
       profileName: band.name, perMileCents: band.cents, baseCents: band.entryCents, includedMiles: band.includedMiles, waitCentsPerMin: band.perMinCents, minCents: band.minCents,
       stepCents: band.stepCents, slowMph: band.slowMph, freeWaitSec: band.freeWaitSec, freeUsed: 0, moved: false,
       taxRate: Number(METER_TAX_RATE) > 0 && Number(METER_TAX_RATE) < 0.5 ? Number(METER_TAX_RATE) : 0, miles: 0, waitMin: 0, minIdx: 0, minMiles: 0, lastPt: null, startPt: null,
-      gpsAt: 0, gapFills: 0, jumps: 0, sandbox: meterSandbox(), driverId: driverPresenceId(), driverName: meterDriverName(), pay: { status: "none" }
+      gpsAt: 0, gapFills: 0, jumps: 0, sandbox: meterSandbox(), driverId: driverPresenceId(), driverName: meterDriverName(), pay: { status: "none" },
+      tollOn: true, tollKind: meterTollKindDefault(), tolls: [] /* v76b */
     };
     if (isCoord(state.hereLat) && isCoord(state.hereLng) && state.gpsAt && now - state.gpsAt < 60000) {
       M.startPt = { lat: +state.hereLat, lng: +state.hereLng };
@@ -12662,6 +13307,9 @@
       pickup: M.pickupAddress || "Metered ride start", drop: M.dropAddress || "Metered ride end",
       rawMiles: f.miles, billedMiles: f.miles, waitMinutes: f.waitMin, fareSub: f.sub, fareTax: f.tax, fareTotal: f.total,
       commissionPct: pct, commissionCents: meterCommissionCents(f, pct), tipCents: 0, paymentStatus: "unpaid", riderName: "Metered ride",
+      tollCount: f.tollCount || 0, tollKind: f.tollKind || "toll", tollLabel: f.tollLabel || "", /* v76b */
+      tollCents: f.tollReimburseCents || 0, /* real tolls: 100% to the driver (reimbursement), not in commissionCents */
+      tollRoadFeeCents: f.tollRoadFeeCents || 0, /* DV-plate cars: fare income, already inside the commission split */
       fareGrossSub: f.grossSub != null ? f.grossSub : f.sub, discountType: f.discountType || null, discountCents: f.discountCents || 0, /* v73 */
       discountReason: M.discount && M.discount.type === "other" ? String(M.discount.reason || "") : null,
       discountApprovedBy: M.discount && M.discount.type === "other" && M.discount.status === "approved" ? String(M.discount.approvedBy || "Matthew") : null
@@ -12672,10 +13320,11 @@
     list.unshift(entry);
     writeRideLog(list);
     var stats = readDayStats(day);
-    if (prev && (prev.day || day) === day) { stats.commissionCents -= Number(prev.commissionCents) || 0; stats.rideTotalCents -= Number(prev.fareTotal) || 0; }
+    if (prev && (prev.day || day) === day) { stats.commissionCents -= Number(prev.commissionCents) || 0; stats.rideTotalCents -= Number(prev.fareTotal) || 0; stats.tollCents = (Number(stats.tollCents) || 0) - (Number(prev.tollCents) || 0); }
     else stats.completed += 1;
     stats.commissionCents += entry.commissionCents;
     stats.rideTotalCents += entry.fareTotal;
+    stats.tollCents = Math.max(0, (Number(stats.tollCents) || 0) + entry.tollCents); /* v76b */
     writeDayStats(day, stats);
     meterWrite(historyUrl(driverPresenceId(), M.code), "PUT", entry);
     M.logged = true;
@@ -12705,7 +13354,7 @@
     var list = readRideLog(), old = null;
     list.forEach(function (e) { if (e && e.code === M.code) old = e; });
     var patch = { isTest: true, testRide: true, paymentStatus: "paid_other", paidVia: "test", testFareCents: old ? Number(old.fareTotal) || 0 : Number(M.fare.total) || 0,
-      fareSub: 0, fareTax: 0, fareTotal: 0, commissionCents: 0, tipCents: 0, cashReceivedCents: null, changeCents: null, riderName: "Rate comparison" };
+      fareSub: 0, fareTax: 0, fareTotal: 0, commissionCents: 0, tipCents: 0, tollCents: 0, tollRoadFeeCents: 0, cashReceivedCents: null, changeCents: null, riderName: "Rate comparison" };
     if (old) {
       var day = old.day || M.logDay;
       if (day) {
@@ -12714,6 +13363,7 @@
         stats.commissionCents = Math.max(0, (Number(stats.commissionCents) || 0) - (Number(old.commissionCents) || 0));
         stats.rideTotalCents = Math.max(0, (Number(stats.rideTotalCents) || 0) - (Number(old.fareTotal) || 0));
         stats.tipCents = Math.max(0, (Number(stats.tipCents) || 0) - (Number(old.tipCents) || 0));
+        stats.tollCents = Math.max(0, (Number(stats.tollCents) || 0) - (Number(old.tollCents) || 0)); /* v76b */
         writeDayStats(day, stats);
       }
       Object.assign(old, patch);
@@ -12746,13 +13396,15 @@
       pickupLat: M.startPt ? M.startPt.lat : null, pickupLng: M.startPt ? M.startPt.lng : null,
       meterMiles: f.miles, billedMiles: f.miles, meterMinutes: M.minutes, waitMinutes: f.waitMin, gpsGapFills: M.gapFills || 0,
       fareBase: f.base, fareMileCents: f.mileCents, fareWaitCents: f.waitCents, fareSub: f.sub, fareTax: f.tax, fareTotal: f.total,
-      feeLines: f.feeLines || [], airportFeeCents: f.airportCents || 0, internationalFeeCents: f.intlCents || 0, meterTrip: meterTripOf(M), /* v72t */
+      feeLines: meterRideFeeLines(f), airportFeeCents: f.airportCents || 0, internationalFeeCents: f.intlCents || 0, meterTrip: meterTripOf(M), /* v72t; v76b + toll line */
+      tollCount: f.tollCount || 0, tollCents: f.tollCents || 0, tollKind: f.tollKind || "toll", tollLabel: f.tollLabel || "", tolls: (f.tolls || []).slice(),
+      tollReimburseCents: f.tollReimburseCents || 0, tollRoadFeeCents: f.tollRoadFeeCents || 0, /* v76b */
       estimateCents: f.total, paymentStatus: "unpaid",
       setFare: !!f.setFare, meterReadingCents: f.meterReadingCents, scheduleId: M.schedId || null, /* v73 set fare: charged f.sub; meter reading kept for testing */
       meterLive: { miles: f.miles, waitMin: f.waitMin, freeUsed: Number(M.freeUsed) || 0, moved: !!M.moved, fareCents: f.sub, at: now, gpsOk: true }
     });
     if (f.setFare) { /* v73: rider meter page shows one Fare line (base = set fare, no mile / wait parts) */
-      meterWrite(rideUrl(M.code), "PATCH", { fareBase: f.sub, fareMileCents: 0, fareWaitCents: 0, feeLines: [], updatedAt: now });
+      meterWrite(rideUrl(M.code), "PATCH", { fareBase: Math.max(0, f.sub - (f.tollCents || 0)), fareMileCents: 0, fareWaitCents: 0, feeLines: f.tollLine ? [f.tollLine] : [], updatedAt: now }); /* v76b: tolls stay their own line */
     }
     if (M.schedId && syncOn()) { /* v73: the scheduled ride is done (the metered ride carries the earnings; no second entry) */
       try {
@@ -12854,7 +13506,8 @@
       if (ok) return true;
       var f = M.fare;
       meterEndWrite = meterWrite(rideUrl(M.code), "PATCH", { status: "completed", completedAt: M.endedAt, endedAt: M.endedAt, updatedAt: Date.now(),
-        fareSub: f.sub, fareTax: f.tax, fareTotal: f.total, estimateCents: f.total, meterMiles: f.miles, waitMinutes: f.waitMin, paymentStatus: "unpaid" });
+        fareSub: f.sub, fareTax: f.tax, fareTotal: f.total, estimateCents: f.total, meterMiles: f.miles, waitMinutes: f.waitMin, paymentStatus: "unpaid",
+        feeLines: meterRideFeeLines(f), tollCount: f.tollCount || 0, tollCents: f.tollCents || 0, tollKind: f.tollKind || "toll" }); /* v76b */
       return meterEndWrite;
     });
   }
@@ -13150,11 +13803,167 @@
       (Number(METER_TAX_RATE) > 0 ? '<div class="money-row"><span>Tax (' + meterPct(METER_TAX_RATE) + ')</span><span id="meter-tax-note">added at the end</span></div>' : "")
     );
   }
+  function meterTollRowHtml(f) {
+    return f && f.tollCents ? '<div class="money-row meter-toll-row" id="meter-toll-row"><span>' + esc(f.tollLabel) + "</span><span>" + money(f.tollCents) + "</span></div>" : "";
+  }
+  function ensureMeterTollStyle() {
+    if (typeof document === "undefined" || document.getElementById("pcs-meter-toll-style")) return;
+    var st = document.createElement("style");
+    st.id = "pcs-meter-toll-style";
+    st.textContent =
+      ".meter-toll{margin:6px 0 4px}.meter-toll-sw{display:flex;align-items:center;gap:10px;margin:4px 0;flex-wrap:wrap}" +
+      ".meter-toll-sw .meter-route-lbl{font-weight:700}" +
+      ".meter-toll-switch{width:auto;min-height:44px;margin:0;padding:8px 20px;border-radius:999px;font-weight:800;font-size:16px;border:2px solid #2e9d4f}" +
+      ".meter-toll-switch[aria-checked=true]{background:#2e9d4f;color:#fff}.meter-toll-switch[aria-checked=false]{background:#e5e7eb;color:#1a1a1a;border-color:#6b7280}" +
+      ".meter-toll-add{display:block;width:100%;min-height:64px;font-size:24px;font-weight:900;margin:6px 0;border-radius:16px;" +
+      "background:#bef1c6 !important;color:#0b3d23 !important;-webkit-text-fill-color:#0b3d23;border:3px solid #2e9d4f !important}" +
+      ".meter-toll-add:active{background:#8fd0a8 !important}" +
+      ".meter-toll-line{display:flex;justify-content:space-between;align-items:center;width:100%;min-height:48px;margin:4px 0;padding:10px 14px;border-radius:12px;" +
+      "background:#e8f8ec !important;color:#0b3d23 !important;-webkit-text-fill-color:#0b3d23;border:2px solid #2e9d4f !important;font-size:17px;font-weight:800;text-align:left}" +
+      ".meter-toll-line small{font-weight:600;font-size:12px;display:block}" +
+      ".meter-toll-undo{width:auto;min-height:40px;margin:2px 0;padding:6px 14px;font-size:14px;border-radius:10px;background:#f3f4f6 !important;color:#1a1a1a !important;border:2px solid #6b7280 !important;font-weight:700}" +
+      ".meter-toll-edit{background:#fff;color:#0b3d23;border:3px solid #2e9d4f;border-radius:16px;padding:10px;margin:6px 0}" +
+      ".meter-toll-edit p{margin:0 0 4px}.meter-toll-amt{font-size:40px;font-weight:900;text-align:center;font-variant-numeric:tabular-nums}" +
+      ".meter-toll-pad{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:6px 0}" +
+      ".meter-toll-pad button{min-height:56px;font-size:24px;font-weight:800;border-radius:12px;background:#e8f8ec;color:#0b3d23;border:2px solid #2e9d4f;margin:0}" +
+      ".meter-toll-edit .btn{min-height:52px;font-size:18px;font-weight:800}.meter-toll-save{background:#2e9d4f !important;color:#fff !important}" +
+      ".meter-toll-cancel{background:#f3f4f6 !important;color:#1a1a1a !important;border:2px solid #6b7280 !important}" +
+      ".meter-toll-note{font-size:12.5px;margin:2px 0;opacity:.95}";
+    (document.head || document.documentElement).appendChild(st);
+  }
+  function meterTollEditable(M) { return !!M && !M.prepaid && (M.status === "running" || (M.status === "ended" && meterTripEditable(M))); }
+  function meterTollHtml(M) {
+    if (!meterTollEditable(M)) return "";
+    ensureMeterTollStyle();
+    var t = meterTollInfo(M), word = meterTollWord(t.kind);
+    var sw = function (id, on, label) {
+      return '<button type="button" class="meter-toll-switch" id="' + id + '" role="switch" aria-checked="' + on + '" aria-label="' + esc(label) + '">' + (on ? "On" : "Off") + "</button>";
+    };
+    var html = '<div class="meter-toll" id="meter-toll">' +
+      '<div class="meter-toll-sw"><span class="meter-route-lbl">This car pays tolls</span>' + sw("meter-toll-switch", t.on, "This car pays tolls") + "</div>";
+    if (meterOwnerDriver()) html += '<div class="meter-toll-sw" id="meter-toll-dv-row"><span class="meter-route-lbl">DV-plate car</span>' + sw("meter-toll-dv", t.kind === "road_fee", "DV-plate car, toll road fee") + "</div>";
+    if (!t.on) return html + '<p class="meter-toll-note" id="meter-toll-off">Tolls are off for this ride.</p></div>';
+    if (state.meterTollEdit) {
+      var cents = Math.min(METER_TOLL_MAX_CENTS, Number(state.meterTollDigits || "0") || 0);
+      var keys = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "clear", "0", "back"];
+      return html + '<div class="meter-toll-edit" id="meter-toll-edit"><p><strong>' + (t.count ? "Toll " + t.count + " amount" : "Toll amount") + "</strong></p>" +
+        '<p class="meter-toll-amt" id="meter-toll-edit-amt">' + money(cents) + "</p>" +
+        '<div class="meter-toll-pad" id="meter-toll-pad" role="group" aria-label="Number pad for the toll amount">' + keys.map(function (k) {
+          return '<button type="button" data-tpad-key="' + k + '" aria-label="' + (k === "back" ? "Delete" : k === "clear" ? "Clear" : k) + '">' + (k === "back" ? "\u232b" : k === "clear" ? "C" : k) + "</button>";
+        }).join("") + "</div>" +
+        (state.meterTollErr ? '<p class="error" id="meter-toll-err" role="alert">' + esc(state.meterTollErr) + "</p>" : "") +
+        '<button type="button" class="btn meter-toll-save" id="meter-toll-save">Save ' + money(cents) + "</button>" +
+        '<button type="button" class="btn meter-toll-cancel" id="meter-toll-cancel">Cancel</button></div></div>';
+    }
+    html += (t.count < METER_TOLL_MAX ? '<button type="button" class="btn meter-toll-add" id="meter-toll-add">+ ' + (t.kind === "road_fee" ? "Toll road fee" : "Toll") + " " + money(METER_TOLL_CENTS) + "</button>" : "");
+    if (t.count) {
+      html += '<button type="button" class="meter-toll-line" id="meter-toll-line" aria-label="' + esc(t.label + " " + money(t.cents) + ". Tap to change the last toll amount") + '">' +
+        '<span>' + esc(t.label) + "<small>Tap to change the last toll amount</small></span><span id=\"meter-toll-total\">" + money(t.cents) + "</span></button>" +
+        '<button type="button" class="meter-toll-undo" id="meter-toll-undo">Undo last ' + (t.kind === "road_fee" ? "fee" : "toll") + "</button>";
+    }
+    html += '<p class="meter-toll-note" id="meter-toll-kind-note">' + (t.kind === "road_fee"
+      ? "Toll road fee: fare income, normal split. Tax added at the end."
+      : "Tolls: paid back to you 100%, outside the split. Tax added at the end.") + "</p>";
+    void word;
+    return html + "</div>";
+  }
+  function meterTollChanged(M) {
+    if (!M) return;
+    if (M.status === "ended") { meterRefareEnded(M); return; }
+    var f = meterFare(M);
+    meterSave();
+    meterWrite(rideUrl(M.code), "PATCH", Object.assign({ meterLive: meterLiveSnapshot(M), updatedAt: Date.now() }, meterTollFields(f)));
+    render();
+  }
+  function meterTollAdd() {
+    var M = state.meter;
+    if (!meterTollEditable(M) || M.tollOn === false) return;
+    var list = meterTollList(M);
+    if (list.length >= METER_TOLL_MAX) return;
+    list.push(METER_TOLL_CENTS);
+    M.tolls = list;
+    M.tollKind = meterTollKindOf(M);
+    meterTollChanged(M);
+  }
+  function meterTollUndo() {
+    var M = state.meter;
+    if (!meterTollEditable(M)) return;
+    var list = meterTollList(M);
+    if (!list.length) return;
+    list.pop();
+    M.tolls = list;
+    state.meterTollEdit = false;
+    meterTollChanged(M);
+  }
+  function meterTollEditOpen() {
+    var M = state.meter;
+    if (!meterTollEditable(M)) return;
+    var list = meterTollList(M);
+    state.meterTollEdit = true; state.meterTollErr = "";
+    state.meterTollDigits = String(list.length ? list[list.length - 1] : METER_TOLL_CENTS);
+    state.meterTollFresh = true; /* the first number typed replaces the amount shown */
+    render();
+  }
+  function meterTollPadPress(k) { /* cash register: 3 5 0 -> $3.50 */
+    var d = String(state.meterTollDigits || "").replace(/^0+/, "");
+    if (state.meterTollFresh && /^[0-9]$/.test(k)) d = "";
+    state.meterTollFresh = false;
+    if (k === "back") d = d.slice(0, -1);
+    else if (k === "clear") d = "";
+    else if (/^[0-9]$/.test(k)) { if (d.length >= 4) return; d = d + k; }
+    state.meterTollDigits = d.replace(/^0+/, "");
+    state.meterTollErr = "";
+    var cents = Number(state.meterTollDigits || "0") || 0;
+    var el = typeof document !== "undefined" ? document.getElementById("meter-toll-edit-amt") : null, sv = el ? document.getElementById("meter-toll-save") : null;
+    if (el && sv) { el.textContent = money(cents); sv.textContent = "Save " + money(cents); } else render();
+  }
+  function meterTollEditSave() {
+    var M = state.meter;
+    if (!meterTollEditable(M)) { state.meterTollEdit = false; render(); return; }
+    var cents = Number(state.meterTollDigits || "0") || 0;
+    if (!(cents > 0)) { state.meterTollErr = "Type the toll amount, or tap Undo to remove it."; render(); return; }
+    if (cents > METER_TOLL_MAX_CENTS) { state.meterTollErr = "One toll can be up to " + money(METER_TOLL_MAX_CENTS) + "."; render(); return; }
+    var list = meterTollList(M);
+    if (list.length) list[list.length - 1] = cents; else list.push(cents);
+    M.tolls = list;
+    state.meterTollEdit = false; state.meterTollErr = "";
+    meterTollChanged(M);
+  }
+  function meterTollSwitch() {
+    var M = state.meter;
+    if (!meterTollEditable(M)) return;
+    M.tollOn = M.tollOn === false;
+    state.meterTollEdit = false;
+    meterTollChanged(M);
+  }
+  function meterTollDvSwitch() {
+    var M = state.meter;
+    if (!meterTollEditable(M) || !meterOwnerDriver()) return;
+    M.tollKind = M.tollKind === "road_fee" ? "toll" : "road_fee";
+    meterTollCarRemember(M.tollKind === "road_fee"); /* remembered for this car (plate) on this phone */
+    meterTollChanged(M);
+  }
+  if (typeof document !== "undefined") {
+    document.addEventListener("click", function (e) {
+      var t = e.target && e.target.closest ? e.target.closest("#meter-toll-add,#meter-toll-undo,#meter-toll-line,#meter-toll-switch,#meter-toll-dv,#meter-toll-save,#meter-toll-cancel,[data-tpad-key]") : null;
+      if (!t) return;
+      e.preventDefault();
+      if (t.hasAttribute("data-tpad-key")) { meterTollPadPress(t.getAttribute("data-tpad-key")); return; }
+      if (t.id === "meter-toll-add") meterTollAdd();
+      else if (t.id === "meter-toll-undo") meterTollUndo();
+      else if (t.id === "meter-toll-line") meterTollEditOpen();
+      else if (t.id === "meter-toll-switch") meterTollSwitch();
+      else if (t.id === "meter-toll-dv") meterTollDvSwitch();
+      else if (t.id === "meter-toll-save") meterTollEditSave();
+      else if (t.id === "meter-toll-cancel") { state.meterTollEdit = false; state.meterTollErr = ""; render(); }
+    });
+  }
   function meterBreakdownHtml(M) {
     var f = M.fare || meterFare(M);
     if (f.setFare) return ( /* v73: fare set before the ride; meter reading shown for testing only */
       '<div class="card" id="meter-breakdown">' +
-      '<div class="money-row" id="meter-setfare-row"><span>Fare (set before the ride)</span><span>' + money(f.sub) + "</span></div>" +
+      '<div class="money-row" id="meter-setfare-row"><span>Fare (set before the ride)</span><span>' + money(f.sub - (f.tollCents || 0)) + "</span></div>" +
+      meterTollRowHtml(f) + /* v76b */
       (M.taxRate ? '<div class="money-row" id="meter-tax"><span>Tax (' + meterPct(M.taxRate) + ")</span><span>" + money(f.tax) + "</span></div>" : "") +
       '<div class="total-row"><span>Total</span><span id="meter-total">' + money(f.total) + "</span></div>" +
       '<p class="fine" id="meter-reading-test">Meter reading (test only, not charged): ' + money(f.meterReadingCents) + " · " + esc(f.miles.toFixed(2)) + " mi · " + esc(String(f.waitMin)) + " min stopped/slow</p>" +
@@ -13172,6 +13981,7 @@
         '<div class="money-row" id="meter-min-applied" style="color:#f0d48a;font-weight:700"><span>Minimum fare ' + money(f.minCents) + " applied</span><span>+" + money(f.minAdd) + "</span></div>" : "") +
       (f.feeLines || []).map(function (l) { return '<div class="money-row meter-fee-line" id="meter-fee-' + esc(l.key) + '"><span>' + esc(l.label) + "</span><span>" + money(l.cents) + "</span></div>"; }).join("") + /* v72t airport lines */
       (f.discountCents ? '<div class="money-row meter-disc-line" id="meter-disc-line" style="color:#8fd0a8;font-weight:700"><span>' + esc(f.discountLabel) + "</span><span>\u2212" + money(f.discountCents) + "</span></div>" : "") + /* v73 */
+      meterTollRowHtml(f) + /* v76b */
       (M.taxRate ? '<div class="money-row"><span>Fare</span><span id="meter-fare-sub">' + money(f.sub) + "</span></div>" +
         '<div class="money-row" id="meter-tax"><span>Tax (' + meterPct(M.taxRate) + ")</span><span>" + money(f.tax) + "</span></div>" : "") +
       '<div class="total-row"><span>Total</span><span id="meter-total">' + money(f.total) + "</span></div>" +
@@ -13351,6 +14161,7 @@
       meterRiderQrHtml(M) +
       meterTripHtml(M) + /* v72t: still editable until payment */
       meterDiscountHtml(M) + /* v73 */
+      meterTollHtml(M) + /* v76b: tolls still editable until the pay link opens */
       (state.meterOtherOpen /* v72s: one screen, no scrolling: the breakdown folds up while marking paid */
         ? '<details class="card meter-bd-box" id="meter-breakdown-box"><summary>Total <strong id="meter-total-sum">' + money(f.total) + "</strong> \u00b7 breakdown</summary>" + meterBreakdownHtml(M) + "</details>"
         : meterBreakdownHtml(M)) + busy + err +
@@ -13412,6 +14223,8 @@
       (M.dest ? '<p class="meter-dest-eta meter-run-eta" id="meter-dest-eta" role="status">' + esc(meterEtaLine(M)) + "</p>" : "") + /* v72z (Matthew): ETA in the meter card, under GPS OK, above End ride */
       (M.riderCard ? '<p class="fine" id="meter-rider-card-note" style="color:#8fd0a8;text-align:center;margin:0">✓ Rider saved a card on their meter page</p>' : "") +
       (meterQrShowing() ? '<div class="meter-qr-modal" id="meter-qr-modal">' + meterRiderQrHtml(M) + "</div>" : "") + busy + /* v72t: big QR overlay at the START */
+      meterTollHtml(M) + /* v76b: + Toll $1.75 */
+      (M.schedId ? folDriverBtnHtml("c_" + M.schedId, (schedFind(M.schedId) || {}).riderPhone) : "") + /* v76b: tracking link during the ride */
       (state.meterConfirmEnd
         ? '<div id="meter-confirm-end"><p class="lede" style="margin:6px 0">End this ride? Meter ' + money(f.sub) + ".</p>" +
           '<button class="btn meter-big meter-end" type="button" id="meter-end-yes">Yes, end ride</button>' +
@@ -13424,7 +14237,7 @@
   function meterMapHome() {
     return (
       accountNav() + '<div class="meter-split" id="meter-split-run"><div class="meter-col">' + meterPanelHtml() + meterRouteHtml("run") + meterTripHtml(state.meter) + "</div>" +
-      '<div class="meter-map-col"><div class="map-stage board-map meter-map">' +
+      '<div class="meter-map-col"><div class="map-stage board-map meter-map" id="meter-map-stage">' + /* v76b: id for Full screen */
       '<div id="live-map" role="img" aria-label="Map: you during the metered ride"></div>' +
       '<div class="meter-topstack" id="meter-topstack">' + meterTurnHtml() + /* v72t: next turn right on the map; v72u: ETA on its own line below it */
       '<button type="button" class="meter-eta-chip' + (state.meter && state.meter.dest ? " has-dest" : "") + '" id="meter-eta-chip">' + esc(meterChipText(state.meter)) + "</button></div>" + /* v71 */
@@ -14113,6 +14926,7 @@
       '<div class="money-row"><span>Rides completed</span><span>' + esc(String(stats.completed)) + "</span></div>" +
       '<div class="money-row"><span>Daily commission</span><span id="hub-comm-value">' + comm + "</span></div>" +
       (stats.tipCents ? '<div class="money-row"><span>Tips (100% yours)</span><span id="hub-tips-value">' + (state.commHidden ? "••••" : money(stats.tipCents)) + "</span></div>" : "") +
+      (stats.tollCents ? '<div class="money-row"><span>Tolls paid back (100% yours)</span><span id="hub-tolls-value">' + (state.commHidden ? "••••" : money(stats.tollCents)) + "</span></div>" : "") + /* v76b */
       '<button class="btn ghost" type="button" id="toggle-comm-hide">' +
       (state.commHidden ? "Show commission" : "Hide commission") +
       "</button>" +
@@ -14131,12 +14945,14 @@
     var weekTotalRide = 0;
     var weekTips = 0;
     var weekCashTips = 0; /* v72s: cash tips = your own money, shown for the record only */
+    var weekTolls = 0; /* v76b: metered-ride tolls paid back to the driver */
     var cards = days.map(function (d) {
       var stats = hubDayStats(d);
       var rides = ridesForDay(d);
       weekTotalComm += stats.commissionCents;
       weekTotalRide += stats.rideTotalCents;
       weekTips += stats.tipCents || 0;
+      weekTolls += stats.tollCents || 0;
       rides.forEach(function (e) { if (e && (String(e.paidVia || "").toLowerCase() === "cash" || String(e.payMethod || "").toLowerCase() === "cash")) weekCashTips += Number(e.tipCents) || 0; });
       var label = d === today ? d + " · today" : d;
       return (
@@ -14154,6 +14970,7 @@
       '<div class="money-row"><span>Week commission</span><span id="hub-week-comm">' + money(weekTotalComm) + "</span></div>" +
       (weekTips - weekCashTips > 0 ? '<div class="money-row"><span>Week tips (100% yours)</span><span id="hub-week-tips">' + money(weekTips - weekCashTips) + "</span></div>" : "") +
       '<div class="money-row"><span>Cash tips received</span><span id="hub-week-cash-tips">' + money(weekCashTips) + "</span></div>" +
+      (weekTolls ? '<div class="money-row"><span>Week tolls paid back (100% yours)</span><span id="hub-week-tolls">' + money(weekTolls) + "</span></div>" : "") + /* v76b */
       '<p class="fine" id="hub-cash-tips-note">Cash tips are yours (100%). They are not part of the 30% owed to PCS and are not fare. Shown for your records.</p>' +
       "</div>" +
       '<div class="hub-week">' + cards + "</div>" +
@@ -14183,6 +15000,8 @@
           money(r.commissionCents || 0) + "</span></div>" +
           (r.billedMiles != null ? '<p class="fine">' + esc(String(r.billedMiles)) + " billed mi</p>" : "") +
           (Number(r.tipCents) > 0 ? '<div class="money-row"><span>Tip (100% yours)</span><span>' + money(r.tipCents) + "</span></div>" : "") +
+          (Number(r.tollCents) > 0 ? '<div class="money-row hub-toll-row"><span>' + esc(r.tollLabel || "Tolls") + " (paid back, 100% yours)</span><span>" + money(r.tollCents) + "</span></div>" : "") + /* v76b */
+          (Number(r.tollRoadFeeCents) > 0 ? '<div class="money-row hub-tollfee-row"><span>' + esc(r.tollLabel || "Toll road fee") + " (fare, in the commission)</span><span>" + money(r.tollRoadFeeCents) + "</span></div>" : "") +
           (r.rideType === "metered" && r.paymentStatus && r.paymentStatus !== "charged" && r.paymentStatus !== "paid_other" ? '<p class="error">Not paid yet</p>' : "") +
           "</article>"
         );
@@ -14396,6 +15215,7 @@
       (completed ? " · trip finished." : (started ? " · en route." : " is at " + esc(pickupLine()) + ".")) +
       "</p></div>" +
       (completed ? "" : mapBlock("Customer")) +
+      (completed ? "" : folDriverBtnHtml("r_" + String(state.driverCode || readDriverCode() || ""), state.phone)) + /* v76b: Text my client a tracking link */
       pinGate +
       (started || completed ? "" : chatBoxHtml()) +
       (started || completed ? "" : (
@@ -14600,6 +15420,7 @@
     }
     bind();
     bindMeter(); /* v70 */
+    try { rfsApply(); } catch (e) {} /* v76b: in-ride full screen */
     var customerRide = signedIn() && ROLE === "customer" && (state.screen === "waiting" || state.screen === "trip");
     if (!signedIn()) {
       /* stay on the login page */
@@ -17132,6 +17953,7 @@
       trackDailyMiles(pos);
       refreshMilesTodayDom();
       meterOnGps(pos); /* v70 */
+      try { fsSpeedOnGps(pos); } catch (e) {} /* v76b: MPH on the full-screen map */
     }
     var ride = currentRide();
     if (syncOn()) {
