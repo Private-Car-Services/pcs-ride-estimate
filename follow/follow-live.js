@@ -26,7 +26,7 @@
     st.textContent = "#fl-live{background:#f0fdf4;color:#0b3d23;border:3px solid #2e9d4f;border-radius:16px;padding:12px}" +
       "#fl-live p{color:#0b3d23}.fl-status{display:block;margin:0 0 8px;padding:10px 12px;border-radius:12px;background:#0b6b3a;color:#fff !important;font-size:21px;font-weight:900;text-align:center}" +
       ".fl-who{font-size:18px;font-weight:800;margin:4px 0}.fl-car{font-size:16px;font-weight:700;margin:2px 0 8px}.fl-plate{display:inline-block;background:#fff;border:2px solid #0b3d23;border-radius:8px;padding:0 8px;margin-left:4px;font-weight:900;letter-spacing:.06em}" +
-      "#fl-map{height:46vh;min-height:260px;border-radius:14px;margin:6px 0 10px;border:2px solid #0b3d23}" +
+      "#fl-map{height:62vh;min-height:340px;border-radius:14px;margin:6px 0 10px;border:2px solid #0b3d23}" +
       ".fl-eta{font-size:19px;font-weight:900;text-align:center;margin:6px 0}.fl-row{margin:3px 0;font-size:16px}.fl-row b{display:inline-block;min-width:44px}" +
       ".fl-upd{font-size:13px;text-align:center;margin:6px 0 0}.fl-call{display:block;margin:10px 0 0;min-height:52px;line-height:52px;text-align:center;border-radius:12px;background:#bef1c6;color:#0b3d23 !important;border:3px solid #2e9d4f;font-size:19px;font-weight:900;text-decoration:none}" +
       ".fl-big{display:grid;grid-template-columns:1fr 1.4fr;gap:8px;margin:8px 0}.fl-spd,.fl-arr{background:#fff;border:3px solid #2e9d4f;border-radius:14px;padding:8px;text-align:center;color:#0b3d23}" +
@@ -72,6 +72,8 @@
       S.map = window.L.map("fl-map", { zoomControl: true, attributionControl: true }).setView([29.76, -95.37], 11);
       window.L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom: 19, attribution: "&copy; OpenStreetMap" }).addTo(S.map);
       S.layers = window.L.layerGroup().addTo(S.map);
+      window.addEventListener("resize", function () { try { S.map.invalidateSize(); } catch (e) {} });
+      setTimeout(function () { try { S.map.invalidateSize(); } catch (e) {} }, 300);
       try { /* v76e: fixed north indicator, top-right (the map is always north-up) */
         var N = window.L.control({ position: "topright" });
         N.onAdd = function () { var el = window.L.DomUtil.create("div", "fl-north"); el.id = "fl-north"; el.setAttribute("aria-label", "North is up");
