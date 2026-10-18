@@ -7,6 +7,7 @@
   var POLL_MS = 5000;
   var app = document.getElementById("app");
   var m = String(window.location.search || "").match(/[?&]t=([A-Za-z0-9_-]{22})(?:&|#|$)/);
+  if (/[?&]t=[A-Za-z0-9_-]{32}(?:&|#|$)/.test(String(window.location.search || ""))) return; /* v76b: a 32-character link is a "Follow my ride" link (follow-live.js) */
   var token = m ? m[1] : "";
   var S = { d: null, off: 0, map: null, layers: null, fitted: false, timer: 0, ended: false };
   function esc(v) { return String(v == null ? "" : v).replace(/[&<>"']/g, function (c) { return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]; }); }
@@ -78,7 +79,7 @@
       S.timer = setTimeout(poll, POLL_MS);
     }).catch(function (e) {
       if (e.status === 404) { message("Follow the ride", e.message); return; }
-      if ($("fw-net")) setText("fw-net", e.status === 429 ? "Busy right now. Updating again shortly." : "No signal right now. This page catches up when you're back online.");
+      if ($("fw-net")) setText("fw-net", e.status === 429 ? "Busy right now. Updating again shortly." : "Signal dropped for a moment. This page catches up when you're back online.");
       else message("Follow the ride", "We couldn\u2019t load the ride just yet. Trying again\u2026");
       S.timer = setTimeout(poll, POLL_MS * 2);
     });
