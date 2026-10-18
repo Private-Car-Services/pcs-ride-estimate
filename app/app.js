@@ -9548,7 +9548,7 @@
   var FOL_END_SHOW_MS = 30 * 60000, FOL_MAX_AGE_MS = 24 * 3600000, FOL_PUSH_MS = 8000, FOL_BEAT_MS = 30000, FOL_MAP_POLL_MS = 30000;
   var FOL_MINE_KEY = "pcs-follow-mine-v1", FOL_DRAFT_KEY = "pcs-follow-draft-v1";
   var FOL_STATUSES = { assigned: 1, on_way: 1, arrived: 1, picked_up: 1, completed: 1, cancelled: 1, ended: 1, stopped: 1 };
-  var fol = { map: {}, mapAt: {}, mapBusy: {}, lastPush: {}, lastSig: {}, lastSt: {}, off: false };
+  var fol = { live: {}, fast: {}, map: {}, mapAt: {}, mapBusy: {}, lastPush: {}, lastSig: {}, lastSt: {}, off: false };
   function folNewToken() {
     var c = typeof window !== "undefined" && (window.crypto || window.msCrypto);
     if (!c || !c.getRandomValues || typeof btoa !== "function") return "";
@@ -9596,6 +9596,35 @@
     Object.keys(c).forEach(function (k) { if (!c[k]) delete c[k]; });
     return c.make || c.model || c.plate ? c : null;
   }
+  /* v76f: the car point for the public copy. 5 decimals (same precision as the route line already shared), whole-mph GPS
+     speed and whole-degree GPS heading only while the ride is live and only when the phone reported them. */
+  function folPosOut(o, now, live) {
+    if (!o || !isCoord(o.lat) || !isCoord(o.lng)) return null;
+    var la = +o.lat, ln = +o.lng;
+    if (Math.abs(la) > 90 || Math.abs(ln) > 180 || (la === 0 && ln === 0)) return null;
+    var p = { lat: Math.round(la * 1e5) / 1e5, lng: Math.round(ln * 1e5) / 1e5, at: Math.round(Number(o.at) || now) };
+    if (live && o.mph != null && isFinite(+o.mph) && +o.mph >= 0 && +o.mph < 130) p.mph = Math.round(+o.mph);
+    if (live && o.hdg != null && isFinite(+o.hdg)) p.hdg = Math.round(((+o.hdg % 360) + 360) % 360);
+    return p;
+  }
+  /* v76f fast lane: while a shared ride is live (on the way / at pickup / on ride), PATCH ONLY the car point every ~2.5 s
+     on every new GPS fix (1 s apart at most) when it moved 2 m+, or every 5 s while standing still. The full copy still goes out on the 4 s tick (every 8 s). */
+  var FOL_FAST_MS = 1000, FOL_STILL_MS = 5000, FOL_MOVE_MI = 2 / 1609.34; /* v76f (Matthew): every fix, 1 s apart at most, 2 m+ moved, 5 s heartbeat */
+  function folFastTick() {
+    if (ROLE !== "driver" || fol.off || !syncOn()) return;
+    var h = folHere(), now = Date.now(); if (!h) return;
+    Object.keys(fol.live || {}).forEach(function (t) {
+      var L = fol.live[t]; if (!L || now - L.at > 15000) { delete fol.live[t]; return; }
+      var last = fol.fast[t];
+      if (last && now - last.at < FOL_FAST_MS) return;
+      var moved = !last || haversineMi(last.lat, last.lng, h.lat, h.lng) >= FOL_MOVE_MI;
+      if (!moved && now - last.at < FOL_STILL_MS) return;
+      if (last && last.gpsAt === h.at && now - last.at < FOL_STILL_MS) return; /* no new fix */
+      var p = folPosOut(h, now, true); if (!p) return;
+      fol.fast[t] = { at: now, lat: h.lat, lng: h.lng, gpsAt: h.at };
+      folWrite(folNodeUrl(t), "PATCH", { pos: p, updatedAt: now });
+    });
+  }
   /* The ONLY fields that ever reach the public copy. Add nothing here without a privacy review (Harry). */
   function folClean(o, now) {
     o = o || {}; now = now || Date.now();
@@ -9607,7 +9636,7 @@
     var car = folCar(o.car); if (car) out.car = car;
     var pk = folPlace(o.pickup); if (pk) out.pickup = pk;
     var dr = folPlace(o.dest); if (dr) out.dest = dr;
-    if ((live || done) && o.pos) { var p = folPt(o.pos.lat, o.pos.lng); if (p) { p.at = Math.round(Number(o.pos.at) || now); out.pos = p; } }
+    if ((live || done) && o.pos) { var p = folPosOut(o.pos, now, live); if (p) out.pos = p; }
     if (live && o.eta && isFinite(+o.eta.min) && isFinite(+o.eta.miles)) { out.eta = { min: Math.max(0, Math.round(+o.eta.min)), miles: Math.max(0, Math.round(+o.eta.miles * 10) / 10), to: o.eta.to === "dest" ? "dest" : "pickup" }; out.etaAt = now; }
     if (live) { var r = folRoute(o.route); if (r) out.route = r; }
     if (done) out.endedAt = Number(o.endedAt) || now;
@@ -9686,7 +9715,10 @@
   function folHere() {
     if (!isCoord(state.hereLat) || !isCoord(state.hereLng)) return null;
     var at = Number(state.gpsAt) || 0;
-    return at && Date.now() - at <= 90000 ? { lat: +state.hereLat, lng: +state.hereLng, at: at } : null;
+    if (!at || Date.now() - at > 90000) return null;
+    var h = { lat: +state.hereLat, lng: +state.hereLng, at: at }, g = state.folGps;
+    if (g && Math.abs((g.at || 0) - at) < 3000) { if (g.mph != null) h.mph = g.mph; if (g.hdg != null) h.hdg = g.hdg; }
+    return h;
   }
   function folStraight(a, b, to) {
     if (!a || !b || !isCoord(a.lat) || !isCoord(b.lat)) return null;
@@ -9758,6 +9790,8 @@
       var t = folTokenFor(c.key);
       if (!t) return;
       seen[t] = 1;
+      var mm = folMine()[t];
+      if ((c.status === "on_way" || c.status === "arrived" || c.status === "picked_up") && !(mm && (mm.wiped || mm.endedAt))) fol.live[t] = { at: now }; else delete fol.live[t];
       folPush(t, c, now, "driver");
     });
     if (ROLE !== "driver") return;
@@ -9907,10 +9941,11 @@
   if (typeof document !== "undefined") document.addEventListener("click", folOnClick);
   if (typeof window !== "undefined") {
     setInterval(function () { try { if (ROLE === "driver") folDriverTick(); else folRiderTick(); } catch (e) {} }, 4000);
+    setInterval(function () { try { folFastTick(); } catch (e) {} }, 500); /* v76f: checks twice a second, sends at most once a second */
     setInterval(function () { try { folSweep(); } catch (e) {} }, 60000);
     setTimeout(function () { try { folSweep(); } catch (e) {} }, 5000);
     window.__pcsFollow = { clean: folClean, token: folNewToken, link: folLink, sms: folSmsHref, msg: folDriverMsg, riderMsg: folRiderMsg, e164: folPhoneE164,
-      ctxs: function () { return folDriverCtxs(); }, rider: function () { return folRiderCtx(); }, state: fol, tick: function () { if (ROLE === "driver") folDriverTick(); else folRiderTick(); },
+      ctxs: function () { return folDriverCtxs(); }, rider: function () { return folRiderCtx(); }, state: fol, fast: function () { folFastTick(); }, posOut: folPosOut, tick: function () { if (ROLE === "driver") folDriverTick(); else folRiderTick(); },
       sweep: function () { folSweep(); }, mine: folMine, route: folRoute }; /* test hooks */
   }
   if (typeof window !== "undefined" && typeof location !== "undefined") try { var ntq = /[?&]navtest=([01])\b/.exec(location.search || ""); if (ntq) { if (ntq[1] === "1") localStorage.setItem(NAVTEST_KEY, "1"); else localStorage.removeItem(NAVTEST_KEY); } } catch (e) {} /* v75y */
@@ -18185,6 +18220,11 @@
     state.driverLng = state.hereLng;
     if (ROLE === "driver") {
       noteSpeed(pos);
+      try { /* v76f: raw GPS speed + heading for the follow page (only when the phone reports them) */
+        var c76 = pos.coords, now76 = Date.now();
+        state.folGps = { mph: c76.speed != null && isFinite(c76.speed) && c76.speed >= 0 ? c76.speed * 2.23694 : null,
+          hdg: c76.heading != null && isFinite(c76.heading) && c76.speed != null && c76.speed > 0.8 ? c76.heading : null, at: now76 };
+      } catch (e) {}
       try { navNoteHeading(pos); } catch (e) {} /* v72u */
       try { brkNoteMotion(state.speedMph, Date.now()); } catch (e) {} /* v72u */
       try { autoBrkTick(Date.now()); } catch (e) {} /* v74d */
