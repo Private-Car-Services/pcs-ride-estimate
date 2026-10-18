@@ -222,9 +222,12 @@
     var disc = f.discount && Number(f.discount.cents) > 0 ? f.discount : null; /* v73: Senior / Military / owner-approved discount */
     var diff = (disc && disc.grossSub ? disc.grossSub : (f.sub || 0)) - parts;
     var minApplied = diff > 0 && r.minCents > 0 && (disc && disc.grossSub ? disc.grossSub : f.sub) === r.minCents && diff >= (r.stepCents || 1);
-    if (!disc && !fees && !(f.mileCents) && !(f.waitCents) && f.base > 0 && f.base === f.sub && f.base !== r.startCents) { /* v73: fare set before the ride */
+    var tollLines = (f.feeLines || []).filter(function (l) { return /^Toll/.test(String(l.label || "")); }); /* v76b: "Tolls (2 × $1.75)" / "Toll road fee (…)" */
+    var tollFees = tollLines.reduce(function (t, l) { return t + (Number(l.cents) || 0); }, 0);
+    if (!disc && fees === tollFees && !(f.mileCents) && !(f.waitCents) && f.base > 0 && f.base + tollFees === f.sub && f.base !== r.startCents) { /* v73: fare set before the ride */
       return '<div class="card" id="rm-breakdown">' +
-        '<div class="money-row" id="rm-setfare-row"><span>Fare</span><span>' + money(f.sub) + "</span></div>" +
+        '<div class="money-row" id="rm-setfare-row"><span>Fare</span><span>' + money(f.base) + "</span></div>" +
+        tollLines.map(function (l) { return '<div class="money-row rm-fee-line"><span>' + esc(l.label) + "</span><span>" + money(l.cents) + "</span></div>"; }).join("") +
         (f.tax ? '<div class="money-row" id="rm-tax-row"><span>Tax (' + pct(r.taxRate) + ")</span><span>" + money(f.tax) + "</span></div>" : "") +
         '<div class="total-row"><span>Total</span><span id="rm-total">' + money(f.total) + "</span></div>" +
         '<p class="fine">' + esc(Number(f.miles || 0).toFixed(2)) + " mi · " + esc(String(f.minutes || 0)) + " min</p></div>";
