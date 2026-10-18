@@ -1096,13 +1096,14 @@
     var entries = historyEntries(driverId);
     var rideTotal = 0;
     var commissionTotal = 0;
-    var tipTotal = 0;
+    var tipTotal = 0, tollTotal = 0, tollFeeTotal = 0;
     entries.forEach(function (e) {
       rideTotal += Number(e.fareTotal) || 0;
       commissionTotal += Number(e.commissionCents) || 0;
       tipTotal += Number(e.tipCents) || 0; /* v70: tips go 100% to the driver */
+      tollTotal += tollReimbCents(e); tollFeeTotal += tollFeeCents(e); /* v76b */
     });
-    return { rideTotal: rideTotal, commissionTotal: commissionTotal, tipTotal: tipTotal, count: entries.length };
+    return { rideTotal: rideTotal, commissionTotal: commissionTotal, tipTotal: tipTotal, tollTotal: tollTotal, tollFeeTotal: tollFeeTotal, count: entries.length };
   }
 
   function mondayOfWeek(ymd) {
@@ -4177,11 +4178,12 @@
     var entries = historyEntries(driverId).filter(function (e) { return e.day === day; });
     var dayRide = 0;
     var dayComm = 0;
-    var dayTips = 0;
+    var dayTips = 0, dayTolls = 0, dayTollFees = 0;
     entries.forEach(function (e) {
       dayRide += Number(e.fareTotal) || 0;
       dayComm += Number(e.commissionCents) || 0;
       dayTips += Number(e.tipCents) || 0;
+      dayTolls += tollReimbCents(e); dayTollFees += tollFeeCents(e); /* v76b */
     });
     var cal = weekDays.map(function (ymd) {
       var count = historyEntries(driverId).filter(function (e) { return e.day === ymd; }).length;
@@ -4212,6 +4214,8 @@
               (isCardFailedCollect(e) ? "Undo Card failed - collect" : "Mark Card failed - collect") + "</button>" : "") +
           (e.billedMiles != null ? "<br><strong>Miles</strong> " + esc(String(e.billedMiles)) : "") +
           (Number(e.tipCents) > 0 ? "<br><strong>" + (isCashEntry(e) ? "Cash tip" : e.tipVia === "card" ? "Card tip" : "Tip") + "</strong> " + esc(fmtCents(e.tipCents)) + (isCashEntry(e) ? " (driver kept it; not owed to PCS)" : " (100% to driver)") : "") +
+          (tollReimbCents(e) ? '<br><strong class="toll-line">' + esc(e.tollLabel || "Tolls") + "</strong> " + esc(fmtCents(tollReimbCents(e))) + (isCashEntry(e) ? " (driver paid them and kept the cash; outside commission)" : " (paid back 100% to driver; outside commission)") : "") + /* v76b */
+          (tollFeeCents(e) ? '<br><strong class="tollfee-line">' + esc(e.tollLabel || "Toll road fee") + "</strong> " + esc(fmtCents(tollFeeCents(e))) + " (fare income, in the commission split)" : "") +
           (e.cashReceivedCents != null ? "<br><strong>Cash received</strong> " + esc(fmtCents(e.cashReceivedCents)) + " · <strong>change</strong> " + esc(fmtCents(Number(e.changeCents) || 0)) : "") +
           (String(e.rideType || "") === "metered" && e.paymentStatus ? "<br><strong>Payment</strong> " + esc(meterPayWord(e.paymentStatus, e.paidVia)) : "") +
           "</p></article>"
@@ -4226,13 +4230,17 @@
       "<strong>All-time ride total</strong> " + esc(fmtCents(totals.rideTotal)) + "<br>" +
       "<strong>All-time commission total</strong> " + esc(fmtCents(totals.commissionTotal)) + "<br>" +
       (totals.tipTotal ? "<strong>All-time tips (100% to driver)</strong> " + esc(fmtCents(totals.tipTotal)) + "<br>" : "") +
+      (totals.tollTotal ? "<strong>All-time tolls paid back (100% to driver)</strong> " + esc(fmtCents(totals.tollTotal)) + "<br>" : "") + /* v76b */
+      (totals.tollFeeTotal ? "<strong>All-time toll road fees (fare)</strong> " + esc(fmtCents(totals.tollFeeTotal)) + "<br>" : "") +
       "<strong>Pay week</strong> Mon–Sun · " + esc(monday) + " → " + esc(addDaysYmd(monday, 6)) +
       (function () { /* v72d: net per driver for the pay week */
         var wk = payBalance(historyEntries(driverId).filter(function (e) { return weekDays.indexOf(e.day) >= 0; }));
         return '<br><span class="pay-week-net"><strong>Week owed to driver</strong> ' + esc(fmtCents(wk.owedToDriver)) +
           " · <strong>owed by driver (cash)</strong> " + esc(fmtCents(wk.owedByDriver)) +
           " · <strong>Net</strong> " + esc(payNetText(wk)) + "</span>" +
-          '<br><span class="pay-week-cash-tips"><strong>Cash tips received</strong> ' + esc(fmtCents(wk.cashTips)) + " (driver keeps 100%; not owed to PCS, not fare; record only)</span>";
+          '<br><span class="pay-week-cash-tips"><strong>Cash tips received</strong> ' + esc(fmtCents(wk.cashTips)) + " (driver keeps 100%; not owed to PCS, not fare; record only)</span>" +
+          (wk.tolls ? '<br><span class="pay-week-tolls"><strong>Week tolls paid back</strong> ' + esc(fmtCents(wk.tolls)) + " (100% to driver, in the owed-to-driver total)</span>" : "") + /* v76b */
+          (wk.tollRoadFees ? '<br><span class="pay-week-tollfees"><strong>Week toll road fees</strong> ' + esc(fmtCents(wk.tollRoadFees)) + " (fare income, in the commission)</span>" : "");
       })() +
       "</p>" +
       '<div class="cal-week">' +
@@ -4241,7 +4249,8 @@
       '<button type="button" class="btn btn-ghost" id="detail-week-next">→</button>' +
       "</div>" +
       '<p class="meta"><strong>' + esc(day) + "</strong> · ride " + esc(fmtCents(dayRide)) +
-      " · commission " + esc(fmtCents(dayComm)) + (dayTips ? " · tips " + esc(fmtCents(dayTips)) : "") + "</p>" +
+      " · commission " + esc(fmtCents(dayComm)) + (dayTips ? " · tips " + esc(fmtCents(dayTips)) : "") +
+      (dayTolls ? " · tolls " + esc(fmtCents(dayTolls)) : "") + (dayTollFees ? " · toll road fees " + esc(fmtCents(dayTollFees)) : "") + "</p>" + /* v76b */
       list
     );
   }
@@ -4272,6 +4281,8 @@
       row("Tax / fees", esc(fmtCents(e.fareTax || 0))) +
       row("Ride total", esc(fmtCents(e.fareTotal || 0))) +
       (tip ? row(cash ? "Cash tip (driver keeps)" : "Card tip (100% driver)", esc(fmtCents(tip))) : "") +
+      (tollReimbCents(e) ? row(esc(e.tollLabel || "Tolls") + (cash ? " (driver keeps, outside commission)" : " (paid back 100% driver)"), esc(fmtCents(tollReimbCents(e))), "earn-toll") : "") + /* v76b */
+      (tollFeeCents(e) ? row(esc(e.tollLabel || "Toll road fee") + " (fare, in the split)", esc(fmtCents(tollFeeCents(e))), "earn-tollfee") : "") +
       row("Driver commission" + (e.commissionPct ? " (" + esc(String(e.commissionPct)) + "%)" : ""), esc(fmtCents(e.commissionCents || 0))) +
       row("Owed to PCS", esc(fmtCents(cashDriverOwesCents(e))), "earn-owed") +
       row("Payment", esc(earnPayWord(e))) + "</article>";
@@ -4281,7 +4292,7 @@
     var monday = state.earnWeek[driverId] || mondayOfWeek(today);
     var days = []; for (var i = 0; i < 7; i += 1) days.push(addDaysYmd(monday, i));
     var all = historyEntries(driverId);
-    var wk = { ride: 0, comm: 0, cashTips: 0, cardTips: 0, owed: 0, tests: 0 };
+    var wk = { ride: 0, comm: 0, cashTips: 0, cardTips: 0, owed: 0, tests: 0, tolls: 0, tollFees: 0 };
     var cards = days.map(function (d) {
       var rides = all.filter(function (e) { return e.day === d; });
       var counted = rides.filter(function (e) { return !earnIsTest(e); });
@@ -4290,6 +4301,7 @@
         var tip = Number(e.tipCents) || 0;
         wk.ride += Number(e.fareTotal) || 0; wk.comm += Number(e.commissionCents) || 0; dc += Number(e.commissionCents) || 0;
         if (isCashEntry(e)) wk.cashTips += tip; else wk.cardTips += tip;
+        wk.tolls += tollReimbCents(e); wk.tollFees += tollFeeCents(e); /* v76b */
         wk.owed += cashDriverOwesCents(e);
       });
       wk.tests += rides.length - counted.length;
@@ -4311,6 +4323,8 @@
       mrow("Week commission", esc(fmtCents(wk.comm)), "earn-wk-comm-" + did) +
       (wk.cardTips ? mrow("Card tips (100% driver)", esc(fmtCents(wk.cardTips))) : "") +
       mrow("Cash tips received", esc(fmtCents(wk.cashTips))) +
+      (wk.tolls ? mrow("Tolls paid back (100% driver, outside commission)", esc(fmtCents(wk.tolls)), "earn-wk-tolls-" + did) : "") + /* v76b */
+      (wk.tollFees ? mrow("Toll road fees (fare, in the commission)", esc(fmtCents(wk.tollFees)), "earn-wk-tollfees-" + did) : "") +
       mrow("<strong>Owes PCS</strong> (cash rides: company share)", "<strong>" + esc(fmtCents(wk.owed)) + "</strong>", "earn-wk-owed-" + did) +
       (function () { var b = payBalance(all.filter(function (e) { return days.indexOf(e.day) >= 0 && !earnIsTest(e); })); /* v74b: Owes PCS netted against the week payout */
         return mrow("<strong>Week payout (net)</strong>", "<strong>" + esc(payNetText(b)) + "</strong>", "earn-wk-net-" + did); })() +
@@ -5301,6 +5315,8 @@
     lines.push("<strong>Pickup</strong> " + meterSpotHtml(m, "pickup") + (m.startedAt ? " · " + esc(fmtClock(m.startedAt)) : ""));
     if (m.endedAt) lines.push("<strong>Drop-off</strong> " + meterSpotHtml(m, "drop") + " · " + esc(fmtClock(m.endedAt)));
     if (m.fareTotal != null) lines.push("<strong>Fare</strong> " + esc(fmtCents(m.fareTotal)));
+    if (Number(m.tollCents) > 0) lines.push("<strong>" + esc(m.tollLabel || (m.tollKind === "road_fee" ? "Toll road fee" : "Tolls")) + "</strong> " + esc(fmtCents(m.tollCents)) +
+      (m.tollKind === "road_fee" ? " (fare income, in the split)" : " (paid back 100% to the driver)") + " · in the fare above"); /* v76b */
     if (st === "running") lines.push('<span style="color:#f0d48a">Ride in progress</span>');
     else if (st === "paid_other") {
       var o = p.paidOther || {};
@@ -5962,6 +5978,78 @@
     });
   }
   window.__pcsGodCancel = cancelCalendarRide;
+  /* ---------- v76b (Matthew 10/17): "Text my client a tracking link" on assigned board rides ----------
+     Same link as the driver app (app.js folClean / FLWSHARE / FLWRDMAP c_<row id>). First tap makes (or reuses) the link,
+     second tap opens Messages to the rider's phone with the text filled in. Matthew presses Send; nothing is sent from here.
+     The assigned driver's app keeps the map live once the driver heads out. Public copy = first name + addresses + status. */
+  var GFOL = { map: {}, busy: {}, err: {} };
+  var GFOL_TOKEN_RE = /^[A-Za-z0-9_-]{32}$/;
+  function gfolToken() {
+    var c = window.crypto || window.msCrypto;
+    if (!c || !c.getRandomValues) return "";
+    var b = new Uint8Array(24), s = "", i;
+    c.getRandomValues(b);
+    for (i = 0; i < b.length; i += 1) s += String.fromCharCode(b[i]);
+    return btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  }
+  function gfolUrl(hub, key) { return baseUrl() + "/rides/" + hub + "/" + encodeURIComponent(key) + ".json"; }
+  function gfolLink(t) { try { return new URL("../follow/?t=" + t, window.location.href).href; } catch (e) { return ""; } }
+  function gfolFirst(name) { var w = String(name || "").trim().split(/\s+/)[0] || ""; return /^[A-Za-z][A-Za-z'.-]{0,30}$/.test(w) ? w.charAt(0).toUpperCase() + w.slice(1) : ""; }
+  function gfolE164(raw) { var d = String(raw || "").replace(/\D/g, ""); if (d.length === 11 && d.charAt(0) === "1") d = d.slice(1); return d.length === 10 && /^[2-9]/.test(d) ? "+1" + d : ""; }
+  function gfolMsg(r, t) { var f = gfolFirst(r.assignedDriverName); return "Your PCS driver " + (f ? f + " " : "") + "is on the way. Follow along live: " + gfolLink(t) + " - www.PCSrides.com"; }
+  function gfolTxt(v, n) { return String(v == null ? "" : v).replace(/[\u0000-\u001f\u007f<>]/g, " ").replace(/\s+/g, " ").trim().slice(0, n); }
+  function gfolPlace(text, lat, lng) {
+    var p = {}, l = gfolTxt(text, 120);
+    if (l) p.label = l;
+    if (lat != null && lng != null && isFinite(+lat) && isFinite(+lng) && !(+lat === 0 && +lng === 0)) { p.lat = Math.round(+lat * 1e4) / 1e4; p.lng = Math.round(+lng * 1e4) / 1e4; }
+    return p.label || p.lat != null ? p : null;
+  }
+  function gfolHtml(r) {
+    if (!r || !r.assignedDriverId || r.status === "completed" || r.status === "cancelled" || r.status === "deleted") return "";
+    var g = GFOL.map[r.id], e = gfolE164(r.riderPhone);
+    if (g && g.t) {
+      return '<div class="gfol" style="margin:6px 0"><a class="btn btn-gold gfol-sms" style="display:block;text-align:center;min-height:52px;font-size:18px;font-weight:800;text-decoration:none;padding:12px" href="' +
+        esc("sms:" + e + "?&body=" + encodeURIComponent(gfolMsg(r, g.t))) + '">Open Messages' + (e ? " to " + esc(r.riderPhone) : "") + ": tracking link</a>" +
+        '<p class="fine" style="margin:4px 0">You press Send. The client sees the car and ETA once ' + esc(gfolFirst(r.assignedDriverName) || "the driver") + " heads out; fare and payment stay private.</p>" +
+        '<button type="button" class="btn btn-ghost gfol-stop" data-event-id="' + esc(r.id) + '" style="margin:2px 0">Stop the tracking link</button></div>';
+    }
+    return '<div class="gfol" style="margin:6px 0"><button type="button" class="btn btn-gold gfol-make" data-event-id="' + esc(r.id) + '" style="display:block;width:100%;min-height:52px;font-size:18px;font-weight:800"' + (GFOL.busy[r.id] ? " disabled" : "") + ">" +
+      (GFOL.busy[r.id] ? "Getting the tracking link\u2026" : "Text my client a tracking link") + "</button>" +
+      (GFOL.err[r.id] ? '<p class="fine" style="color:#ffb35c">' + esc(GFOL.err[r.id]) + "</p>" : "") + "</div>";
+  }
+  function gfolFind(id) { var rows = (state.calendar || []), i; for (i = 0; i < rows.length; i += 1) if (rows[i] && rows[i].id === id) return rows[i]; return null; }
+  function gfolMake(id, r) {
+    if (!r || GFOL.busy[id]) return;
+    GFOL.busy[id] = true; GFOL.err[id] = ""; renderBoardLists();
+    var key = "c_" + id, now = Date.now();
+    fetch(gfolUrl("FLWRDMAP", key)).then(function (res) { if (!res.ok) throw new Error("read " + res.status); return res.json(); }).then(function (d) {
+      if (d && GFOL_TOKEN_RE.test(String(d.t || ""))) return String(d.t);
+      var t = gfolToken();
+      if (!GFOL_TOKEN_RE.test(t)) throw new Error("token");
+      var copy = { v: 1, status: "assigned", kind: "sched", createdAt: now, updatedAt: now };
+      var df = gfolFirst(r.assignedDriverName); if (df) copy.driverFirst = df;
+      var pk = gfolPlace(r.pickup, r.pickupLat, r.pickupLng); if (pk) copy.pickup = pk;
+      var dr = gfolPlace(r.dropoff, r.dropoffLat, r.dropoffLng); if (dr) copy.dest = dr;
+      var put = function (url, body) { return fetch(url, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }).then(function (x) { if (!x.ok) throw new Error("save " + x.status); }); };
+      return put(gfolUrl("FLWSHARE", t), copy).then(function () { return put(gfolUrl("FLWRDMAP", key), { t: t, at: now, by: "god" }); }).then(function () { return t; });
+    }).then(function (t) { GFOL.busy[id] = false; GFOL.map[id] = { t: t }; renderBoardLists(); })
+      .catch(function (e) { GFOL.busy[id] = false; GFOL.err[id] = "The tracking link could not be made right now (" + (e && e.message || "try again") + ")."; renderBoardLists(); });
+  }
+  function gfolStop(id) {
+    var g = GFOL.map[id]; if (!g || !g.t) return;
+    var now = Date.now();
+    fetch(gfolUrl("FLWSHARE", g.t), { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ v: 1, status: "stopped", endedAt: now, updatedAt: now }) }).catch(function () {});
+    fetch(gfolUrl("FLWRDMAP", "c_" + id), { method: "DELETE" }).catch(function () {});
+    GFOL.map[id] = null; renderBoardLists();
+  }
+  document.addEventListener("click", function (e) {
+    var b = e.target && e.target.closest ? e.target.closest(".gfol-make,.gfol-stop") : null;
+    if (!b) return;
+    e.preventDefault();
+    var id = b.getAttribute("data-event-id"); if (!id) return;
+    if (b.classList.contains("gfol-stop")) gfolStop(id); else gfolMake(id, gfolFind(id));
+  });
+  window.__pcsGodFollow = { html: gfolHtml, msg: gfolMsg, e164: gfolE164, state: GFOL, place: gfolPlace }; /* test hook */
   function dayBoardHtml() {
     var rows = upcomingCalendarRides();
     var drivers = approvedDriversForAssign();
@@ -6040,6 +6128,7 @@
             ? '<p class="day-line"><span>Driver</span> ' + esc(r.assignedDriverName) + "</p>"
             : "") +
           (r.assignedDriverId ? dbTipHtml(r) : "") + /* v73 Tip (paid in Square) */
+          gfolHtml(r) + /* v76b: Text my client a tracking link */
           (st === "completed"
             ? '<p class="day-line"><span>Commission</span> ' + esc(fmtCents(r.commissionCents)) + "</p>" +
               (completedEarly(r) ? '<p class="day-line db-early" style="color:#ffb35c;font-weight:700">Completed early – <button type="button" class="btn btn-ghost btn-undo-complete" data-event-id="' + esc(r.id) + '" style="min-height:0;padding:2px 10px">Undo</button></p>' : "")
@@ -6478,14 +6567,19 @@
   function cashDriverOwesCents(e) {
     if (!isCashEntry(e)) return 0;
     if (e.driverOwesCents != null && isFinite(+e.driverOwesCents)) return Math.max(0, Math.round(+e.driverOwesCents));
-    return Math.max(0, Math.round((Number(e.fareTotal) || 0) - (Number(e.commissionCents) || 0)));
+    return Math.max(0, Math.round((Number(e.fareTotal) || 0) - (Number(e.commissionCents) || 0) - tollReimbCents(e))); /* v76b: the driver keeps the tolls he paid */
   }
+  /* v76b: metered-ride tolls. tollCents = real tolls paid back 100% to the driver (outside commission); tollRoadFeeCents =
+     "Toll road fee" in Matthew's DV-plate cars (fare income, already inside commissionCents). Shown as their own lines. */
+  function tollReimbCents(e) { return e && !(e.isTest === true || String(e.paidVia || "") === "test") ? Math.max(0, Math.round(Number(e.tollCents) || 0)) : 0; }
+  function tollFeeCents(e) { return e && !(e.isTest === true || String(e.paidVia || "") === "test") ? Math.max(0, Math.round(Number(e.tollRoadFeeCents) || 0)) : 0; }
   function payBalance(entries) {
-    var out = { owedToDriver: 0, owedByDriver: 0, net: 0, cashRides: 0, cashTips: 0 };
+    var out = { owedToDriver: 0, owedByDriver: 0, net: 0, cashRides: 0, cashTips: 0, tolls: 0, tollRoadFees: 0 };
     (entries || []).forEach(function (e) {
       /* v72s: cash tips are the driver's own money (100% kept, not part of the 30% owed, not fare): record only */
       if (isCashEntry(e)) { out.owedByDriver += cashDriverOwesCents(e); out.cashRides += 1; out.cashTips += Number(e.tipCents) || 0; }
-      else out.owedToDriver += (Number(e.commissionCents) || 0) + (Number(e.tipCents) || 0);
+      else out.owedToDriver += (Number(e.commissionCents) || 0) + (Number(e.tipCents) || 0) + tollReimbCents(e); /* v76b: + tolls paid back */
+      out.tolls += tollReimbCents(e); out.tollRoadFees += tollFeeCents(e);
     });
     out.net = out.owedToDriver - out.owedByDriver;
     return out;
@@ -7000,7 +7094,7 @@
   /* Pure: patch for a pay-week entry when God sets / clears Card failed - collect (driver owes 30% + taxes = total - commission). */
   function cardFailPatch(e, on) {
     if (!on) return { cardFailedCollect: false, driverOwesCents: 0 };
-    return { cardFailedCollect: true, driverOwesCents: Math.max(0, Math.round((Number(e.fareTotal) || 0) - (Number(e.commissionCents) || 0))) };
+    return { cardFailedCollect: true, driverOwesCents: Math.max(0, Math.round((Number(e.fareTotal) || 0) - (Number(e.commissionCents) || 0) - tollReimbCents(e))) }; /* v76b */
   }
   function cardFailToggle(driverId, code, on) {
     var e = ((state.history && state.history[driverId]) || {})[code];
@@ -7045,7 +7139,7 @@
   }
 
   window.__pcsGodAddRide = { build: addRideBuild, prefill: addRidePrefill, historyEntry: addRideHistoryEntry, chicagoIso: addRideChicagoIso,
-    payBalance: payBalance, isCash: isCashEntry, cashOwes: cashDriverOwesCents, cardFailPatch: cardFailPatch, isCardFailed: isCardFailedCollect, openFor: function (d, e) { return addRideOpenFor(d, e); } };
+    payBalance: payBalance, isCash: isCashEntry, cashOwes: cashDriverOwesCents, tollReimb: tollReimbCents, tollFee: tollFeeCents, totalsForDriver: totalsForDriver, cardFailPatch: cardFailPatch, isCardFailed: isCardFailedCollect, openFor: function (d, e) { return addRideOpenFor(d, e); } };
 
   function renderBoard() {
     return (
