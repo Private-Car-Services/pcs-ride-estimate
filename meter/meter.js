@@ -100,6 +100,7 @@
   }
   function ratesHtml(d) {
     var r = d.rates;
+    if (/^Contract rate$/.test(String(d.mode && d.mode.label || ""))) return '<div class="card" id="rm-rates"><p class="tag">Your fare</p><p>Fare agreed with PCS. Your total shows at the end of the ride.</p></div>'; /* v76j: contract numbers stay private */
     var incl = Number(r.includedMiles) || 0;
     return '<div class="card" id="rm-rates"><p class="tag">How your fare works · ' + esc(d.mode.label || d.mode.name || "") + "</p>" +
       '<div class="money-row"><span>Start' + (incl ? " (incl. " + (incl === 1 ? "first mile" : esc(String(incl)) + " mi") + ")" : "") + '</span><span id="rm-rate-start">' + money(r.startCents) + "</span></div>" +
