@@ -3567,6 +3567,7 @@
       signOf: function (d) { return dlRec("signs")[d] || (hist.signs || {})[d] || null; },
       onSign: function (d, rec) { dlPut("signs", d, rec); },
       dvirOf: function (d, k) { var a = dlRec("dvir")[d] || {}, b2 = (hist.dvir || {})[d] || {}; var r = a[k] || b2[k] || null; if (r && b2[k] && b2[k].cleared) r = Object.assign({}, r, { cleared: b2[k].cleared });
+        if (r && k === "post" && d === dlToday()) { var pst = 0; try { pst = signedIn() ? currentShiftSince() : 0; } catch (e) {} if (pst && Number(r.at) < pst) return null; } /* v76h (Matthew 10/18): inspections belong to the SHIFT. A post-trip from BEFORE this shift / login (e.g. 1:52 AM, shift opened 1:39 PM) is the earlier shift's; show a fresh form (the earlier one stays in the day history) */
         if (r && k === "pre" && d === dlToday()) { var ps = null; try { ps = preTripState(now); } catch (e) {} if (r.carriedOver || !(ps && ps.ok && Number(ps.rec.at) === Number(r.at))) return null; } /* v76d-pretrip: a pre-trip that no longer counts never shows as done */
         return r; },
       vehDates: function () { var pl = normalizePlate(acc.carPlate || "") || "car"; try { return (JSON.parse(localStorage.getItem("pcs-dvir-veh") || "{}") || {})[pl] || ((hist.veh || {})[pl]) || {}; } catch (e) { return {}; } },
@@ -3574,12 +3575,15 @@
         try { var pl = normalizePlate(acc.carPlate || "") || "car", vm = JSON.parse(localStorage.getItem("pcs-dvir-veh") || "{}") || {}; vm[pl] = Object.assign({}, vm[pl] || {}, rec.vehDates || {}, { updatedAt: Date.now(), driver: driverPresenceId(), vehicle: [acc.carYear, acc.carMake, acc.carModel].filter(Boolean).join(" ") }); localStorage.setItem("pcs-dvir-veh", JSON.stringify(vm));
           if (syncOn()) authFetch(databaseURL() + "/rides/DVIRVEH/" + encodeURIComponent(pl) + ".json", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(vm[pl]) }).catch(function () {}); } catch (e) {}
         rec.plate = normalizePlate(acc.carPlate || "");
+        try { if (k === "post") rec.shiftStart = currentShiftSince() || null; else if (k === "pre") { var cs = !state.milesNeedStart && (todayMilesRow() || readShift()) ? Number(currentShiftInfo().shiftStartedAt) || 0 : 0; rec.shiftStart = cs && preTripDoneToday() ? cs : Number(rec.at); } } catch (e) {} /* v76h: every inspection names its shift */
         if (k === "pre" && Number(rec.odometer) > 0) { try { localStorage.setItem("pcs-dvir-odo", JSON.stringify({ odo: Number(rec.odometer), at: Date.now(), plate: rec.plate, driver: driverPresenceId() })); } catch (e) {} } /* v75: reused as the opening odometer */
         var all = dlRec("dvir"); all[d] = all[d] || {};
         var was = all[d][k] || ((hist.dvir || {})[d] || {})[k]; /* v76d-pretrip: keep the earlier same-day inspection (e.g. the 1:52 AM post-trip and tonight's) */
         if (was && Number(was.at) > 0 && Number(was.at) !== Number(rec.at)) { var ek = k + "-" + Number(was.at); all[d].earlier = Object.assign({}, all[d].earlier || {}); all[d].earlier[ek] = was;
           if (syncOn()) authFetch(databaseURL() + "/rides/DRVRHSLG/" + encodeURIComponent(driverPresenceId()) + "/dvir/" + d + "/earlier/" + ek + ".json", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(was) }).catch(function () {}); }
         all[d][k] = rec; try { localStorage.setItem(dlKey("dvir"), JSON.stringify(all)); } catch (e) {}
+        if ((k === "pre" || k === "post") && Number(rec.shiftStart) > 0) { var ix = { day: d, at: Number(rec.at), slot: k, odometer: Number(rec.odometer) || null }; try { var sm = JSON.parse(localStorage.getItem(dlKey("dvirShift")) || "{}") || {}; sm[String(rec.shiftStart)] = Object.assign({}, sm[String(rec.shiftStart)] || {}); sm[String(rec.shiftStart)][k] = ix; localStorage.setItem(dlKey("dvirShift"), JSON.stringify(sm)); } catch (e) {}
+          if (syncOn()) authFetch(databaseURL() + "/rides/DRVRHSLG/" + encodeURIComponent(driverPresenceId()) + "/dvirShift/" + Number(rec.shiftStart) + "/" + k + ".json", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(ix) }).catch(function () {}); } /* v76h: index by shift (pre + post per shift); the day slots stay for God mode / history */
         if (syncOn()) authFetch(databaseURL() + "/rides/DRVRHSLG/" + encodeURIComponent(driverPresenceId()) + "/dvir/" + d + "/" + k + ".json", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(rec) }).catch(function () {});
         try { render(); } catch (e) {}
         if (k === "pre" && state.availAfterPre) { state.availAfterPre = false; setTimeout(function () { /* v74b: pre-trip done -> odometer -> Available */
@@ -3834,11 +3838,30 @@
     if (kind === "post") { var si = null; try { si = currentShiftInfo(); } catch (e) {} if (si && si.startOdo != null && !state.milesNeedStart && odo < si.startOdo && !odoOverrideActive()) return "The ending odometer can't be less than the opening odometer (" + si.startOdo.toFixed(1) + ")."; }
     return "";
   }
-  function postTripSince(t) { var r = dlDvirRec(dlToday(), "post"); return !!(r && Number(r.at) > 0 && Number(r.at) >= (Number(t) || 0) && (!r.plate || !dlPlate() || r.plate === dlPlate())) ? r : null; }
+  function postTripSince(t) { /* v76h: the post-trip for THIS shift = any post-trip saved at/after the shift start (or login), whatever calendar day it is filed under (shift across midnight), incl. the same-day "earlier" stash */
+    t = Number(t) || 0; var pl = dlPlate(), best = null, from = t > 0 ? dlYmd(t - 86400000) : "";
+    var ok = function (r) { return r && typeof r === "object" && Number(r.at) > 0 && Number(r.at) >= t && (!r.plate || !pl || r.plate === pl); };
+    [dlRec("dvir"), hosReadHist().dvir || {}].forEach(function (m) { Object.keys(m || {}).forEach(function (d) { if (from && d < from) return; var o = m[d] || {};
+      var c = [o.post]; Object.keys(o.earlier || {}).forEach(function (ek) { if (/^post-/.test(ek)) c.push(o.earlier[ek]); });
+      c.forEach(function (r) { if (ok(r) && (!best || Number(r.at) > Number(best.at))) best = r; }); }); });
+    return best;
+  }
+  function dlYmd(ms) { return new Intl.DateTimeFormat("en-CA", { timeZone: "America/Chicago", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date(ms)); }
+  /* v76h: start of the shift the driver is in now = the open shift's start, else the login time (same rule Log out uses) */
+  function currentShiftSince() {
+    var open = !state.milesNeedStart && !!(todayMilesRow() || readShift()), since = 0;
+    try { since = open ? (Number(currentShiftInfo().shiftStartedAt) || 0) : 0; } catch (e) {}
+    if (!since) { /* no open shift: the most recent shift (e.g. last night's, closed by the next-day check) still owns its post-trip; else the login time */
+      try { var mm = readMilesLocal() || {}, td = chicagoToday(); for (var i = 0; i <= 2; i += 1) { var r0 = mm[addDaysYmd(td, -i)]; if (!r0 || typeof r0 !== "object") continue;
+        [r0.shiftStartAt, r0.startedAt].concat(Object.keys(r0.shifts || {})).forEach(function (v) { var n = Number(v) || 0; if (n > since && n <= Date.now()) since = n; }); } } catch (e) {}
+      if (!since) { try { since = Number(localStorage.getItem("pcs-login-at")) || 0; } catch (e) {} }
+    }
+    return since;
+  }
   function driverLogoutStart(postRec) {
     if (ROLE !== "driver" || !signedIn()) { finishLogoutHook(); return; }
     var open = !state.milesNeedStart && !!(todayMilesRow() || readShift());
-    var since = 0; try { since = open ? (Number(currentShiftInfo().shiftStartedAt) || 0) : (Number(localStorage.getItem("pcs-login-at")) || 0); } catch (e) {}
+    var since = currentShiftSince();
     var post = postRec && Number(postRec.odometer) > 0 ? postRec : postTripSince(since);
     if (!post) { state.logoutAfterPost = true; clearDriverPresence(); state.hubOpen = false; render(); openDriverLog("day:" + dlToday() + ":insp-post"); return; }
     if (open) { /* the post-trip odometer closes the shift through the normal ending-odometer save (same rules) */
@@ -3891,7 +3914,7 @@
   }
   /* login / new day: open the pre-trip first instead of a separate opening-odometer prompt */
   function maybeOpenPreTripGate() {
-    if (!state.loginGate || ROLE !== "driver" || !signedIn() || !state.milesNeedStart || state.preGateOpenedAt) return;
+    if (!state.loginGate || ROLE !== "driver" || !signedIn() || !state.milesNeedStart || state.preGateOpenedAt || state.logoutAfterPost) return; /* v76h: Log out always gets the POST-trip, never the login pre-trip */
     try { if (driverMidRide() || meterActive() || document.getElementById("dl-overlay")) return; } catch (e) { return; }
     state.preGateOpenedAt = Date.now();
     setTimeout(function () { openDriverLog("day:" + dlToday() + ":insp"); }, 50);
@@ -16058,6 +16081,7 @@
     finishLogoutHook = finishDriverLogout;
     function finishDriverLogout() {
       stopOpenRideAlert();
+      try { var dlo = document.getElementById("dl-overlay"); if (dlo) dlo.remove(); } catch (e) {} /* v76h: a login pre-trip left open never stays on top of the login screen */
       state.milesEndFromDvir = false; state.logoutAfterPost = false; state.loginGate = false; state.preGateOpenedAt = 0;
       if (ROLE === "driver") {
         try { var loAt = Date.now(); noteLogoutAt(loAt); localStorage.setItem(qOffKey(), "1"); hosTick(loAt); } catch (e) {} /* v76d-pretrip: logging out starts off-duty time */
