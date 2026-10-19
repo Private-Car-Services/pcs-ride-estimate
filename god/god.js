@@ -1460,6 +1460,21 @@
       state.loginError = "This browser cannot verify the password securely.";
       return Promise.resolve(false);
     }
+    /* v77.1: the Worker checks the God password (it can be changed in-app) and says when it's time for a new one.
+       Only an old Worker (404) or a network failure falls back to the on-device check. */
+    var viaWorker = fetch(PAY_WORKER + "/god/login", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ godPassword: String(password) }) })
+      .then(function (res) { return res.json().catch(function () { return {}; }).then(function (d) { d = d || {}; d.httpStatus = res.status; return d; }); })
+      .catch(function () { return { httpStatus: 0 }; });
+    return viaWorker.then(function (d) {
+      if (d.ok) {
+        try { if (d.godToken) { gqSetTok(d.godToken); gq.tokOn = true; } gq.pw = String(password); } catch (e2) {}
+        state.godPwMust = d.mustChange === true; state.godPwDays = d.days || 45;
+        return writeSession(e).then(function () { state.sessionEmail = e; state.screen = "board"; state.loginError = ""; return true; });
+      }
+      if (d.httpStatus === 403 || d.httpStatus === 429) { state.loginError = d.httpStatus === 429 ? "Too many tries. Wait a minute." : "Wrong email or password."; return false; }
+      return localGodCheck();
+    });
+    function localGodCheck() {
     return sha256Hex(password).then(function (got) {
       if (got !== expected) {
         state.loginError = "Wrong email or password.";
@@ -1469,12 +1484,78 @@
         state.sessionEmail = e;
         state.screen = "board";
         state.loginError = "";
+        try { if (typeof gq !== "undefined" && gq && !gqTok()) gq.pw = String(password); } catch (e2) {} /* v77.1: first roster read through the Worker gets the God token (memory only) */
         return true;
       });
     }).catch(function () {
       state.loginError = "Could not verify password.";
       return false;
     });
+    }
+  }
+  /* v77.1: God password change (forced after the limit, or any time from the Password button) + the days setting */
+  function godPwScreenHtml() {
+    var big = "display:block;width:100%;min-height:58px;font-size:20px;font-weight:700;border-radius:12px;border:0;background:#1f7a3a;color:#fff;margin-top:14px";
+    var box = "display:block;width:100%;min-height:50px;font-size:18px;padding:10px;border-radius:10px;border:2px solid #1f7a3a;margin:6px 0 10px;box-sizing:border-box";
+    var forced = state.godPwMust === true;
+    return '<div class="login-wrap"><section class="login-card" style="max-width:520px">' +
+      '<h1 style="color:#1f7a3a;font-size:26px;margin:0 0 8px">' + (forced ? "Time to set a new password" : "Change God password") + '</h1>' +
+      '<p style="font-size:17px">' + (forced ? "God mode asks for a fresh password every " + esc(String(state.godPwDays || 45)) + " days. Set a new one to continue." : "Your God password is changed here.") + '</p>' +
+      '<form id="godpw-form" autocomplete="off" novalidate>' +
+      '<label for="godpw-cur">Current password</label><input id="godpw-cur" type="password" autocomplete="current-password" style="' + box + '">' +
+      '<label for="godpw-new">New password (8 or more characters)</label><input id="godpw-new" type="password" autocomplete="new-password" style="' + box + '">' +
+      '<label for="godpw-confirm">New password again</label><input id="godpw-confirm" type="password" autocomplete="new-password" style="' + box + '">' +
+      '<p class="login-error" id="godpw-error" role="alert" style="font-size:17px">' + esc(state.godPwError || "") + '</p>' +
+      '<button type="submit" style="' + big + '"' + (state.godPwBusy ? " disabled" : "") + '>' + (state.godPwBusy ? "Saving…" : "Save new password") + '</button></form>' +
+      (forced ? "" :
+        '<form id="godpw-days-form" style="margin-top:22px" novalidate><label for="godpw-days">Password change every (days)</label>' +
+        '<input id="godpw-days" type="number" inputmode="numeric" min="1" max="365" value="' + esc(String(state.godPwDays || 45)) + '" style="' + box + '">' +
+        '<p id="godpw-days-msg" style="font-size:16px">' + esc(state.godPwDaysMsg || "Applies to drivers and God mode.") + '</p>' +
+        '<button type="submit" style="' + big + '">Save setting</button></form>' +
+        '<button type="button" id="godpw-close" style="' + big + ';background:#4a5a4a">Back to the board</button>') +
+      '</section></div>';
+  }
+  function godPwAuth() { var t = ""; try { t = gqTok(); } catch (e) {} return t ? { godToken: t } : (gq.pw ? { godPassword: gq.pw } : null); }
+  function bindGodPw() {
+    var f = document.getElementById("godpw-form");
+    if (f) f.addEventListener("submit", function (ev) {
+      ev.preventDefault();
+      var g = function (id) { var el = document.getElementById(id); return el ? el.value : ""; };
+      var cur = g("godpw-cur"), np = g("godpw-new"), cf = g("godpw-confirm");
+      var fail = function (m) { state.godPwError = m; state.godPwBusy = false; render(); };
+      if (!cur) return fail("Enter your current password.");
+      if (np.length < 8) return fail("Use at least 8 characters for the new password.");
+      if (np !== cf) return fail("The two new passwords must match.");
+      if (np === cur) return fail("Pick a new password that's different from the last one.");
+      state.godPwBusy = true; state.godPwError = ""; render();
+      fetch(PAY_WORKER + "/god/changepw", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ godPassword: cur, newPassword: np }) })
+        .then(function (res) { return res.json().catch(function () { return {}; }); })
+        .then(function (d) {
+          if (!d || !d.ok) return fail((d && d.error) || "Couldn't save the new password. Try again.");
+          try { if (d.godToken) { gqSetTok(d.godToken); gq.tokOn = true; } gq.pw = ""; } catch (e) {}
+          state.godPwMust = false; state.godPwOpen = false; state.godPwBusy = false; state.godPwError = "";
+          state.actionNotice = "New God password saved. Use it next time you sign in.";
+          render(); startPoll();
+        }).catch(function () { fail("Couldn't reach PCS. Check signal and try again."); });
+    });
+    var df = document.getElementById("godpw-days-form");
+    if (df) df.addEventListener("submit", function (ev) {
+      ev.preventDefault();
+      var d0 = Math.round(Number((document.getElementById("godpw-days") || {}).value));
+      if (!(d0 >= 1 && d0 <= 365)) { state.godPwDaysMsg = "Pick 1 to 365 days."; render(); return; }
+      var auth = godPwAuth() || godWriteAuth();
+      if (!auth) return;
+      fetch(PAY_WORKER + "/god/pwpolicy", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(Object.assign({ days: d0 }, auth)) })
+        .then(function (res) { return res.json().catch(function () { return {}; }); })
+        .then(function (d) {
+          if (d && d.godToken) { try { gqSetTok(d.godToken); } catch (e) {} }
+          state.godPwDays = d && d.ok ? d.days : state.godPwDays;
+          state.godPwDaysMsg = d && d.ok ? "Saved: every " + d.days + " days." : ((d && d.error) || "Couldn't save the setting.");
+          render();
+        }).catch(function () { state.godPwDaysMsg = "Couldn't reach PCS. Try again."; render(); });
+    });
+    var c = document.getElementById("godpw-close");
+    if (c) c.addEventListener("click", function () { state.godPwOpen = false; render(); startPoll(); });
   }
 
   function logout() {
@@ -1578,7 +1659,55 @@
     });
   }
 
+  /* v77.1 (Harry v77 #1): the driver roster is read through the Worker with the God token (password fields stripped there).
+     A Worker without /god/roster (404 "Not found") falls back to the old direct read. Never prompts: no token yet = old read. */
+  function godReadAuth() {
+    var t = ""; try { t = gqTok(); } catch (e) {}
+    if (t) return { godToken: t };
+    if (typeof gq !== "undefined" && gq && gq.pw) return { godPassword: gq.pw };
+    return null;
+  }
+  function godRosterApi(extra) {
+    var auth = godReadAuth();
+    if (!auth) return Promise.resolve({ noAuth: true });
+    return fetch(PAY_WORKER + "/god/roster", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(Object.assign({}, extra || {}, auth)) })
+      .then(function (res) {
+        return res.json().catch(function () { return {}; }).then(function (d) {
+          d = d || {}; d.httpStatus = res.status;
+          if (res.status === 404 && d.error === "Not found") d.oldWorker = true;
+          if (d.godToken) { try { gqSetTok(d.godToken); gq.pw = ""; gq.tokOn = true; } catch (e) {} }
+          if (res.status === 401) { try { gqSetTok(""); gq.pw = ""; } catch (e) {} }
+          return d;
+        });
+      });
+  }
+  function godRosterRow(id) {
+    return godRosterApi({ driverId: id }).then(function (d) {
+      if (d.ok) return d.row || null;
+      if (d.oldWorker || d.noAuth) return fetch(rosterUrl(id)).then(function (r) { return r.ok ? r.json() : null; });
+      return null;
+    }).catch(function () { return null; });
+  }
   function listRoster() {
+    return godRosterApi().then(function (d) {
+      if (d.ok && d.roster && typeof d.roster === "object") {
+        var out0 = {};
+        Object.keys(d.roster).forEach(function (id) { var row = d.roster[id]; if (row && typeof row === "object") { row.id = id; out0[id] = row; } });
+        return out0;
+      }
+      if (!d.oldWorker && !d.noAuth) { var e0 = new Error("roster-denied"); e0.denied = d.httpStatus === 401 || d.httpStatus === 403; throw e0; }
+      return listRosterDirect().catch(function (err) {
+        /* roster closed to direct reads and this device has no God token yet: ask for the God password once, then use the Worker */
+        if (!(err && err.denied) || !d.noAuth || state.rosterPwAsked) throw err;
+        state.rosterPwAsked = true;
+        var a = godWriteAuth();
+        if (!a) throw err;
+        if (a.godPassword) gq.pw = a.godPassword;
+        return listRoster();
+      });
+    });
+  }
+  function listRosterDirect() {
     return fetch(rosterUrl()).then(function (res) {
       if (res.status === 401 || res.status === 403) {
         var err = new Error("roster-denied");
@@ -7533,6 +7662,7 @@
           '<div class="top-actions">' +
             '<p class="status-pill" id="refresh-pill">' + esc(statusPillText()) + "</p>" +
             '<button type="button" class="btn btn-gold" id="god-push-btn">' + (state.pushOn ? "\uD83D\uDD14 Phone alerts: ON" : "\uD83D\uDD14 Turn on phone alerts") + "</button>" +
+            '<button type="button" class="btn btn-ghost" id="god-pw-btn">Password</button>' + /* v77.1 */
             '<button type="button" class="btn btn-ghost" id="god-logout">Sign out</button>' +
           "</div>" +
         "</header>" +
@@ -7793,6 +7923,13 @@
         });
       });
     }
+    var pwb = document.getElementById("god-pw-btn");
+    if (pwb) pwb.addEventListener("click", function () {
+      state.godPwOpen = true; state.godPwError = ""; state.godPwDaysMsg = "";
+      var a = godPwAuth();
+      if (a) fetch(PAY_WORKER + "/god/pwpolicy", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(a) }).then(function (r) { return r.json(); }).then(function (d) { if (d && d.ok) { state.godPwDays = d.days; render(); } }).catch(function () {});
+      render();
+    });
     var out = document.getElementById("god-logout");
     if (out) {
       out.addEventListener("click", function () { logout(); });
@@ -7826,6 +7963,7 @@
       bind();
       return;
     }
+    if (state.godPwMust || state.godPwOpen) { stopPoll(); tearMap(); root.innerHTML = godPwScreenHtml(); bindGodPw(); return; } /* v77.1 */
     var nae = document.activeElement, ncode = nae && nae.getAttribute ? nae.getAttribute("data-note-code") : null; /* v76d: keep typing in a note box */
     var nsel = ncode ? [nae.selectionStart, nae.selectionEnd] : null;
     root.innerHTML = renderBoard();
@@ -7999,7 +8137,7 @@
   function godDriverLogData(id, now) {
     now = now || Date.now();
     var j = function (u) { return fetch(u).then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }); };
-    return Promise.all([j(milesUrl(id)), j(baseUrl() + "/rides/DRVRHSLG/" + encodeURIComponent(id) + ".json"), j(rosterUrl(id))]).then(function (res) {
+    return Promise.all([j(milesUrl(id)), j(baseUrl() + "/rides/DRVRHSLG/" + encodeURIComponent(id) + ".json"), godRosterRow(id)]).then(function (res) {
       var miles = res[0] || {}, hl = res[1] || {}, ro = res[2] || {}, duty = [], drive = [], breaks = [], offline = [], overrides = [];
       var iv = function (o, arr) { if (o && typeof o === "object") Object.keys(o).forEach(function (k) { var v = o[k] || {}; var s0 = Number(v.s), e0 = Number(v.e) || s0; if (v.open && !(e0 > s0)) e0 = now; if (s0 > 0 && e0 > s0) arr.push([s0, e0]); }); };
       Object.keys(hl).forEach(function (k) { if (/^\d+$/.test(k)) { var v = hl[k] || {}; if (Number(v.s) > 0 && Number(v.e) > Number(v.s)) duty.push([Number(v.s), Number(v.e)]); } });
