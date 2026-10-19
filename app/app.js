@@ -8514,6 +8514,76 @@
     if (id) return base + "/" + encodeURIComponent(id) + ".json";
     return base + ".json";
   }
+  /* v77.1 (Harry v77 #1): the driver roster is read/written ONLY through the Worker (/driver/roster); password hashes stay there.
+     A Worker without the route (404 "Not found") falls back to the old direct read so the order of deploys does not matter. */
+
+  /* v77.1 (Matthew 10/19): password change every N days (God setting, default 45). The Worker says mustChange at login; the driver app
+     then shows "Time to set a new password" (current + new, 8+ characters, different from the last one) before anything else.
+     Never shown in the middle of a ride or a running meter. */
+  var PW_MUST_KEY = "pcs-pw-must-change";
+  function pwMustChange() {
+    try { var e = String(readSession() || "").toLowerCase(); return !!e && localStorage.getItem(PW_MUST_KEY) === e; } catch (x) { return false; }
+  }
+  function pwMustSet(email, on) {
+    try { if (on) localStorage.setItem(PW_MUST_KEY, String(email || "").toLowerCase()); else localStorage.removeItem(PW_MUST_KEY); } catch (x) {}
+  }
+  function pwChangeScreen() {
+    var big = "display:block;width:100%;min-height:58px;font-size:20px;font-weight:700;border-radius:12px;border:0;background:#1f7a3a;color:#fff;margin-top:14px";
+    var box = "display:block;width:100%;min-height:50px;font-size:18px;padding:10px;border-radius:10px;border:2px solid #1f7a3a;margin:6px 0 10px;box-sizing:border-box";
+    return '<section class="pw-change" style="max-width:520px;margin:24px auto;padding:20px">' +
+      '<h1 style="color:#1f7a3a;font-size:26px;margin:0 0 8px">Time to set a new password</h1>' +
+      '<p style="font-size:17px">PCS asks for a fresh password every ' + esc(String(state.pwDays || 45)) + ' days. Set yours to keep driving.</p>' +
+      '<form id="pwc-form" autocomplete="off" novalidate>' +
+      '<label for="pwc-cur">Current password</label><input id="pwc-cur" type="password" autocomplete="current-password" style="' + box + '">' +
+      '<label for="pwc-new">New password (8 or more characters)</label><input id="pwc-new" type="password" autocomplete="new-password" style="' + box + '">' +
+      '<label for="pwc-confirm">New password again</label><input id="pwc-confirm" type="password" autocomplete="new-password" style="' + box + '">' +
+      '<p class="error" id="pwc-error" role="alert" style="font-size:17px;color:#b00020">' + esc(state.pwcError || "") + '</p>' +
+      '<button type="submit" id="pwc-save" style="' + big + '"' + (state.pwcBusy ? " disabled" : "") + '>' + (state.pwcBusy ? "Saving…" : "Save new password") + '</button>' +
+      '</form></section>';
+  }
+  function pwChangeSubmit() {
+    var g = function (id) { var el = document.getElementById(id); return el ? el.value : ""; };
+    var cur = g("pwc-cur"), np = g("pwc-new"), cf = g("pwc-confirm"), email = String(readSession() || "").toLowerCase();
+    var fail = function (m) { state.pwcError = m; state.pwcBusy = false; render(); };
+    if (!cur) return fail("Enter your current password.");
+    if (np.length < 8) return fail("Use at least 8 characters for the new password.");
+    if (np !== cf) return fail("The two new passwords must match.");
+    if (np === cur) return fail("Pick a new password that's different from the last one.");
+    state.pwcBusy = true; state.pwcError = ""; render();
+    rosterApi({ op: "changepw", email: email, password: cur, newPassword: np }).then(function (d) {
+      if (!d.ok) return fail(d.error || "Couldn't save the new password. Try again.");
+      pwMustSet(email, false); state.pwcBusy = false; state.pwcError = "";
+      return saveRosterAccountLocally(d.row || { email: email }, np, accountForRole()).then(function () {
+        qDriverLoginToken(email, np);
+        state.actionNotice = "New password saved.";
+        render();
+      });
+    }).catch(function () { fail("Couldn't reach PCS. Check signal and try again."); });
+  }
+  document.addEventListener("submit", function (ev) {
+    if (ev.target && ev.target.id === "pwc-form") { ev.preventDefault(); pwChangeSubmit(); }
+  }, true);
+  var ROSTER_TOK_KEY = "pcs-roster-tok";
+  function rosterTok() { try { return localStorage.getItem(ROSTER_TOK_KEY) || ""; } catch (e) { return ""; } }
+  function rosterTokSave(t) { try { if (t) localStorage.setItem(ROSTER_TOK_KEY, String(t)); else localStorage.removeItem(ROSTER_TOK_KEY); } catch (e) {} }
+  function rosterAuth() {
+    var o = {}, r = rosterTok(), t = "";
+    if (r) o.rtok = r;
+    try { t = typeof qToken === "function" ? qToken() : ""; } catch (e) { t = ""; }
+    if (t) o.token = t;
+    return o;
+  }
+  function rosterApi(body) {
+    return fetch(METER_WORKER + "/driver/roster", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) })
+      .then(function (r) {
+        return r.json().catch(function () { return {}; }).then(function (d) {
+          d = d || {}; d.httpStatus = r.status;
+          d.oldWorker = r.status === 404 && d.error === "Not found";
+          if (d.rtok) rosterTokSave(d.rtok);
+          return d;
+        });
+      });
+  }
 
   function historyUrl(driverId, rideCode) {
     var base = databaseURL() + "/rides/" + encodeURIComponent(HISTORY_HUB) + "/" + encodeURIComponent(driverId);
@@ -10760,65 +10830,30 @@
       });
     }
     var id = driverPresenceId();
-    return authFetch(rosterUrl(id)).then(loadRow).catch(function () {
-      return fetch(rosterUrl(id)).then(loadRow);
-    }).then(function (row) {
-      if (row !== undefined) applyRosterRow(row);
+    function legacyLoad() {
+      return authFetch(rosterUrl(id)).then(loadRow).catch(function () {
+        return fetch(rosterUrl(id)).then(loadRow);
+      }).then(function (row) {
+        if (row !== undefined) applyRosterRow(row);
+      }).catch(function () {});
+    }
+    var auth = rosterAuth();
+    return rosterApi(Object.assign({ op: "get" }, auth)).then(function (d) {
+      if (d.oldWorker) return legacyLoad();
+      if (!d.ok) return; /* not proven yet (log in again): keep the status this phone already has */
+      var mine = rosterIdsForEmail(readSession() || "").concat([id]);
+      if (mine.indexOf(String(d.id || "")) < 0) { rosterTokSave(""); return; } /* another driver's token on this phone */
+      applyRosterRow(d.row || null);
     }).catch(function () {});
   }
 
   function publishPendingSignup(account) {
+    /* v77.1: through the Worker (it only ever creates a PENDING row and never changes a rate) */
     if (!syncOn() || !account || !account.email) return Promise.resolve();
-    var id = String(account.email).toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 48);
-    if (!id) return Promise.resolve();
-    return authFetch(rosterUrl(id)).then(function (res) {
-      return res.text().then(function (text) {
-        var existing = null;
-        if (text && text !== "null") {
-          try { existing = JSON.parse(text); } catch (e) { existing = null; }
-        }
-        if (existing && existing.active === true) return existing;
-        if (existing && String(existing.approvalStatus || "").toLowerCase() === "approved") return existing;
-        if (existing && String(existing.approvalStatus || "").toLowerCase() === "fired") return existing;
-        if (existing && String(existing.approvalStatus || "").toLowerCase() === "rejected") return existing;
-        /* Drivers may only create/update a pending signup row — never self-approve. */
-        var row = {
-          name: account.name || "",
-          phone: account.phone || "",
-          email: String(account.email || "").toLowerCase(),
-          uid: firebaseUid() || account.uid || "",
-          commissionPct: (existing && existing.commissionPct != null) ? existing.commissionPct : Math.round(DRIVER_COMMISSION_RATE * 100),
-          active: false,
-          approvalStatus: "pending",
-          signedUpAt: (existing && existing.signedUpAt) || Date.now(),
-          updatedAt: Date.now(),
-          carYear: account.carYear || "",
-          carMake: account.carMake || "",
-          carModel: account.carModel || "",
-          carPlate: normalizePlate(account.carPlate),
-          carSeats: account.carSeats || ""
-        };
-        var method = existing ? "PATCH" : "PUT";
-        var body = existing
-          ? {
-              name: row.name,
-              phone: row.phone,
-              email: row.email,
-              carYear: row.carYear,
-              carMake: row.carMake,
-              carModel: row.carModel,
-              carPlate: row.carPlate,
-              carSeats: row.carSeats,
-              updatedAt: row.updatedAt
-            }
-          : row;
-        return authFetch(rosterUrl(id), {
-          method: method,
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(body)
-        }).then(function () { return row; });
-      });
-    }).catch(function () {});
+    var body = Object.assign({ op: "signup", email: String(account.email || "").toLowerCase(), name: account.name || "", phone: account.phone || "",
+      uid: firebaseUid() || account.uid || "", carYear: account.carYear || "", carMake: account.carMake || "", carModel: account.carModel || "",
+      carPlate: normalizePlate(account.carPlate), carSeats: account.carSeats || "" }, rosterAuth());
+    return rosterApi(body).then(function (d) { return d && d.row ? d.row : null; }).catch(function () {});
   }
 
   function accountsHubUrl(id) {
@@ -10938,23 +10973,13 @@
         }
       }
       /* Roster car text: only PATCH an existing roster row (PATCH would create a half row otherwise). */
-      return authFetch(rosterUrl(id)).then(function (res) {
-        if (!res.ok) return "";
-        return res.text();
-      }).then(function (text) {
-        if (!text || text === "null") return;
-        var car = {};
-        ["carYear", "carMake", "carModel", "carPlate", "carSeats"].forEach(function (k) {
-          if (hasProfileValue(k, row[k])) car[k] = row[k];
-        });
-        if (!Object.keys(car).length) return;
-        car.profileUpdatedAt = at;
-        return authFetch(rosterUrl(id), {
-          method: "PATCH",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(car)
-        });
-      }).catch(function () {});
+      var car = {};
+      ["carYear", "carMake", "carModel", "carPlate", "carSeats"].forEach(function (k) {
+        if (hasProfileValue(k, row[k])) car[k] = row[k];
+      });
+      if (!Object.keys(car).length) return;
+      /* v77.1: car text on the driver's own roster row goes through the Worker (existing rows only) */
+      return rosterApi(Object.assign({ op: "car" }, car, rosterAuth())).catch(function () {});
     }).then(function () { return true; });
   }
 
@@ -11981,9 +12006,16 @@
     /* After a good on-phone login, store a salted hash on the roster row if none exists yet,
        so the same driver can log in from the Home Screen app or another phone. */
     if (ROLE !== "driver" || !syncOn()) return;
-    fetchRosterByEmail(email).then(function (found) {
-      if (!found || found.row.pwHash || found.row.passwordHash) return;
-      return writeRosterPassword(found.id, password);
+    /* v77.1: the Worker checks it (and hands this phone its roster token); a row with no password yet gets this one */
+    rosterApi({ op: "login", email: email, password: password }).then(function (d) {
+      if (d.oldWorker) {
+        return fetchRosterByEmail(email).then(function (found) {
+          if (!found || found.row.pwHash || found.row.passwordHash) return;
+          return writeRosterPassword(found.id, password);
+        });
+      }
+      if (d.ok && d.found && d.hasPassword === false) return rosterApi({ op: "setpw", email: email, password: password });
+      if (d.ok && d.found && d.hasPassword) { if (d.days) state.pwDays = d.days; pwMustSet(email, d.mustChange === true); render(); } /* v77.1 */
     }).catch(function () {});
   }
 
@@ -15912,6 +15944,7 @@
     var app = document.getElementById("app");
     var html = "";
     if (!signedIn()) html = accountGate();
+    else if (ROLE === "driver" && pwMustChange() && !driverMidRide() && !meterActive()) html = pwChangeScreen(); /* v77.1 */
     else if (ROLE === "driver" && state.screen === "home" && state.meterOpen) html = meterScreen(); /* v70 */
     else if (ROLE === "driver" && state.screen === "home") html = driverHome();
     else if (ROLE === "driver") html = driverTrip();
@@ -16148,7 +16181,42 @@
             loginFail(localSame ? "That email or password does not match the account on this phone." : "No account on this phone yet. Create one first (or finish Firebase Auth keys).");
             return;
           }
-          fetchRosterByEmail(loginEmail).then(function (found) {
+          /* v77.1: the Worker checks the password against the roster (the hash never comes to the phone) */
+          rosterApi({ op: "login", email: loginEmail, password: password }).then(function (d) {
+            if (d.oldWorker) return legacyRosterLogin();
+            if (d.httpStatus === 403) { loginFail(mismatchMsg); return; }
+            if (d.httpStatus === 429) { loginFail(d.error || "Too many tries. Wait 15 minutes."); return; }
+            if (!d.ok) throw new Error("roster");
+            if (!d.found) { loginFail(localSame ? mismatchMsg : noAccountMsg); return; }
+            if (d.hasPassword && d.row) {
+              state.loginSetupEmail = "";
+              state.loginSetupDraft = "";
+              if (d.days) state.pwDays = d.days;
+              pwMustSet(loginEmail, d.mustChange === true); /* v77.1 */
+              return saveRosterAccountLocally(d.row, password, keep).then(afterLocalLogin);
+            }
+            if (localSame) { loginFail(mismatchMsg); return; }
+            if (password.length < 8) { loginFail("Password must be at least 8 characters."); return; }
+            var confirmEl = document.getElementById("login-confirm");
+            var confirmPw = confirmEl ? confirmEl.value : "";
+            if (state.loginSetupEmail !== loginEmail || !confirmEl) {
+              state.loginSetupEmail = loginEmail;
+              state.loginSetupDraft = loginEmail;
+              loginFail("Found your driver account" + (d.name ? " (" + d.name + ")" : "") + ". Set your password for this app: type it in Password and again in Confirm password, then tap Log in.");
+              return;
+            }
+            if (confirmPw !== password) { loginFail("Password and confirm password must match."); return; }
+            return rosterApi({ op: "setpw", email: loginEmail, password: password }).then(function (s2) {
+              if (!s2.ok || !s2.row) throw new Error("roster");
+              state.loginSetupEmail = "";
+              state.loginSetupDraft = "";
+              return saveRosterAccountLocally(s2.row, password, keep).then(afterLocalLogin);
+            });
+          }).catch(function () {
+            loginFail("Could not reach the driver roster. Check signal and try again.");
+          });
+          function legacyRosterLogin() {
+            return fetchRosterByEmail(loginEmail).then(function (found) {
             if (!found) {
               loginFail(localSame ? mismatchMsg : noAccountMsg);
               return;
@@ -16194,9 +16262,8 @@
               state.loginSetupDraft = "";
               return saveRosterAccountLocally(row, password, keep).then(afterLocalLogin);
             });
-          }).catch(function () {
-            loginFail("Could not reach the driver roster. Check signal and try again.");
-          });
+            });
+          }
         }
         if (!a || !a.hasConfig || !a.hasConfig()) {
           tryLocalLogin();
@@ -18881,6 +18948,7 @@
       qWorker("/driver/session", { driverId: driverPresenceId(), email: email, password: password }).then(function (d) {
         qSetToken(d.token); qd.authErr = ""; qd.lastPub = null; render();
       }).catch(function (e) {
+        if (e.code === "pw_expired") { pwMustSet(email, true); render(); return; } /* v77.1 */
         if (e.status === 403 && e.code !== "pin_changed" && tries < 3) { setTimeout(go, 4000 * tries); return; } /* roster password backfill may land a moment later */
         qd.authErr = e.message || "Couldn't confirm your driver login.";
       });
