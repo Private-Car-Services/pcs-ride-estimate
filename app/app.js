@@ -8953,6 +8953,7 @@
   }
   if (typeof window !== "undefined") window.__pcsV76dNotes = { clean: function (t) { return rideNoteClean(t); }, patch: function (t, b, n) { return rideNotePatch(t, b, n); }, isTest: function (e) { return appIsTestRide(e); } };
   if (typeof window !== "undefined") window.__pcsV76dCash = { regFmt: function (v) { return meterRegFmt(v); }, regKey: function (c, k) { return meterRegKey(c, k); }, tipFromChoice: function (M, c, x) { return meterTipFromChoice(M, c, x); } };
+  if (typeof window !== "undefined") window.__pcsV76iSched = { meterDone: function (r) { return schedMeterDone(r); }, meterDoneText: function (m) { return schedMeterDoneText(m); } };
   if (typeof window !== "undefined") window.__pcsV76dApp = { rideCode: rideCodeV76d, historyDecision: historyDecision, ridePctOf: ridePctOf };
 
   /* ---------- v75v (Matthew 2026-10-16): Prepaid (Square invoice) ----------
@@ -9020,6 +9021,10 @@
   function refreshScheduledRides(force) {
     if (ROLE !== "driver" || !signedIn() || !syncOn()) return Promise.resolve();
     return listScheduledRides().then(function (rows) {
+      (rows || []).forEach(function (r) { /* v76i: a card save still waiting for signal wins over the older copy on the server */
+        var w = r && r.id ? outboxPending(calendarHubUrl(r.id)) : null;
+        if (w) Object.keys(w).forEach(function (k) { if (w[k] !== null && k !== "updatedAt") r[k] = w[k]; });
+      });
       state.scheduledRides = rows || [];
       state.scheduledError = "";
       try { /* v73: PCS (God mode) canceled a scheduled ride assigned to me -> tell the driver once */
@@ -9164,9 +9169,8 @@
     if (r && body.stopsGeo) r.stopsGeo = schedStopsOf(body);
     state.scheduledSig = schedSig();
     if (!syncOn()) return Promise.resolve(true);
-    return authFetch(calendarHubUrl(id), { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(Object.assign({ updatedAt: Date.now() }, body)) })
-      .then(function (res) { if (!res.ok) throw new Error("save " + res.status); return true; })
-      .catch(function () { state.schedMsg = "Saved on this device. It will show for PCS once the signal is back; tap Save again if it does not."; return false; });
+    return saveWrite(calendarHubUrl(id), "PATCH", Object.assign({ updatedAt: Date.now() }, body)) /* v76i: retried by itself */
+      .then(function (ok) { if (!ok) state.schedMsg = "Saved on this device. It goes to PCS by itself once the signal is back."; return ok; });
   }
   function schedSaveDrop(id, text, lat, lng) {
     if (state.schedEst) delete state.schedEst[id];
@@ -10335,7 +10339,7 @@
           '<button class="btn" type="button" data-complete-schedule="' + esc(r.id) + '" style="' + SCHED_BTN_2 + ';min-height:40px;font-size:14px">It was a separate ride: Mark complete</button>';
       } else {
         actions = (M ? '<p style="margin:8px 0;color:#374151">Finish the current metered ride, then start this one.</p>'
-            : '<button type="button" class="sched-start" data-sched-start="' + esc(r.id) + '" style="' + SCHED_BTN_BIG + '">Start ride</button>') +
+            : '<button type="button" class="sched-start" data-sched-start="' + esc(r.id) + '" style="' + SCHED_BTN_BIG + '">Head to pick up</button>') +
           '<button class="btn" type="button" data-complete-schedule="' + esc(r.id) + '" style="' + SCHED_BTN_2 + ';min-height:40px;font-size:14px">Mark complete (ride already done)</button>';
       }
       return (
@@ -10540,7 +10544,33 @@
     var body = Object.assign({ status: "completed", completedAt: now, updatedAt: now }, extra || {});
     (state.scheduledRides || []).forEach(function (r) { if (r && r.id === eventId) Object.assign(r, body); });
     if (!syncOn()) return Promise.resolve();
-    return authFetch(calendarHubUrl(eventId), { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }).catch(function () {});
+    return saveWrite(calendarHubUrl(eventId), "PATCH", body); /* v76i */
+  }
+  /* v76i (Matthew 10/19, Patti Drisko IAH): a card that already ran on the meter. Mark complete closes it WITHOUT a second
+     ($0) pay-week entry: the metered ride carries the fare, the driver's % share and the tip. Returns null for a card that
+     never started the meter. */
+  function schedMeterDone(r) {
+    if (!r) return null;
+    var M = state.meter, code = String(r.meterCode || "");
+    if (M && M.schedId === r.id && M.status !== "running") code = M.code;
+    if (!code) return null;
+    if (M && M.code === code && M.status === "running") return null;
+    var entry = null;
+    readRideLog().forEach(function (e) { if (!entry && e && e.code === code) entry = e; });
+    return { code: code, entry: entry, meter: M && M.code === code ? M : null };
+  }
+  function schedMeterDoneText(md) {
+    var e = md.entry;
+    if (e && (Number(e.fareSub) || 0) > 0) return "This ride ran on the meter. Your pay week already has it: fare " + money(Number(e.fareSub) || 0) +
+      " before tax, your share " + money(Number(e.commissionCents) || 0) + (Number(e.tipCents) > 0 ? " + tip " + money(Number(e.tipCents)) : "") + ". Close this ride?";
+    return "This ride ran on the meter (ride code " + md.code + "). The meter's fare goes on your pay week. Close this ride?";
+  }
+  function schedCloseMetered(r, md) {
+    var me = driverPresenceId(), saves = [];
+    if (md.meter && md.meter.status !== "running" && md.meter.endSaved !== true && md.meter.fare) saves.push(saveWrite(rideUrl(md.code), "PATCH", meterEndFields(md.meter)));
+    if (md.entry && me) saves.push(saveWrite(historyUrl(me, md.code), "PATCH", Object.assign({}, md.entry))); /* heals a lost pay-week save */
+    saves.push(schedCloseNoCredit(r.id, { meterCode: md.code }));
+    return Promise.all(saves).then(function () { return refreshScheduledRides(true); }, function () { return refreshScheduledRides(true); });
   }
   function completeScheduledRide(eventId) {
     var row = null;
@@ -10553,6 +10583,7 @@
     }
     if (!row) return Promise.resolve();
     if (schedAppPaid(row)) return schedCloseNoCredit(eventId); /* v75w: paid in the app, the meter already credited it */
+    var mdV76i = schedMeterDone(row); if (mdV76i) return schedCloseMetered(row, mdV76i); /* v76i: ran on the meter -> never a second $0 entry */
     var pct = driverCommissionPct(); /* v75w: the driver's stored % */
     if (ridePctOf(row) != null) pct = ridePctOf(row); /* v76d: a per-ride % set in God mode wins */
     var fareBefore = row.fareBeforeTax != null && isFinite(Number(row.fareBeforeTax))
@@ -10614,9 +10645,9 @@
     if (syncOn()) {
       puts.push(appHistoryGuard(driverPresenceId(), code, entry).then(function (g) { /* v76d: never overwrite another ride's pay entry */
         if (g.code !== code) { entry.code = g.code; next.code = g.code; row.code = g.code; }
-        return authFetch(calendarHubUrl(eventId), { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(next) }).then(function () {
+        return saveWrite(calendarHubUrl(eventId), "PATCH", next).then(function () { /* v76i: outbox */
           if (g.skip) return null;
-          return authFetch(historyUrl(driverPresenceId(), g.code), { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(entry) });
+          return saveWrite(historyUrl(driverPresenceId(), g.code), "PUT", entry);
         }).then(function () {
           if (ridePctOf(row) != null || (row.manual && row.commissionDollars != null)) return null; /* per-ride % / God dollar override stays */
           return rateRecheckAfterEnd(g.code, pct, function (p) {
@@ -13444,10 +13475,89 @@
     var acct = readDriverAccount() || {};
     return String(acct.name || state.driverName || readSession() || "Driver").slice(0, 80);
   }
-  function meterWrite(url, method, body) {
+  /* ---------- v76i (Matthew 10/19, Patti Drisko IAH): SAVE-LATER OUTBOX. The meter ended at the IAH curb with a weak signal;
+     the end-of-ride saves (ride done, card done, pay-week entry) were one-shot and were lost, so the card stayed open with a
+     $0 fare. Every ride/card/pay-week save now goes through saveWrite: a save that fails for signal (or a server hiccup) is
+     kept on this device and sent again (every 20 s, when the signal comes back, when the app is opened) in the same order.
+     Later saves to the same place are merged into the waiting one, so a newer value is never overwritten by an older retry. */
+  var OUTBOX_KEY = "pcs-outbox-v76i", OUTBOX_MAX_AGE = 3 * 86400000, OUTBOX_MAX_TRIES = 200;
+  var outboxBusy = false, outboxTimer = 0, outboxSeq = 0;
+  function outboxRead() { try { var a = JSON.parse(localStorage.getItem(OUTBOX_KEY) || "[]"); return Array.isArray(a) ? a.filter(Boolean) : []; } catch (e) { return []; } }
+  function outboxWrite(a) { try { if (a.length) localStorage.setItem(OUTBOX_KEY, JSON.stringify(a.slice(-200))); else localStorage.removeItem(OUTBOX_KEY); } catch (e) {} }
+  function outboxHas(url) { return outboxRead().some(function (x) { return x.url === url; }); }
+  function outboxPending(url) { /* merged body still waiting for this url (PATCH/PUT), or null */
+    var out = null; outboxRead().forEach(function (x) { if (x.url === url && x.method !== "DELETE" && x.body && typeof x.body === "object") out = Object.assign(out || {}, x.body); });
+    return out;
+  }
+  function outboxAdd(url, method, body) {
+    var a = outboxRead(), last = null, i;
+    for (i = a.length - 1; i >= 0; i -= 1) if (a[i].url === url) { last = a[i]; break; }
+    if (last && method === "PATCH" && last.method !== "DELETE" && last.body && typeof last.body === "object" && body && typeof body === "object") {
+      Object.assign(last.body, body); last.rev = (last.rev || 0) + 1; last.at = Date.now();
+    } else {
+      if (method === "PUT" || method === "DELETE") a = a.filter(function (x) { return x.url !== url; });
+      outboxSeq += 1;
+      a.push({ id: Date.now() + "-" + outboxSeq, url: url, method: method, body: body == null ? null : JSON.parse(JSON.stringify(body)), at: Date.now(), rev: 0, tries: 0 });
+    }
+    outboxWrite(a);
+    outboxSoon();
+  }
+  function outboxRetriable(status) { return !status || status === 401 || status === 408 || status === 429 || status >= 500; }
+  function outboxSoon(ms) {
+    if (outboxTimer) return;
+    outboxTimer = setTimeout(function () { outboxTimer = 0; outboxFlush(); }, ms == null ? 4000 : ms);
+  }
+  function outboxFlush() {
+    if (outboxBusy) return Promise.resolve(false);
     if (!syncOn()) return Promise.resolve(false);
-    return authFetch(url, { method: method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) })
-      .then(function (res) { return res.ok; }).catch(function () { return false; });
+    var now = Date.now(), list = outboxRead();
+    var keep = list.filter(function (x) { return now - (x.at || 0) < OUTBOX_MAX_AGE && (x.tries || 0) < OUTBOX_MAX_TRIES; });
+    if (keep.length !== list.length) outboxWrite(keep);
+    if (!keep.length) return Promise.resolve(true);
+    outboxBusy = true;
+    var ids = keep.map(function (x) { return x.id; }), failedUrls = {}, anyFail = false;
+    function step(i) { /* one place at a time, oldest first; a place that fails waits, other places still go */
+      if (i >= ids.length) { outboxBusy = false; if (anyFail) outboxSoon(20000); return Promise.resolve(!anyFail); }
+      var cur0 = outboxRead(), head = null, k;
+      for (k = 0; k < cur0.length; k += 1) if (cur0[k].id === ids[i]) { head = cur0[k]; break; }
+      if (!head || failedUrls[head.url]) return step(i + 1);
+      var rev = head.rev || 0;
+      var opts = { method: head.method, headers: { "Content-Type": "application/json" } };
+      if (head.method !== "DELETE") opts.body = JSON.stringify(head.body);
+      return authFetch(head.url, opts).then(function (res) { return res.status; }, function () { return 0; }).then(function (st) {
+        var cur = outboxRead(), ix = -1, j;
+        for (j = 0; j < cur.length; j += 1) if (cur[j].id === head.id) { ix = j; break; }
+        var done = st >= 200 && st < 300, dead = !done && !outboxRetriable(st);
+        if (ix >= 0 && (done || dead) && (cur[ix].rev || 0) === rev) cur.splice(ix, 1); /* merged meanwhile -> sent again next round */
+        else if (ix >= 0 && !done && !dead) cur[ix].tries = (cur[ix].tries || 0) + 1;
+        outboxWrite(cur);
+        if (!done && !dead) { failedUrls[head.url] = 1; anyFail = true; }
+        else if (ix >= 0 && cur.some(function (x) { return x.id === head.id; })) anyFail = true; /* merged while sending */
+        return step(i + 1);
+      });
+    }
+    return step(0).catch(function () { outboxBusy = false; outboxSoon(20000); return false; });
+  }
+  function saveWrite(url, method, body) {
+    if (!syncOn()) return Promise.resolve(false);
+    if (outboxHas(url)) { outboxAdd(url, method, body); return outboxFlush().then(function () { return !outboxHas(url); }); } /* keep the order */
+    var opts = { method: method, headers: { "Content-Type": "application/json" } };
+    if (method !== "DELETE") opts.body = JSON.stringify(body);
+    return authFetch(url, opts).then(function (res) { return res.status; }, function () { return 0; }).then(function (st) {
+      if (st >= 200 && st < 300) return true;
+      if (outboxRetriable(st)) outboxAdd(url, method, body);
+      return false;
+    });
+  }
+  if (typeof window !== "undefined") {
+    window.addEventListener("online", function () { outboxFlush(); });
+    document.addEventListener("visibilitychange", function () { if (document.visibilityState === "visible") outboxFlush(); });
+    setInterval(function () { if (outboxRead().length) outboxFlush(); }, 20000);
+    setTimeout(function () { outboxFlush(); }, 3000);
+    window.__pcsV76iOutbox = { read: outboxRead, flush: outboxFlush, add: outboxAdd, save: saveWrite, pending: outboxPending };
+  }
+  function meterWrite(url, method, body) {
+    return saveWrite(url, method, body);
   }
   function meterPayUrl(code) { return databaseURL() + "/rides/PAYMENTS/" + encodeURIComponent(code) + ".json"; }
   function meterIndexMeter(M, status) {
@@ -13607,13 +13717,21 @@
     M.logged = true;
     M.logDay = day;
   }
+  function meterEndFields(M) { /* v76i: the ride-done numbers (payment status left out), re-sent with the payment if the end save was lost */
+    var f = M.fare || {};
+    return { status: "completed", completedAt: M.endedAt, endedAt: M.endedAt, fareSub: f.sub, fareTax: f.tax, fareTotal: f.total, estimateCents: f.total,
+      meterMiles: f.miles, billedMiles: f.miles, meterMinutes: M.minutes || null, waitMinutes: f.waitMin, scheduleId: M.schedId || null,
+      tollCount: f.tollCount || 0, tollCents: f.tollCents || 0, tollKind: f.tollKind || "toll",
+      dropLat: M.endPt ? M.endPt.lat : null, dropLng: M.endPt ? M.endPt.lng : null };
+  }
   function meterUpdatePayWeek(M, patch) {
     var list = readRideLog();
-    var tipAdd = 0;
+    var tipAdd = 0, fullV76i = null;
     list.forEach(function (e) {
       if (e && e.code === M.code) {
         tipAdd = (Number(patch.tipCents) || 0) - (Number(e.tipCents) || 0);
         Object.assign(e, patch);
+        fullV76i = e;
       }
     });
     writeRideLog(list);
@@ -13622,7 +13740,7 @@
       stats.tipCents = (Number(stats.tipCents) || 0) + tipAdd;
       writeDayStats(M.logDay, stats);
     }
-    meterWrite(historyUrl(driverPresenceId(), M.code), "PATCH", patch);
+    meterWrite(historyUrl(driverPresenceId(), M.code), "PATCH", fullV76i ? Object.assign({}, fullV76i) : patch); /* v76i: the whole entry, so the fare is there even if the end save was lost */
   }
 
   /* v72x.1 (Matthew): TEST payment = practice ride. Labeled Test everywhere; its money is zeroed out of the ride log, day stats,
@@ -13681,13 +13799,14 @@
       setFare: !!f.setFare, meterReadingCents: f.meterReadingCents, scheduleId: M.schedId || null, /* v73 set fare: charged f.sub; meter reading kept for testing */
       meterLive: { miles: f.miles, waitMin: f.waitMin, freeUsed: Number(M.freeUsed) || 0, moved: !!M.moved, fareCents: f.sub, at: now, gpsOk: true }
     });
+    M.endSaved = false; /* v76i */
+    meterEndWrite.then(function (ok) { if (ok && state.meter && state.meter.code === M.code) { state.meter.endSaved = true; meterSave(); } });
     if (f.setFare) { /* v73: rider meter page shows one Fare line (base = set fare, no mile / wait parts) */
       meterWrite(rideUrl(M.code), "PATCH", { fareBase: Math.max(0, f.sub - (f.tollCents || 0)), fareMileCents: 0, fareWaitCents: 0, feeLines: f.tollLine ? [f.tollLine] : [], updatedAt: now }); /* v76b: tolls stay their own line */
     }
     if (M.schedId && syncOn()) { /* v73: the scheduled ride is done (the metered ride carries the earnings; no second entry) */
-      try {
-        authFetch(calendarHubUrl(M.schedId), { method: "PATCH", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ status: "completed", completedAt: now, meterCode: M.code, meterReadingCents: f.meterReadingCents, updatedAt: now }) }).catch(function () {});
+      try { /* v76i: through the outbox, so a weak signal at the curb can't leave the card open */
+        saveWrite(calendarHubUrl(M.schedId), "PATCH", { status: "completed", completedAt: now, meterCode: M.code, meterReadingCents: f.meterReadingCents, updatedAt: now });
       } catch (e) {}
       (state.scheduledRides || []).forEach(function (r) { if (r && r.id === M.schedId) r.status = "completed"; });
     }
@@ -13782,9 +13901,9 @@
     });
   }
   function meterEnsureEndSaved(M) {
-    var first = meterEndWrite || Promise.resolve(false);
+    var first = meterEndWrite || Promise.resolve(M.endSaved === true);
     return first.then(function (ok) {
-      if (ok) return true;
+      if (ok || M.endSaved === true) return true;
       var f = M.fare;
       meterEndWrite = meterWrite(rideUrl(M.code), "PATCH", { status: "completed", completedAt: M.endedAt, endedAt: M.endedAt, updatedAt: Date.now(),
         fareSub: f.sub, fareTax: f.tax, fareTotal: f.total, estimateCents: f.total, meterMiles: f.miles, waitMinutes: f.waitMin, paymentStatus: "unpaid",
@@ -13967,7 +14086,7 @@
       meterSave();
       meterStopTimers();
       var cashLines = r.cash ? { fareCashCents: amount, cashTipCents: tip, tipKind: tip > 0 ? "cash" : null } : {}; /* v76d: fare and tip as separate lines */
-      meterWrite(rideUrl(M.code), "PATCH", Object.assign({ paymentStatus: "paid_other", paidVia: method, paidOtherCents: amount, tipCents: tip, paidAt: now,
+      meterWrite(rideUrl(M.code), "PATCH", Object.assign(M.endSaved === false ? meterEndFields(M) : {}, { paymentStatus: "paid_other", paidVia: method, paidOtherCents: amount, tipCents: tip, paidAt: now, /* v76i */
         cashReceivedCents: received, changeCents: changeC, highTipConfirmed: highTip || null,
         paidOtherBy: M.driverName, paidOtherByDriverId: M.driverId, updatedAt: now }, cashLines));
       meterIndexPatch(M, "paid_other", { paymentStatus: "paid_other",
@@ -16372,6 +16491,16 @@
         var id = btn.getAttribute("data-complete-schedule");
         if (!id) return;
         var zr = schedFind(id); /* v76d: $0 fare and nothing prepaid -> say so */
+        var mdc = schedMeterDone(zr); /* v76i: already ran on the meter -> close it, the meter credited it */
+        if (mdc) {
+          if (!window.confirm(schedMeterDoneText(mdc))) return;
+          btn.disabled = true;
+          schedCloseMetered(zr, mdc).then(function () { render(); });
+          return;
+        }
+        var startV76i = zr ? Date.parse(zr.start || "") : NaN; /* v76i: Jeff Beeler 3:45 PM was closed at 6:06 AM by mistake (the list moved up) */
+        if (isFinite(startV76i) && startV76i - Date.now() > 60 * 60000 &&
+          !window.confirm("This ride is set for " + prettyScheduleWhen(zr.start) + ". That time is still ahead. Mark it complete anyway?")) return;
         if (zr && !(Number(zr.fareBeforeTax) > 0) && !(zr.prepaid && zr.prepaidAmountCents != null) && !schedAppPaid(zr) &&
           !window.confirm("This ride has a $0 fare. Your pay week gets $0 for it. Mark it complete anyway?")) return;
         if (!window.confirm("Mark this scheduled ride complete and credit commission for your pay week?")) return;
