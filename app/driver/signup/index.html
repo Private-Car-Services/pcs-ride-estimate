@@ -315,6 +315,19 @@
         }
         return fetch(url, opts || {});
       }
+      /* v77.1: the driver roster (/rides/DRVRCMMS) is written only through the Worker; old Worker (404 "Not found") -> legacy() */
+      function rosterPost(body, legacy) {
+        var o = Object.assign({}, body);
+        try { var rt = localStorage.getItem("pcs-roster-tok") || ""; if (rt) o.rtok = rt; } catch (e) {}
+        try { var em = String(body.email || localStorage.getItem("pcs-driver-session") || "").toLowerCase().replace(/[^a-z0-9]/g, "_").replace(/^_+|_+$/g, "").slice(0, 48); var qt = localStorage.getItem("pcs-driver-qtoken-" + em) || ""; if (qt) o.token = qt; } catch (e) {}
+        return fetch("https://pcs-pay.pcsrides.workers.dev/driver/roster", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(o) }).then(function (res) {
+          return res.json().catch(function () { return {}; }).then(function (d) {
+            if (res.status === 404 && d && d.error === "Not found" && legacy) return legacy();
+            if (d && d.rtok) { try { localStorage.setItem("pcs-roster-tok", d.rtok); } catch (e) {} }
+            return d;
+          });
+        });
+      }
       function driverIdFor(email) {
         return String(email || "").trim().toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 48);
       }
@@ -378,11 +391,14 @@
           if (!res.ok) throw new Error("profile " + res.status);
           /* Copy the car text onto an existing roster row (never approval fields) so God mode sees it. */
           var rurl = db + "/rides/DRVRCMMS/" + encodeURIComponent(id) + ".json";
-          return authedFetch(rurl).then(function (r2) { return r2.ok ? r2.text() : ""; }).then(function (text) {
-            if (!text || text === "null") return;
-            var car = { profileUpdatedAt: at };
-            ["carYear", "carMake", "carModel", "carPlate", "carSeats"].forEach(function (k) { if (hasVal(k, row[k])) car[k] = row[k]; });
-            return authedFetch(rurl, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(car) });
+          var car = {};
+          ["carYear", "carMake", "carModel", "carPlate", "carSeats"].forEach(function (k) { if (hasVal(k, row[k])) car[k] = row[k]; });
+          if (!Object.keys(car).length) return true;
+          return rosterPost(Object.assign({ op: "car", email: email }, car), function () {
+            return authedFetch(rurl).then(function (r2) { return r2.ok ? r2.text() : ""; }).then(function (text) {
+              if (!text || text === "null") return;
+              return authedFetch(rurl, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(Object.assign({ profileUpdatedAt: at }, car)) });
+            });
           }).catch(function () {}).then(function () { return true; });
         }).catch(function () { return false; });
       }
@@ -912,14 +928,14 @@
                     carSeats: profile.carSeats
                   };
                   var url = db + "/rides/DRVRCMMS/" + encodeURIComponent(rid) + ".json";
-                  fetch(url).then(function (res) {
+                  rosterPost({ op: "signup", email: email, name: row.name, phone: row.phone, carYear: row.carYear, carMake: row.carMake, carModel: row.carModel, carPlate: row.carPlate, carSeats: row.carSeats }, function () { return fetch(url).then(function (res) {
                     return res.text().then(function (text) {
                       var existing = null;
                       if (text && text !== "null") { try { existing = JSON.parse(text); } catch (e) {} }
                       if (existing && (existing.active === true || String(existing.approvalStatus || "").toLowerCase() === "approved")) return;
                       return fetch(url, { method: existing ? "PATCH" : "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(existing ? Object.assign({}, existing, { name: row.name, phone: row.phone, carYear: row.carYear, carMake: row.carMake, carModel: row.carModel, carPlate: row.carPlate, carSeats: row.carSeats, updatedAt: Date.now() }) : row) });
                     });
-                  }).catch(function () {});
+                  }); }).catch(function () {});
                 }
               } catch (pubErr) {}
               showSaved();
@@ -971,7 +987,7 @@
                   if (!token) return;
                   var authQ = "?auth=" + encodeURIComponent(token);
                   var url = db + "/rides/DRVRCMMS/" + encodeURIComponent(rid) + ".json" + authQ;
-                  return fetch(url).then(function (res) {
+                  return rosterPost({ op: "signup", email: email, name: row.name, phone: row.phone, uid: uid, carYear: row.carYear, carMake: row.carMake, carModel: row.carModel, carPlate: row.carPlate, carSeats: row.carSeats }, function () { return fetch(url).then(function (res) {
                     return res.text().then(function (text) {
                       var existing = null;
                       if (text && text !== "null") { try { existing = JSON.parse(text); } catch (e) {} }
@@ -986,7 +1002,7 @@
                         body: JSON.stringify(body)
                       });
                     });
-                  }).then(function () {
+                  }); }).then(function () {
                     var acctUrl = db + "/rides/USRACCTS/" + encodeURIComponent(uid) + ".json" + authQ;
                     return fetch(acctUrl, {
                       method: "PUT",
@@ -1005,6 +1021,6 @@
       });
     })();
   </script>
-  <script src="../ride-alert.js?v=5"></script>
+  <script src="../ride-alert.js?v=77.1"></script>
 </body>
 </html>
