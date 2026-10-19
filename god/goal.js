@@ -507,12 +507,39 @@
     return '<button type="button" id="gl-b-sun" role="switch" aria-checked="' + (on ? "true" : "false") + '" style="display:flex;align-items:center;justify-content:space-between;gap:12px;width:100%;min-height:64px;margin:10px 0 4px;padding:10px 14px;border-radius:14px;border:3px solid ' + (on ? "#1f8a3b" : "#3fae5a") + ';background:' + (on ? "#bfeac7" : "#e8f7ea") + ';color:#0b3d17;font-size:20px;font-weight:800;text-align:left;cursor:pointer">' +
       '<span>Working Sunday (' + esc(fmtD(c.sun)) + ')<span style="display:block;font-size:15px;font-weight:700;color:#0b3d17">' + (on ? "On: this week is 7 days, Mon\u2013Sun" : auto ? "Off, but rides are logged on Sunday, so Sunday counts" : "Off: this week is 6 days, Mon\u2013Sat") + '</span></span>' +
       '<span aria-hidden="true" style="flex:0 0 auto;display:inline-block;min-width:76px;padding:8px 12px;border-radius:999px;text-align:center;font-size:20px;font-weight:900;background:' + (on ? "#1f8a3b" : "#ffffff") + ';color:' + (on ? "#ffffff" : "#0b3d17") + ';border:2px solid #1f8a3b">' + (on ? "ON" : "OFF") + '</span></button>'; }
+  /* goal-hourly (Matthew 2026-10-19): Today's hourly average = today's ledger entries (rides + tips, every source; same day as the tape)
+     / hours since the first driver-app shift start today (rides/DRVRMLES/{id}/{day}/shifts, read-only). If the driver app has
+     nothing for today, it counts from the first ledger entry today. Updates every minute. */
+  var HR = { id: (typeof window !== "undefined" && window.PCS_GOAL_DRIVER_ID) || "mwragge_privatetaxiservices_net", day: "", start: 0, at: 0, busy: false };
+  function hrDayOf(ms) { return new Date(ms).toLocaleDateString("en-CA", { timeZone: "America/Chicago" }); }
+  function hrPrevDay(d) { var x = new Date(d + "T12:00:00Z"); x.setUTCDate(x.getUTCDate() - 1); return x.toISOString().slice(0, 10); }
+  function hrShiftStart(rows, day) { var best = 0; (rows || []).forEach(function (row) { if (!row || typeof row !== "object") return; var c = [Number(row.startedAt) || 0];
+      Object.keys(row.shifts || {}).forEach(function (k) { var x = row.shifts[k] || {}; c.push(Number(x.shiftStartedAt) || Number(k) || 0); });
+      c.forEach(function (ms) { if (ms > 0 && hrDayOf(ms) === day && (!best || ms < best)) best = ms; }); }); return best; }
+  function hrFetch(day) { if (HR.busy || typeof fetch !== "function") return; if (HR.day === day && Date.now() - HR.at < 300000) return; HR.busy = true;
+    var base = ((typeof window !== "undefined" && window.PCS_DATABASE_URL) || "https://pts-maps-rides-default-rtdb.firebaseio.com").replace(/\/+$/, "") + "/rides/DRVRMLES/" + encodeURIComponent(HR.id) + "/";
+    function one(d) { return fetch(base + d + ".json").then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }); }
+    Promise.all([one(day), one(hrPrevDay(day))]).then(function (rows) { HR.day = day; HR.start = hrShiftStart(rows, day); HR.at = Date.now(); })
+      .then(function () { HR.busy = false; hrPaint(); }, function () { HR.busy = false; }); }
+  function hrCalc(entries, day, shiftStart, now) { var sum = 0, first = 0; Object.keys(entries || {}).forEach(function (k) { var e = entries[k]; if (!e || e.date !== day || e.line === "exp" || e.type === "adjustment") return;
+      sum += Number(e.amount) || 0; var a = Number(e.at) || 0; if (a > 0 && hrDayOf(a) === day && (!first || a < first)) first = a; });
+    var useShift = shiftStart > 0 && shiftStart <= now, from = useShift ? shiftStart : first, kind = useShift ? "shift" : first ? "entry" : "";
+    var mins = from ? Math.floor((now - from) / 60000) : 0, rate = mins >= 1 ? Math.round(sum / (mins / 60) * 100) / 100 : null;
+    return { sum: Math.round(sum * 100) / 100, from: from, kind: kind, mins: mins, rate: rate }; }
+  function hrText(h) { if (!h.kind) return "Starts with your first entry today";
+    var t = new Date(h.from).toLocaleTimeString("en-US", { timeZone: "America/Chicago", hour: "numeric", minute: "2-digit" }), dur = Math.floor(h.mins / 60) + "h " + (h.mins % 60) + "m";
+    return (h.rate == null ? "$0.00" : "$" + h.rate.toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ",")) + "/hr \u00b7 " + dur + (h.kind === "shift" ? " since " + t : " since first entry " + t) + " CT"; }
+  function hrHtml(day) { day = day || today(); hrFetch(day); var h = hrCalc(D && D.entries, day, HR.day === day ? HR.start : 0, Date.now());
+    return '<div class="fine">Today\u2019s hourly average</div><div style="font-size:22px;font-weight:800;color:#7ee08f">' + esc(hrText(h)) + '</div><div class="fine">' + $m(h.sum, true) + ' typed today</div>'; }
+  function hrPaint() { var el = typeof document !== "undefined" && document.getElementById("gl-hr"); if (el && D) el.innerHTML = hrHtml(today()); }
+  if (typeof setInterval === "function") setInterval(hrPaint, 60000);
+  if (typeof window !== "undefined") window.__pcsGoalHourly = { hrCalc: hrCalc, hrText: hrText, hrShiftStart: hrShiftStart, hrPrevDay: hrPrevDay };
   function topHtml(c) {
     var g = c.g, h = "";
     h += '<div class="row" style="justify-content:space-between"><h1>Monthly Goal</h1><button class="btn ghost" id="gl-b-lock">Lock</button></div>';
-    h += GS ? gsBarHtml() + '<div class="row" style="justify-content:flex-end"><span class="fine" id="gl-ver" style="opacity:.7">goal v76j-test \u00b7 75x</span></div>' : '<div class="row" style="justify-content:space-between"><span id="gl-sync" style="color:#7ee08f;font-weight:700;font-size:15px"></span><span class="fine" id="gl-ver" style="opacity:.7">goal v76j \u00b7 75x</span></div>';
+    h += GS ? gsBarHtml() + '<div class="row" style="justify-content:flex-end"><span class="fine" id="gl-ver" style="opacity:.7">goal v76j-hr-test \u00b7 75x</span></div>' : '<div class="row" style="justify-content:space-between"><span id="gl-sync" style="color:#7ee08f;font-weight:700;font-size:15px"></span><span class="fine" id="gl-ver" style="opacity:.7">goal v76j-hr \u00b7 75x</span></div>';
     var roll = '<div class="fine">' + (c.dayOv != null ? "you set it for today" : c.snap ? "fixed for today" : "") + '</div>', tr = c.todayRem;
-    h += '<div class="card hero"><b class="t">TODAY \u00b7 ' + esc(c.t) + '</b><div class="grid">' + big("Weekly goal", $m(c.weekGoal), weekBar(c)) + big("Days left in week", c.dLeft == null ? "\u2014" : String(c.dLeft), '<div class="fine">' + (c.typedToday ? "you typed it for today" : c.offToday ? "Sunday is off" : c.sunWork ? "Mon\u2013Sun, working Sunday" : "Mon\u2013Sat, Sunday off") + '</div>') +
+    h += '<div class="card hero"><b class="t">TODAY \u00b7 ' + esc(c.t) + '</b><div class="grid">' + big("Weekly goal", $m(c.weekGoal), weekBar(c)) + big("Days left in week", c.dLeft == null ? "\u2014" : String(c.dLeft), '<div class="fine">' + (c.typedToday ? "you typed it for today" : c.offToday ? "Sunday is off" : c.sunWork ? "Mon\u2013Sun, working Sunday" : "Mon\u2013Sat, Sunday off") + '</div>' + '<div id="gl-hr" style="margin-top:8px;border-top:1px solid #3fae5a;padding-top:6px">' + hrHtml(c.t) + '</div>') +
       big("Today's goal", $m(c.daily, true), roll + '<button type="button" class="btn" id="gl-b-recalc" style="font-size:20px;padding:12px 22px;margin-top:6px">Recalculate today</button>') + big("Today remaining", tr != null && tr < 0 ? "ahead by " + $m(-tr, true) : $m(tr, true)) + big("Week remaining", $m(left(c.weekRem), true), '<div class="fine">before today ' + $m(c.weekRemBefore, true) + '</div>') + big("Month remaining", $m(left(c.monthRem), true), '<div class="fine">before today ' + $m(c.monthRemBefore, true) + '</div>') + big("Month daily pace", $m(c.monthPace, true), '<div class="fine">' + c.mdLeft + ' days, ' + (c.sunWork ? "7 this week, then 6 a week" : "6 a week") + '</div>') +
       '</div>' + sunToggleHtml(c) + sunLine(c) + howToday(c) + '</div>';
     var ids = Object.keys(D.entries).filter(function (k) { return D.entries[k].date === c.t && D.entries[k].line !== "exp"; }).sort(function (a, b) { return (D.entries[a].at || 0) - (D.entries[b].at || 0); });
