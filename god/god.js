@@ -5693,7 +5693,9 @@
     if (!window.confirm("Charge " + (p.name || "the rider") + "'s saved card " + fmtCents(cents) + " now (fare, no tip)?")) return;
     state.payBusy[code] = true;
     setPayNotice("Charging " + code + "…");
-    var body = { rideCode: code, tipCents: 0, expectedCents: Number(cents) || 0, by: "god" };
+    var auth = gqAuth(); /* v77: the Worker needs God sign-in to charge (and signs the fare shown here) */
+    if (!auth.godPassword && !auth.godToken) { delete state.payBusy[code]; setPayNotice("Sign in to God mode first, then charge."); return; }
+    var body = Object.assign({ rideCode: code, tipCents: 0, expectedCents: Number(cents) || 0, by: "god" }, auth);
     if (isSandboxPay(code)) body.sandbox = true;
     payWorkerPost("/charge", body).then(function (d) {
       afterPayAction(code, d.already ? code + ": already paid." : code + ": charged " + fmtCents(d.totalCents || d.amountCents || cents) + ".");
