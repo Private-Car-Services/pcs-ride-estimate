@@ -6162,7 +6162,7 @@
       '<p class="fine" style="margin:4px 0">Add a tip for your driver? <span id="tip-pick-hint">' + esc(tipPicked() ? "You can change it any time before you pay." : "Tap one to continue. No tip is fine.") + "</span></p>" +
       '<div class="tip-chips" style="display:flex;flex-wrap:wrap;gap:8px;margin:6px 0">' + chips + "</div>" +
       (state.tipChoice === "custom"
-        ? '<label for="tip-custom">Tip amount ($)</label><input id="tip-custom" type="text" inputmode="decimal" pattern="[0-9]*[.]?[0-9]{0,2}" maxlength="7" value="' + esc(state.tipCustom || "") + '" placeholder="5.00">'
+        ? '<label for="tip-custom">Tip amount ($)</label><input id="tip-custom" type="text" inputmode="numeric" pattern="[0-9.]*" maxlength="9" data-money-reg="1" value="' + esc(state.tipCustom || "") + '" placeholder="5.00">'
         : "") + "</details>" +
       '<div class="money-row"><span>Tip</span><span id="pay-tip-amt">' + esc(tipPicked() ? money(tip) : "pick one") + "</span></div>" +
       '<div class="total-row"><span>Total</span><span id="pay-total-amt">' + esc(money(total)) + "</span></div>" +
@@ -8886,6 +8886,7 @@
       prepaid: raw.prepaid === true, prepaidAmountCents: raw.prepaidAmountCents != null && isFinite(+raw.prepaidAmountCents) ? Math.round(+raw.prepaidAmountCents) : null, /* v75v */
       prepaidTaxCents: raw.prepaidTaxCents != null && isFinite(+raw.prepaidTaxCents) ? Math.round(+raw.prepaidTaxCents) : null, prepaidInvoiceNo: String(raw.prepaidInvoiceNo || ""),
       rideCommissionPct: raw.rideCommissionPct != null && raw.rideCommissionPct !== "" && isFinite(+raw.rideCommissionPct) ? Math.round(+raw.rideCommissionPct) : null, /* v76d */
+      rateOverride: rateOvOf(raw), /* v76j contract rate (God mode only) */
       meterCode: raw.meterCode ? String(raw.meterCode) : ""
     };
   }
@@ -10347,6 +10348,7 @@
         '<p style="margin:0 0 4px;font-size:13px;font-weight:800;letter-spacing:.04em;text-transform:uppercase;color:#0b3d23">Assigned to you' + schedDayLabel(r.start) + "</p>" +
         '<p style="margin:0 0 6px;font-size:20px;font-weight:800;color:#111">' + esc(prettyScheduleWhen(r.start)) + "</p>" +
         prepaidBadgeHtml(prepaidOf(r)) + /* v75v */
+        (rateOvOf(r) ? rateOvBadgeHtml("sched-contract-" + esc(r.id)) : "") + /* v76j */
         '<p style="margin:0 0 6px;color:#1a1a1a"><strong style="' + SCHED_LBL + '">Rider:</strong> ' + esc(r.rider || "\u2014") + (r.riderPhone ? ' \u00b7 <a href="tel:' + esc(r.riderPhone) + '" style="color:#0b3d23;font-weight:700">' + esc(r.riderPhone) + "</a>" : "") + "</p>" +
         '<p style="margin:0 0 6px;color:#1a1a1a"><strong style="' + SCHED_LBL + '">Pickup:</strong> ' + esc(r.pickup || "\u2014") + "</p>" +
         (st ? '<p style="margin:0 0 6px;color:#1a1a1a"><strong style="' + SCHED_LBL + '">Stop:</strong> ' + esc(st.address) + "</p>" : "") +
@@ -10591,7 +10593,9 @@
       : 0;
     var fareCentsV72d = Math.round(fareBefore * 100); /* v72d: fareBeforeTax is dollars; history is cents */
     var taxCentsV72d = Math.round((Number(row.taxFees) || 0) * 100);
-    var commissionCents = Math.round(fareCentsV72d * (pct / 100));
+    var ovMark = rateOvOf(row); /* v76j: flat contract rate set by PCS = the fare (tax on top, driver % on the pre-tax fare) */
+    if (ovMark && ovMark.flat != null) { fareCentsV72d = Math.round(ovMark.flat * 100); taxCentsV72d = Math.round(fareCentsV72d * Number(METER_TAX_RATE) * 1000000 / 1000000); }
+    var commissionCents = Math.round(fareCentsV72d * (pct / 100)); /* tax never part of the driver's share */
     if (row.manual && row.commissionDollars != null && isFinite(Number(row.commissionDollars))) commissionCents = Math.round(Number(row.commissionDollars) * 100); /* v72d: God override */
     var cashV72d = String(row.payMethod || "") === "cash";
     var ppMark = prepaidOf(row); /* v75v: prepaid ride marked complete: credit from the invoice amount */
@@ -12979,6 +12983,30 @@
       tollReimburseCents: f.tollReimburseCents || 0, tollRoadFeeCents: f.tollRoadFeeCents || 0, tolls: (f.tolls || []).slice() };
   }
   function meterRideFeeLines(f) { return (f.feeLines || []).concat(f.tollLine ? [f.tollLine] : []); } /* rider meter page shows these */
+  /* ---------- v76j (Matthew 10/19): CONTRACT RATE set by PCS in God mode (rateOverride on the ride).
+     fare = flat, or base + perMile x miles (from the pickup, every mile, no wait / minimum / step / airport fee / discount).
+     Tolls + tax stay as usual; the driver's % applies to the pre-tax fare. Drivers see "Contract rate set by PCS" only,
+     never the numbers, and can't change it. Pure (tested): */
+  function rateOvOf(r) {
+    var o = r && r.rateOverride; if (!o || typeof o !== "object") return null;
+    function n(v) { if (v == null || v === "") return null; v = Number(v); return isFinite(v) && v >= 0 && v < 100000 ? Math.round(v * 100) / 100 : null; }
+    var flat = n(o.flat), base = n(o.base), per = n(o.perMile);
+    if (flat != null && flat > 0) return { flat: flat, base: base, perMile: per, setBy: String(o.setBy || "god") };
+    if ((base || 0) > 0 || (per || 0) > 0) return { flat: null, base: base || 0, perMile: per || 0, setBy: String(o.setBy || "god") };
+    return null;
+  }
+  function rateOvApply(M, ov) {
+    if (!M || !ov) return M;
+    M.rateOverride = { flat: ov.flat, base: ov.base, perMile: ov.perMile, setBy: ov.setBy };
+    M.discount = null; M.includedMiles = 0; M.waitCentsPerMin = 0; M.minCents = 0; M.stepCents = 0; M.freeWaitSec = 0;
+    if (ov.flat != null) { M.setFareCents = Math.round(ov.flat * 100); M.baseCents = 0; M.perMileCents = 0; }
+    else { delete M.setFareCents; M.baseCents = Math.round((ov.base || 0) * 100); M.perMileCents = Math.round((ov.perMile || 0) * 100); }
+    return M;
+  }
+  function rateOvLocked(M) { return !!(M && M.rateOverride); }
+  var RATE_OV_LABEL = "Contract rate set by PCS";
+  function rateOvBadgeHtml(id) { return '<p class="meter-contract" id="' + id + '" style="background:#0b6b3a;color:#fff;font-weight:800;border-radius:10px;padding:8px 12px;font-size:18px;text-align:center">\u{1F512} ' + RATE_OV_LABEL + " \u00b7 fare locked</p>"; }
+  if (typeof window !== "undefined") window.__pcsRateOv = { of: rateOvOf, apply: rateOvApply, fare: function (M) { return meterFare(M); }, locked: rateOvLocked, label: RATE_OV_LABEL };
   function meterFare(M) {
     var miles = Math.max(0, Number(M && M.miles) || 0);
     var incl = M.includedMiles != null && isFinite(Number(M.includedMiles)) ? Math.max(0, Number(M.includedMiles)) : 0;
@@ -12994,13 +13022,13 @@
     var min = Math.max(0, Math.round(Number(M.minCents) || 0));
     var final = !!M.status && M.status !== "running";
     var sub = final ? Math.max(min, stepped) : stepped;
-    var air = meterAirportLines(M); /* v72t: airport fee + international arrival (taxed, like the quote page / app) */
+    var air = rateOvLocked(M) ? { cents: 0, lines: [], airportCents: 0, intlCents: 0 } : meterAirportLines(M); /* v76j contract rate: the agreed fare only; v72t: airport fee + international arrival (taxed, like the quote page / app) */
     var meterSub = sub;
     sub += air.cents;
     var setFare = Math.round(Number(M && M.setFareCents) || 0) > 0 ? Math.round(Number(M.setFareCents)) : 0;
     var meterReadingCents = sub; /* v73: what the meter would have charged (kept for testing on set-fare rides) */
     if (setFare) sub = setFare; /* v73: PCS set the fare before the ride -> charge it, not the meter price */
-    var disc = setFare ? { cents: 0, type: null, label: "" } : meterDiscountCents(M, sub); /* v73: Senior / Military 10% or an owner-approved Other discount, before tax */
+    var disc = setFare || rateOvLocked(M) ? { cents: 0, type: null, label: "" } : meterDiscountCents(M, sub); /* v73: Senior / Military 10% or an owner-approved Other discount, before tax */
     var toll = meterTollInfo(M); /* v76b: tolls after the minimum / set fare / discount (never discounted), before tax */
     var grossSub = sub + toll.cents;
     sub = Math.max(0, sub - disc.cents) + toll.cents;
@@ -13010,7 +13038,7 @@
       mileCents: mileCents, waitMin: waitMin, waitCents: waitCents, raw: raw,
       roundCents: stepped - raw, meter: stepped, minAdd: meterSub - stepped, minApplied: meterSub > stepped, /* v73: meter vs minimum only (airport fee / discount are their own lines) */ minCents: min, freeMin: Math.max(0, Number(M.freeUsed) || 0),
       feeLines: air.lines, airportCents: air.airportCents, intlCents: air.intlCents, meterSub: meterSub,
-      sub: sub, tax: tax, total: sub + tax, setFare: !!setFare, meterReadingCents: meterReadingCents,
+      sub: sub, tax: tax, total: sub + tax, setFare: !!setFare || rateOvLocked(M), contractRate: rateOvLocked(M), /* v76j: contract = one Fare line for the rider */ meterReadingCents: meterReadingCents,
       tollCents: toll.cents, tollCount: toll.count, tollKind: toll.kind, tollLabel: toll.label, tollLine: toll.line, tolls: toll.list, tollOn: toll.on, /* v76b */
       tollReimburseCents: toll.reimburseCents, tollRoadFeeCents: toll.roadFeeCents };
   }
@@ -13049,7 +13077,7 @@
     var landed = t.landedAt && t.landedAt <= (startedAt || Date.now()) ? t.landedAt : (startedAt || Date.now());
     return Math.max(0, mins * 60 - Math.floor(((startedAt || Date.now()) - landed) / 1000));
   }
-  function meterTripEditable(M) { return !M || (M.status !== "paid" && !(M.pay && (M.pay.status === "link_open" || M.pay.status === "paid_other"))); }
+  function meterTripEditable(M) { return !M || (!rateOvLocked(M) && M.status !== "paid" && !(M.pay && (M.pay.status === "link_open" || M.pay.status === "paid_other"))); }
   /* v72t (Matthew): ONE Airport toggle on the metered ride: red = No (default), green = Yes (to-airport pricing). */
   function meterTripHtml(M) {
     var t = M ? meterTripOf(M) : meterTripOf({ trip: state.meterTripPending });
@@ -13564,7 +13592,7 @@
     var f = M.fare || meterFare(M);
     return {
       status: status, startedAt: M.startedAt, endedAt: M.endedAt || null, driverId: M.driverId, driverName: M.driverName,
-      tierLabel: M.tierLabel, perMileCents: M.perMileCents, miles: f.miles, minutes: M.minutes || null, waitMinutes: f.waitMin,
+      tierLabel: rateOvLocked(M) ? "Contract rate" : M.tierLabel, perMileCents: rateOvLocked(M) ? null : M.perMileCents, miles: f.miles, minutes: M.minutes || null, waitMinutes: f.waitMin,
       fareSub: f.sub, fareTotal: f.total,
       tollCount: f.tollCount || 0, tollCents: f.tollCents || 0, tollKind: f.tollKind || "toll", tollLabel: f.tollLabel || "", /* v76b */
       pickupLat: M.startPt ? M.startPt.lat : null, pickupLng: M.startPt ? M.startPt.lng : null,
@@ -13583,7 +13611,8 @@
       requestedAt: M.startedAt, startedAt: M.startedAt, acceptedAt: M.startedAt, updatedAt: Date.now(),
       driverId: M.driverId, driverUid: firebaseUid() || "", driverName: M.driverName, driverEmail: String(readSession() || "").slice(0, 120),
       meterTrip: meterTripOf(M), tripType: meterTripOf(M).kind, airportCode: meterTripOf(M).kind === "local" ? null : meterTripOf(M).code, internationalArrival: meterTripOf(M).intl,
-      meterTier: M.tier, meterTierLabel: M.tierLabel, meterProfile: M.profileName, perMileCents: M.perMileCents, baseCents: M.baseCents,
+      meterTier: M.tier, meterTierLabel: rateOvLocked(M) ? "Contract rate" : M.tierLabel, meterProfile: rateOvLocked(M) ? "Contract rate" : M.profileName, /* v76j: contract numbers stay off rider-visible records */
+      perMileCents: rateOvLocked(M) ? null : M.perMileCents, baseCents: rateOvLocked(M) ? null : M.baseCents, contractRate: rateOvLocked(M) || null,
       waitCentsPerMin: M.waitCentsPerMin, includedMiles: M.includedMiles, minimumCents: M.minCents, stepCents: M.stepCents, freeWaitSec: M.freeWaitSec,
       slowMph: M.slowMph, taxRate: M.taxRate, holiday: !!M.holiday,
       pickupLat: M.startPt ? M.startPt.lat : null, pickupLng: M.startPt ? M.startPt.lng : null,
@@ -13658,8 +13687,9 @@
     state.schedStartId = "";
     if (M.schedId) { var ppr = prepaidOf(schedFind(M.schedId)); if (ppr) M.prepaid = ppr; } /* v75v */
     if (M.schedId) { var rpx = ridePctOf(schedFind(M.schedId)); if (rpx != null) M.ridePct = rpx; } /* v76d per-ride % */
+    var ovx = M.schedId ? rateOvOf(schedFind(M.schedId)) : null; /* v76j contract rate */
     var tp = meterTripOf({ trip: state.meterTripPending }); /* v72t trip type */
-    M.trip = tp; M.freeWaitSecBand = M.freeWaitSec;
+    M.trip = tp; if (ovx) { M.trip = meterTripOf({}); rateOvApply(M, ovx); } M.freeWaitSecBand = M.freeWaitSec;
     state.meterTripPending = null;
     var pst = state.meterStopPending;
     if (pst && isCoord(pst.lat) && isCoord(pst.lng)) M.stop = { label: String(pst.label || ""), sub: String(pst.sub || ""), lat: +pst.lat, lng: +pst.lng };
@@ -13791,7 +13821,7 @@
       dropLat: M.endPt ? M.endPt.lat : null, dropLng: M.endPt ? M.endPt.lng : null,
       pickupLat: M.startPt ? M.startPt.lat : null, pickupLng: M.startPt ? M.startPt.lng : null,
       meterMiles: f.miles, billedMiles: f.miles, meterMinutes: M.minutes, waitMinutes: f.waitMin, gpsGapFills: M.gapFills || 0,
-      fareBase: f.base, fareMileCents: f.mileCents, fareWaitCents: f.waitCents, fareSub: f.sub, fareTax: f.tax, fareTotal: f.total,
+      fareBase: f.contractRate ? Math.max(0, f.sub - (f.tollCents || 0)) : f.base, fareMileCents: f.contractRate ? 0 : f.mileCents, fareWaitCents: f.contractRate ? 0 : f.waitCents, fareSub: f.sub, /* v76j */ fareTax: f.tax, fareTotal: f.total,
       feeLines: meterRideFeeLines(f), airportFeeCents: f.airportCents || 0, internationalFeeCents: f.intlCents || 0, meterTrip: meterTripOf(M), /* v72t; v76b + toll line */
       tollCount: f.tollCount || 0, tollCents: f.tollCents || 0, tollKind: f.tollKind || "toll", tollLabel: f.tollLabel || "", tolls: (f.tolls || []).slice(),
       tollReimburseCents: f.tollReimburseCents || 0, tollRoadFeeCents: f.tollRoadFeeCents || 0, /* v76b */
@@ -14025,6 +14055,7 @@
   }
   function meterRegFmt(v) { var dg = String(v == null ? "" : v).replace(/\D/g, "").replace(/^0+/, ""); if (!dg) return ""; if (dg.length > 7) dg = dg.slice(0, 7); return (Number(dg) / 100).toFixed(2); }
   function meterRegKey(cur, k) { var dg = String(cur == null ? "" : cur).replace(/\D/g, "").replace(/^0+/, "");
+    if (k === "00") { if (!dg) return meterRegFmt(dg); dg = (dg + "00").slice(0, 7); return meterRegFmt(dg); }
     if (k === "back") dg = dg.slice(0, -1); else if (/^[0-9]$/.test(k)) { if (dg.length < 7) dg += k; } else return meterRegFmt(dg); /* "." ignored: register style */
     return meterRegFmt(dg); }
   function meterTipFromChoice(M, choice, custom) {
@@ -14406,6 +14437,10 @@
       '<p class="fine">' + esc(M.tierLabel) + " · " + esc(String(M.minutes || "")) + " min ride · ride " + esc(M.code) + "</p>" +
       "</div>"
     );
+    if (rateOvLocked(M)) return '<div class="card" id="meter-breakdown">' + rateOvBadgeHtml("meter-contract-bd") + /* v76j: totals only */
+      '<div class="money-row"><span>Fare (' + esc(f.miles.toFixed(2)) + " mi)</span><span>" + money(f.sub - (f.tollCents || 0)) + "</span></div>" +
+      (f.tollCents ? '<div class="money-row"><span>Tolls</span><span>' + money(f.tollCents) + "</span></div>" : "") +
+      '<div class="money-row"><span>Tax</span><span>' + money(f.tax) + '</span></div><div class="money-row"><b>Total</b><b>' + money(f.total) + "</b></div></div>";
     return (
       '<div class="card" id="meter-breakdown">' +
       '<div class="money-row" id="meter-start-row"><span>Start (incl. ' + meterMilesWord(f.includedMiles) + ")</span><span>" + money(f.base) + "</span></div>" +
@@ -14435,6 +14470,16 @@
   if (typeof document !== "undefined") document.addEventListener("toggle", function (e) {
     if (e.target && e.target.id === "rider-tip-box") riderTipOpenState.app = e.target.open;
   }, true);
+  /* v76j (Matthew): cash-register entry for any data-money-reg box in the app: 7,5,7,8 -> 75.78; Backspace drops the last digit;
+     a pasted / prefilled 75.78 stays 75.78. Value is dollars with 2 decimals. */
+  function moneyRegText(v) { var t = String(v == null ? "" : v).trim(); if (/^\$?\d+\.\d$/.test(t)) t += "0"; return meterRegKey(t, ""); }
+  if (typeof document !== "undefined" && !window.__pcsAppMoneyReg) { window.__pcsAppMoneyReg = 1;
+    document.addEventListener("keydown", function (e) { var t = e.target; if (!t || !t.getAttribute || t.getAttribute("data-money-reg") !== "1" || e.ctrlKey || e.metaKey || e.altKey) return;
+      var k = e.key; if (!/^[0-9]$/.test(k) && k !== "Backspace") return; e.preventDefault();
+      var cur = t.__regFresh ? "" : t.value; t.__regFresh = false; t.value = meterRegKey(cur, k === "Backspace" ? "back" : k);
+      try { t.setSelectionRange(t.value.length, t.value.length); } catch (x) {} t.dispatchEvent(new Event("input", { bubbles: true })); }, true);
+    document.addEventListener("input", function (e) { var t = e.target; if (!t || !t.getAttribute || t.getAttribute("data-money-reg") !== "1") return; var f = moneyRegText(t.value); if (t.value !== f) t.value = f; }, true);
+    document.addEventListener("focusin", function (e) { var t = e.target; if (t && t.getAttribute && t.getAttribute("data-money-reg") === "1") t.__regFresh = true; }); }
   /* v72t: in-app number pad for "Cash received" / "Amount collected" and the Custom tip */
   function meterPadTarget() {
     var t = state.meterPadTarget || "amount";
@@ -14442,10 +14487,10 @@
     return t;
   }
   function meterPadHtml() {
-    var keys = ["1", "2", "3", "4", "5", "6", "7", "8", "9", ".", "0", "back"];
+    var keys = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "00", "0", "back"]; /* v76j: register style, "00" adds two digits */
     return '<div class="meter-pad" id="meter-pad" role="group" aria-label="Number pad for ' + (meterPadTarget() === "tip" ? "the custom tip" : "the amount") + '">' +
       keys.map(function (k) {
-        return '<button type="button" class="meter-pad-key" data-pad-key="' + k + '" aria-label="' + (k === "back" ? "Delete" : k === "." ? "Decimal point" : k) + '">' + (k === "back" ? "\u232b" : k) + "</button>";
+        return '<button type="button" class="meter-pad-key" data-pad-key="' + k + '" aria-label="' + (k === "back" ? "Delete" : k === "00" ? "Double zero" : k) + '">' + (k === "back" ? "\u232b" : k) + "</button>";
       }).join("") + "</div>";
   }
   function meterPadPress(k) {
@@ -14453,7 +14498,7 @@
     var el = document.getElementById(id);
     if (!el) return;
     var v = String(el.value || "");
-    if (state.meterOtherMethod === "cash") { v = meterRegKey(v, k); el.value = v; /* v76d: cash-register keypad */
+    if (true) { v = meterRegKey(v, k); el.value = v; /* v76d cash-register keypad; v76j: every payment method */
       state.meterOtherDraft = Object.assign({}, state.meterOtherDraft || {}, id === "meter-other-tip" ? { tip: v } : { amount: v });
       try { el.dispatchEvent(new Event("input", { bubbles: true })); } catch (e) {} return; }
     if (k === "back") v = v.slice(0, -1);
@@ -14654,8 +14699,8 @@
     return (
       '<section id="meter-running" class="meter-panel">' + meterTestTag(M) +
       meterModeHtml(M.tier, M.tierLabel, "meter-mode") +
-      '<p class="meter-rates" id="meter-profile">' + esc(M.tierLabel) + " · starts " + money(M.baseCents) + (Number(M.includedMiles) > 0 ? " incl. " + (Number(M.includedMiles) === 1 ? "1st mile" : esc(String(M.includedMiles)) + " mi") : "") +
-        " · " + money(M.perMileCents) + "/mi after · " + money(M.waitCentsPerMin) + "/min under " + esc(String(M.slowMph)) + " mph</p>" +
+      (rateOvLocked(M) ? rateOvBadgeHtml("meter-contract-badge") : '<p class="meter-rates" id="meter-profile">' + esc(M.tierLabel) + " · starts " + money(M.baseCents) + (Number(M.includedMiles) > 0 ? " incl. " + (Number(M.includedMiles) === 1 ? "1st mile" : esc(String(M.includedMiles)) + " mi") : "") +
+        " · " + money(M.perMileCents) + "/mi after · " + money(M.waitCentsPerMin) + "/min under " + esc(String(M.slowMph)) + " mph</p>") +
       prepaidBadgeHtml(M.prepaid, "meter-prepaid-badge") + /* v75v */
       '<p class="meter-fare" id="meter-fare" aria-live="off">' + money(f.sub) + "</p>" +
       '<p class="meter-sub">Meter' + (M.minCents > M.baseCents ? " · " + money(M.minCents) + " minimum" : "") + (M.taxRate ? " · tax added at the end" : "") + "</p>" +
