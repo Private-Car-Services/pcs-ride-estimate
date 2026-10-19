@@ -284,7 +284,8 @@
       prepaid: raw.prepaid === true, prepaidAmountCents: raw.prepaidAmountCents != null && isFinite(+raw.prepaidAmountCents) ? Math.round(+raw.prepaidAmountCents) : null, /* v75v prepaid (Square invoice) */
       prepaidTaxCents: raw.prepaidTaxCents != null && isFinite(+raw.prepaidTaxCents) ? Math.round(+raw.prepaidTaxCents) : null, prepaidInvoiceNo: String(raw.prepaidInvoiceNo || ""),
       rideCommissionPct: raw.rideCommissionPct != null && raw.rideCommissionPct !== "" && isFinite(+raw.rideCommissionPct) ? Math.round(+raw.rideCommissionPct) : null, /* v76d */
-      sqInvoice: raw.sqInvoice && typeof raw.sqInvoice === "object" ? raw.sqInvoice : null, contractId: raw.contractId ? String(raw.contractId) : ""
+      sqInvoice: raw.sqInvoice && typeof raw.sqInvoice === "object" ? raw.sqInvoice : null, contractId: raw.contractId ? String(raw.contractId) : "",
+      rateOverride: raw.rateOverride && typeof raw.rateOverride === "object" ? raw.rateOverride : null, rateOverrideCleared: raw.rateOverrideCleared === true /* v76j */
     };
   }
 
@@ -342,12 +343,12 @@
       '<h2 style="margin:4px 0 6px;color:#0b3d23">Prepaid (Square invoice) \u00b7 ' + esc(r.rider || "ride") + "</h2>" +
       '<label style="display:flex;gap:10px;align-items:center;font-size:20px;font-weight:800;color:#111;margin:8px 0"><input type="checkbox" id="db-prepaid-on" style="width:28px;height:28px"' + (r.prepaid ? " checked" : "") + "> Paid on a Square invoice</label>" +
       '<label for="db-prepaid-amt" style="display:block;font-weight:800;color:#111;margin:8px 0 4px">Amount for this ride before tax (optional)</label>' +
-      '<input id="db-prepaid-amt" type="text" inputmode="decimal" pattern="[0-9]*[.]?[0-9]{0,2}" autocomplete="off" value="' + esc(r.prepaidAmountCents != null ? (r.prepaidAmountCents / 100).toFixed(2) : "") + '" style="width:100%;font-size:20px;padding:10px;border:2px solid #0b3d23;border-radius:10px;background:#fff;color:#111">' +
+      '<input id="db-prepaid-amt" type="text" inputmode="numeric" pattern="[0-9.]*" autocomplete="off" data-money-reg="1" value="' + esc(r.prepaidAmountCents != null ? (r.prepaidAmountCents / 100).toFixed(2) : "") + '" style="width:100%;font-size:20px;padding:10px;border:2px solid #0b3d23;border-radius:10px;background:#fff;color:#111">' +
       '<label for="db-prepaid-inv" style="display:block;font-weight:800;color:#111;margin:8px 0 4px">Invoice # (optional)</label>' +
       '<input id="db-prepaid-inv" type="text" autocomplete="off" value="' + esc(r.prepaidInvoiceNo || "") + '" style="width:100%;font-size:20px;padding:10px;border:2px solid #0b3d23;border-radius:10px;background:#fff;color:#111">' +
       '<button type="button" id="db-prepaid-lookup" style="' + big + 'background:#fff;color:#0b3d23;border:3px solid #0b6b3a">Look up in Square</button>' + /* v76d */
       '<label for="db-prepaid-tax" style="display:block;font-weight:800;color:#111;margin:8px 0 4px">Tax on the invoice (never paid to the driver)</label>' +
-      '<input id="db-prepaid-tax" type="text" inputmode="decimal" autocomplete="off" value="' + esc(r.prepaidTaxCents != null ? (r.prepaidTaxCents / 100).toFixed(2) : "") + '" style="width:100%;font-size:20px;padding:10px;border:2px solid #0b3d23;border-radius:10px;background:#fff;color:#111">' +
+      '<input id="db-prepaid-tax" type="text" inputmode="numeric" autocomplete="off" data-money-reg="1" value="' + esc(r.prepaidTaxCents != null ? (r.prepaidTaxCents / 100).toFixed(2) : "") + '" style="width:100%;font-size:20px;padding:10px;border:2px solid #0b3d23;border-radius:10px;background:#fff;color:#111">' +
       '<p id="db-prepaid-sq" style="color:#0b3d23;font-weight:800;margin:6px 0">' + esc(r.sqInvoice ? sqInvoiceLine(r.sqInvoice) : "") + "</p>" +
       '<p id="db-prepaid-msg" role="status" style="color:#7c2d12;font-weight:700;margin:6px 0"></p>' +
       '<button type="button" id="db-prepaid-save" style="' + big + 'background:#0b6b3a;color:#fff;border:0">Save</button>' +
@@ -3467,7 +3468,9 @@
     });
 
     var discP = listDiscReqs().then(function (d) { state.discReqs = d; }).catch(function () {}); /* v73 */
-    Promise.all([rosterP, driversP, ridesP, milesP, historyP, calendarP, safetyP, paymentsP, discP]).then(function () {
+    var rcP = listRateContracts().then(function (L) { state.rateContracts = L; }).catch(function () {}); /* v76j */
+    Promise.all([rosterP, driversP, ridesP, milesP, historyP, calendarP, safetyP, paymentsP, discP, rcP]).then(function () {
+      try { rovAutoApply(); } catch (e) {} /* v76j */
       state.loading = false;
       state.lastRefreshAt = Date.now();
       renderBoardLists();
@@ -5016,7 +5019,7 @@
       ".odo-req .btn-ghost,.god-dvir-flag .btn-ghost,.god-dvir-missed .btn-ghost,.booking-alert .btn-ghost,#god-dvir-alerts .btn-ghost{background:#1f2937 !important;color:#fff !important;border:2px solid #fff !important;text-shadow:none}" +
       ".odo-req .btn-gold,#god-dvir-alerts .btn-gold,.booking-alert .btn-gold{background:#d4af37 !important;color:#111 !important;border:2px solid #111 !important}";
     (document.head || document.documentElement).appendChild(st); })();
-  function moneyRegAttrs() { return ' type="text" inputmode="decimal" pattern="[0-9]*[.]?[0-9]{0,2}" autocomplete="off" data-money-reg="1"'; } /* v74b: numeric keypad with a decimal point */
+  function moneyRegAttrs() { return ' type="text" inputmode="numeric" pattern="[0-9.]*" autocomplete="off" data-money-reg="1"'; } /* v76j: digit pad, register style */ /* v74b: numeric keypad with a decimal point */
   function moneyRegVal(n) { var x = Number(n); return n === "" || n == null || !isFinite(x) ? "" : x.toFixed(2); }
   if (typeof document !== "undefined") {
     document.addEventListener("input", function (e) {
@@ -6139,6 +6142,115 @@
     }).catch(function () { state.boardNotice = "NOT SAVED: the ride commission % did not save. Try again."; renderBoardLists(); return false; });
   }
   window.__pcsV76dRideComm = { patch: rideCommPatch };
+  /* ---------- v76j (Matthew 10/19): RATE OVERRIDE / contract rates. God mode only.
+     Per ride: rateOverride { base, perMile, flat, setBy, at } on the board row (flat wins). Per customer: saved list at
+     /rides/RATECNTR (God-only by the rides/$code rule), auto-applied to a ride for that customer unless the ride has its own
+     override or Matthew cleared it (rateOverrideCleared). The driver app / meter lock the fare and show "Contract rate set by PCS". */
+  var RATE_PRESETS = [{ id: "corp-airport", name: "Corporate airport", base: 20, perMile: 1.25, flat: null }];
+  function rovNum(v) { var t = String(v == null ? "" : v).replace(/[$,\s]/g, ""); if (t === "") return null; var n = Number(t); return isFinite(n) && n >= 0 && n <= 100000 ? Math.round(n * 100) / 100 : NaN; }
+  function rateOvPatch(base, perMile, flat, now, setBy, extra) { /* pure (tested) */
+    var b = rovNum(base), m = rovNum(perMile), f = rovNum(flat);
+    if ([b, m, f].some(function (x) { return x !== null && isNaN(x); })) return { ok: false, error: "Enter dollar amounts (like 20 or 1.25)." };
+    if (!(f > 0) && !(b > 0) && !(m > 0)) return { ok: false, error: "Enter a flat fare, or a base and/or per-mile price." };
+    var o = Object.assign({ base: b || 0, perMile: m || 0, flat: f > 0 ? f : null, setBy: setBy || "god", at: now }, extra || {});
+    return { ok: true, patch: { rateOverride: o, rateOverrideCleared: false, updatedAt: now } };
+  }
+  function rateOvClearPatch(now) { return { rateOverride: null, rateOverrideCleared: true, updatedAt: now }; }
+  function rovDigits(v) { return String(v || "").replace(/\D/g, "").slice(-10); }
+  function contractMatch(row, list) { /* pure (tested): phone (last 10 digits), then email, then exact name */
+    var ph = rovDigits(row && row.riderPhone), em = String((row && (row.riderEmail || row.email)) || "").trim().toLowerCase(), nm = String((row && row.rider) || "").trim().toLowerCase();
+    var L = (list || []).filter(function (c) { return c && c.on !== false; }), hit = null;
+    if (ph.length === 10) hit = L.filter(function (c) { return rovDigits(c.phone) === ph; })[0];
+    if (!hit && em) hit = L.filter(function (c) { return String(c.email || "").trim().toLowerCase() === em; })[0];
+    if (!hit && nm) hit = L.filter(function (c) { return String(c.name || "").trim().toLowerCase() === nm; })[0];
+    return hit || null;
+  }
+  function rateOvAutoPatch(row, list, now) { /* pure (tested): null when nothing to do */
+    if (!row || row.rateOverride || row.rateOverrideCleared === true) return null;
+    var st = String(row.status || "").toLowerCase(); if (st === "completed" || st === "cancelled" || st === "deleted") return null;
+    var c = contractMatch(row, list); if (!c) return null;
+    var out = rateOvPatch(c.base, c.perMile, c.flat, now, "contract", { contractRateId: String(c.id || ""), contractName: String(c.name || "") });
+    return out.ok ? out.patch : null;
+  }
+  function rateContractsUrl(id) { return baseUrl() + "/rides/RATECNTR" + (id ? "/" + encodeURIComponent(id) : "") + ".json"; }
+  function listRateContracts() { return godFetch(rateContractsUrl(), {}).then(function (res) { if (!res.ok) throw new Error("contracts"); return res.json(); })
+    .then(function (d) { return Object.keys(d || {}).filter(function (k) { return d[k] && typeof d[k] === "object"; }).map(function (k) { return Object.assign({ id: k }, d[k]); }); }); }
+  function rovFix(n) { return n > 0 ? Number(n).toFixed(2) : ""; }
+  function rovMoney(n) { return n == null || n === "" ? "" : "$" + Number(n).toFixed(2); }
+  function rovDesc(o) { return o.flat > 0 ? "flat " + rovMoney(o.flat) : rovMoney(o.base || 0) + " base + " + rovMoney(o.perMile || 0) + "/mi"; }
+  function rovPresetOptions() {
+    return '<option value="">Preset…</option>' + RATE_PRESETS.map(function (p) { return '<option value="p:' + esc(p.id) + '">' + esc(p.name) + " (" + esc(rovDesc(p)) + ")</option>"; }).join("") +
+      (state.rateContracts || []).map(function (c) { return '<option value="c:' + esc(c.id) + '">' + esc(c.name || "Contract") + " (" + esc(rovDesc(c)) + ")</option>"; }).join("");
+  }
+  function rovPresetFind(v) { v = String(v || ""); if (v.indexOf("p:") === 0) return RATE_PRESETS.filter(function (p) { return p.id === v.slice(2); })[0] || null;
+    if (v.indexOf("c:") === 0) return (state.rateContracts || []).filter(function (c) { return c.id === v.slice(2); })[0] || null; return null; }
+  function rateOvHtml(r) {
+    var o = r.rateOverride || null, id = esc(r.id), big = ' style="width:90px;font-size:18px;min-height:44px"';
+    return '<div class="db-rov" style="border:2px solid #0b6b3a;background:#0b3d23;border-radius:10px;padding:8px;margin:6px 0">' +
+      '<div style="font-weight:800;margin-bottom:4px">Rate override (God mode only)' + (o ? ' \u2713 <span class="fine">' + esc(rovDesc(o)) + (o.setBy === "contract" ? " \u00b7 contract " + esc(o.contractName || "") : "") + "</span>" : "") + "</div>" +
+      '<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:end">' +
+      '<select class="rov-preset" data-event-id="' + id + '" style="min-height:44px">' + rovPresetOptions() + "</select>" +
+      '<label>Base / drop-off $<br><input id="rov-b-' + id + '" inputmode="numeric" data-money-reg="1" value="' + esc(o && o.base ? Number(o.base).toFixed(2) : "") + '"' + big + "></label>" +
+      '<label>Per mile $<br><input id="rov-m-' + id + '" inputmode="numeric" data-money-reg="1" value="' + esc(o && o.perMile ? Number(o.perMile).toFixed(2) : "") + '"' + big + "></label>" +
+      '<label>Flat fare $ (wins)<br><input id="rov-f-' + id + '" inputmode="numeric" data-money-reg="1" value="' + esc(o && o.flat ? Number(o.flat).toFixed(2) : "") + '"' + big + "></label>" +
+      '<button type="button" class="btn btn-gold btn-rov-save" data-event-id="' + id + '" style="min-height:44px">Save rate</button>' +
+      (o ? '<button type="button" class="btn btn-ghost btn-rov-clear" data-event-id="' + id + '" style="min-height:44px">Clear</button>' : "") +
+      "</div></div>";
+  }
+  function rovRow(id) { var row = null; (state.calendar || []).forEach(function (r) { if (r && r.id === id) row = r; }); return row; }
+  function rovSave(id, patch, msg) {
+    var row = rovRow(id); if (!row) return Promise.resolve(false);
+    return godFetch(calendarUrl(id), { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(patch) }).then(function (res) {
+      if (!res.ok) throw new Error("save"); row.rateOverride = patch.rateOverride; row.rateOverrideCleared = patch.rateOverrideCleared;
+      if (msg) state.boardNotice = msg; return refresh();
+    }).catch(function () { state.boardNotice = "NOT SAVED: the rate override did not save. Try again."; renderBoardLists(); return false; });
+  }
+  function rateContractsHtml() {
+    var L = state.rateContracts || [], big = ' style="font-size:17px;min-height:44px;width:100%"';
+    return '<details class="rate-contracts" style="margin:6px 0;border:2px solid #0b6b3a;border-radius:10px;padding:6px 8px"' + (state.rcOpen ? " open" : "") + '><summary style="cursor:pointer;font-weight:800">Contract rates (God mode only) (' + L.length + ")</summary>" +
+      '<p class="fine">Auto-applied to rides for these customers (match by phone, email, or exact name). A ride\u2019s own override wins.</p>' +
+      L.map(function (c) { return '<div class="card" style="padding:6px 8px;margin:4px 0"><b>' + esc(c.name || "") + "</b> \u00b7 " + esc(rovDesc(c)) + '<br><span class="fine">' + esc([c.phone, c.email].filter(Boolean).join(" \u00b7 ")) +
+        '</span> <button type="button" class="btn btn-ghost rc-del" data-rc-id="' + esc(c.id) + '">Delete</button></div>'; }).join("") +
+      '<div style="display:grid;grid-template-columns:1fr 1fr;gap:6px">' +
+      '<input id="rc-name" placeholder="Customer name"' + big + '><input id="rc-phone" type="tel" placeholder="Phone"' + big + ">" +
+      '<input id="rc-email" type="email" placeholder="Email"' + big + '><select id="rc-preset"' + big + ">" + rovPresetOptions() + "</select>" +
+      '<input id="rc-base" inputmode="numeric" data-money-reg="1" placeholder="Base / drop-off $"' + big + '><input id="rc-per" inputmode="numeric" data-money-reg="1" placeholder="Per mile $"' + big + ">" +
+      '<input id="rc-flat" inputmode="numeric" data-money-reg="1" placeholder="Flat fare $ (optional)"' + big + '><button type="button" class="btn btn-gold" id="rc-save" style="min-height:44px">Save contract</button></div>' +
+      '<p class="error" id="rc-err" role="alert">' + esc(state.rcErr || "") + "</p></details>";
+  }
+  function rovWire() {
+    if (rovWire.done || typeof document === "undefined") return; rovWire.done = true;
+    function v(id) { var el = document.getElementById(id); return el ? el.value : ""; }
+    function setV(id, x) { var el = document.getElementById(id); if (el) el.value = x == null ? "" : String(x); }
+    document.addEventListener("change", function (e) {
+      var t = e.target; if (!t) return;
+      if (t.classList && t.classList.contains("rov-preset")) { var p = rovPresetFind(t.value), id = t.getAttribute("data-event-id"); if (p) { setV("rov-b-" + id, rovFix(p.base)); setV("rov-m-" + id, rovFix(p.perMile)); setV("rov-f-" + id, rovFix(p.flat)); } }
+      if (t.id === "rc-preset") { var q = rovPresetFind(t.value); if (q) { setV("rc-base", rovFix(q.base)); setV("rc-per", rovFix(q.perMile)); setV("rc-flat", rovFix(q.flat)); } }
+      if (t.id === "ar-ovPreset") { var a = rovPresetFind(t.value); if (a) { ["ovBase", "ovPerMile", "ovFlat"].forEach(function (k, i) { var val = rovFix([a.base, a.perMile, a.flat][i]); setV("ar-" + k, val); state.addRideDraft = state.addRideDraft || {}; state.addRideDraft[k] = String(val); }); } }
+    }, true);
+    document.addEventListener("toggle", function (e) { if (e.target && e.target.classList && e.target.classList.contains("rate-contracts")) state.rcOpen = e.target.open; }, true);
+    document.addEventListener("click", function (e) {
+      var t = e.target && e.target.closest ? e.target.closest(".btn-rov-save,.btn-rov-clear,#rc-save,.rc-del") : null; if (!t) return;
+      var id = t.getAttribute("data-event-id");
+      if (t.classList.contains("btn-rov-save")) { var out = rateOvPatch(v("rov-b-" + id), v("rov-m-" + id), v("rov-f-" + id), Date.now(), "god");
+        if (!out.ok) { state.boardNotice = "NOT SAVED: " + out.error; renderBoardLists(); return; } t.disabled = true; rovSave(id, out.patch, "Saved: contract rate " + rovDesc(out.patch.rateOverride) + " on this ride."); return; }
+      if (t.classList.contains("btn-rov-clear")) { t.disabled = true; rovSave(id, rateOvClearPatch(Date.now()), "Rate override cleared; the regular meter rate applies."); return; }
+      if (t.id === "rc-save") { var o = rateOvPatch(v("rc-base"), v("rc-per"), v("rc-flat"), Date.now(), "contract"), nm = v("rc-name").trim();
+        state.rcErr = !nm ? "Enter the customer name." : !o.ok ? o.error : ""; if (state.rcErr) { renderBoardLists(); return; }
+        var rec = { name: nm.slice(0, 120), phone: v("rc-phone").trim().slice(0, 40), email: v("rc-email").trim().toLowerCase().slice(0, 120), base: o.patch.rateOverride.base, perMile: o.patch.rateOverride.perMile, flat: o.patch.rateOverride.flat, on: true, at: Date.now() };
+        var key = "c" + Date.now().toString(36); t.disabled = true;
+        godFetch(rateContractsUrl(key), { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(rec) }).then(function (res) { if (!res.ok) throw new Error(); state.rcOpen = true; return refresh(); })
+          .catch(function () { state.rcErr = "NOT SAVED: try again."; renderBoardLists(); }); return; }
+      if (t.classList.contains("rc-del")) { if (typeof confirm === "function" && !confirm("Delete this contract rate? Rides that already have it keep it.")) return;
+        godFetch(rateContractsUrl(t.getAttribute("data-rc-id")), { method: "DELETE" }).then(function () { return refresh(); }); }
+    }, true);
+  }
+  function rovAutoApply() {
+    var L = state.rateContracts || []; if (!L.length) return; state.rovAutoDone = state.rovAutoDone || {};
+    (state.calendar || []).forEach(function (row) { var p = rateOvAutoPatch(row, L, Date.now()); if (!p || state.rovAutoDone[row.id]) return; state.rovAutoDone[row.id] = 1;
+      godFetch(calendarUrl(row.id), { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(p) }).then(function (res) { if (res.ok) { row.rateOverride = p.rateOverride; row.rateOverrideCleared = false; renderBoardLists(); } }).catch(function () {}); });
+  }
+  if (typeof window !== "undefined") window.__pcsGodRateOv = { patch: rateOvPatch, clear: rateOvClearPatch, match: contractMatch, auto: rateOvAutoPatch, presets: RATE_PRESETS, html: rateOvHtml };
   /* v76d: Square invoice lookup (read-only, through the Worker). Amounts are pre-tax subtotal / tax / total in cents. */
   function sqInvoiceLine(q) {
     if (!q) return "";
@@ -6381,6 +6493,7 @@
             : "") +
           (r.assignedDriverId ? dbTipHtml(r) : "") + /* v73 Tip (paid in Square) */
           (r.assignedDriverId && st !== "cancelled" ? rideCommHtml(r) : "") + /* v76d per-ride Commission % */
+          (st !== "cancelled" && st !== "completed" ? rateOvHtml(r) : "") + /* v76j rate override */
           (r.sqInvoice ? '<p class="day-line db-sqinv"><span>Invoice</span> #' + esc(r.prepaidInvoiceNo || r.sqInvoice.number || "") + " \u00b7 " + esc(sqInvoiceLine(r.sqInvoice)) + "</p>" : "") +
           gfolHtml(r) + /* v76b: Text my client a tracking link */
           (st === "completed"
@@ -6964,6 +7077,10 @@
       createdAt: (prev && prev.createdAt) || now,
       updatedAt: now
     });
+    if ([f.ovBase, f.ovPerMile, f.ovFlat].some(function (x) { return String(x == null ? "" : x).trim() !== ""; })) { /* v76j */
+      var rov = rateOvPatch(f.ovBase, f.ovPerMile, f.ovFlat, now, "god"); if (!rov.ok) return { ok: false, error: "Rate override: " + rov.error };
+      row.rateOverride = rov.patch.rateOverride; row.rateOverrideCleared = false;
+    } else if (prev && prev.rateOverride) { row.rateOverride = null; row.rateOverrideCleared = true; }
     if (status === "completed") {
       row.completedAt = (prev && prev.completedAt) || now;
       row.commissionCents = Math.round(nums.commission * 100);
@@ -7107,7 +7224,8 @@
       prepaid: r.prepaid === true, prepaidAmount: r.prepaidAmountCents != null ? (Number(r.prepaidAmountCents) / 100).toFixed(2) : "", prepaidInvoiceNo: r.prepaidInvoiceNo || "", /* v75v */
       fare: s2(r.fare != null ? r.fare : r.fareBeforeTax), discount: s2(r.discount || 0), taxFees: s2(r.taxFees || 0), total: s2(r.total),
       commissionPct: r.commissionPct != null ? String(r.commissionPct) : "", commission: s2(r.commissionDollars), balance: s2(r.balance),
-      payMethod: r.payMethod || "", flat: !!r.flatPrice, notes: r.notes || "", audit: "" };
+      payMethod: r.payMethod || "", flat: !!r.flatPrice, notes: r.notes || "", audit: "",
+      ovBase: rovFix(r.rateOverride && r.rateOverride.base), ovPerMile: rovFix(r.rateOverride && r.rateOverride.perMile), ovFlat: rovFix(r.rateOverride && r.rateOverride.flat) }; /* v76j */
   }
 
   /* v74b (Matthew): "Add past ride" (backdated) inside a driver's Mon-Sun pay week: date/time, pickup, drop-off, fare,
@@ -7233,7 +7351,7 @@
       return '<label class="ar-l" for="ar-' + id + '">' + label + "</label>" +
         '<input id="ar-' + id + '" data-ar="' + id + '" type="' + (type || "text") + '" value="' + esc(d[id] == null ? "" : d[id]) + '"' + (extra || "") + ">";
     };
-    var money = ' inputmode="decimal" pattern="[0-9]*[.]?[0-9]{0,2}" autocomplete="off" data-money-reg="1"'; /* v73 cash-register entry */
+    var money = ' inputmode="numeric" pattern="[0-9.]*" autocomplete="off" data-money-reg="1"'; /* v76j: digit pad */ /* v73 cash-register entry */
     var cash = arCollects(d.payMethod);
     return (
       '<div class="add-ride-sheet" role="dialog" aria-modal="true" aria-labelledby="ar-title" style="background:#141414;color:#fff;border:2px solid #f0d48a;border-radius:16px;max-width:560px;width:100%;max-height:92vh;overflow:auto;padding:16px 18px">' +
@@ -7257,6 +7375,8 @@
       '<div style="grid-column:1/3">' + inp("balance", cash ? "Driver owes PCS ($) — driver collects" : "PCS owes driver ($)", "text", money + ' style="font-weight:800;font-size:18px"') + "</div>" +
       '<div style="grid-column:1/3;background:#0b3d23;border:2px solid #0b6b3a;border-radius:10px;padding:8px 10px"><label class="ar-c" style="display:block;font-weight:800;font-size:17px"><input type="checkbox" id="ar-prepaid" data-ar="prepaid"' + (d.prepaid ? " checked" : "") + "> Prepaid (Square invoice)</label>" + /* v75v */
         '<div style="display:grid;grid-template-columns:1fr 1fr;gap:6px 12px">' + "<div>" + inp("prepaidAmount", "Invoice amount for this ride ($, optional)", "text", money) + "</div><div>" + inp("prepaidInvoiceNo", "Invoice # (optional)") + "</div></div></div>" +
+      '<div style="grid-column:1/3;background:#0b3d23;border:2px solid #0b6b3a;border-radius:10px;padding:8px 10px"><b>Rate override (God mode only)</b> <select id="ar-ovPreset" style="min-height:40px">' + rovPresetOptions() + "</select>" + /* v76j */
+        '<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px">' + "<div>" + inp("ovBase", "Base / drop-off ($)", "text", money) + "</div><div>" + inp("ovPerMile", "Per mile ($)", "text", money) + "</div><div>" + inp("ovFlat", "Flat fare ($, wins)", "text", money) + "</div></div></div>" +
       '<div style="grid-column:1/3"><label class="ar-l" for="ar-notes">Notes</label><textarea id="ar-notes" data-ar="notes" rows="2" style="width:100%">' + esc(d.notes || "") + "</textarea></div>" +
       '<div style="grid-column:1/3">' + inp("audit", state.addRideEditId ? "Audit note (required): what changed and why" : "Audit note (optional)") + "</div>" +
       "</div>" +
@@ -7334,6 +7454,7 @@
       .sort(function (a, b) { return String(b.start || "").localeCompare(String(a.start || "")); }).slice(0, 30);
     var head = '<button type="button" class="btn btn-gold" data-add-ride-driver="">+ Add ride</button>' +
       '<p class="fine" style="opacity:.75;margin:6px 0">Tip: open a driver and tap Add ride to pre-pick them.</p>';
+    head += rateContractsHtml(); rovWire(); /* v76j */
     if (!rows.length) return head;
     /* v73: the added-rides list folds into one row so the map stays in view on iPad / iPhone; remembers open / closed */
     return head + '<details class="manual-list"' + (state.manualListOpen ? " open" : "") + ' style="margin:4px 0"><summary style="cursor:pointer;padding:6px 0;font-weight:700">Added rides (' + rows.length + ")</summary>" + rows.map(function (r) {
