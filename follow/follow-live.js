@@ -1,4 +1,8 @@
-/* PCS v76f: 2.5 s updates, GPS speed/heading when shared, gliding arrow. v76e: big live speed + ETA + heading arrow (computed here). v76b (Matthew 10/17): "Follow my ride" / driver tracking link. /follow/?t=<32-character token>.
+/* PCS v76g (Matthew 10/18): the ride's stops on the map (numbered) + in the From / To list; the map zooms in on the car and
+   its next target as it gets closer (pauses 10 s after the viewer touches the map); a slide-down pop-up across the top
+   when the driver is about 1 minute from the pickup and again from the drop-off (once per leg, plus a short vibration
+   where the phone supports it; silent, no sound).
+   v76f: 2.5 s updates, GPS speed/heading when shared, gliding arrow. v76e: big live speed + ETA + heading arrow (computed here). v76b (Matthew 10/17): "Follow my ride" / driver tracking link. /follow/?t=<32-character token>.
    Read-only. Reads ONE small public copy: /rides/FLWSHARE/<token> (written by the rider / driver / God apps, see app.js
    folClean). Shows: status, driver first name, car + plate, the car on a map with the route, pickup + drop-off, ETA and
    the PCS phone. Never the fare, payment, card or the rider's phone / email (they are never in the copy). Everything read
@@ -33,12 +37,18 @@
       ".fl-spd b{display:block;font-size:46px;line-height:1.05;font-weight:900;font-variant-numeric:tabular-nums}.fl-spd span{display:block;font-size:15px;font-weight:800}.fl-spd small{display:block;font-size:12px;font-weight:700}" +
       ".fl-arr .k{display:block;font-size:15px;font-weight:800}.fl-arr b{display:block;font-size:34px;line-height:1.1;font-weight:900}.fl-arr span{display:block;font-size:16px;font-weight:800}.fl-arr small{display:block;font-size:13px;font-weight:700}" +
       ".fl-carico{background:none;border:0}" +
+      ".fl-stopico{background:none;border:0}.fl-stopico div{width:26px;height:26px;border-radius:50%;background:#fff;border:3px solid #0b3d23;color:#0b3d23;font:900 15px/26px system-ui,-apple-system,sans-serif;text-align:center;box-sizing:content-box;box-shadow:0 1px 3px rgba(0,0,0,.35)}" +
+      ".fl-stopico.done div{background:#d9e6dc;border-color:#6b8f78;color:#4a6656}" +
+      "#fl-soon{position:fixed;left:6px;right:6px;top:4px;top:calc(env(safe-area-inset-top,0px) + 4px);z-index:2000;background:#bef1c6;color:#0b3d23;border:3px solid #2e9d4f;border-radius:14px;" +
+      "padding:8px 12px;box-shadow:0 6px 18px rgba(11,61,35,.35);text-align:center;cursor:pointer;transform:translateY(-130%);opacity:0;transition:transform .45s ease,opacity .45s ease;-webkit-tap-highlight-color:transparent}" +
+      "#fl-soon.in{transform:translateY(0);opacity:1}#fl-soon b{display:block;font-size:20px;line-height:1.2;font-weight:900}#fl-soon small{display:block;font-size:13px;font-weight:700;margin-top:1px}" +
       ".fl-msg{background:#f0fdf4;color:#0b3d23;border:3px solid #2e9d4f;border-radius:16px;padding:14px}.fl-msg p{color:#0b3d23}.fl-msg .tag{color:#0b3d23;font-weight:900;font-size:20px}";
     document.head.appendChild(st);
   }
   function message(title, body, final) {
     style();
-    if (final) { S.ended = true; if (S.map) { try { S.map.remove(); } catch (e) {} S.map = null; } }
+    if (final) { S.ended = true; soonHide(true); }
+    if (final && S.map) { try { S.map.remove(); } catch (e) {} S.map = null; }
     app.innerHTML = '<div class="card fl-msg" id="fl-msg"><p class="tag">' + esc(title) + '</p><p class="lede">' + esc(body) + "</p>" +
       '<a class="fl-call" id="fl-call" href="' + PCS_TEL + '">Call PCS ' + PCS_PHONE + "</a>" +
       '<p class="fine">Need a ride of your own? Visit <a href="https://www.PCSrides.com" style="color:#0b3d23;font-weight:800">www.PCSrides.com</a>.</p></div>';
@@ -65,11 +75,14 @@
       '<div class="fl-arr" id="fl-arr"><span class="k" id="fl-arr-k"></span><b id="fl-arr-t"></b><span id="fl-arr-m"></span><small id="fl-arr-to"></small></div></div>' +
       '<p class="fl-eta" id="fl-eta"></p>' +
       '<div id="fl-map" role="img" aria-label="Map with the car, the pickup and the drop-off"></div>' +
-      '<p class="fl-row" id="fl-from"></p><p class="fl-row" id="fl-to"></p>' +
+      '<p class="fl-row" id="fl-from"></p><div id="fl-stops"></div><p class="fl-row" id="fl-to"></p>' +
       '<p class="fl-upd" id="fl-upd"></p><p class="error" id="fl-net" role="status"></p>' +
       '<a class="fl-call" id="fl-call" href="' + PCS_TEL + '">Questions? Call PCS ' + PCS_PHONE + "</a></div>";
     if (window.L) {
-      S.map = window.L.map("fl-map", { zoomControl: true, attributionControl: true }).setView([29.76, -95.37], 11);
+      S.map = window.L.map("fl-map", { zoomControl: true, attributionControl: true, zoomSnap: 0.25, zoomDelta: 1 }).setView([29.76, -95.37], 11);
+      /* v76g: the viewer touched the map (drag, pinch, wheel, the +/- buttons): auto-zoom waits 10 s, then picks up again */
+      var mapEl = $("fl-map"), touched = function () { S.userUntil = Date.now() + USER_PAUSE_MS; };
+      ["touchstart", "pointerdown", "mousedown", "wheel"].forEach(function (ev) { try { mapEl.addEventListener(ev, touched, { passive: true }); } catch (e) {} });
       window.L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom: 19, attribution: "&copy; OpenStreetMap" }).addTo(S.map);
       S.layers = window.L.layerGroup().addTo(S.map);
       window.addEventListener("resize", function () { try { S.map.invalidateSize(); } catch (e) {} });
@@ -94,13 +107,62 @@
     }
     function dot(p, color, title) { var a = pt(p); if (!a) return; pts.push(a); L.circleMarker(a, { radius: 9, color: "#fff", weight: 3, fillColor: color, fillOpacity: 1 }).bindTooltip(title).addTo(S.layers); }
     dot(d.pickup, "#2e9d4f", "Pickup");
+    var sl = stopsOf(d);
+    sl.forEach(function (s, i) { /* v76g: numbered stop pins, in driving order */
+      if (!s.p) return;
+      pts.push(s.p);
+      L.marker(s.p, { icon: L.divIcon({ className: "fl-stopico" + (s.done ? " done" : ""), iconSize: [32, 32], iconAnchor: [16, 16], html: "<div>" + (i + 1) + "</div>" }), keyboard: false, zIndexOffset: 500 })
+        .bindTooltip("Stop " + (sl.length > 1 ? (i + 1) + " " : "") + (s.done ? "(visited)" : "")).addTo(S.layers);
+    });
     dot(d.dest, "#c0392b", "Drop-off");
     var car = showCar ? pt(d.pos) : null;
     if (car) pts.push(car);
     carMove(car);
-    var key = (d.status || "") + (car ? "c" : "");
-    if (!S.fitted || S.lastKey !== key) { S.fitted = true; S.lastKey = key; if (pts.length === 1) S.map.setView(pts[0], 15); else if (pts.length) S.map.fitBounds(pts, { padding: [36, 36], maxZoom: 16 }); }
-    else if (car && !S.map.getBounds().pad(-0.15).contains(car)) S.map.panTo(car);
+    var key = (d.status || "") + (car ? "c" : ""), now = Date.now();
+    var sz = S.map.getSize(), szKey = sz ? sz.x + "x" + sz.y : "";
+    var refit = S.fitted && S.lastKey === key && now < (S.overviewUntil || 0) && S.fitSize !== szKey && now >= (S.userUntil || 0); /* the map settled to its real size */
+    if (!S.fitted || S.lastKey !== key || refit) { /* first look (and each new phase): the whole route */
+      if (!refit) S.overviewUntil = now + OVERVIEW_MS;
+      S.fitted = true; S.lastKey = key; S.autoAt = now; S.fitSize = szKey;
+      var all = pts.concat(route);
+      if (pts.length === 1 && route.length < 2) S.map.setView(pts[0], 15); else if (all.length) S.map.fitBounds(all, { padding: [36, 36], maxZoom: 16 });
+      return;
+    }
+    autoZoom(car, nextTarget(d, sl), now);
+  }
+  /* v76g: the stops in the copy (up to 5): map point when known, address, visited flag. */
+  function stopsOf(d) {
+    var out = [];
+    if (d && Array.isArray(d.stops)) d.stops.slice(0, 5).forEach(function (s) {
+      if (!s || typeof s !== "object") return;
+      var p = pt(s), l = txt(s.label, 120);
+      if (p || l) out.push({ p: p, label: l, done: s.done === true });
+    });
+    return out;
+  }
+  /* where the car is heading now: the pickup, else the next stop it has not reached, else the drop-off */
+  function nextTarget(d, sl) {
+    if (d.status === "on_way" || d.status === "arrived") return pt(d.pickup);
+    if (d.status !== "picked_up") return null;
+    for (var i = 0; i < sl.length; i += 1) if (!sl[i].done && sl[i].p) return sl[i].p;
+    return pt(d.dest);
+  }
+  /* v76g auto-zoom: fit the car + its next target with padding. It moves the map only when the right zoom is 3/4 of a
+     level away or a point is off screen, at most every 2.5 s, so it does not jitter; it waits 10 s after a touch. */
+  var OVERVIEW_MS = 5000, USER_PAUSE_MS = 10000, AUTO_EVERY_MS = 2500, AUTO_MAX_Z = 17, AUTO_PAD = 56;
+  function autoZoom(car, tg, now) {
+    var m = S.map; if (!m || !car) return;
+    if (now < (S.userUntil || 0)) return; /* the viewer is looking around */
+    if (!tg) { if (now >= (S.overviewUntil || 0) && !m.getBounds().pad(-0.15).contains(car)) m.panTo(car); return; }
+    if (now < (S.overviewUntil || 0) || now - (S.autoAt || 0) < AUTO_EVERY_MS) return;
+    var L = window.L, b = L.latLngBounds([car, tg]), sz = m.getSize();
+    if (!sz || sz.x < 50 || sz.y < 50) return;
+    var z = Math.min(AUTO_MAX_Z, m.getBoundsZoom(b, false, L.point(AUTO_PAD * 2, AUTO_PAD * 2))), cz = m.getZoom();
+    var inner = m.getBounds().pad(-0.08), off = !inner.contains(car) || !inner.contains(tg);
+    if (!off && Math.abs(z - cz) < 0.75) return;
+    if (!off && z < cz) return; /* both still on screen: only ever zoom IN by itself */
+    S.autoAt = now; S.autoZ = z;
+    m.fitBounds(b, { padding: [AUTO_PAD, AUTO_PAD], maxZoom: AUTO_MAX_Z, animate: true, duration: 0.8 });
   }
   /* v76f: ONE car marker, painted at 60 fps (requestAnimationFrame). Between fixes (~1 s apart) it keeps rolling along
      the heading at the current speed for up to 2 s (dead reckoning), easing toward each new fix; turns take the short way. */
@@ -191,8 +253,8 @@
       if (arr < now) arr = now + 60000;
       try { t = new Date(arr).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }); } catch (x) {}
       setText("fl-arr-t", "about " + t);
-      setText("fl-arr-m", left + " min \u00b7 " + Math.max(0, num(e.miles)).toFixed(1) + " mi");
-    } else { setText("fl-arr-t", "Updating\u2026"); setText("fl-arr-m", ""); }
+      setText("fl-arr-m", (soonFired(dest ? "dest" : "pickup") && legOf(d) ? "Arriving shortly" : left + " min") + " \u00b7 " + Math.max(0, num(e.miles)).toFixed(1) + " mi");
+    } else { setText("fl-arr-t", "Updating\u2026"); setText("fl-arr-m", soonFired(dest ? "dest" : "pickup") && legOf(d) ? "Arriving shortly" : ""); }
     setText("fl-arr-to", nm);
   }
   function update(d) {
@@ -213,12 +275,79 @@
     var pk = d.pickup && typeof d.pickup === "object" ? txt(d.pickup.label, 120) : "", dr = d.dest && typeof d.dest === "object" ? txt(d.dest.label, 120) : "";
     setText("fl-from", pk ? "From: " + pk : "");
     setText("fl-to", dr ? "To: " + dr : "");
+    stopsList(d);
     var pAt = d.pos && num(d.pos.at), age = pAt ? Math.round((now - pAt) / 1000) : -1;
     var showCar = (live || d.status === "completed") && !!pt(d.pos);
     setText("fl-upd", !live ? (done ? "The car stopped sharing its location at the end of the ride." : "The car shows on the map once your driver heads out.")
       : age < 0 ? "Waiting for the first update from the car\u2026" : age <= 20 ? "Live \u00b7 updated just now" : "Last update " + (age < 60 ? age + " s" : Math.floor(age / 60) + " min") + " ago");
-    track(d); bigBox(d, now, live);
+    track(d); soonCheck(d, now); bigBox(d, now, live);
     draw(d, showCar);
+  }
+  function stopsList(d) { /* v76g: one line per stop between From and To, like the driver app */
+    var box = $("fl-stops"); if (!box) return;
+    var sl = stopsOf(d), h = sl.map(function (s, i) {
+      return '<p class="fl-row fl-stop' + (s.done ? " done" : "") + '">' + "Stop" + (sl.length > 1 ? " " + (i + 1) : "") + ": " + esc(s.label || "On the map") + (s.done ? " \u2713" : "") + "</p>";
+    }).join("");
+    if (box.__h !== h) { box.innerHTML = h; box.__h = h; }
+  }
+  /* ---------- v76g (Matthew 10/18): "arriving shortly" pop-up ----------
+     Pickup leg (on the way) and drop-off leg (on the ride). Fires when the shared ETA is 1 min or less, or (fallback) the
+     ETA miles / the car's straight-line distance to the target is 0.25 mi or less. Once per leg per link: remembered in
+     localStorage (sessionStorage if that is blocked) keyed by token + leg, so a reload or a jittery ETA never repeats it.
+     Slides down across the top, over the map; tap closes it, it fades by itself after 15 s; the ETA box then keeps a
+     small "Arriving shortly". A short vibration where the phone supports it (Android Chrome; iPhone Safari has none, so
+     it is skipped). No sound. */
+  var SOON_MIN = 1, SOON_MI = 0.25, SOON_SHOW_MS = 15000, SOON_KEY = "pcs-fl-soon-v1:";
+  var SOON_TEXT = { pickup: "Your driver is arriving shortly", dest: "Arriving at drop-off shortly" };
+  function legOf(d) { return d && d.status === "on_way" ? "pickup" : d && d.status === "picked_up" ? "dest" : ""; }
+  function soonStore() { var w = window; try { if (w.localStorage) { w.localStorage.setItem(SOON_KEY + "t", "1"); w.localStorage.removeItem(SOON_KEY + "t"); return w.localStorage; } } catch (e) {}
+    try { if (w.sessionStorage) return w.sessionStorage; } catch (e2) {} return null; }
+  function soonFired(leg) {
+    S.soon = S.soon || {};
+    if (S.soon[leg]) return true;
+    var st = soonStore(); try { if (st && st.getItem(SOON_KEY + token + ":" + leg)) { S.soon[leg] = true; return true; } } catch (e) {}
+    return false;
+  }
+  function soonMark(leg) { S.soon = S.soon || {}; S.soon[leg] = true; var st = soonStore(); try { if (st) st.setItem(SOON_KEY + token + ":" + leg, String(Date.now())); } catch (e) {} }
+  function soonDue(d, leg, now) {
+    var e = d.eta, eAt = num(d.etaAt) || num(d.updatedAt) || now;
+    if (e && typeof e === "object" && (e.to === "dest") === (leg === "dest") && now - eAt <= 180000) {
+      var mn = num(e.min), mi = num(e.miles);
+      if (mn !== null && mn - Math.max(0, now - eAt) / 60000 <= SOON_MIN) return true;
+      if (mi !== null && mi <= SOON_MI) return true;
+    }
+    var car = pt(d.pos), pAt = d.pos && num(d.pos.at);
+    if (!car || !pAt || now - pAt > 60000) return false;
+    var tg = leg === "pickup" ? pt(d.pickup) : pt(d.dest);
+    if (!tg) return false;
+    if (leg === "dest" && stopsOf(d).some(function (s) { return !s.done && s.p; })) return false; /* a stop is still ahead: wait for the ETA */
+    return hav(car, tg) <= SOON_MI;
+  }
+  function soonCheck(d, now) {
+    var leg = legOf(d);
+    if (!leg || soonFired(leg) || !soonDue(d, leg, now)) return;
+    soonMark(leg); /* fired: stays fired for this leg */
+    soonShow(leg);
+  }
+  function soonShow(leg) {
+    style(); soonHide(true);
+    var el = document.createElement("div");
+    el.id = "fl-soon"; el.setAttribute("role", "alert"); el.setAttribute("aria-live", "assertive"); el.setAttribute("data-leg", leg);
+    el.innerHTML = "<b>" + esc(SOON_TEXT[leg]) + "</b><small>Tap to close</small>";
+    el.addEventListener("click", function () { soonHide(false); });
+    document.body.appendChild(el);
+    S.soonEl = el; S.soonShownAt = Date.now();
+    void el.offsetHeight;
+    el.className = "in";
+    try { if (window.navigator && typeof window.navigator.vibrate === "function") window.navigator.vibrate([200, 100, 200]); } catch (e) {}
+    clearTimeout(S.soonT); S.soonT = setTimeout(function () { soonHide(false); }, SOON_SHOW_MS);
+  }
+  function soonHide(now) {
+    clearTimeout(S.soonT);
+    var el = S.soonEl || $("fl-soon"); S.soonEl = null;
+    if (!el) return;
+    if (now) { if (el.parentNode) el.parentNode.removeChild(el); return; }
+    el.className = ""; setTimeout(function () { if (el.parentNode) el.parentNode.removeChild(el); }, 500);
   }
   function over(d, now) {
     if (!d || typeof d !== "object") return "";
@@ -300,6 +429,7 @@
   document.addEventListener("visibilitychange", function () { if (document.visibilityState === "visible" && !S.ended && !S.timer) poll(); });
   (function qr() { var el = $("fw-qr"); if (!el || typeof window.qrcode !== "function") return; try { var x = window.qrcode(0, "M"); x.addData("https://www.PCSrides.com"); x.make(); el.innerHTML = x.createSvgTag(4, 0); } catch (e) {} })();
   setInterval(function () { if (S.d && !S.ended && $("fl-live")) { try { bigBox(S.d, Date.now(), /^(on_way|arrived|picked_up)$/.test(String(S.d.status))); } catch (e) {} } }, 15000);
-  window.__pcsFollowLive = { setPath: setPath, update: update, track: track, state: S, over: over, statusText: statusText };
+  window.__pcsFollowLive = { setPath: setPath, update: update, track: track, state: S, over: over, statusText: statusText,
+    stopsOf: stopsOf, nextTarget: nextTarget, soonDue: soonDue, soonText: SOON_TEXT };
   poll();
 })();
