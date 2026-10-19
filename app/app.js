@@ -184,7 +184,60 @@
     return window.PCS_AUTH || null;
   }
 
+  /* v77: ride ownership + signed fare (Worker /ride/claim, /ride/fare). The rider key never leaves this phone except to the PCS Worker. */
+  function v77RkKey(code) { return "pcs-rider-key-" + String(code || "").toUpperCase(); }
+  function v77RiderKey(code) { try { return localStorage.getItem(v77RkKey(code)) || ""; } catch (e) { return ""; } }
+  function v77MakeRiderKey(code) {
+    var k = v77RiderKey(code);
+    if (k) return k;
+    var b = new Uint8Array(24);
+    try { crypto.getRandomValues(b); } catch (e) { return ""; }
+    k = Array.prototype.map.call(b, function (x) { return ("0" + x.toString(16)).slice(-2); }).join("");
+    try { localStorage.setItem(v77RkKey(code), k); } catch (e) { return ""; }
+    return k;
+  }
+  function v77Post(path, body) {
+    try {
+      return fetch(METER_WORKER + path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body), keepalive: true })
+        .then(function (r) { return r.json().catch(function () { return {}; }).then(function (d) { d = d || {}; d.httpStatus = r.status; return d; }); });
+    } catch (e) { return Promise.resolve({ ok: false }); }
+  }
+  function v77ClaimRide(code) {
+    if (ROLE !== "customer" || !code) return;
+    var k = v77MakeRiderKey(code);
+    if (k) v77Post("/ride/claim", { rideCode: code, riderKey: k }).catch(function () {});
+  }
+  function v77AuthFields(body) {
+    var out = {};
+    try {
+      if (ROLE === "driver") { var t = typeof qToken === "function" ? qToken() : ""; if (t) out.driverToken = t; }
+      else if (body && body.rideCode) { var k = v77RiderKey(body.rideCode); if (k) out.riderKey = k; }
+    } catch (e) {}
+    return out;
+  }
+  /* driver app: a write that ends a ride with a fare also posts that fare to the Worker, which signs it (3 tries) */
+  function v77FareHook(url, opts) {
+    if (ROLE !== "driver" || !opts || !/^(PATCH|PUT)$/i.test(String(opts.method || ""))) return;
+    var m = /\/rides\/([A-Z0-9]{4,16})\.json(\?|$)/.exec(String(url || ""));
+    if (!m) return;
+    var b;
+    try { b = typeof opts.body === "string" ? JSON.parse(opts.body) : null; } catch (e) { return; }
+    if (!b || b.status !== "completed" || !(Number(b.fareTotal) >= 0)) return;
+    var code = m[1], fare = Math.round(Number(b.fareTotal)), tries = 0;
+    var go = function () {
+      tries++;
+      var t = typeof qToken === "function" ? qToken() : "";
+      if (!t) return;
+      v77Post("/ride/fare", { rideCode: code, fareCents: fare, driverToken: t }).then(function (d) {
+        if (!(d && d.ok) && tries < 3 && !(d && d.httpStatus === 409)) setTimeout(go, 3000 * tries);
+      }).catch(function () { if (tries < 3) setTimeout(go, 3000 * tries); });
+    };
+    setTimeout(go, 1200); /* after the Firebase write lands */
+  }
+  window.pcsV77 = { riderKey: v77RiderKey, claim: v77ClaimRide, authFields: v77AuthFields, fareHook: v77FareHook };
+
   function authFetch(url, opts) {
+    v77FareHook(url, opts);
     var a = pcsAuth();
     /* Auth not on this device yet: fall back to plain REST so roster/presence still work. */
     if (!a || !a.authFetch || (a.hasConfig && !a.hasConfig())) {
@@ -5577,7 +5630,7 @@
 
   function workerPost(url, body) {
     var cfg = squareCfg();
-    var payload = Object.assign({}, body || {});
+    var payload = Object.assign({}, body || {}, v77AuthFields(body)); /* v77 */
     if (cfg.sandbox) payload.sandbox = true;
     var ctrl = typeof AbortController === "function" ? new AbortController() : null;
     var timer = ctrl ? setTimeout(function () { ctrl.abort(); }, 30000) : 0;
@@ -11443,6 +11496,7 @@
         var openPromise = putOpenRide(code, Object.assign({}, payload, { status: "pending_owner", isTest: !!payload.isTest }));
         return openPromise.then(function () {
           notifyOwnerNewBooking(payload);
+          v77ClaimRide(code); /* v77: pin this phone as the rider (pay proof) */
           state.rideStatus = "pending_owner";
           state.isTest = !!payload.isTest;
           saveRide("pending_owner");
@@ -13908,7 +13962,7 @@
   /* ---------- pay ---------- */
   function meterPost(path, body) {
     var M = state.meter;
-    var payload = Object.assign({}, body || {});
+    var payload = Object.assign({}, body || {}, v77AuthFields(body)); /* v77: driver token (meter view needs it) */
     if (M && M.sandbox) payload.sandbox = true;
     var ctrl = typeof AbortController === "function" ? new AbortController() : null;
     var timer = ctrl ? setTimeout(function () { ctrl.abort(); }, 25000) : 0;
@@ -13948,6 +14002,11 @@
     state.meterError = "";
     render();
     meterEnsureEndSaved(M).then(function () {
+      /* v77 (Harry #5): /meter/link needs the Worker-signed fare: sign it here first (same fare the end-ride write saved) */
+      var t = typeof qToken === "function" ? qToken() : "";
+      if (!t || !M.fare || !(Number(M.fare.total) >= 0)) return null;
+      return v77Post("/ride/fare", { rideCode: M.code, fareCents: Math.round(Number(M.fare.total)), driverToken: t }).catch(function () { return null; });
+    }).then(function () {
       return meterPost("/meter/link", { rideCode: M.code, attempt: M.linkAttempt || 0 });
     }).then(function (data) {
       state.meterBusy = "";
