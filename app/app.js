@@ -3607,8 +3607,10 @@
     var loc = dlRec("dvir"), srv = hosReadHist().dvir || {}, hit = null;
     [loc, srv].forEach(function (m) { Object.keys(m || {}).forEach(function (d) { ["pre", "post", "avail"].forEach(function (k) {
       var r = m[d] && m[d][k]; if (!r || !r.unsafe) return;
-      if ((r.blocks || []).length && r.blocks.every(function (b) { return b && b.k === "carwash"; }) && !washBlockNow()) return; /* v76d-pretrip: car-wash-only block follows the current wash date (calendar days) */
-      var cl = (srv[d] && srv[d][k] && srv[d][k].cleared) || r.cleared; if (!cl) hit = { day: d, kind: k, at: r.at, blocks: r.blocks || [], rejected: (srv[d] && srv[d][k] && srv[d][k].rejected) || r.rejected || null };
+      /* v76d-pretrip: a car-wash block follows the current wash date (calendar days). v76g: a POST-trip never blocks for the car wash (end of shift). */
+      var bl = (r.blocks || []).filter(function (b) { return !(b && b.k === "carwash" && (k === "post" || !washBlockNow())); });
+      if ((r.blocks || []).length && !bl.length) return;
+      var cl = (srv[d] && srv[d][k] && srv[d][k].cleared) || r.cleared; if (!cl) hit = { day: d, kind: k, at: r.at, blocks: bl, rejected: (srv[d] && srv[d][k] && srv[d][k].rejected) || r.rejected || null };
     }); }); });
     return hit;
   }
@@ -3733,14 +3735,19 @@
     var cw = its.filter(function (i) { return i.k === "carwash"; })[0];
     if (cw && (cw.maxAgeHours || cw.maxAgeDays) && vd.carwash && L.washState) { var ws = L.washState(vd.carwash, now, cw); /* v76d-pretrip: calendar days (America/Chicago), reminder first */
       if (ws && ws.block) out.push({ k: "carwash", label: cw.label, why: "more than " + ws.grace + " days since last wash" });
-      else if (ws && (ws.remind || ws.overdue)) qd.washMsg = "Reminder: wash the car (last wash " + vd.carwash + ")." + (cw.block ? " Going online is blocked starting " + ws.blockFrom + "." : ""); }
+      else if (ws && (ws.remind || ws.overdue)) qd.washMsg = (ws.remind ? "Car wash reminder: last wash " + ws.last + ", please wash by " + ws.washBy + "." : "Car wash due: last wash " + ws.last + ". Please wash the car.") + (cw.block && ws.remind ? " Going online pauses starting " + ws.blockFrom + "." : ""); } /* v76g wording */
     if (its.some(function (i) { return i.group === "Fluids" && i.block; })) { var days = Number(localStorage.getItem("pcs-dvir-fluids-days")) || 7, fd = L.fluidsDue(vd.fluids, now, days);
       if (fd.due && fd.why !== "weekend") out.push({ k: "fluids", label: "Fluids check", why: fd.why === "never" ? "never checked" : "not checked in " + fd.days + " days" }); }
     var av = dlDvirRec(dlToday(), "avail"); /* God already cleared these exact blocks today */
     if (av && av.cleared && out.every(function (b) { return (av.blocks || []).some(function (x) { return x.k === b.k; }); })) return [];
     return out;
   }
-  function availBlockMsg(bk) { var bl = (bk && bk.blocks || []).map(function (b) { return b.label + (b.why === "photo" ? " (photo waiting for God approval)" : b.why !== "defect" ? " (" + b.why + ")" : ""); }).join(", ");
+  function availBlockMsg(bk) {
+    if (bk && (bk.blocks || []).length && bk.blocks.every(function (b) { return b && b.k === "carwash"; })) { /* v76g: the car wash is a pause, not an unsafe defect */
+      var L = window.PCSDriverLog, vd = {}; try { vd = (JSON.parse(localStorage.getItem("pcs-dvir-veh") || "{}") || {})[dlPlate() || "car"] || ((hosReadHist().veh || {})[dlPlate() || "car"]) || {}; } catch (e) {}
+      var ws = L && L.washState && vd.carwash ? L.washState(vd.carwash, Date.now(), { block: true }) : null, wl = L && L.washLine ? L.washLine(ws, "pre") : null;
+      return wl && wl.level === "block" ? wl.text : "Car wash overdue. Going online is paused until the car is washed and PCS clears it."; }
+    var bl = (bk && bk.blocks || []).map(function (b) { return b.label + (b.why === "photo" ? " (photo waiting for God approval)" : b.why !== "defect" ? " (" + b.why + ")" : ""); }).join(", ");
     return "Unsafe vehicle defect reported" + (bl ? ": " + bl : "") + ". You can\u2019t go Available until God mode clears it." + (bk && bk.rejected ? " God mode rejected the photo: " + bk.rejected.reason + ". Do a new inspection with a new photo." : ""); }
   /* v74b: a missed post-trip (flagged by the Worker's midnight check) must be completed first, then today's pre-trip */
   function missedPostDay() { var m = dlRec("missed"), ds = Object.keys(m).filter(function (d) { var x = m[d]; if (!x || !x.at || x.resolvedAt) return false; var p = dlDvirRec(d, "post"); return !(p && Number(p.at) >= Number(x.at)); }).sort(); return ds[0] || null; }
@@ -9625,6 +9632,19 @@
       folWrite(folNodeUrl(t), "PATCH", { pos: p, updatedAt: now });
     });
   }
+  /* v76g (Matthew 10/18): the ride's stops, in driving order, same as the driver app shows them (including a stop added
+     mid-ride). Address + map point only, like pickup / drop-off; "done" once the driver has passed it. Up to 5. */
+  function folStopsOut(list) {
+    if (!Array.isArray(list)) return null;
+    var out = [];
+    list.forEach(function (s) {
+      var p = out.length < 5 && s && typeof s === "object" ? folPlace(s) : null;
+      if (!p) return;
+      if (s.done === true) p.done = true;
+      out.push(p);
+    });
+    return out.length ? out : null;
+  }
   /* The ONLY fields that ever reach the public copy. Add nothing here without a privacy review (Harry). */
   function folClean(o, now) {
     o = o || {}; now = now || Date.now();
@@ -9636,6 +9656,7 @@
     var car = folCar(o.car); if (car) out.car = car;
     var pk = folPlace(o.pickup); if (pk) out.pickup = pk;
     var dr = folPlace(o.dest); if (dr) out.dest = dr;
+    var sx = folStopsOut(o.stops); if (sx) out.stops = sx; /* v76g */
     if ((live || done) && o.pos) { var p = folPosOut(o.pos, now, live); if (p) out.pos = p; }
     if (live && o.eta && isFinite(+o.eta.min) && isFinite(+o.eta.miles)) { out.eta = { min: Math.max(0, Math.round(+o.eta.min)), miles: Math.max(0, Math.round(+o.eta.miles * 10) / 10), to: o.eta.to === "dest" ? "dest" : "pickup" }; out.etaAt = now; }
     if (live) { var r = folRoute(o.route); if (r) out.route = r; }
@@ -9711,7 +9732,7 @@
     folWrite(folMapUrl(k), "DELETE");
     folRedraw();
   }
-  function folSig(c) { return JSON.stringify([c.status, c.pos ? [c.pos.lat, c.pos.lng] : 0, c.eta || 0, c.pickup || 0, c.dest || 0, c.car || 0, c.driverFirst || "", c.route ? c.route.length + ":" + c.route[c.route.length - 1] : 0]); }
+  function folSig(c) { return JSON.stringify([c.status, c.pos ? [c.pos.lat, c.pos.lng] : 0, c.eta || 0, c.pickup || 0, c.dest || 0, c.car || 0, c.driverFirst || "", c.route ? c.route.length + ":" + c.route[c.route.length - 1] : 0, c.stops || 0]); }
   function folHere() {
     if (!isCoord(state.hereLat) || !isCoord(state.hereLng)) return null;
     var at = Number(state.gpsAt) || 0;
@@ -9724,6 +9745,22 @@
     if (!a || !b || !isCoord(a.lat) || !isCoord(b.lat)) return null;
     var mi = haversineMi(+a.lat, +a.lng, +b.lat, +b.lng) * 1.3; /* same fallback as the meter: straight line x1.3 at 30 mph */
     return { to: to, miles: mi, min: Math.max(1, Math.round(mi * 2)) };
+  }
+  /* v76g: a God-board ride's stops for the public copy. While the meter runs this ride, the meter's stop (the one on the
+     driver's map, including one added mid-ride) wins; it is marked done once the driver reached it. A typed stop without a
+     map point uses the point the app already looked up for it (estimate / Start ride), else shows in the list only. */
+  function folSchedStops(r, M) {
+    var out = [];
+    (r && r.stopsGeo || []).forEach(function (s) {
+      if (!s || !String(s.address || "").trim()) return;
+      var g = !isCoord(s.lat) ? schedGeoCache[String(s.address).trim()] : null;
+      out.push({ lat: isCoord(s.lat) ? s.lat : g && g.lat, lng: isCoord(s.lng) ? s.lng : g && g.lng, label: s.address });
+    });
+    if (M && M.stop && isCoord(M.stop.lat) && isCoord(M.stop.lng)) {
+      var ms = { lat: +M.stop.lat, lng: +M.stop.lng, label: [M.stop.label, M.stop.sub].filter(Boolean).join(", "), done: !!M.stopDone };
+      if (out.length) out[0] = ms; else out.push(ms);
+    }
+    return out.slice(0, 5);
   }
   function folMyId(r) { return String(r && r.assignedDriverId || "").toLowerCase().replace(/[^a-z0-9]/g, "_").replace(/^_+|_+$/g, "").slice(0, 48); }
   /* every ride this driver can share: God-board rides assigned to me (any phase) + the app ride on screen */
@@ -9740,6 +9777,7 @@
       else if (trip && trip.id === r.id && st === "assigned") st = trip.phase === "arrived" ? "arrived" : "on_way";
       var pickup = { lat: r.pickupLat, lng: r.pickupLng, label: r.pickup }, dest = { lat: r.dropoffLat, lng: r.dropoffLng, label: r.dropoff };
       if (onMeter && M.dest && isCoord(M.dest.lat)) dest = { lat: M.dest.lat, lng: M.dest.lng, label: [M.dest.label, M.dest.sub].filter(Boolean).join(", ") || r.dropoff };
+      var stops = folSchedStops(r, onMeter ? M : null); /* v76g */
       var eta = null, route = null;
       if (st === "on_way") {
         var R = schedNavRoute;
@@ -9750,7 +9788,7 @@
         if (e && !e.pending) eta = { to: "dest", miles: e.miles, min: e.min };
         if (meterRoute && meterRoute.line) route = meterRoute.line;
       }
-      out.push(Object.assign({ key: "c_" + r.id, kind: "sched", status: st, phone: r.riderPhone, pickup: pickup, dest: dest, eta: eta, route: route, pos: here }, base));
+      out.push(Object.assign({ key: "c_" + r.id, kind: "sched", status: st, phone: r.riderPhone, pickup: pickup, dest: dest, stops: stops, eta: eta, route: route, pos: here }, base));
     });
     var code = state.screen === "trip" ? String(state.driverCode || readDriverCode() || "") : "";
     if (code && FOL_KEY_RE.test("r_" + code)) {
@@ -9759,6 +9797,7 @@
       var pk = placeCoords("pickup"), dr = placeCoords("drop");
       out.push(Object.assign({ key: "r_" + code, kind: "app", status: st2, phone: state.phone,
         pickup: { lat: pk && pk.lat, lng: pk && pk.lng, label: pickupLine() }, dest: { lat: dr && dr.lat, lng: dr && dr.lng, label: dropLine() },
+        stops: filledStops().map(function (s) { return { lat: s.lat, lng: s.lng, label: stopLine(s) }; }), /* v76g */
         eta: st2 === "on_way" ? folStraight(here, pk, "pickup") : st2 === "picked_up" ? folStraight(here, dr, "dest") : null, route: null, pos: here }, base));
     }
     return out;
@@ -9946,7 +9985,7 @@
     setTimeout(function () { try { folSweep(); } catch (e) {} }, 5000);
     window.__pcsFollow = { clean: folClean, token: folNewToken, link: folLink, sms: folSmsHref, msg: folDriverMsg, riderMsg: folRiderMsg, e164: folPhoneE164,
       ctxs: function () { return folDriverCtxs(); }, rider: function () { return folRiderCtx(); }, state: fol, fast: function () { folFastTick(); }, posOut: folPosOut, tick: function () { if (ROLE === "driver") folDriverTick(); else folRiderTick(); },
-      sweep: function () { folSweep(); }, mine: folMine, route: folRoute }; /* test hooks */
+      sweep: function () { folSweep(); }, mine: folMine, route: folRoute, schedStops: folSchedStops, sig: folSig }; /* test hooks */
   }
   if (typeof window !== "undefined" && typeof location !== "undefined") try { var ntq = /[?&]navtest=([01])\b/.exec(location.search || ""); if (ntq) { if (ntq[1] === "1") localStorage.setItem(NAVTEST_KEY, "1"); else localStorage.removeItem(NAVTEST_KEY); } } catch (e) {} /* v75y */
   if (typeof window !== "undefined") window.__pcsSchedFull = { key: schedFullKey, on: function () { return schedFullOn(); }, set: function (v) { schedFullSet(v); }, apply: function () { schedFullApply(); } }; /* test hook */

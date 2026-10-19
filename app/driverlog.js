@@ -238,8 +238,45 @@
   function washState(v, now, it) {
     var t = parseMdy(v); if (t == null) return null; now = now || Date.now();
     var days = Math.round((midnight(ymd(now)) - t) / 86400000), g = washGraceDays(it);
-    var bf = ymd(t + (g + 1) * 86400000 + 3 * 3600000);
-    return { days: days, grace: g, block: !!(it && it.block) && days > g, remind: days >= 1 && days <= g, overdue: days > g, blockFrom: bf.slice(5, 7) + "/" + bf.slice(8, 10) };
+    var bf = ymd(t + (g + 1) * 86400000 + 3 * 3600000), wb = ymd(t + g * 86400000 + 3 * 3600000), ld = ymd(t + 3 * 3600000);
+    return { days: days, grace: g, block: !!(it && it.block) && days > g, remind: days >= 1 && days <= g, overdue: days > g, blockFrom: bf.slice(5, 7) + "/" + bf.slice(8, 10),
+      washBy: wb.slice(5, 7) + "/" + wb.slice(8, 10), last: ld.slice(5, 7) + "/" + ld.slice(8, 10) }; /* v76g: "please wash by" = the last reminder day */
+  }
+  /* v76g (Matthew 10/18 "Fix this"): one wording for the car wash everywhere. Reminder days: a friendly line, never a defect,
+     never "Blocked". POST-trip (end of shift): information only, never a block. PRE-trip / Available: blocks only after
+     3 full calendar days. Returns { level: "remind" | "info" | "block", text } or null (washed today / date unreadable). */
+  function washLine(ws, kind) {
+    if (!ws || ws.days < 1) return null;
+    if (ws.remind) return { level: "remind", text: "Car wash reminder: last wash " + ws.last + ", please wash by " + ws.washBy + "." };
+    if (kind === "post" || !ws.block) return { level: "info", text: "Car wash due: last wash " + ws.last + ". Please wash the car before the next shift." };
+    return { level: "block", text: "Car wash overdue: last wash " + ws.last + ", more than " + ws.grace + " full days ago. Going online is paused until the car is washed and PCS clears it." };
+  }
+  /* v76g: show any stored inspection by TODAY's car-wash rule (records saved under the old 48 h rule, or a post-trip that
+     stored a car-wash block, stop showing "Blocked" + "1 defect(s)"). Display only; nothing is written back. The car wash is
+     judged on the inspection's own date + the wash date in it. Everything that is not the car wash is left as stored. */
+  function recView(rec, kind, meta, fallbackWash) {
+    if (!rec || typeof rec !== "object") return rec;
+    var cw = items(meta || {}).filter(function (i) { return i.k === "carwash"; })[0] || { k: "carwash", label: "Last date of car wash", block: true, maxAgeDays: 3 };
+    var its = rec.items && typeof rec.items === "object" ? rec.items : {}, out = {}, wx = its.carwash;
+    var date = (wx && wx.date) || fallbackWash || "", at = Number(rec.at) || Date.now();
+    var ws = date ? washState(date, at, cw) : null, wl = washLine(ws, kind), wBlock = kind !== "post" && !!(ws && ws.block);
+    Object.keys(its).forEach(function (k) {
+      var x = its[k];
+      if (k === "carwash" && x && typeof x === "object") {
+        x = Object.assign({}, x); delete x.stale; delete x.blocking; delete x.remind; delete x.blockFrom; delete x.washNote;
+        x.bad = x.expiry === "expired";
+        if (wBlock) { x.bad = true; x.blocking = true; x.stale = true; }
+        else if (wl) x.washNote = wl.text;
+      }
+      out[k] = x;
+    });
+    var stored = rec.blocks || [], blocks = stored.filter(function (b) { return !(b && b.k === "carwash"); });
+    var hadWash = stored.length !== blocks.length;
+    if (wBlock) blocks.push({ k: "carwash", label: cw.label || "Last date of car wash", why: "more than " + ws.grace + " days since last wash" });
+    else if (hadWash && !ws && kind !== "post") stored.forEach(function (b) { if (b && b.k === "carwash" && !/48\s*h/i.test(String(b.why || ""))) blocks.push(b); }); /* unknown date: keep, except the retired 48 h rule */
+    var n = 0; Object.keys(out).forEach(function (k) { var x = out[k]; if (x && x.bad && !x.optional && !x.noteFlag && k !== "carwash") n++; });
+    var defects = isFinite(Number(rec.defects)) ? Math.min(Number(rec.defects), n) : n;
+    return Object.assign({}, rec, { items: out, blocks: blocks, unsafe: blocks.length > 0 || (!!rec.unsafe && !stored.length), defects: defects, noDefects: defects === 0, wash: wl });
   }
   function expiryState(v, now) { var t = parseMdy(v); if (t == null) return ""; now = now || Date.now(); var end = t + 86400000; if (end <= now) return "expired"; if (end - now <= 30 * 86400000) return "soon"; return "ok"; }
   function myShow(v) { v = String(v || ""); var a = /^(\d{4})-(\d{2})$/.exec(v); if (a) return a[2] + "/" + a[1]; var b = /^(\d{1,2})\/\d{1,2}\/(\d{4})$/.exec(v); return b ? ("0" + b[1]).slice(-2) + "/" + b[2] : v; }
@@ -251,18 +288,20 @@
     var head = '<div style="display:flex;gap:6px;padding:8px;background:#fff">' + ["pre", "post"].map(function (k) { return '<button type="button" class="dl-dvir-kind" data-kind="' + k + '" style="flex:1;padding:8px;border-radius:8px;border:1px solid #2f6fe0;background:' + (k === kind ? "#2f6fe0;color:#fff" : "#fff;color:#2f6fe0") + '">' + (k === "pre" ? "Pre-trip" : "Post-trip") + ((k === kind ? rec : other) ? " \u2713" : "") + "</button>"; }).join("") + "</div>";
     var grp = function (it, prev) { return it.group && it.group !== prev ? '<div class="dl-dvir-group" style="font-weight:700;margin-top:10px">' + esc(it.group) + "</div>" : (!it.group && prev ? '<div class="dl-dvir-gap" style="border-top:2px solid #ccc;margin-top:8px"></div>' : ""); };
     if (rec) {
-      var keys = Object.keys(rec.items || {}), prevG = "";
+      rec = recView(rec, kind, meta); /* v76g: today's car-wash rule */
+      var keys = Object.keys(rec.items || {}), prevG = "", WASH_CSS = { remind: "background:#e8f8ec;color:#0b3d23;border:2px solid #2e9d4f", info: "background:#fff4e0;color:#5c3a00;border:2px solid #d9a441", block: "background:#fde8e8;color:#8b1414;border:2px solid #b91c1c" };
       return head + '<div class="dl-dvir-done" style="background:#fff;padding:12px;font-size:14px;color:#222"><p><b>' + (kind === "pre" ? "Pre-trip" : "Post-trip") + " inspection</b> \u00b7 " + esc(clock(rec.at)) + " \u00b7 Odometer " + esc(rec.odometer) + "</p>" +
         (rec.startedAt ? '<p class="dl-dvir-dur" style="margin:4px 0;color:#555">Started ' + esc(clock(rec.startedAt)) + " \u00b7 finished " + esc(clock(rec.finishedAt)) + " \u00b7 took " + fmtDur(rec.durationSec) + "</p>" : "") +
-        ((rec.blocks || []).length ? '<p class="dl-dvir-blocks" style="color:#b91c1c;font-weight:700">Blocked from Available until God mode ' + (rec.cleared ? "cleared it (" + esc(rec.cleared.by || "") + ")" : "clears it") + ": " + rec.blocks.map(function (b) { return esc(b.label) + (b.why === "photo" ? " (photo approval)" : b.why !== "defect" ? " (" + esc(b.why) + ")" : ""); }).join(", ") + "</p>" : "") +
+        (rec.wash ? '<p class="dl-dvir-wash dl-dvir-wash-' + rec.wash.level + '" style="' + WASH_CSS[rec.wash.level] + ';border-radius:8px;padding:6px 10px;font-weight:700">' + esc(rec.wash.text) + "</p>" : "") +
+        ((rec.blocks || []).length ? '<p class="dl-dvir-blocks" style="color:#b91c1c;font-weight:700">' + (kind === "post" ? "For God mode before the next shift" + (rec.cleared ? " (cleared by " + esc(rec.cleared.by || "") + ")" : "") : "Blocked from Available until God mode " + (rec.cleared ? "cleared it (" + esc(rec.cleared.by || "") + ")" : "clears it")) + ": " + rec.blocks.map(function (b) { return esc(b.label) + (b.why === "photo" ? " (photo approval)" : b.why !== "defect" ? " (" + esc(b.why) + ")" : ""); }).join(", ") + "</p>" : "") +
         (rec.noDefects ? '<p class="dl-dvir-nodef" style="color:#2e7d32;font-weight:700">No defects</p>' : '<p class="dl-dvir-ndef" style="color:#b91c1c;font-weight:700">' + rec.defects + " defect(s)</p>") +
         '<div style="padding-left:4px">' + keys.map(function (k) { var x = rec.items[k] || {}, it = { k: k, label: x.label || k, group: x.group || "", type: x.type || "choice" };
           var h = grp(it, prevG); prevG = it.group;
           return h + '<div class="dl-dvir-row-' + esc(k) + '" style="padding:3px 0' + (it.group ? ";padding-left:12px" : "") + '">' + esc(it.label) + ': <b style="color:' + (x.noteFlag ? "#b45309" : x.bad ? (x.optional ? "#8a6d3b" : "#b91c1c") : "#2e7d32") + '">' + esc(ansText(it, x)) + "</b>" +
             (x.expiry === "expired" ? ' <b style="color:#b91c1c">EXPIRED</b>' : x.expiry === "soon" ? ' <b style="color:#b45309">expires within 30 days</b>' : "") +
-            (x.blocking ? ' \u00b7 <b style="color:#b91c1c">' + (x.needsApproval ? "blocked until God approves the photo" : x.stale ? "over 3 days since last wash: blocks going online" : "blocks Available") + "</b>" : x.remind ? ' \u00b7 <b style="color:#7a4b00">Reminder: wash the car' + (x.blockFrom ? " before " + esc(x.blockFrom) : "") + "</b>" : x.bad && !x.optional ? " \u00b7 flagged to God (not blocking)" : "") + (x.bad && x.optional ? " (optional item, not a defect flag)" : "") + (x.noteFlag ? " (note for God mode, not a defect)" : "") +
+            (x.blocking ? ' \u00b7 <b style="color:#b91c1c">' + (x.needsApproval ? "blocked until God approves the photo" : x.stale ? "over 3 days since last wash: blocks going online" : "blocks Available") + "</b>" : x.washNote ? ' \u00b7 <b class="dl-dvir-washnote" style="color:#0b6b3a">' + esc(x.washNote) + "</b>" : x.remind ? ' \u00b7 <b style="color:#7a4b00">Reminder: wash the car' + (x.blockFrom ? " before " + esc(x.blockFrom) : "") + "</b>" : x.bad && !x.optional ? " \u00b7 flagged to God (not blocking)" : "") + (x.bad && x.optional ? " (optional item, not a defect flag)" : "") + (x.noteFlag ? " (note for God mode, not a defect)" : "") +
             (x.note ? " \u00b7 " + esc(x.note) : "") + (x.warn && x.bad ? ' <b style="color:#b91c1c">' + esc(x.warn) + "</b>" : "") + (x.photos && x.photos.length ? "<br>" + x.photos.map(function (ph) { return '<img src="' + esc(ph) + '" style="height:70px;margin:3px;border-radius:4px">'; }).join("") : "") + "</div>"; }).join("") + "</div>" +
-        (rec.unsafe ? '<p class="dl-dvir-unsafe" style="color:#b91c1c;font-weight:700">' + (rec.cleared ? "Unsafe defect cleared by " + esc(rec.cleared.by || "God mode") + " on " + esc(clock(rec.cleared.at)) + " \u00b7 reason: " + esc(rec.cleared.reason || "") : "Unsafe defect: you can\u2019t go Available until God mode clears it.") + "</p>" : "") +
+        (rec.unsafe ? '<p class="dl-dvir-unsafe" style="color:#b91c1c;font-weight:700">' + (rec.cleared ? "Unsafe defect cleared by " + esc(rec.cleared.by || "God mode") + " on " + esc(clock(rec.cleared.at)) + " \u00b7 reason: " + esc(rec.cleared.reason || "") : (kind === "post" ? "Unsafe defect: God mode clears it before the next shift." : "Unsafe defect: you can\u2019t go Available until God mode clears it.")) + "</p>" : "") +
         (rec.sig ? '<img alt="Driver signature" src="' + esc(rec.sig) + '" style="height:70px"><div style="border-top:1px solid #333;width:240px"></div><p style="font-size:12px">Driver signature</p>' : "") + "</div>";
     }
     if (!meta.canSign || (day.upTo >= day.minutes && meta.inspDay !== day.day)) return head + '<div class="dl-insp" style="background:#fff;padding:12px">No Inspections</div>';
@@ -326,7 +365,11 @@
         if (!v) { if (it.required && !err) err = "Enter " + it.label + (it.monthYear ? " (MM/YYYY)." : " (MM/DD/YYYY)."); }
         else if (parseMdy(v) == null) { if (!err) err = it.label + (it.monthYear ? ": use MM/YYYY with a month 01-12 (e.g. 06/2027)." : ": use MM/DD/YYYY."); }
         else { x.date = v; if (it.vehicle) vehDates[it.k] = v;
-          if (it.maxAgeHours || it.maxAgeDays) { var ws = washState(v, now, it); /* v76d-pretrip: calendar days, not 48 h */ if (ws && ws.block) { x.stale = true; x.bad = true; x.blocking = true; unsafe = true; blocks.push({ k: it.k, label: it.label, why: "more than " + ws.grace + " days since last wash" }); } else if (ws && (ws.remind || ws.overdue)) { x.remind = true; x.blockFrom = ws.blockFrom; } } if (it.expiry) { x.expiry = expiryState(v, now); if (x.expiry === "expired") { x.bad = true; if (it.required) defects++; else x.optional = true; } } }
+          if (it.maxAgeHours || it.maxAgeDays) { var ws = washState(v, now, it), dk = form.getAttribute("data-kind") === "post" ? "post" : "pre"; /* v76d-pretrip: calendar days, not 48 h */
+            if (ws && (ws.days < 0 || ws.days > 366) && !err) err = it.label + ": " + v + " looks off. Check the month, day and year (MM/DD/YYYY)."; /* v76g: e.g. 10/18/2016 typed for 10/18/2026 */
+            var wl = washLine(ws, dk); if (wl && wl.level !== "block") x.washNote = wl.text;
+            if (dk === "post") { if (ws && (ws.remind || ws.overdue)) { x.remind = true; x.blockFrom = ws.blockFrom; } } /* v76g: end of shift = information only */
+            else if (ws && ws.block) { x.stale = true; x.bad = true; x.blocking = true; unsafe = true; blocks.push({ k: it.k, label: it.label, why: "more than " + ws.grace + " days since last wash" }); } else if (ws && (ws.remind || ws.overdue)) { x.remind = true; x.blockFrom = ws.blockFrom; } } if (it.expiry) { x.expiry = expiryState(v, now); if (x.expiry === "expired") { x.bad = true; if (it.required) defects++; else x.optional = true; } } }
         out[it.k] = x; return;
       }
       var fk = form.getAttribute("data-kind"); if (Array.isArray(it.kinds) && it.kinds.length && it.kinds.indexOf(fk) < 0) return;
@@ -544,5 +587,5 @@
     if (mk === "mdy" && (d.length > 4 || (d.length === 4 && !del))) out = d.slice(0, 2) + "/" + d.slice(2, 4) + "/" + d.slice(4);
     if (out !== t.value) t.value = out;
   }, true);
-  window.PCSDriverLog = { minTimeGate: minTimeGate, fmtDur: fmtDur, motionGate: motionGate, fluidsDue: fluidsDue, readDvir: readDvir, parseMdy: parseMdy, expiryState: expiryState, washState: washState, EXTRAS: DVIR_EXTRAS, items: items, DVIR: DVIR, CERT: CERT, dayHash: dayHash, snapshot: snapshot, historyHtml: historyHtml, build: build, html: html, gridSvg: gridSvg, listHtml: listHtml, detailHtml: detailHtml, csv: csv, open: open, close: close, download: download, midnight: midnight, CARRIER: CARRIER };
+  window.PCSDriverLog = { recView: recView, washLine: washLine, minTimeGate: minTimeGate, fmtDur: fmtDur, motionGate: motionGate, fluidsDue: fluidsDue, readDvir: readDvir, parseMdy: parseMdy, expiryState: expiryState, washState: washState, EXTRAS: DVIR_EXTRAS, items: items, DVIR: DVIR, CERT: CERT, dayHash: dayHash, snapshot: snapshot, historyHtml: historyHtml, build: build, html: html, gridSvg: gridSvg, listHtml: listHtml, detailHtml: detailHtml, csv: csv, open: open, close: close, download: download, midnight: midnight, CARRIER: CARRIER };
 })();
