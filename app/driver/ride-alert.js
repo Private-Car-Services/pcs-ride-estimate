@@ -570,12 +570,25 @@
 
   function checkApproved() {
     if (approved !== null) return Promise.resolve(approved);
-    return fetch(db() + "/rides/DRVRCMMS/" + encodeURIComponent(driverId()) + ".json").then(function (res) {
-      return res.ok ? res.json() : null;
-    }).then(function (row) {
+    function judge(row) {
       var a = row && String(row.approvalStatus || "").toLowerCase();
       approved = !!row && a !== "pending" && a !== "rejected" && a !== "fired" && row.active !== false;
       return approved;
+    }
+    function legacy() { /* Worker without /driver/roster only */
+      return fetch(db() + "/rides/DRVRCMMS/" + encodeURIComponent(driverId()) + ".json").then(function (res) { return res.ok ? res.json() : null; }).then(judge);
+    }
+    /* v77.1: the roster is read through the Worker with this phone's roster token / driver session token */
+    var body = { op: "get" }, rt = ls("pcs-roster-tok"), qt = ls("pcs-driver-qtoken-" + driverId());
+    if (rt) body.rtok = rt;
+    if (qt) body.token = qt;
+    if (!rt && !qt) return Promise.resolve(false); /* not proven yet: no alerts, ask again next tick */
+    return fetch("https://pcs-pay.pcsrides.workers.dev/driver/roster", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }).then(function (res) {
+      return res.json().catch(function () { return {}; }).then(function (d) {
+        if (res.status === 404 && d && d.error === "Not found") return legacy();
+        if (!res.ok || !d || !d.ok) return false; /* not cached: try again next tick */
+        return judge(d.row || null);
+      });
     }).catch(function () { return false; });
   }
 
