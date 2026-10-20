@@ -267,7 +267,7 @@
       fareBeforeTax: raw.fareBeforeTax != null ? Number(raw.fareBeforeTax) : null,
       commissionCents: raw.commissionCents != null ? Number(raw.commissionCents) : null,
       completedAt: raw.completedAt || null,
-      source: String(raw.source || ""), payMethod: String(raw.payMethod || ""), stops: Array.isArray(raw.stops) ? raw.stops : [], /* v72d */
+      source: String(raw.source || ""), sessionFlags: Array.isArray(raw.sessionFlags) ? raw.sessionFlags.map(String).slice(0, 8) : [], discountReview: "", /* r4 M4: from the Worker only (discOverlay) */ payMethod: String(raw.payMethod || ""), stops: Array.isArray(raw.stops) ? raw.stops : [], /* v72d */
       riderPhone: String(raw.riderPhone || ""), riderPhoneEdited: raw.riderPhoneEdited === true, riderPhoneSrc: String(raw.riderPhoneSrc || ""), autoText: raw.autoText !== false, /* v77.3 */ teenRider: raw.teenRider === true, teenPhone: String(raw.teenPhone || ""), extraPhoneOnce: String(raw.extraPhoneOnce || ""), /* v77.5 */ balance: raw.balance != null ? Number(raw.balance) : null,
       paidSquareCents: raw.paidSquareCents != null && isFinite(+raw.paidSquareCents) ? Math.round(+raw.paidSquareCents) : null, paidEdits: Array.isArray(raw.paidEdits) ? raw.paidEdits : [], /* v75w */
       tipCents: Number(raw.tipCents) || 0, tipVia: raw.tipVia ? String(raw.tipVia) : null, tipEdits: Array.isArray(raw.tipEdits) ? raw.tipEdits : [], /* v73 */
@@ -279,7 +279,7 @@
       pickupLat: isFinite(+raw.pickupLat) && raw.pickupLat != null && raw.pickupLat !== "" ? +raw.pickupLat : null, pickupLng: isFinite(+raw.pickupLng) && raw.pickupLng != null && raw.pickupLng !== "" ? +raw.pickupLng : null,
       dropoffLat: isFinite(+raw.dropoffLat) && raw.dropoffLat != null && raw.dropoffLat !== "" ? +raw.dropoffLat : null, dropoffLng: isFinite(+raw.dropoffLng) && raw.dropoffLng != null && raw.dropoffLng !== "" ? +raw.dropoffLng : null,
       estKey: String(raw.estKey || ""), estText: String(raw.estText || ""), estLoCents: Number(raw.estLoCents) || 0, estHiCents: Number(raw.estHiCents) || 0, estBy: String(raw.estBy || ""), /* v75s */
-      meterDiscount: raw.meterDiscount && typeof raw.meterDiscount === "object" ? raw.meterDiscount : null, discountPct: Number(raw.discountPct) || 0,
+      meterDiscount: null /* r4 M3: Firebase copy ignored; filled from the Worker (discOverlay) */, discountPct: Number(raw.discountPct) || 0,
       trip: raw.trip && typeof raw.trip === "object" ? raw.trip : null,
       prepaid: raw.prepaid === true, prepaidAmountCents: raw.prepaidAmountCents != null && isFinite(+raw.prepaidAmountCents) ? Math.round(+raw.prepaidAmountCents) : null, /* v75v prepaid (Square invoice) */
       prepaidTaxCents: raw.prepaidTaxCents != null && isFinite(+raw.prepaidTaxCents) ? Math.round(+raw.prepaidTaxCents) : null, prepaidInvoiceNo: String(raw.prepaidInvoiceNo || ""),
@@ -419,8 +419,31 @@
     });
   }
 
+  /* r4 (Harry M3/M4): discounts + their review state come from the Worker (POST /god/discounts), never from Firebase. */
+  function discOverlay(rows, kv, rev) { /* pure (tested) */
+    kv = kv || {}; rev = rev || {};
+    (rows || []).forEach(function (r) { if (!r || !r.id) return; var k = Object.prototype.hasOwnProperty.call(kv, r.id) ? kv[r.id] : null;
+      r.meterDiscount = k && k.d && typeof k.d === "object" ? k.d : null; r.discountReview = r.meterDiscount && !Object.prototype.hasOwnProperty.call(rev, r.id) ? "pending" : ""; });
+    return rows;
+  }
+  function entryNeedsReview(e, rev) { return !!e && Number(e.discountCents) > 0 && !Object.prototype.hasOwnProperty.call(rev || {}, "ride:" + String(e.code || "")); } /* pure (tested) */
+  function presetAuditText(e, presets) { /* pure (tested): r5 driver self-applied preset, as the Worker recorded it */
+    var p = presets && e && Object.prototype.hasOwnProperty.call(presets, String(e.code || "")) ? presets[String(e.code)] : null; if (!p || p.by !== "driver") return "";
+    return ' <span class="fine">' + esc((p.preset === "military" ? "Military (10%)" : "Senior 65+ (10%)") + " applied by the driver after the ID check \u00b7 recorded " + ctClock(p.at)) + "</span>";
+  }
+  function discLoad() {
+    return atxPost("/god/discounts", {}).then(function (d) { state.discKV = d.discounts || {}; state.discRev = d.reviewed || {}; state.discPresets = d.presets || {}; discOverlay(state.calendar, state.discKV, state.discRev); })
+      .catch(function () { state.discKV = state.discKV || {}; state.discRev = state.discRev || {}; discOverlay(state.calendar, state.discKV, state.discRev); });
+  }
+  function discSave(id, d, msg) { /* field-level write only (the Worker mirrors just this into KV) */
+    var url = calendarUrl(id).replace(/\.json$/, "/meterDiscount.json");
+    return godFetch(url, d ? { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(d) } : { method: "DELETE" }).then(function (res) {
+      if (!res.ok) throw new Error("save"); if (msg) state.boardNotice = msg; return discLoad().then(refresh);
+    }).catch(function () { state.boardNotice = "NOT SAVED: try again."; renderBoardLists(); return false; });
+  }
   function putCalendarRide(row) {
     if (!row || !row.id) return Promise.reject(new Error("calendar-id"));
+    row = Object.assign({}, row); delete row.meterDiscount; delete row.discountReview; /* r4 M3: never re-send the discount with a whole row */
     /* v76d: PATCH, not PUT. The row here is the normalized copy, so a PUT erased every field it doesn't list
        (prepaidEdited, prepaidVia, stopsEdited, rideCommissionPctEdited, partial-paid notes ...) and the next calendar
        sync then dropped the prepaid mark. PATCH writes the listed fields and keeps the rest. */
@@ -559,6 +582,102 @@
   }
   window.__pcsV76d = { rideCode: rideCodeV76d, historyDecision: historyDecision, ridePctOf: ridePctOf, zeroFareWarn: zeroFareWarn };
 
+  /* v77.10 (Matthew 10/20): picking a driver in the card dropdown SAVES right away (the badge used to stay OPEN because the pick
+     was only remembered on screen). The empty choice unassigns (status back to open). Only open / assigned cards change this way;
+     a started or finished ride never does. Pure (tested). */
+  function assignPickPatch(row, driver, now) {
+    var st = String((row && row.status) || "open");
+    if (st !== "open" && st !== "assigned") return { ok: false, error: "This ride is " + st + "; its driver stays as is." };
+    if (!driver) return { ok: true, patch: { assignedDriverId: "", assignedDriverName: "", status: "open", updatedAt: now } };
+    return { ok: true, patch: { assignedDriverId: driver.id, assignedDriverName: driver.name || driver.id, status: "assigned", updatedAt: now } };
+  }
+  /* v77.10 (Matthew 10/20): "Cash" checkbox on the ride card. Checked -> payMethod "cash" (driver collects at drop-off, owes PCS its
+     share from the weekly balance, same as Add ride cash); unchecked -> payMethod "" (normal card / app pay). No discount is applied.
+     Saved via cphSave = PATCH through the God-only Worker /god/db (PCSCALND), never a direct browser Firebase write. Pure (tested). */
+  function cashPatch(on, now) { return { payMethod: on ? "cash" : "", payMethodBy: "god", payMethodAt: now, updatedAt: now }; }
+  function cashBoxHtml(r) {
+    var id = esc(r.id), on = String(r.payMethod || "") === "cash", dis = r.status === "completed" || r.prepaid ? " disabled" : "";
+    return '<label class="db-cash" style="display:inline-flex;align-items:center;gap:10px;font-size:20px;font-weight:800;color:#fff;background:#2e7d32;border-radius:12px;padding:10px 16px;min-height:52px;margin:6px 0;cursor:pointer">' +
+      '<input type="checkbox" class="db-cash-box" data-event-id="' + id + '"' + (on ? " checked" : "") + dis + ' style="width:30px;height:30px;accent-color:#9be7b0">Cash</label>';
+  }
+  /* v77.10 (Matthew 10/20): approve a discount case by case on ANY ride card (calendar or manual). Saved as the ride's one approved
+     discount: meterDiscount {type "other", status "approved", pct | cents, by "god", at} via cphSave (God-only Worker /god/db PATCH).
+     The driver's meter applies it as its own line (existing rule for owner-approved discounts); the sync keeps it. Never set by Cash.
+     Pure (tested). */
+  function godDiscPatch(mode, raw, now) {
+    if (mode === "military" || mode === "senior") return { ok: true, patch: { meterDiscount: { type: mode, status: "applied", pct: 10, by: "god", at: now }, updatedAt: now } }; /* standing 10% presets; one discount per ride */
+    var t = String(raw == null ? "" : raw).replace(/[$,%\s]/g, "");
+    if (t === "") return { ok: true, patch: { meterDiscount: null, updatedAt: now } }; /* blank = remove */
+    var n = Number(t); if (!isFinite(n) || n <= 0) return { ok: false, error: "Enter the discount as a number, like 10." };
+    if (mode === "pct") { if (n > 100) return { ok: false, error: "A percent discount goes up to 100." }; return { ok: true, patch: { meterDiscount: { type: "other", status: "approved", pct: Math.round(n * 100) / 100, by: "god", at: now }, updatedAt: now } }; }
+    if (n > 10000) return { ok: false, error: "That dollar amount looks too large." };
+    return { ok: true, patch: { meterDiscount: { type: "other", status: "approved", cents: Math.round(n * 100), by: "god", at: now }, updatedAt: now } };
+  }
+  function godDiscText(d) { if (d && d.by === "god" && (d.type === "military" || d.type === "senior")) return d.type === "military" ? "Military discount (10%)" : "Senior discount, 65+ (10%)";
+    if (!d || d.by !== "god" || d.status !== "approved") return ""; return Number(d.cents) > 0 ? "$" + (Number(d.cents) / 100).toFixed(2) : Number(d.pct) > 0 ? Number(d.pct) + "%" : ""; }
+  function godDiscHtml(r) {
+    var id = esc(r.id), cur = godDiscText(r.meterDiscount), d = r.meterDiscount || {}, dis = r.status === "completed" ? " disabled" : "";
+    return '<div class="db-disc" style="border:2px solid #0b6b3a;background:#0b3d23;border-radius:10px;padding:8px;margin:6px 0">' +
+      '<div style="font-weight:800;margin-bottom:4px">Discount' + (cur ? ' \u2713 <span class="fine db-disc-line">' + esc(/\(10%\)$/.test(cur) ? cur : cur + " off, approved by you") + "</span>" : "") + "</div>" +
+      presetBoxesHtml(r, dis) + driverCoversHtml(r, dis) +
+      '<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center"><select id="disc-mode-' + id + '" style="font-size:18px;min-height:44px"' + dis + '><option value="pct"' + (Number(d.cents) > 0 ? "" : " selected") + '>%</option><option value="usd"' + (Number(d.cents) > 0 ? " selected" : "") + ">$</option></select>" +
+      '<input id="disc-amt-' + id + '" inputmode="decimal" autocomplete="off" placeholder="10" value="' + esc(Number(d.cents) > 0 ? (Number(d.cents) / 100).toFixed(2) : Number(d.pct) > 0 ? String(d.pct) : "") + '" style="font-size:18px;min-height:44px;width:120px"' + dis + ">" +
+      '<button type="button" class="btn btn-disc-apply" data-event-id="' + id + '" style="background:#2e7d32;color:#fff;border:0;border-radius:10px;font-weight:800;font-size:17px;min-height:48px;padding:8px 14px"' + dis + ">Apply discount</button>" +
+      (cur ? '<button type="button" class="btn btn-disc-remove" data-event-id="' + id + '" style="min-height:48px"' + dis + ">Remove</button>" : "") + "</div>" +
+      '<p class="fine" style="margin:4px 0 0">Shown as its own line on the fare. PCS covers it by default (driver % on the full fare). One discount per ride: a new one replaces the old.</p></div>';
+  }
+  function presetBoxesHtml(r, dis) { /* pure (tested): Military / Senior 65+ checkboxes; one checked = the other is disabled (grayed) */
+    var d = r.meterDiscount || {}, cur = d.by === "god" && (d.type === "military" || d.type === "senior") ? d.type : "";
+    return '<div style="display:flex;gap:8px;flex-wrap:wrap;margin:4px 0">' + [["military", "Military (10%)"], ["senior", "Senior 65+ (10%)"]].map(function (k) {
+      var on = cur === k[0], off = dis || (cur && !on) ? " disabled" : "";
+      return '<label class="db-disc-pre" style="display:inline-flex;align-items:center;gap:10px;font-size:19px;font-weight:800;color:#fff;background:' + (off ? "#6b7280;opacity:.6" : "#2e7d32") + ';border-radius:12px;padding:10px 14px;min-height:52px">' +
+        '<input type="checkbox" class="db-disc-preset" data-disc-preset="' + k[0] + '" data-event-id="' + esc(r.id) + '"' + (on ? " checked" : "") + off + ' style="width:30px;height:30px">' + k[1] + "</label>"; }).join("") + "</div>";
+  }
+  function driverCoversHtml(r, dis) { /* v77.10: default unchecked = PCS absorbs the discount; only shown when a discount is on */
+    var d = r.meterDiscount; if (!d || d.by !== "god") return "";
+    return '<label class="db-disc-dc" style="display:inline-flex;align-items:center;gap:10px;font-size:18px;font-weight:800;color:#fff;background:#14532d;border:2px solid #2e7d32;border-radius:12px;padding:8px 14px;min-height:50px;margin:4px 0">' +
+      '<input type="checkbox" class="db-disc-driver-covers" data-event-id="' + esc(r.id) + '"' + (d.driverCovers === true ? " checked" : "") + dis + ' style="width:28px;height:28px">Driver covers it</label>' +
+      '<span class="fine" style="margin-left:6px">' + (d.driverCovers === true ? "The whole discount comes off the driver\u2019s share." : "PCS covers the discount; the driver\u2019s % is on the full fare.") + "</span>";
+  }
+  function driverCoversPatch(d, on, now) { /* pure (tested): same one discount, only the driverCovers flag changes */
+    if (!d || typeof d !== "object") return null; var x = {}; Object.keys(d).forEach(function (k) { if (k !== "driverCovers") x[k] = d[k]; });
+    if (on) x.driverCovers = true; return { meterDiscount: x, updatedAt: now };
+  }
+  function idVerifyGodPop(type) {
+    var el = document.getElementById("god-idpop"); if (!el) { el = document.createElement("div"); el.id = "god-idpop"; document.body.appendChild(el); }
+    el.innerHTML = '<div role="alertdialog" aria-modal="true" style="position:fixed;inset:0;background:rgba(0,0,0,.8);z-index:99999;display:flex;align-items:center;justify-content:center;padding:16px"><div style="background:#fff;color:#0b3d23;border:4px solid #2e7d32;border-radius:16px;max-width:420px;width:100%;padding:18px;text-align:center">' +
+      '<p style="font-size:24px;font-weight:800;margin:0 0 8px">Verify with ID</p><p style="font-size:17px;margin:0 0 12px">' + (type === "military" ? "Military ID" : "ID showing age 65+") + ". The driver is asked to check it at Start too.</p>" +
+      '<button type="button" id="god-idpop-ok" style="background:#2e7d32;color:#fff;border:0;border-radius:12px;font-weight:800;font-size:22px;min-height:60px;width:100%">OK</button></div></div>';
+    document.getElementById("god-idpop-ok").addEventListener("click", function () { el.innerHTML = ""; });
+  }
+  /* v77.10: the driver app flags a start / completion made without an active session (stale GPS, under 1 min, same spot, 0 miles). */
+  var SESSION_FLAG_TEXT = { stale_gps: "GPS over 2 min old at completion", under_1_min: "started and completed in under 1 min", same_spot: "started and completed at the same spot",
+    zero_miles: "0 metered miles", app_hidden: "app was in the background", start_stale_gps: "GPS over 2 min old at Start", start_app_hidden: "app was in the background at Start" };
+  function discReviewBtn(key) { return '<button type="button" class="btn-disc-reviewed" data-disc-review="' + esc(key) + '" style="background:#2e7d32;color:#fff;border:0;border-radius:10px;font-weight:800;font-size:16px;min-height:44px;padding:6px 14px">Mark reviewed</button>'; }
+  if (typeof document !== "undefined") document.addEventListener("click", function (e) { var b = e.target && e.target.closest ? e.target.closest("[data-disc-review]") : null; if (!b) return; /* r4 M4: God-only Worker endpoint */
+    b.disabled = true; atxPost("/god/discounts/review", { key: b.getAttribute("data-disc-review"), by: (typeof godWho === "function" ? godWho() : "god") }).then(function (d) { state.discRev = d.reviewed || {}; discOverlay(state.calendar, state.discKV, state.discRev); state.boardNotice = "Saved \u2713 Discount reviewed."; refresh(); })
+      .catch(function (er) { b.disabled = false; window.alert("Couldn't save: " + String(er && er.message || er)); }); }, true);
+  function sessionFlagHtml(r) { var f = (r && Array.isArray(r.sessionFlags)) ? r.sessionFlags : []; var rv = r && r.discountReview === "pending" ? ' <span class="badge db-disc-review" style="background:#b91c1c;color:#fff;font-weight:800">Discount: review before payout</span> ' + discReviewBtn(r.id) : "";
+    if (!f.length) return rv;
+    return ' <span class="badge db-session-flag" style="background:#b91c1c;color:#fff;font-weight:800">Check this ride: ' + esc(f.map(function (k) { return SESSION_FLAG_TEXT[k] || k; }).join("; ")) + "</span>" + rv; }
+  function driverLineHtml(r) { /* pure (tested) */
+    /* r2 (Matthew 3:35 PM): always visible under the title, also when the card is collapsed; SAVED assignment only (never the dropdown draft) */
+    return '<p class="day-driver" style="margin:2px 0 4px;font-weight:700">' + (r && r.assignedDriverId ? "Assigned to " + esc(r.assignedDriverName || r.assignedDriverId) : '<span style="color:#f0d48a">Unassigned</span>') +
+      sessionFlagHtml(r) +
+      (r && String(r.payMethod || "") === "cash" ? ' <span class="badge db-cash-tag" style="background:#2e7d32;color:#fff;font-weight:800">Cash</span>' : "") + "</p>";
+  }
+  function assignPatchSave(row, patch) {
+    if (!patch.code) patch = Object.assign({}, patch, { code: ownCode(row) });
+    return godFetch(calendarUrl(row.id), { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(patch) }).then(function (res) {
+      if (!res.ok) throw new Error("NOT SAVED (server refused)"); Object.keys(patch).forEach(function (k) { row[k] = patch[k]; }); });
+  }
+  function unassignCalendarRide(eventId) {
+    var row = null; (state.calendar || []).forEach(function (r) { if (r && r.id === eventId) row = r; });
+    if (!row) return Promise.reject(new Error("missing"));
+    var pp = assignPickPatch(row, null, Date.now()); if (!pp.ok) return Promise.reject(new Error(pp.error));
+    return assignPatchSave(row, pp.patch).then(function () {
+      state.boardNotice = "Saved: " + (row.rider || "ride") + " is unassigned (open)."; try { var p = refresh(); if (p && p.catch) p.catch(function () {}); } catch (e) {} renderBoardLists(); });
+  }
   function assignCalendarRide(eventId, driverId) {
     var row = null;
     (state.calendar || []).forEach(function (r) {
@@ -581,7 +700,9 @@
       code: ownCode(row), /* v76d */
       updatedAt: Date.now()
     });
-    return putCalendarRide(next).then(function () {
+    /* r2 (Harry F7): PATCH only the driver fields (+ code/status), never the whole cached row, so a stale board can't undo a
+       ride that just went started on the driver's phone. */
+    return assignPatchSave(row, { assignedDriverId: next.assignedDriverId, assignedDriverName: next.assignedDriverName, status: next.status, code: next.code, updatedAt: next.updatedAt }).then(function () {
       state.boardNotice = "Assigned " + (next.rider || "ride") + " → " + (driver.name || driver.id);
       /* v74: the save already succeeded; a failed board reload must not show "Could not assign". */
       try { var p = refresh(); if (p && p.catch) p.catch(function () {}); } catch (e) {}
@@ -609,9 +730,41 @@
     var n = String((r && r.prepaidInvoiceNo) || ""); if (!n) return "";
     var u = sqInvoiceUrl(r.squareInvoiceId), st = ' style="color:#f0d48a;font-weight:800;text-decoration:underline"';
     return '<span class="fine day-inv-saved" id="inv-saved-' + esc(r.id) + '">' + (u
-      ? '<a href="' + esc(u) + '" target="_blank" rel="noopener"' + st + ">Invoice #" + esc(n) + "</a>"
+      ? '<a href="' + esc(u) + '" target="_blank" rel="noopener"' + st + ">Invoice #" + esc(n) + "</a>" + ' <button type="button" class="btn god-payqr-btn" data-payqr="' + esc(r.squareInvoiceId) + '" data-payqr-label="invoice #' + esc(n) + '" style="background:#2e7d32;color:#fff;border:0;border-radius:10px;font-weight:800;font-size:17px;min-height:48px;padding:8px 14px;margin:4px 0 0 6px">Show pay QR</button>' /* v77.10 */
       : "Invoice #" + esc(n) + ' <a href="https://app.squareup.com/dashboard/invoices" target="_blank" rel="noopener" style="font-size:12px;color:#f0d48a">Find in Square</a>') + "</span>";
   }
+  /* v77.10 (Matthew 10/20): "Show pay QR": a big QR of the invoice's Square pay page, for the client to scan in the car.
+     The Worker reads the pay URL from Square (read-only, /sq/invoice/payurl); the QR is drawn here (bundled qrcode.js, MIT,
+     loaded only when needed). Square is never changed; no Square token in the browser. */
+  function payQrHostOk(u) { var m = /^https:\/\/([^\/?#:]+)(?:[\/?#]|$)/i.exec(String(u || "")); return !!m && /(^|\.)squareup(sandbox)?\.com$|(^|\.)square\.link$/i.test(m[1]); } /* pure (tested) */
+  function payQrSvg(url) { /* pure-ish (tested with the bundled library): SVG markup, "" for a bad URL */
+    if (!payQrHostOk(url) || typeof qrcode !== "function") return ""; /* r2: same Square host allowlist as the Worker */
+    var q = qrcode(0, "M"); q.addData(String(url)); q.make();
+    return q.createSvgTag({ cellSize: 8, margin: 4, scalable: true });
+  }
+  function payQrLib() {
+    if (typeof qrcode === "function") return Promise.resolve();
+    return new Promise(function (ok, bad) { var s = document.createElement("script"); s.src = "qrcode.js?v=77.10"; s.onload = ok; s.onerror = function () { bad(new Error("The QR maker didn't load. Check the connection and try again.")); }; document.head.appendChild(s); });
+  }
+  function payQrShow(invoiceId, label) {
+    var el = document.getElementById("god-payqr"); if (!el) { el = document.createElement("div"); el.id = "god-payqr"; document.body.appendChild(el); }
+    var shell = function (inner) { el.innerHTML = '<div style="position:fixed;inset:0;background:rgba(0,0,0,.85);z-index:99999;display:flex;align-items:center;justify-content:center;padding:12px" role="dialog" aria-modal="true" aria-label="Pay QR">' +
+      '<div style="background:#fff;color:#0b3d23;border:4px solid #2e7d32;border-radius:16px;max-width:520px;width:100%;padding:16px;text-align:center">' + inner +
+      '<button type="button" class="btn god-payqr-close" style="background:#2e7d32;color:#fff;border:0;border-radius:12px;font-weight:800;font-size:20px;min-height:56px;width:100%;margin-top:12px">Close</button></div></div>'; };
+    shell('<p style="font-size:20px;font-weight:800">Loading the pay page\u2026</p>');
+    return Promise.all([atxPost("/sq/invoice/payurl", { invoiceId: invoiceId }), payQrLib()]).then(function (a) {
+      var d = a[0], svg = payQrSvg(d.payUrl); if (!svg) throw new Error("Square doesn’t show a pay page for this invoice yet.");
+      shell('<div style="font-size:22px;font-weight:800;margin-bottom:6px">Scan to pay ' + esc(label || ("invoice #" + (d.number || ""))) + "</div>" +
+        (d.paid ? '<div style="background:#2e7d32;color:#fff;border-radius:8px;padding:6px;font-weight:800;margin-bottom:6px">Square shows this invoice as PAID</div>' : "") +
+        '<div class="god-payqr-code" style="width:min(80vw,440px);margin:0 auto">' + svg + "</div>" +
+        '<div style="font-size:14px;margin-top:6px">Opens Square\u2019s secure pay page \u00b7 www.PCSrides.com</div>');
+    }).catch(function (e) { shell('<p style="font-size:18px;font-weight:800">' + esc(String(e && e.message || e)) + "</p>"); });
+  }
+  if (typeof document !== "undefined") document.addEventListener("click", function (e) {
+    var t = e.target && e.target.closest ? e.target.closest(".god-payqr-close,[data-payqr]") : null; if (!t) return;
+    if (t.classList.contains("god-payqr-close")) { var el = document.getElementById("god-payqr"); if (el) el.innerHTML = ""; return; }
+    e.preventDefault(); payQrShow(t.getAttribute("data-payqr"), t.getAttribute("data-payqr-label"));
+  });
   function saveCalendarFare(eventId, fareBeforeTax, fixedFare, invoiceText) {
     var row = null;
     (state.calendar || []).forEach(function (r) { if (r && r.id === eventId) row = r; });
@@ -668,7 +821,7 @@
     late: { drop: 3000, pick: 5000 }
   };
     var METER_DISC_PCT = { senior: 10, military: 10 };
-    var METER_DISC_NAME = { senior: "Senior discount", military: "Military discount", other: "Discount" };
+    var METER_DISC_NAME = { senior: "Senior discount, 65+", military: "Military discount", other: "Discount" };
     var METER_AIRPORTS = [["IAH", "Bush Intercontinental (IAH)"], ["HOU", "Hobby (HOU)"], ["DFW", "Dallas Fort Worth (DFW)"], ["DAL", "Dallas Love Field (DAL)"]];
     var METER_TIER_AIRPORT = { day: "daytime", night: "weekendNight", late: "late" };
     function pad2(n) {
@@ -833,9 +986,9 @@
      Range = road miles (low) .. +10 % miles and 20 % of the drive time as slow minutes (high), like the meter's estimate.
      Set-fare (account) rides show "Set fare $X". Saved on the ride row (est*) so the driver app and God mode show one number. */
   function schedEstDisc(r) {
-    if (r && r.meterDiscount && typeof r.meterDiscount === "object" && r.meterDiscount.type) return r.meterDiscount;
+    if (r && r.meterDiscount && typeof r.meterDiscount === "object" && r.meterDiscount.type) return r.meterDiscount; /* Worker copy (discOverlay) */
     var p = Number(r && r.discountPct);
-    return p > 0 ? { type: "other", status: "approved", pct: p } : null;
+    return p > 0 ? { type: "other", status: "approved", pct: Math.min(p, 50) } : null; /* r4: fallback capped at 50% */
   }
   function schedEstSetFare(r) { return !!r && r.fixedFare === true && r.fareBeforeTax != null && isFinite(Number(r.fareBeforeTax)) && Number(r.fareBeforeTax) > 0; }
   function schedEstKey(r) {
@@ -1622,6 +1775,13 @@
     return h + " h " + (m % 60) + " min ago";
   }
   function isBackgroundDriver(d) { return !!(d && d.online && d.presence === "background"); }
+  /* v77.10 (Matthew 10/20, Anson audit): heartbeat age. >15 min = red "SIGNAL LOST"; >60 min = out of Online/Available counts and
+     dispatch, gray pin with last-seen time. Pure (tested). */
+  var SIGNAL_LOST_MS = 15 * 60000, SIGNAL_GONE_MS = 60 * 60000;
+  function signalLevel(d, now) { var t = Number(d && d.lastSeenAt) || 0; if (!t) return "ok"; var a = (now || Date.now()) - t; return a > SIGNAL_GONE_MS ? "gone" : a > SIGNAL_LOST_MS ? "lost" : "ok"; }
+  function ctClock(ts) { try { return new Date(Number(ts)).toLocaleString("en-US", { timeZone: "America/Chicago", month: "numeric", day: "numeric", hour: "numeric", minute: "2-digit" }) + " CT"; } catch (e) { return ""; } }
+  function signalBadgeHtml(d, now) { var lv = d && (d.signalLost ? "gone" : signalLevel(d, now)); if (!lv || lv === "ok") return "";
+    return '<span class="badge signal-lost" style="background:#b91c1c;color:#fff;font-weight:800">SIGNAL LOST \u00b7 last seen ' + esc(ctClock(d.lastSeenAt)) + "</span>"; }
 
   function listOnlineDrivers() {
     return fetch(driversUrl()).then(function (res) {
@@ -3526,8 +3686,10 @@
       return listOnlineDrivers().then(function (rows) {
         state.driversError = "";
         state.offlineDrivers = (rows || []).filter(function (d) { return d && d.offlineLoggedIn && isRosterActive(d.id); }); /* v73: shown, never dispatchable */
+        var nowS = Date.now(); /* v77.10: >60 min since the last heartbeat = signal gone: off the Online/Available lists */
+        state.lostDrivers = (rows || []).filter(function (d) { return d && !d.offlineLoggedIn && isRosterActive(d.id) && signalLevel(d, nowS) === "gone"; });
         state.drivers = (rows || []).filter(function (d) {
-          return d && !d.offlineLoggedIn && isRosterActive(d.id);
+          return d && !d.offlineLoggedIn && isRosterActive(d.id) && signalLevel(d, nowS) !== "gone";
         });
       }).catch(function (err) {
         state.drivers = [];
@@ -3582,7 +3744,8 @@
     });
 
     var calendarP = listCalendarRides().then(function (rows) {
-      state.calendar = rows || [];
+      state.calendar = discOverlay(rows || [], state.discKV, state.discRev); /* r4: last Worker copy at once */
+      discLoad().then(function () { try { renderBoardLists(); } catch (e) {} });
       state.calendarError = "";
       state.calendarUpdated = new Date().toISOString();
     }).catch(function (err) {
@@ -3883,6 +4046,11 @@
       }
     });
 
+    /* v77.10: signal gone >60 min: gray pin at the last known spot, with the last-seen time */
+    (state.lostDrivers || []).forEach(function (driver) {
+      if (!isCoord(driver.lat) || !isCoord(driver.lng)) return;
+      window.L.marker([+driver.lat, +driver.lng], { icon: markerIcon("car", shortName(driver.name, "Driver") + " \u00b7 SIGNAL LOST \u00b7 last seen " + ctClock(driver.lastSeenAt), false, null), zIndexOffset: 100, opacity: 0.4 }).addTo(markerLayer);
+    });
     /* Free online drivers (no rider): car + name. */
     drivers.forEach(function (driver) {
       if (pairedDriverIds[driver.id]) return;
@@ -4022,6 +4190,12 @@
         /* Fired: do not treat as online in the panel. */
         prev.online = false;
       }
+      byId[d.id] = prev;
+    });
+    (state.lostDrivers || []).forEach(function (d) { /* v77.10: signal gone >60 min: listed, not online, not dispatchable */
+      if (!d || !d.id || (byId[d.id] && byId[d.id].online)) return;
+      var prev = byId[d.id] || { id: d.id, name: d.name || d.id, phone: d.phone || "", email: "", fromRoster: false, active: true, online: false };
+      prev.online = false; prev.signalLost = true; prev.lastSeenAt = d.lastSeenAt || 0; prev.lat = d.lat; prev.lng = d.lng;
       byId[d.id] = prev;
     });
     (state.offlineDrivers || []).forEach(function (d) { /* v73: logged in but Offline: not online, not dispatchable */
@@ -4415,6 +4589,7 @@
     );
   }
 
+  function discPaidByText(by) { return by === "driver" ? " (driver covers it: comes off the driver\u2019s share)" : " (PCS covers it: driver % on the full fare)"; } /* v77.10 pure (tested) */
   function driverDetailHtml(driverId) {
     var rows = knownDriverRows();
     var d = null;
@@ -4457,8 +4632,9 @@
           "<strong>Rider</strong> " + esc(e.riderName || "—") + "<br>" +
           "<strong>Route</strong> " + esc(e.pickup || "") + " → " + esc(e.drop || "") + "<br>" +
           (e.canceled || e.status === "canceled" ? '<strong style="color:#ff9b9b">CANCELED</strong> ' + esc(e.cancelFee === "charge" ? "(cancellation fee to charge)" : "(fee waived, no earnings)") + (e.cancelReason ? " \u00b7 " + esc(e.cancelReason) : "") + "<br>" : "") + /* v73 */
-          (Number(e.discountCents) > 0 ? '<strong style="color:#8fd0a8">' + (isCashEntry(e) && e.discountType !== "other" ? "Cash discount" : "Discount") + "</strong> " + /* v74b */ esc(({ senior: "Senior 10%", military: "Military 10%", other: "Other" })[e.discountType] || "Discount") + " \u2212" + esc(fmtCents(e.discountCents)) +
-            (e.discountType === "other" ? " (from the driver\u2019s portion; PCS share on the full fare" + (e.discountReason ? "; reason: " + esc(e.discountReason) : "") + (e.discountApprovedBy ? "; approved by " + esc(e.discountApprovedBy) : "") + ")" : isCashEntry(e) ? "" : " (PCS share reduced in proportion)") + "<br>" : "") +
+          (Number(e.discountCents) > 0 ? '<strong style="color:#8fd0a8">' + (isCashEntry(e) && e.discountType !== "other" ? "Cash discount" : "Discount") + "</strong> " + /* v74b */ esc(({ senior: "Senior 65+ 10%", military: "Military 10%", other: "Other" })[e.discountType] || "Discount") + " \u2212" + esc(fmtCents(e.discountCents)) +
+            (e.discountPaidBy ? discPaidByText(e.discountPaidBy) : /* v77.10; older entries keep the rule they were paid under */ e.discountType === "other" ? " (from the driver\u2019s portion; PCS share on the full fare" + (e.discountReason ? "; reason: " + esc(e.discountReason) : "") + (e.discountApprovedBy ? "; approved by " + esc(e.discountApprovedBy) : "") + ")" : isCashEntry(e) ? "" : " (PCS share reduced in proportion)") + "<br>" : "") +
+          (entryNeedsReview(e, state.discRev) ? '<strong style="background:#b91c1c;color:#fff;padding:2px 6px;border-radius:6px">Discount: review before payout</strong> ' + discReviewBtn("ride:" + String(e.code || "")) + presetAuditText(e, state.discPresets) + "<br>" : "") + /* r4 M4: Worker review state; Firebase discountReview ignored */
           "<strong>Ride total</strong> " + esc(fmtCents(e.fareTotal)) + "<br>" +
           "<strong>Commission</strong> " + esc(fmtCents(e.commissionCents)) +
           " (" + esc(String(e.commissionPct || "")) + "%)" +
@@ -4706,6 +4882,7 @@
         if (approval === "pending") badge = '<span class="badge pending">Pending</span>';
         else if (approval === "rejected") badge = '<span class="badge fired">Rejected</span>';
         else if (approval === "fired" || !d.active) badge = '<span class="badge fired">Fired</span>';
+        else if (signalBadgeHtml(d)) badge = signalBadgeHtml(d) + (trip ? ' <span class="badge on-trip">On trip</span>' : ""); /* v77.10 */
         else if (trip) badge = '<span class="badge on-trip">On trip' + (isBackgroundDriver(d) ? " · app in background" : "") + "</span>";
         else if (isBackgroundDriver(d)) badge = '<span class="badge bg-app" style="background:#4a3d12;color:#f0d48a;border:1px solid #f0d48a">Online · app in background · seen ' + esc(agoText(d.lastSeenAt)) + "</span>";
         else if (d.online && d.autoBreak) badge = '<span class="badge auto-break" style="background:#1f4d33;color:#bef1c6">Break (auto, available)</span>'; /* v74d */
@@ -4716,6 +4893,7 @@
         if (approval === "pending") statusShort = '<span class="badge pending">Pending</span>';
         else if (approval === "rejected") statusShort = '<span class="badge fired">Rejected</span>';
         else if (approval === "fired" || !d.active) statusShort = '<span class="badge fired">Fired</span>';
+        else if (signalBadgeHtml(d)) statusShort = signalBadgeHtml(d); /* v77.10 */
         else if (isBackgroundDriver(d)) statusShort = '<span class="badge bg-app" style="background:#4a3d12;color:#f0d48a;border:1px solid #f0d48a">Online · app in background · seen ' + esc(agoText(d.lastSeenAt)) + "</span>";
         else if (d.online && d.autoBreak) statusShort = '<span class="badge auto-break" style="background:#1f4d33;color:#bef1c6">Break (auto, available)</span>'; /* v74d */
         else if (d.online) statusShort = '<span class="badge">Online</span>';
@@ -4766,6 +4944,7 @@
               locateBtn +
               '<button type="button" class="btn btn-gold" data-add-ride-driver="' + esc(d.id) + '">+ Add ride</button>' + /* v72d */
               '<button type="button" class="btn btn-ghost" data-driver-log="' + esc(d.id) + '">Driver\u2019s Log (14 days)</button>' + /* v73 */
+              '<button type="button" class="btn btn-ping-driver" data-ping-driver="' + esc(d.id) + '" style="background:#2e7d32;color:#fff;border:0;border-radius:10px;font-weight:800;font-size:17px;min-height:48px;padding:8px 14px;margin:4px 6px 4px 0">Ping driver</button>' + /* v77.10 */
               '<button type="button" class="btn btn-ghost btn-force-logout" data-force-logout="' + esc(d.id) + '"' + (trip ? ' disabled title="Driver is on an active ride"' : "") + ">" + (trip ? "Log out driver (on a ride)" : "Log out driver") + "</button>" + /* v74b */
               '<p class="driver-speed"><strong>Speed</strong> ' + esc(speedTxt) + "</p>" +
               (d.online ? driverVersionHtml(d) : "") + /* v72r */
@@ -5132,7 +5311,15 @@
     });
     document.addEventListener("change", function (e) {
       var t = e.target;
-      if (t && t.classList && t.classList.contains("day-assign")) { state.assignDrafts[t.getAttribute("data-event-id")] = t.value; state.dbHoldUntil = Date.now() + 1500; dbFlushLater(); }
+      if (t && t.classList && t.classList.contains("day-assign")) { /* v77.10: save the pick right away */
+        var eid = t.getAttribute("data-event-id"), did = t.value, crow = null; (state.calendar || []).forEach(function (r) { if (r && r.id === eid) crow = r; });
+        var chk = assignPickPatch(crow, did ? { id: did } : null, Date.now()); if (!chk.ok) { state.boardNotice = chk.error; renderBoardLists(); return; }
+        state.assignDrafts[eid] = did; state.dbHoldUntil = 0; t.disabled = true;
+        (did ? assignCalendarRide(eid, did) : unassignCalendarRide(eid)).then(function () {
+          delete state.assignDrafts[eid]; if (did) state.boardNotice = "Saved \u2713 " + state.boardNotice; renderBoardLists(); })
+          .catch(function (err) { delete state.assignDrafts[eid]; t.disabled = false;
+            state.boardNotice = "NOT SAVED: " + (err && err.message === "driver" ? "that driver isn\u2019t on the roster." : err && err.message && err.message !== "missing" ? err.message : "try again."); renderBoardLists(); });
+      }
     }, true);
   }
   /* v73 (Matthew): cash-register money boxes. Digit keypad (inputmode numeric), digits fill from the right:
@@ -5216,9 +5403,10 @@
       '<h2 id="gd-title" style="margin:0 0 6px">Discount request \u00b7 ' + esc(q.code) + "</h2>" +
       '<p class="meta" id="gd-who">' + esc(q.driverName || q.driverId || "Driver") + " \u00b7 fare " + esc(fmtCents(q.fareSubCents)) + " before tax" + (pend.length > 1 ? " \u00b7 " + (pend.length - 1) + " more waiting" : "") + "</p>" +
       '<p id="gd-reason" style="font-weight:700">Reason: ' + esc(q.reason || "") + "</p>" +
+      (q.preset ? '<p style="font-weight:800;color:#9be7b0">' + (q.preset === "military" ? "Military discount (10%): check the military ID" : "Senior discount, 65+ (10%): check ID showing age 65+") + '</p><input id="gd-pct" type="hidden" value="10">' : /* r4 M5 */
       '<div style="display:flex;gap:8px;align-items:end;flex-wrap:wrap"><div><label for="gd-amount">Amount off ($)</label><input id="gd-amount"' + moneyRegAttrs() + ' style="width:120px"></div>' +
-      '<div><label for="gd-pct">or percent off (%)</label><input id="gd-pct" type="text" inputmode="decimal" pattern="[0-9]*[.]?[0-9]*" autocomplete="off" style="width:90px"></div></div>' +
-      '<p class="fine">The whole discount comes out of the driver\u2019s portion; PCS\u2019s share stays on the full fare.</p>' +
+      '<div><label for="gd-pct">or percent off (%, up to 50)</label><input id="gd-pct" type="text" inputmode="decimal" pattern="[0-9]*[.]?[0-9]*" autocomplete="off" style="width:90px"></div></div>') +
+      '<p class="fine">PCS covers the discount: the driver\u2019s % stays on the full fare.</p>' +
       '<p class="error" id="gd-err" role="alert" style="color:#ff6b6b"></p>' +
       '<div style="display:flex;gap:8px"><button type="button" class="btn btn-gold" id="gd-approve">Approve</button><button type="button" class="btn btn-ghost" id="gd-decline">Decline</button></div></div>';
     document.body.appendChild(el);
@@ -5228,7 +5416,7 @@
       var err = document.getElementById("gd-err");
       if (status === "approved") {
         if ((amt > 0) === (pct > 0)) { if (err) err.textContent = "Enter a dollar amount OR a percent (one of them)."; return; }
-        if (pct > 100 || (Number(q.fareSubCents) > 0 && amt > Number(q.fareSubCents))) { if (err) err.textContent = "That is more than the fare."; return; }
+        if (pct > 50 || (Number(q.fareSubCents) > 0 && amt > Number(q.fareSubCents))) { if (err) err.textContent = "That is more than the fare."; return; }
       }
       var now = Date.now();
       var patch = { status: status, amountCents: status === "approved" ? amt : 0, pct: status === "approved" ? pct : 0, decidedBy: "Matthew", decidedAt: now, updatedAt: now };
@@ -5596,6 +5784,7 @@
     var ms = String(m.status || "").toLowerCase();
     if (payRecOk(p.final)) return "paid";
     if (p.paidOther || ms === "paid_other") return "paid_other";
+    if (String(p.payMethod || "").toLowerCase() === "cash" || String(p.paidVia || "").toLowerCase() === "cash") return "paid_other"; /* v77.10: cash = collected by the driver */
     if (ms === "paid") return "paid";
     if (ms === "running") return "running";
     return "unpaid"; /* ended (waiting for the QR payment) or finished unpaid */
@@ -6423,13 +6612,90 @@
     if (p === null) return { ok: false, error: "Enter a 10-digit US phone, like 936-555-1212." };
     return { ok: true, patch: { extraPhoneOnce: p || null, updatedAt: now } };
   }
+  /* ---------- v77.10 (Matthew 10/20): CLIENT PHONE DIRECTORY ----------
+     A phone saved on a card or an Add ride is also saved for that client (Worker KV via /god/clients/put, never the open
+     Firebase). Future rides: the calendar sync fills a card that has none (Worker v77.10), Add ride fills the phone box when
+     the name matches, and a card without a phone shows the saved number ready to save. A phone already on a card is never
+     replaced. Same name rule as the Worker (clientNameOf / clientKey are identical; tested). */
+  function clientNameOf(raw) { /* pure (tested) */
+    var s = String(raw == null ? "" : raw); try { s = s.normalize("NFKD"); } catch (e) {}
+    s = s.replace(/[\u0300-\u036f]/g, "").replace(/[\u2018\u2019\u02bc`]/g, "'").trim();
+    s = s.replace(/^pcs\b[\s\u2013\u2014\-:|]*/i, "").trim();
+    if (/'s\b/i.test(s)) return "";
+    var m = /^(?:pick(?:\s*-?\s*up)?|drop(?:\s*-?\s*off)?|ride\s+for)\s+(.+)$/i.exec(s); if (m) s = m[1];
+    s = s.replace(/\s+(?:up|for|from|to|at|@|-|\u2013|\u2014)(?:\s.*)?$/i, "");
+    s = s.replace(/\s*&\s*(?:his|her|their)\b.*$/i, "").replace(/\s*\(.*$/, "").trim();
+    return s;
+  }
+  function clientKey(raw) { /* pure (tested) */
+    var n = clientNameOf(raw).toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+    if (!n || !/[a-z]/.test(n)) return "";
+    return n.split(" ").join("_").slice(0, 80);
+  }
+  /* pure (tested): saved number for this name: the directory first, then an app booking (rider account) with the same name */
+  function clientPhoneFor(name, dir, appRides) {
+    var k = clientKey(name); if (!k) return null;
+    var c = dir && dir[k]; if (c && cphNorm(c.phone)) return { phone: cphNorm(c.phone), src: "saved" };
+    var hit = null;
+    (appRides || []).forEach(function (r) { if (!hit && r && clientKey(r.name || r.riderName) === k && cphNorm(r.phone)) hit = cphNorm(r.phone); });
+    return hit ? { phone: hit, src: "app" } : null;
+  }
+  /* pure (tested): God-typed card phones the directory doesn't have yet (newest per client); never replaces a saved number */
+  function clientSeedItems(rows, dir) {
+    var best = {};
+    (rows || []).forEach(function (r) {
+      if (!r || r.riderPhoneEdited !== true || r.riderPhoneSrc !== "god") return;
+      var p = cphNorm(r.riderPhone), k = clientKey(r.rider || r.title); if (!p || !k || (dir && dir[k])) return;
+      var at = Number(r.riderPhoneAt) || 0; if (!best[k] || at > best[k].at) best[k] = { name: r.rider || r.title, phone: p, at: at };
+    });
+    return Object.keys(best).slice(0, 50).map(function (k) { return { name: best[k].name, phone: best[k].phone, src: "card", onlyIfMissing: true }; });
+  }
+  function clientsLoad() {
+    state.clients = state.clients || {};
+    return atxPost("/god/clients/list", {}).then(function (d) {
+      state.clients = d.clients || {}; state.clientsErr = "";
+      if (!state.clientsSeeded) { state.clientsSeeded = true; var items = clientSeedItems(state.calendar, state.clients);
+        if (items.length) return atxPost("/god/clients/put", { items: items }).then(function (d2) { state.clients = d2.clients || state.clients; }).catch(function () {}); }
+    }).catch(function (e) { state.clientsErr = String(e && e.message || e); }).then(function () { renderBoardLists(); });
+  }
+  function clientRemember(name, phone) { /* after a phone is saved on a card / Add ride */
+    var p = cphNorm(phone); if (!p || !clientKey(name)) return Promise.resolve();
+    return atxPost("/god/clients/put", { name: name, phone: p, src: "god" }).then(function (d) { state.clients = d.clients || state.clients; }).catch(function () {});
+  }
+  function clientsPanelHtml() {
+    var dir = state.clients || {}, keys = Object.keys(dir).sort(), big = ' style="font-size:18px;min-height:44px;width:200px"';
+    return '<details class="clients-panel" style="margin:6px 0;border:2px solid #0b6b3a;border-radius:10px;padding:6px 8px"' + (state.clOpen ? " open" : "") + '><summary style="cursor:pointer;font-weight:800">Client phones (' + keys.length + ")</summary>" +
+      '<p class="fine">Saved once, used on every future ride for that client. A phone already on a ride is never replaced.</p>' +
+      (state.clientsErr ? '<p class="error" role="alert">' + esc(state.clientsErr) + "</p>" : "") +
+      keys.map(function (k) { var c = dir[k] || {};
+        return '<div class="card" style="padding:6px 8px;margin:4px 0"><b>' + esc(c.name || k) + '</b> <span class="fine">' + esc(c.src === "card" ? "from a ride" : "saved in God mode") + "</span><br>" +
+          '<input id="cl-' + esc(k) + '" type="tel" inputmode="tel" autocomplete="off" value="' + esc(cphShow(c.phone)) + '"' + big + "> " +
+          '<button type="button" class="btn btn-gold btn-cl-save" data-cl-key="' + esc(k) + '" data-cl-name="' + esc(c.name || k) + '" style="min-height:44px">Save</button> ' +
+          '<button type="button" class="btn btn-cl-del" data-cl-key="' + esc(k) + '" data-cl-name="' + esc(c.name || k) + '" style="min-height:44px">Remove</button></div>';
+      }).join("") +
+      '<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px"><input id="cl-new-name" placeholder="Client name"' + big + '><input id="cl-new-phone" type="tel" inputmode="tel" placeholder="936-555-1212"' + big + '><button type="button" class="btn btn-gold btn-cl-add" style="min-height:44px">Add client</button></div></details>';
+  }
+  function clientsWire() {
+    if (clientsWire.done || typeof document === "undefined") return; clientsWire.done = true;
+    document.addEventListener("toggle", function (e) { if (e.target && e.target.classList && e.target.classList.contains("clients-panel")) state.clOpen = e.target.open; }, true);
+    document.addEventListener("click", function (e) {
+      var t = e.target && e.target.closest ? e.target.closest(".btn-cl-save,.btn-cl-del,.btn-cl-add") : null; if (!t) return;
+      var name, phone;
+      if (t.classList.contains("btn-cl-add")) { name = (document.getElementById("cl-new-name") || {}).value || ""; phone = (document.getElementById("cl-new-phone") || {}).value || ""; if (!clientKey(name)) { state.clientsErr = "Enter the client's name."; renderBoardLists(); return; } }
+      else { name = t.getAttribute("data-cl-name"); phone = t.classList.contains("btn-cl-del") ? "" : ((document.getElementById("cl-" + t.getAttribute("data-cl-key")) || {}).value || ""); }
+      if (phone && cphNorm(phone) === null) { state.clientsErr = "Enter a 10-digit US phone, like 936-555-1212."; renderBoardLists(); return; }
+      atxPost("/god/clients/put", { name: name, phone: phone ? cphNorm(phone) : "", src: "god" }).then(function (d) { state.clients = d.clients || {}; state.clientsErr = ""; state.boardNotice = phone ? "Saved " + clientNameOf(name) + "'s phone for future rides." : "Removed " + clientNameOf(name) + " from Client phones."; })
+        .catch(function (er) { state.clientsErr = String(er && er.message || er); }).then(function () { renderBoardLists(); });
+    });
+  }
   function autoTextPatch(on, now) { return { autoText: on !== false, updatedAt: now }; } /* pure (tested) */
   function cphHtml(r) {
     var id = esc(r.id), on = r.autoText !== false, big = ' style="font-size:18px;min-height:44px;width:220px"';
-    return '<div class="db-cph" style="border:2px solid #0b6b3a;background:#0b3d23;border-radius:10px;padding:8px;margin:6px 0">' +
-      '<div style="font-weight:800;margin-bottom:4px">Client phone' + (r.riderPhone ? ' \u2713 <span class="fine">' + esc(cphShow(r.riderPhone)) + (r.riderPhoneSrc === "calendar" ? " \u00b7 from the calendar" : "") + "</span>" : "") + "</div>" +
+    var cphSaved = r.riderPhone ? null : clientPhoneFor(r.rider || r.title, state.clients, state.rides); /* v77.10 */
+    return cashBoxHtml(r) + godDiscHtml(r) + /* v77.10 */ '<div class="db-cph" style="border:2px solid #0b6b3a;background:#0b3d23;border-radius:10px;padding:8px;margin:6px 0">' +
+      '<div style="font-weight:800;margin-bottom:4px">Client phone' + (r.riderPhone ? ' \u2713 <span class="fine">' + esc(cphShow(r.riderPhone)) + (r.riderPhoneSrc === "calendar" ? " \u00b7 from the calendar" : r.riderPhoneSrc === "client" ? " \u00b7 saved for this client" : "") + "</span>" : (cphSaved ? ' <span class="fine">\u00b7 saved for this client: ' + esc(cphShow(cphSaved.phone)) + " (tap Save phone)</span>" : "")) + "</div>" +
       '<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">' +
-      '<input id="cph-' + id + '" type="tel" inputmode="tel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" placeholder="936-555-1212" value="' + esc(r.riderPhone ? cphShow(r.riderPhone) : "") + '"' + big + ">" +
+      '<input id="cph-' + id + '" type="tel" inputmode="tel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" placeholder="936-555-1212" value="' + esc(r.riderPhone ? cphShow(r.riderPhone) : cphSaved ? cphShow(cphSaved.phone) : "") + '"' + big + ">" +
       '<button type="button" class="btn btn-gold btn-cph-save" data-event-id="' + id + '" style="min-height:44px">Save phone</button>' +
       '<label style="font-weight:700;font-size:17px;min-height:44px;display:flex;align-items:center;gap:6px"><input type="checkbox" class="cph-auto" data-event-id="' + id + '"' + (on ? " checked" : "") + ' style="width:26px;height:26px"> Auto text the tracking link</label>' +
       "</div>" + teenHtml(r) + "</div>";
@@ -6451,7 +6717,8 @@
     var row = rovRow(id); if (!row) return Promise.resolve(false);
     return godFetch(calendarUrl(id), { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(patch) }).then(function (res) {
       if (!res.ok) throw new Error("save"); Object.keys(patch).forEach(function (k) { row[k] = patch[k]; });
-      if (msg) state.boardNotice = msg; return refresh();
+      if (msg) state.boardNotice = msg;
+      return (patch.riderPhone ? clientRemember(row.rider || row.title, patch.riderPhone) : Promise.resolve()).then(refresh); /* v77.10 */
     }).catch(function () { state.boardNotice = "NOT SAVED: try again."; renderBoardLists(); return false; });
   }
   function atxPost(path, body) {
@@ -6481,6 +6748,23 @@
   }
   function cphWire() {
     if (cphWire.done || typeof document === "undefined") return; cphWire.done = true;
+    document.addEventListener("click", function (e) { var b = e.target && e.target.closest ? e.target.closest(".btn-disc-apply,.btn-disc-remove") : null; if (!b) return; /* v77.10 discount */
+      var id = b.getAttribute("data-event-id"), rm = b.classList.contains("btn-disc-remove");
+      var mode = (document.getElementById("disc-mode-" + id) || {}).value || "pct", amt = rm ? "" : ((document.getElementById("disc-amt-" + id) || {}).value || "");
+      if (!rm && !String(amt).trim()) { state.boardNotice = "Type the discount first."; renderBoardLists(); return; }
+      var o = godDiscPatch(mode, amt, Date.now()); if (!o.ok) { state.boardNotice = o.error; renderBoardLists(); return; }
+      b.disabled = true; discSave(id, o.patch.meterDiscount, rm ? "Saved \u2713 Discount removed." : "Saved \u2713 Discount " + godDiscText(o.patch.meterDiscount) + " approved for this ride."); }, true);
+    document.addEventListener("change", function (e) { var t = e.target; if (!t || !t.classList || !t.classList.contains("db-disc-driver-covers")) return; /* v77.10 */
+      var id = t.getAttribute("data-event-id"), row = rovRow(id), on = !!t.checked, pt = row && driverCoversPatch((state.discKV && state.discKV[id] && state.discKV[id].d) || null, on, Date.now()); if (!pt) return; t.disabled = true; /* r4: Worker copy */
+      discSave(id, pt.meterDiscount, on ? "Saved \u2713 Driver covers this discount." : "Saved \u2713 PCS covers this discount."); }, true);
+    document.addEventListener("change", function (e) { var t = e.target; if (!t || !t.classList || !t.classList.contains("db-disc-preset")) return; /* v77.10 Military / Senior 65+ */
+      var id = t.getAttribute("data-event-id"), k = t.getAttribute("data-disc-preset"), on = !!t.checked;
+      var o = on ? godDiscPatch(k, "", Date.now()) : godDiscPatch("pct", "", Date.now()); t.disabled = true;
+      if (on) idVerifyGodPop(k);
+      discSave(id, o.patch.meterDiscount, on ? "Saved \u2713 " + godDiscText(o.patch.meterDiscount) + " on this ride." : "Saved \u2713 Discount removed."); }, true);
+    document.addEventListener("change", function (e) { var t = e.target; if (!t || !t.classList || !t.classList.contains("db-cash-box")) return; /* v77.10 Cash */
+      var id = t.getAttribute("data-event-id"), on = !!t.checked; t.disabled = true;
+      cphSave(id, cashPatch(on, Date.now()), on ? "Saved \u2713 Cash ride: the driver collects at drop-off." : "Saved \u2713 Cash removed.").then(function (ok) { if (ok === false) { t.checked = !on; } t.disabled = false; }); }, true);
     dcardWire(); /* v77.3b */
     document.addEventListener("toggle", function (e) { if (e.target && e.target.classList && e.target.classList.contains("atx-panel")) { state.atx = state.atx || {}; var was = state.atx.open; state.atx.open = e.target.open; if (e.target.open && !was) atxLoad(); } }, true);
     document.addEventListener("change", function (e) {
@@ -6796,7 +7080,7 @@
         : (st === "assigned"
           ? '<span class="badge online">Assigned</span>'
           : '<span class="badge pending">Open</span>');
-      var options = ['<option value="">Assign driver…</option>'].concat(drivers.map(function (d) {
+      var options = ['<option value="">' + (r.assignedDriverId ? "Unassign (open)" : "Assign driver\u2026") + "</option>"].concat(drivers.map(function (d) {
         var sel = d.id === (state.assignDrafts[r.id] != null ? state.assignDrafts[r.id] : r.assignedDriverId) ? " selected" : ""; /* v73: keep the picked name */
         return '<option value="' + esc(d.id) + '"' + sel + ">" + esc(d.name || d.id) + "</option>";
       }));
@@ -6812,7 +7096,7 @@
             '<p class="day-time">' + esc(fmtBoardWhen(r.start)) + "</p>" +
             badge +
           "</div>" +
-          '<h3 class="day-rider">' + esc(r.rider) + "</h3>" +
+          '<h3 class="day-rider">' + esc(r.rider) + "</h3>" + driverLineHtml(r) + /* v77.10 */
           '<div class="day-card-body"' + (dbCards[r.id] ? ' style="display:none"' : "") + ">" +
           '<p class="day-line"><span>Pickup</span> ' + esc(r.pickup || "—") + "</p>" +
           ((r.stopsGeo && r.stopsGeo[0] && r.stopsGeo[0].address) || (r.stops && r.stops[0]) ? '<p class="day-line"><span>Stop</span> ' + esc((r.stopsGeo && r.stopsGeo[0] && r.stopsGeo[0].address) || r.stops[0]) + "</p>" : "") +
@@ -7522,6 +7806,7 @@
         body: JSON.stringify({ kind: "past ride added", at: now, grantedAt: now, by: godWho(), code: row.code, day: f.date, time: f.time, payWeek: past, payMethod: row.payMethod, fare: row.fare,
           reason: "Past ride " + row.code + " on " + f.date + " " + f.time + " (" + row.payMethod + ")" + (owes ? ", driver owes PCS " + fmtCents(owes) : "") }) }).catch(function () {});
     }).then(function () {
+      if (row.riderPhone) clientRemember(row.rider, row.riderPhone); /* v77.10: saved for this client's future rides */
       state.addRidePast = "";
       state.addRideDraft = null; state.addRideTouched = {}; state.addRideOpen = false; state.addRideEditId = "";
       var cash = arCollects(row.payMethod);
@@ -7705,6 +7990,7 @@
       '<div><label class="ar-l" for="ar-driverId">Driver</label>' + sel("driverId", drivers.map(function (x) { return [x.id, x.name || x.id]; }), "Pick a driver…") + "</div>" +
       '<div><label class="ar-l" for="ar-status">Status</label>' + sel("status", ADD_RIDE_STATUS, "Status…") + "</div>" +
       "<div>" + inp("name", "Client name") + "</div><div>" + inp("phone", "Client phone", "tel") + "</div>" +
+      '<div style="grid-column:1/3"><label style="display:inline-flex;align-items:center;gap:10px;font-size:20px;font-weight:800;color:#fff;background:#2e7d32;border-radius:12px;padding:10px 16px;min-height:52px"><input type="checkbox" id="ar-cashBox" class="ar-cash-box"' + (d.payMethod === "cash" ? " checked" : "") + ' style="width:30px;height:30px">Cash</label></div>' + /* v77.10 */
       '<div style="grid-column:1/3;position:relative">' + inp("pickup", "Pickup (search an address)", "text", ' autocomplete="off" data-places="pickup"') + "</div>" +
       '<div style="grid-column:1/3" id="ar-stops-box">' + arStopsHtml(d) + "</div>" + /* v73: one address search per stop */
       '<div style="grid-column:1/3;position:relative">' + inp("dropoff", "Drop-off (search an address)", "text", ' autocomplete="off" data-places="dropoff"') + "</div>" +
@@ -7756,6 +8042,8 @@
     }
     if (!force) return;
     host.innerHTML = addRideFormHtml();
+    var arCash = host.querySelector("#ar-cashBox"); /* v77.10: Cash checkbox = Payment method Cash (unchecked clears it) */
+    if (arCash) arCash.addEventListener("change", function () { var ps = host.querySelector("#ar-payMethod"); if (!ps) return; ps.value = arCash.checked ? "cash" : ""; ps.dispatchEvent(new Event("change")); });
     Array.prototype.forEach.call(host.querySelectorAll("[data-ar]"), function (el) {
       var key = el.getAttribute("data-ar");
       var save = function () {
@@ -7766,6 +8054,10 @@
         if (key === "discount") state.addRideTouched.discMode = "usd";
         if ((key === "pickup" || key === "dropoff") && !el.__placePicked && el.value !== el.__pickedText) { delete state.addRideDraft[key + "Lat"]; delete state.addRideDraft[key + "Lng"]; } /* typed by hand: no pin */
         if (key === "driverId" && !state.addRideTouched.commissionPct && el.value) state.addRideDraft.commissionPct = String(commissionPctFor(el.value));
+        if (key === "phone") state.addRideTouched.phone = !!el.value; /* v77.10 */
+        if (key === "payMethod") { var cbx = document.getElementById("ar-cashBox"); if (cbx) cbx.checked = el.value === "cash"; }
+        if (key === "name" && !state.addRideTouched.phone) { var hitP = clientPhoneFor(el.value, state.clients, state.rides), phEl = document.getElementById("ar-phone");
+          var fillP = hitP ? cphShow(hitP.phone) : ""; if (phEl && (!phEl.value || phEl.__autoFilled)) { phEl.value = fillP; phEl.__autoFilled = !!fillP; state.addRideDraft.phone = fillP; } }
         if (["fare", "discount", "discountPct", "taxFees", "commissionPct", "payMethod", "driverId", "total", "commission"].indexOf(key) >= 0) {
           state.addRideDraft = addRidePrefill(state.addRideDraft, state.addRideTouched, DEFAULT_COMMISSION_PCT);
           arSyncDerivedDom();
@@ -7799,6 +8091,7 @@
       '<p class="fine" style="opacity:.75;margin:6px 0">Tip: open a driver and tap Add ride to pre-pick them.</p>';
     head += rateContractsHtml(); rovWire(); /* v76j */
     head += autoTextPanelHtml(); cphWire(); /* v77.3 */
+    head += clientsPanelHtml(); clientsWire(); if (!state.clientsLoaded) { state.clientsLoaded = true; clientsLoad(); } /* v77.10 */
     if (!rows.length) return head;
     /* v73: the added-rides list folds into one row so the map stays in view on iPad / iPhone; remembers open / closed */
     return head + '<details class="manual-list"' + (state.manualListOpen ? " open" : "") + ' style="margin:4px 0"><summary style="cursor:pointer;padding:6px 0;font-weight:700">Added rides (' + rows.length + ")</summary>" + rows.map(function (r) {
@@ -8377,17 +8670,19 @@
   function dvirLoad() {
     var ids = {}; Object.keys(state.roster || {}).forEach(function (k) { ids[k] = 1; }); (state.drivers || []).concat(state.offlineDrivers || []).forEach(function (d) { if (d && d.id) ids[d.id] = 1; });
     var since = Date.now() - 15 * 86400000;
+    var revP = dvirRevLoad(); /* r2 */
     state.lastWash = state.lastWash || {}; /* v77.9: last car wash per driver (post-trip Yes) */
     Promise.all(Object.keys(ids).map(function (id) { return fetch(baseUrl() + "/rides/DRVRHSLG/" + encodeURIComponent(id) + "/lastWash.json").then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }).then(function (w) { if (w && w.date) state.lastWash[id] = w; else delete state.lastWash[id]; }); })).then(function () { try { dvirPaint(); } catch (e) {} });
     return Promise.all(Object.keys(ids).map(function (id) {
-      return fetch(baseUrl() + "/rides/DRVRHSLG/" + encodeURIComponent(id) + "/dvir.json").then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }).then(function (o) {
+      return revP.then(function () { return fetch(baseUrl() + "/rides/DRVRHSLG/" + encodeURIComponent(id) + "/dvir.json").then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }).then(function (o) {
         var out = [], L = window.PCSDriverLog; Object.keys(o || {}).forEach(function (d) { var ek = Object.keys((o[d] && o[d].earlier) || {}); ["pre", "post", "avail"].concat(ek).forEach(function (k0) { var k = String(k0).split("-")[0], r = o[d] && (k0 === k ? o[d][k] : o[d].earlier[k0]); /* v76h: earlier same-day inspections (other shifts) are checked too */
+          var rpath = d + "/" + (k0 === k ? k : "earlier/" + k0); /* v77.10: Dismiss (reviewed, Worker KV) */
           if (r && L && L.recView) { var fw = "", fd = Infinity; ["pre", "post"].forEach(function (q) { var y = o[d][q], dt = y && y.items && y.items.carwash && y.items.carwash.date; if (dt && Math.abs(Number(y.at) - Number(r.at)) < fd) { fd = Math.abs(Number(y.at) - Number(r.at)); fw = dt; } }); r = L.recView(r, k, { dvirItems: state.dvirCfg }, fw); } /* v76g: today's car-wash rule (old 48 h records, post-trips never block) */
-          if (r && (r.unsafe || r.defects > 0 || r.notes > 0 || r.motion === "unverified") && (Number(r.at) > since || (r.unsafe && !r.cleared))) out.push({ id: id, day: d, kind: k, r: r }); }); });
-        return out; });
+          if (r && (r.unsafe || r.defects > 0 || r.notes > 0 || r.motion === "unverified") && (Number(r.at) > since || (r.unsafe && !r.cleared)) && !dvirHidden(r, (state.dvirRev || {})["dvir:" + id + ":" + rpath])) out.push({ id: id, day: d, kind: k, r: r, path: rpath }); }); });
+        return out; }); });
     })).then(function (lists) { state.dvirFlags = [].concat.apply([], lists).sort(function (a, b) { return Number(b.r.at) - Number(a.r.at); });
       return fetch(baseUrl() + "/rides/DVRMSSNG.json").then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }); }).then(function (m) {
-      state.dvirMiss = Object.keys(m || {}).map(function (k) { return m[k]; }).filter(function (x) { return x && x.driver && !x.resolvedAt; }); dvirPaint(); });
+      state.dvirMiss = Object.keys(m || {}).map(function (k) { return m[k] && typeof m[k] === "object" ? Object.assign({ key: k }, m[k]) : null; }).filter(function (x) { return x && x.driver && !x.resolvedAt && !(state.dvirRev || {})["miss:" + x.key]; }); dvirPaint(); }); /* v77.10: reviewed = dismissed */
   }
   state.dvirVeh = {};
   function dvirVehLoad() { return fetch(baseUrl() + "/rides/DVIRVEH.json").then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }).then(function (o) { state.dvirVeh = o || {}; dvirPaint(); }); }
@@ -8405,13 +8700,41 @@
       return '<div class="god-last-wash" data-wash-driver="' + esc(id) + '" style="padding:4px 0;color:' + col + '">' + esc(gqName(id) || id) + " \u00b7 last car wash " + (w ? esc(L && L.washLastText ? L.washLastText(w.date) : w.date) + (w.plate ? " (" + esc(w.plate) + ")" : "") + (ws && ws.block ? " \u00b7 over 3 days: going online is paused (Clear (override) below)" : "") : "not recorded yet") + "</div>"; });
     return rows.length ? '<div class="card god-wash-card" style="border:2px solid #2e7d32;background:#12261a;color:#fff;padding:10px;margin:8px 0"><b>Car wash</b>' + rows.join("") + "</div>" : "";
   }
+  /* v77.10 (Matthew 10/20): Dismiss reviewed notes. A note hides once God marks it reviewed {by, at}; the record stays in Firebase
+     (history). An UNSAFE item that still blocks the driver can't be dismissed: it keeps Clear (override). Pure (tested). */
+  function dvirDismissable(r) { return !!r && !(r.unsafe && !r.cleared); }
+  function dvirHidden(r, rev) { return !!(r && rev && rev.at && dvirDismissable(r)); } /* r2: reviewed marks come ONLY from the Worker (KV), never Firebase */
+  function dvirReviewedRec(who, now) { return { by: String(who || "God").slice(0, 60), at: now || Date.now() }; }
+  var DSM_BTN = ' style="background:#2e7d32;color:#fff;border:0;border-radius:10px;font-weight:800;font-size:17px;min-height:48px;padding:10px 16px;margin:6px 6px 0 0"';
+  function dvirRef(kind, item) { /* pure (tested): Worker reference for one note */
+    return kind === "miss" ? "miss:" + String(item.key) : "dvir:" + String(item.id) + ":" + String(item.path);
+  }
+  function dvirDismissUrls(kind, item) { return [dvirRef(kind, item)]; } /* r2: kept name; now returns Worker refs */
+  function dvirRevLoad() { return atxPost("/god/dvir/reviewed", {}).then(function (d) { state.dvirRev = d.reviewed || {}; }).catch(function () { state.dvirRev = state.dvirRev || {}; }); }
+  function dvirDismiss(list) { /* r2 (Harry M2): God-only Worker endpoint, never a browser PUT to Firebase */
+    var chunks = []; for (var i = 0; i < list.length; i += 100) chunks.push(list.slice(i, i + 100));
+    return chunks.reduce(function (p, c) { return p.then(function () { return atxPost("/god/dvir/review", { refs: c, by: godWho() }).then(function (d) { state.dvirRev = d.reviewed || state.dvirRev; }); }); }, Promise.resolve())
+      .then(dvirLoad).catch(function (e) { window.alert("Couldn't save: " + String(e && e.message || e)); });
+  }
+  document.addEventListener("click", function (e) {
+    var b = e.target && e.target.closest ? e.target.closest("[data-dvir-dismiss],[data-dvir-dismiss-all]") : null; if (!b) return;
+    var all = b.getAttribute("data-dvir-dismiss-all"), urls = [];
+    if (all === "miss") (state.dvirMiss || []).forEach(function (x) { urls = urls.concat(dvirDismissUrls("miss", x)); });
+    else if (all === "dvir") (state.dvirFlags || []).filter(function (x) { return dvirDismissable(x.r); }).forEach(function (x) { urls = urls.concat(dvirDismissUrls("dvir", x)); });
+    else { var a = b.getAttribute("data-dvir-dismiss").split("|"); urls = a[0] === "miss" ? dvirDismissUrls("miss", { key: a[1] }) : dvirDismissUrls("dvir", { id: a[1], path: a[2] }); }
+    if (!urls.length) return;
+    if (all && !window.confirm("Mark all " + urls.length + " as reviewed? They stay in the history.")) return;
+    b.disabled = true; dvirDismiss(urls);
+  });
   function dvirPaint() {
     var host = document.getElementById("god-dvir-alerts");
     if (!host) { host = document.createElement("div"); host.id = "god-dvir-alerts"; var m = document.querySelector("main") || document.body; m.insertBefore(host, m.firstChild); }
     var f = state.dvirFlags || [];
     var mi = state.dvirMiss || [];
     host.innerHTML = (mi.length ? '<div class="card god-dvir-missed" style="border:2px solid #b91c1c;background:#2a1212;color:#fff;padding:10px;margin:8px 0"><b>Missed post-trip inspection</b>' + mi.map(function (x) {
-        return '<div style="border-top:1px solid #733;padding:6px 0">' + esc(gqName(x.driver) || x.name || x.driver) + " \u00b7 shift " + esc(x.day) + " ended without a post-trip. Flag for review; the driver\u2019s next login still starts with a pre-trip.</div>"; }).join("") + "</div>" : "") +
+        return '<div style="border-top:1px solid #733;padding:6px 0">' + esc(gqName(x.driver) || x.name || x.driver) + " \u00b7 shift " + esc(x.day) + " ended without a post-trip. Flag for review; the driver\u2019s next login still starts with a pre-trip." +
+          '<br><button type="button" class="btn god-dvir-dismiss" data-dvir-dismiss="' + esc("miss|" + x.key) + '"' + DSM_BTN + ">Dismiss</button></div>"; }).join("") +
+        (mi.length > 1 ? '<button type="button" class="btn god-dvir-dismiss-all" data-dvir-dismiss-all="miss"' + DSM_BTN + ">Clear all reviewed</button>" : "") + "</div>" : "") +
       dvirVehHtml() + lastWashHtml() + (!f.length ? "" : '<div class="card" style="border:2px solid #b91c1c;background:#2a1212;color:#fff;padding:10px;margin:8px 0"><b>Vehicle inspection defects (DVIR)</b>' + f.map(function (x) {
       var defs = Object.keys(x.r.items || {}).filter(function (k) { var it = x.r.items[k]; return ((it.bad || it.s === "defect") && !it.optional) || it.noteFlag; }).map(function (k) { var it = x.r.items[k]; return esc((it.group ? it.group + " " : "") + (it.label || k)) + (it.answer ? " = " + esc(it.answer) : "") + (it.expiry === "expired" ? " EXPIRED " + esc(it.date || "") : "") + (it.needsApproval ? " (photo needs approval)" : it.stale ? " (over 3 full days since last wash)" : it.blocking || it.safe === false ? " (NOT safe)" : "") + (it.noteFlag ? " (note, not unsafe)" : "") + (it.fuelAckAt ? " \u00b7 reminder acknowledged " + esc(new Date(it.fuelAckAt).toLocaleTimeString("en-US", { timeZone: "America/Chicago", hour: "numeric", minute: "2-digit" })) : "") + (it.warn ? ' <b style="color:#ff9b9b">\u26a0 ' + esc(it.warn) + "</b>" : "") + (it.note ? ": " + esc(it.note) : "") + ((it.photos || []).length ? " \u00b7 " + it.photos.length + " photo(s)" : ""); }).join("; ");
       return '<div class="god-dvir-flag" data-dvir-driver="' + esc(x.id) + '" style="border-top:1px solid #733;padding:6px 0">' + esc(gqName(x.id)) + " \u00b7 " + esc(x.day) + " " + (x.kind === "pre" ? "pre-trip" : x.kind === "avail" ? "Available check" : "post-trip") + (x.r.startedAt ? ' <span class="fine god-dvir-dur">(' + esc(new Date(x.r.startedAt).toLocaleTimeString("en-US", { timeZone: "America/Chicago", hour: "numeric", minute: "2-digit" })) + "\u2013" + esc(new Date(x.r.finishedAt).toLocaleTimeString("en-US", { timeZone: "America/Chicago", hour: "numeric", minute: "2-digit" })) + ", took " + Math.floor(x.r.durationSec / 60) + "m " + ("0" + (x.r.durationSec % 60)).slice(-2) + "s)</span>" : "") + (x.r.motion === "unverified" ? ' <span class="badge" style="background:#7c5c00">motion unverified (no GPS)</span>' : "") + " \u00b7 " + defs +
@@ -8421,8 +8744,9 @@
             (x.r.rejected ? ' <span class="badge">Photo rejected by ' + esc(x.r.rejected.by) + ": " + esc(x.r.rejected.reason) + "</span>" : "") +
             (Object.keys(x.r.items || {}).some(function (k) { return x.r.items[k].needsApproval; })
               ? ' <button type="button" class="btn btn-gold" data-dvir-approve="' + esc(x.id + "|" + x.day + "|" + x.kind) + '">Approve photo' + ((x.r.blocks || []).length > 1 ? " & clear" : "") + '</button> <button type="button" class="btn btn-ghost" data-dvir-reject="' + esc(x.id + "|" + x.day + "|" + x.kind) + '">Reject photo</button>'
-              : ' <button type="button" class="btn btn-gold" data-dvir-clear="' + esc(x.id + "|" + x.day + "|" + x.kind) + '">Clear (override)</button>')) : "") + "</div>";
-    }).join("") + "</div>");
+              : ' <button type="button" class="btn btn-gold" data-dvir-clear="' + esc(x.id + "|" + x.day + "|" + x.kind) + '">Clear (override)</button>')) : "") +
+        (dvirDismissable(x.r) ? '<br><button type="button" class="btn god-dvir-dismiss" data-dvir-dismiss="' + esc("dvir|" + x.id + "|" + x.path) + '"' + DSM_BTN + ">Dismiss</button>" : "") + "</div>";
+    }).join("") + (f.filter(function (x) { return dvirDismissable(x.r); }).length > 1 ? '<button type="button" class="btn god-dvir-dismiss-all" data-dvir-dismiss-all="dvir"' + DSM_BTN + ">Clear all reviewed</button>" : "") + "</div>");
   }
   document.addEventListener("click", function (e) {
     var b = e.target && e.target.closest ? e.target.closest("[data-dvir-clear],[data-dvir-approve],[data-dvir-reject]") : null; if (!b) return;
@@ -8438,6 +8762,15 @@
     put(baseUrl() + "/rides/DRVRHSLG/" + encodeURIComponent(a[0]) + "/dvir/" + a[1] + "/" + a[2] + "/cleared.json", rec)
       .then(function () { return put(baseUrl() + "/rides/DRVRHSLG/" + encodeURIComponent(a[0]) + "/overrides/" + rec.at + ".json", Object.assign({ kind: ap ? "dvir-photo-approved" : "dvir-unsafe-cleared", day: a[1], inspection: a[2], grantedAt: rec.at }, rec)); })
       .then(dvirLoad).catch(function () { window.alert("Couldn't clear it. Try again."); });
+  });
+  /* v77.10: God-only "Ping driver": the Worker sends "PCS: please open your driver app so dispatch can see you." to the driver's
+     phone (driver-app alerts). Nothing else is sent; 1 ping per driver per minute. */
+  document.addEventListener("click", function (e) {
+    var b = e.target && e.target.closest ? e.target.closest("[data-ping-driver]") : null; if (!b || b.disabled) return;
+    var id = b.getAttribute("data-ping-driver"); b.disabled = true;
+    atxPost("/god/ping", { driverId: id }).then(function (d) {
+      state.boardNotice = d.sent ? "Ping sent to " + gqName(id) + "." : "Ping didn\u2019t reach " + gqName(id) + ": " + (d.why === "no_device" ? "their app alerts aren\u2019t turned on yet. Call them instead." : d.why === "wait" ? "wait a minute between pings." : "alerts are off on the server.");
+    }).catch(function (er) { state.boardNotice = "Ping didn\u2019t go out: " + String(er && er.message || er); }).then(function () { b.disabled = false; renderBoardLists(); try { render(); } catch (x) {} });
   });
   /* v74b (Matthew): God mode "Log out driver": ends the shift, Offline / logged out, reason + time in the Driver's Log
      (rides/DRVRHSLG/{id}/overrides/{at} kind "forced logout"); the driver app sees rides/DRVRHSLG/{id}/forceLogout on its next sync. */
