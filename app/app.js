@@ -8541,28 +8541,35 @@
     var big = "display:block;width:100%;min-height:58px;font-size:20px;font-weight:700;border-radius:12px;border:0;background:#1f7a3a;color:#fff;margin-top:14px";
     var box = "display:block;width:100%;min-height:50px;font-size:18px;padding:10px;border-radius:10px;border:2px solid #1f7a3a;margin:6px 0 10px;box-sizing:border-box";
     return '<section class="pw-change" style="max-width:520px;margin:24px auto;padding:20px">' +
-      '<h1 style="color:#1f7a3a;font-size:26px;margin:0 0 8px">Time to set a new password</h1>' +
-      '<p style="font-size:17px">PCS asks for a fresh password every ' + esc(String(state.pwDays || 45)) + ' days. Set yours to keep driving.</p>' +
+      (pwMustChange() ? '<h1 style="color:#1f7a3a;font-size:26px;margin:0 0 8px">Time to set a new password</h1>' +
+      '<p style="font-size:17px">PCS asks for a fresh password every ' + esc(String(state.pwDays || 45)) + ' days. Set yours to keep driving.</p>'
+      : '<h1 style="color:#1f7a3a;font-size:26px;margin:0 0 8px">Change password</h1><p style="font-size:17px">A new password restarts your ' + esc(String(state.pwDays || 45)) + '-day clock.</p>') +
       '<form id="pwc-form" autocomplete="off" novalidate>' +
       '<label for="pwc-cur">Current password</label><input id="pwc-cur" type="password" autocomplete="current-password" style="' + box + '">' +
-      '<label for="pwc-new">New password (8 or more characters)</label><input id="pwc-new" type="password" autocomplete="new-password" style="' + box + '">' +
+      '<label for="pwc-new">New password (12+ characters, letters and a number)</label><input id="pwc-new" type="password" autocomplete="new-password" style="' + box + '">' +
       '<label for="pwc-confirm">New password again</label><input id="pwc-confirm" type="password" autocomplete="new-password" style="' + box + '">' +
       '<p class="error" id="pwc-error" role="alert" style="font-size:17px;color:#b00020">' + esc(state.pwcError || "") + '</p>' +
       '<button type="submit" id="pwc-save" style="' + big + '"' + (state.pwcBusy ? " disabled" : "") + '>' + (state.pwcBusy ? "Saving…" : "Save new password") + '</button>' +
-      '</form></section>';
+      '</form>' + (pwMustChange() ? "" : '<button type="button" id="pwc-close" style="' + big + ';background:#4a5a4a">Back</button>') + '</section>';
   }
+  document.addEventListener("click", function (ev) { /* v77.4: voluntary change from the driver menu */
+    var t = ev.target && ev.target.closest ? ev.target.closest("#pwc-open, #pwc-close") : null;
+    if (!t) return;
+    state.pwcOpen = t.id === "pwc-open"; state.pwcError = ""; state.hubOpen = false; render();
+  }, true);
   function pwChangeSubmit() {
     var g = function (id) { var el = document.getElementById(id); return el ? el.value : ""; };
     var cur = g("pwc-cur"), np = g("pwc-new"), cf = g("pwc-confirm"), email = String(readSession() || "").toLowerCase();
     var fail = function (m) { state.pwcError = m; state.pwcBusy = false; render(); };
     if (!cur) return fail("Enter your current password.");
-    if (np.length < 8) return fail("Use at least 8 characters for the new password.");
-    if (np !== cf) return fail("The two new passwords must match.");
+    if (np.length < 12) return fail("Use at least 12 characters for the new password.");
+    if (!/[A-Za-z]/.test(np) || !/[0-9]/.test(np)) return fail("Use letters and at least one number in the new password."); /* v77.4 */
+    if (np !== cf) return fail("Passwords must match.");
     if (np === cur) return fail("Pick a new password that's different from the last one.");
     state.pwcBusy = true; state.pwcError = ""; render();
     rosterApi({ op: "changepw", email: email, password: cur, newPassword: np }).then(function (d) {
       if (!d.ok) return fail(d.error || "Couldn't save the new password. Try again.");
-      pwMustSet(email, false); state.pwcBusy = false; state.pwcError = "";
+      pwMustSet(email, false); state.pwcOpen = false; state.pwcBusy = false; state.pwcError = ""; if (d.days) state.pwDays = d.days;
       return saveRosterAccountLocally(d.row || { email: email }, np, accountForRole()).then(function () {
         qDriverLoginToken(email, np);
         state.actionNotice = "New password saved.";
@@ -9815,6 +9822,7 @@
     if (st === "ended" || st === "stopped") { out.endedAt = Number(o.endedAt) || now; return out; }
     var df = folFirst(o.driverName); if (df) out.driverFirst = df;
     var car = folCar(o.car); if (car) out.car = car;
+    if (/^[A-Za-z0-9_-]{24}$/.test(String(o.cardKey || ""))) out.cardKey = String(o.cardKey); /* v77.3b: random key of the driver's picture card (photo shown on /follow/); never the driver id */
     var pk = folPlace(o.pickup); if (pk) out.pickup = pk;
     var dr = folPlace(o.dest); if (dr) out.dest = dr;
     var sx = folStopsOut(o.stops); if (sx) out.stops = sx; /* v76g */
@@ -9893,7 +9901,7 @@
     folWrite(folMapUrl(k), "DELETE");
     folRedraw();
   }
-  function folSig(c) { return JSON.stringify([c.status, c.pos ? [c.pos.lat, c.pos.lng] : 0, c.eta || 0, c.pickup || 0, c.dest || 0, c.car || 0, c.driverFirst || "", c.route ? c.route.length + ":" + c.route[c.route.length - 1] : 0, c.stops || 0]); }
+  function folSig(c) { return JSON.stringify([c.status, c.pos ? [c.pos.lat, c.pos.lng] : 0, c.eta || 0, c.pickup || 0, c.dest || 0, c.car || 0, c.driverFirst || "", c.cardKey || "", c.route ? c.route.length + ":" + c.route[c.route.length - 1] : 0, c.stops || 0]); }
   function folHere() {
     if (!isCoord(state.hereLat) || !isCoord(state.hereLng)) return null;
     var at = Number(state.gpsAt) || 0;
@@ -9929,7 +9937,7 @@
     if (ROLE !== "driver" || fol.off || !syncOn()) return [];
     var out = [], me = driverPresenceId(), M = state.meter, trip = schedTripNow(), here = folHere();
     var acc = readDriverAccount() || {};
-    var base = { driverName: acc.name || state.driverName || "", car: acc };
+    var base = { driverName: acc.name || state.driverName || "", car: acc, cardKey: folCardKey() }; /* v77.3b */
     (state.scheduledRides || []).forEach(function (r) {
       if (!r || !r.id || folMyId(r) !== me || !FOL_KEY_RE.test("c_" + r.id)) return;
       var st = r.status === "cancelled" || r.status === "deleted" ? "cancelled" : r.status === "completed" ? "completed" : "assigned";
@@ -10144,7 +10152,7 @@
     setInterval(function () { try { folFastTick(); } catch (e) {} }, 500); /* v76f: checks twice a second, sends at most once a second */
     setInterval(function () { try { folSweep(); } catch (e) {} }, 60000);
     setTimeout(function () { try { folSweep(); } catch (e) {} }, 5000);
-    window.__pcsFollow = { clean: folClean, token: folNewToken, link: folLink, sms: folSmsHref, msg: folDriverMsg, riderMsg: folRiderMsg, e164: folPhoneE164,
+    window.__pcsFollow = { autoMsg: folAutoMsg, clean: folClean, token: folNewToken, link: folLink, sms: folSmsHref, msg: folDriverMsg, riderMsg: folRiderMsg, e164: folPhoneE164,
       ctxs: function () { return folDriverCtxs(); }, rider: function () { return folRiderCtx(); }, state: fol, fast: function () { folFastTick(); }, posOut: folPosOut, tick: function () { if (ROLE === "driver") folDriverTick(); else folRiderTick(); },
       sweep: function () { folSweep(); }, mine: folMine, route: folRoute, schedStops: folSchedStops, sig: folSig }; /* test hooks */
   }
@@ -10534,6 +10542,30 @@
     });
   }
   if (typeof window !== "undefined") window.__pcsSchedSec = { html: function (n, cards, active) { return schedSecHtml(n, cards, active); }, bind: function () { schedSecBind(); }, open: function () { return schedSecOpen(); } }; /* test hook */
+  /* v77.3 (Matthew 10/20): auto "on the way" text. When the driver taps Start on a scheduled ride, make the tracking link
+     live and ask the Worker to text it to the client from the PCS texting number (once per ride; the Worker also sends a
+     backup 30 min before pickup). The "Text my client a tracking link" button stays as the manual fallback. */
+  function folAutoMsg(res) { /* pure (tested) */
+    var w = res && res.why;
+    return res && res.sent ? "Your client got a text with the tracking link." :
+      w === "already_sent" ? "Your client already has the tracking link." :
+      w === "no_phone" ? "This ride is missing the client phone. Use the Text my client button below." :
+      w === "off" || w === "paused" || w === "not_configured" || w === "ride_off" ? "" : "Use the Text my client button below to send the tracking link.";
+  }
+  function folAutoText(schedId) {
+    var k = "c_" + schedId;
+    if (ROLE !== "driver" || fol.off || !FOL_KEY_RE.test(k)) return Promise.resolve(null);
+    var t = folTokenFor(k) || folDraft(k);
+    if (!FOL_TOKEN_RE.test(t || "")) return Promise.resolve(null);
+    var live = folTokenFor(k) === t ? Promise.resolve(true) : folCommit(k, t, "driver", folDriverCtx(k) || { status: "assigned" });
+    return live.then(function () {
+      var tk = typeof qToken === "function" ? qToken() : ""; if (!tk) return null;
+      return qWorker("/notify/onway", { token: tk, rideId: schedId, link: folLink(t) });
+    }).then(function (res) { if (res && res.cardKey) folCardKey(res.cardKey); var m = folAutoMsg(res); if (m) schedMsgFor(schedId, m); return res; }).catch(function () { return null; });
+  }
+  function folCardKey(set) { /* v77.3b: this driver's picture-card key, from the Worker (/notify/onway) */
+    try { var lk = "pcs-dcard-key-" + driverPresenceId(); if (set && /^[A-Za-z0-9_-]{24}$/.test(String(set))) localStorage.setItem(lk, String(set)); var k = localStorage.getItem(lk) || ""; return /^[A-Za-z0-9_-]{24}$/.test(k) ? k : ""; } catch (e) { return ""; }
+  }
   function schedMsgFor(id, msg) { state.schedMsg = msg; state.schedMsgId = id; render(); }
   function schedBegin(id) {
     var r = schedFind(id);
@@ -10570,6 +10602,7 @@
         state.schedMsg = "";
         schedPatch(id, { headedToPickupAt: Date.now() });
         try { followGps(); acquireWakeLock(); } catch (e) {}
+        try { folAutoText(id); } catch (e) {} /* v77.3 auto text the client */
         schedNavRoute = null;
         render();
         schedNavFetch(true); /* v75s: in-app route + turn-by-turn to the pickup right away */
@@ -12176,7 +12209,8 @@
   }
 
   function logoutLine() {
-    return '<button class="btn ghost" type="button" id="log-out">Log out</button>';
+    return (ROLE === "driver" ? '<button class="btn" type="button" id="pwc-open" style="min-height:52px;font-size:18px">Change password</button>' : "") + /* v77.4 */
+      '<button class="btn ghost" type="button" id="log-out">Log out</button>';
   }
 
   function accountNav() {
@@ -15954,7 +15988,7 @@
     var app = document.getElementById("app");
     var html = "";
     if (!signedIn()) html = accountGate();
-    else if (ROLE === "driver" && pwMustChange() && !driverMidRide() && !meterActive()) html = pwChangeScreen(); /* v77.1 */
+    else if (ROLE === "driver" && (pwMustChange() || state.pwcOpen) && !driverMidRide() && !meterActive()) html = pwChangeScreen(); /* v77.1 */
     else if (ROLE === "driver" && state.screen === "home" && state.meterOpen) html = meterScreen(); /* v70 */
     else if (ROLE === "driver" && state.screen === "home") html = driverHome();
     else if (ROLE === "driver") html = driverTrip();
