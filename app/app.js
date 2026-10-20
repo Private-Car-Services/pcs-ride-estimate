@@ -9418,7 +9418,45 @@
       (n.text ? '<small style="display:block;font-size:14px;font-weight:700;color:#d1fae5">In ' + esc(dd) + "</small>" + esc(n.text) : "Head to the pickup") +
       '<small style="display:block;font-size:14px;font-weight:700;color:#d1fae5;margin-top:4px">' + esc((Math.round(n.left * 10) / 10) + " mi to the pickup" + (mins ? " \u00b7 about " + mins + " min" : "")) + "</small></div>";
   }
-  function schedNavPaint() { var el = document.getElementById("sched-turn"); if (el) { var h = schedTurnHtml(); if (el.outerHTML !== h) el.outerHTML = h; } var fs = document.getElementById("sched-turn-fs"); if (fs) { var h2 = schedTurnHtml().replace('id="sched-turn"', 'id="sched-turn-fs"'); if (fs.outerHTML !== h2) fs.outerHTML = h2; } if (!schedNavTrip()) schedFullApply(); if (navTestOn()) try { navTestPaint(); } catch (e) {} } /* v75x: full screen banner too; v75y test flag: Uber-style card + bar */
+  /* v77.8 (Matthew 10/20, circled spot): big ETA box top-right of the nav map, below the turn banner.
+     "Arrive 1:55 PM" / "9 min \u00b7 5 mi" + "to pickup" / "to drop-off". Minutes come from the route duration (Google
+     duration_in_traffic via the Worker route; OSRM when Google is unavailable), scaled to the miles left. Pure (tested). */
+  function navEtaClock(ms) {
+    try { return new Date(ms).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", timeZone: "America/Chicago" }); }
+    catch (e) { var d = new Date(ms), h = d.getHours(), m = d.getMinutes(); return ((h % 12) || 12) + ":" + (m < 10 ? "0" : "") + m + " " + (h < 12 ? "AM" : "PM"); }
+  }
+  function navEtaBoxHtml(id, mins, miles, phase, now) {
+    if (mins == null || !isFinite(mins) || miles == null || !isFinite(miles)) return '<div id="' + id + '" class="nav-eta" style="display:none"></div>';
+    var m = Math.max(1, Math.round(mins)), mi = miles < 0.1 ? "<0.1" : miles < 10 ? String(Math.round(miles * 10) / 10) : String(Math.round(miles));
+    return '<div id="' + id + '" class="nav-eta" role="status" aria-live="polite"><div class="nav-eta-at">Arrive ' + esc(navEtaClock((now || Date.now()) + m * 60000)) + "</div>" +
+      '<div class="nav-eta-left">' + esc(m + " min \u00b7 " + mi + " mi") + '</div><div class="nav-eta-to">' + (phase === "dropoff" ? "to drop-off" : "to pickup") + "</div></div>";
+  }
+  function navEtaStyle() {
+    if (typeof document === "undefined" || document.getElementById("pcs-nav-eta-style")) return;
+    var st = document.createElement("style"); st.id = "pcs-nav-eta-style";
+    st.textContent = ".nav-eta{background:#0b3d23;color:#fff;border:3px solid #2e9d4f;border-radius:14px;padding:8px 14px;min-width:150px;text-align:right;box-shadow:0 2px 8px rgba(0,0,0,.45);font-family:system-ui,-apple-system,sans-serif;pointer-events:none}" +
+      ".nav-eta-at{font-size:24px;font-weight:900;line-height:1.15;white-space:nowrap}.nav-eta-left{font-size:20px;font-weight:800;color:#d1fae5;white-space:nowrap}.nav-eta-to{font-size:14px;font-weight:700;color:#bef1c6}" +
+      "#sched-eta-map{position:absolute;right:8px;top:8px;z-index:1001}#home-map-stage.pcs-fullmap #sched-eta-map{display:none}" +
+      "#sched-fs-top .nav-eta{margin:8px 0 0 auto;width:max-content}.meter-topstack .nav-eta{align-self:flex-end}";
+    document.head.appendChild(st);
+  }
+  function schedEtaNums() {
+    var n = schedNextTurn(), R = schedNavRoute;
+    if (!n || !R || !(R.miles > 0)) return null;
+    var left = n.left * 1.3 > R.miles ? R.miles : n.left * 1.3; /* road miles left (straight line x1.3, never more than the route) */
+    return { mins: R.minutes * Math.min(1, left / Math.max(0.01, R.miles)), miles: left };
+  }
+  function schedEtaHtml(id) { navEtaStyle(); var e = schedEtaNums(); return navEtaBoxHtml(id, e && e.mins, e && e.miles, "pickup"); }
+  function schedEtaPaint() {
+    if (typeof document === "undefined") return;
+    var stage = document.getElementById("home-map-stage"), el = document.getElementById("sched-eta-map");
+    if (!schedNavTrip() || !stage) { if (el) el.remove(); return; }
+    var h = schedEtaHtml("sched-eta-map");
+    if (!el) { stage.insertAdjacentHTML("beforeend", h); } else if (el.outerHTML !== h) el.outerHTML = h;
+    var fe = document.getElementById("sched-eta-fs"), top = document.getElementById("sched-fs-top");
+    if (top) { var h2 = schedEtaHtml("sched-eta-fs"); if (!fe) top.insertAdjacentHTML("beforeend", h2); else if (fe.outerHTML !== h2) fe.outerHTML = h2; }
+  }
+  function schedNavPaint() { var el = document.getElementById("sched-turn"); if (el) { var h = schedTurnHtml(); if (el.outerHTML !== h) el.outerHTML = h; } var fs = document.getElementById("sched-turn-fs"); if (fs) { var h2 = schedTurnHtml().replace('id="sched-turn"', 'id="sched-turn-fs"'); if (fs.outerHTML !== h2) fs.outerHTML = h2; } try { schedEtaPaint(); } catch (e) {} if (!schedNavTrip()) schedFullApply(); if (navTestOn()) try { navTestPaint(); } catch (e) {} } /* v75x: full screen banner too; v75y test flag: Uber-style card + bar */
   /* v75x (Matthew 10/16): on the way to the pickup the map can fill the whole screen. A big "Full screen map" button on the
      small map (or a tap on the map) opens it; the next-turn banner stays on top, the pickup pin, Follow / Heading up and the
      v75w arrow freeze are the SAME map (resized, never recreated). Big "I'm at the pickup" + Close. The choice is remembered
@@ -9500,7 +9538,7 @@
     if (full) {
       if (!top) { top = document.createElement("div"); top.id = "sched-fs-top"; stage.appendChild(top); }
       if (navTestOn()) navTestTop(stage, top); else /* v75y test flag */
-      top.innerHTML = schedTurnHtml().replace('id="sched-turn"', 'id="sched-turn-fs"');
+      top.innerHTML = schedTurnHtml().replace('id="sched-turn"', 'id="sched-turn-fs"') + schedEtaHtml("sched-eta-fs"); /* v77.8 ETA box below the banner */
       if (!bot) {
         bot = document.createElement("div"); bot.id = "sched-fs-bottom";
         bot.innerHTML = '<button type="button" id="sched-fs-arrived">I\u2019m at the pickup</button><button type="button" id="sched-fs-close">Close map</button>';
@@ -10073,11 +10111,49 @@
     if (!fol.mapAt[k]) return '<button type="button" class="fol-big" disabled>Getting the tracking link ready\u2026</button>';
     var live = folTokenFor(k), t = live || folDraft(k);
     if (!t) return "";
-    var e = folPhoneE164(phone);
-    return '<a class="fol-big fol-sms" data-fol-act="dsms" data-fol-key="' + esc(k) + '" data-fol-tok="' + esc(t) + '" href="' + esc(folSmsHref(phone, folDriverMsg(folLink(t), name))) + '">Text my client a tracking link</a>' +
-      '<p class="fol-note">' + (e ? "Opens Messages to " + esc(folPhoneShow(e)) + ". You press Send." : "Opens Messages. Type the client\u2019s number, then press Send.") +
+    var e = folPhoneE164(phone), st = (fol.biz && fol.biz[k]) || {};
+    /* v77.8 (Matthew 10/20): ONE tap texts the client from the PCS business line (picture card + tap-to-track link).
+       Never opens Messages on the driver's phone. While the line activates, the button says so. */
+    var inactive = fol.bizInactive === true;
+    if (k.indexOf("c_") !== 0) { /* on-demand app ride: the Worker texts scheduled board rides only; share the link without the personal phone */
+      if (!live) folCommit(k, t, "driver", folDriverCtx(k) || { status: "assigned" });
+      return '<button type="button" class="fol-big" data-fol-act="copy" data-fol-key="' + esc(k) + '">Copy the tracking link</button>' +
+        '<p class="fol-msg" role="status" id="fol-msg">' + esc(state.folMsg || "") + '</p><p class="fol-note">Business-line texts are for scheduled rides. Your personal number stays private.</p>';
+    }
+    var label = st.busy ? "Sending\u2026" : inactive ? "Business line activating" : "Text my client a tracking link";
+    return '<button type="button" class="fol-big fol-biz" data-fol-act="bsms" data-fol-key="' + esc(k) + '" data-fol-tok="' + esc(t) + '"' + (st.busy || inactive ? " disabled" : "") + ">" + label + "</button>" +
+      '<p class="fol-msg" role="status" data-fol-biz-msg="' + esc(k) + '">' + esc(st.msg || "") + "</p>" +
+      '<p class="fol-note">' + (inactive ? "The PCS business line is being approved by the phone carriers. Your personal number stays private." :
+        "Sent from the PCS business line" + (e ? " to " + esc(folPhoneShow(e)) : "") + " with your picture card. Your personal number stays private.") +
       " They see your car and ETA on a map, nothing to download. Fare and payment stay private." + (live ? " This link is live." : "") + "</p>" +
       (live ? '<button type="button" class="fol-btn2" data-fol-act="stop" data-fol-key="' + esc(k) + '">Stop the tracking link</button>' : "");
+  }
+  function folBizMsg(res, err) { /* pure (tested) */
+    var w = res && res.why;
+    if (res && res.sent) return "Sent \u2713 Your client has the tracking link" + (res.count > 1 ? " (" + res.count + " numbers)." : ".");
+    if (w === "line_inactive") return "Business line activating. The text will go out from the PCS line once the carriers approve it.";
+    if (w === "wait") return "Just sent. Please wait a minute before sending again.";
+    if (w === "limit") return "This ride has reached today\u2019s text limit. Please call God mode for help.";
+    if (w === "no_phone") return "This ride is missing the client phone. Ask God mode to add it.";
+    if (w === "ride_off") return "Texts are turned off for this client.";
+    if (w === "status") return "This ride is finished or cancelled.";
+    if (err) return "Not sent: " + String(err && err.message || err).slice(0, 80);
+    return "Not sent (" + (w || "try again") + "). Please try again.";
+  }
+  function folBizSend(k, t) {
+    fol.biz = fol.biz || {};
+    var id = String(k).slice(2), cur = fol.biz[k] = fol.biz[k] || {};
+    if (cur.busy || k.indexOf("c_") !== 0) return Promise.resolve(null);
+    cur.busy = true; cur.msg = ""; folRedraw();
+    var live = FOL_TOKEN_RE.test(t || "") && folTokenFor(k) !== t ? folCommit(k, t, "driver", folDriverCtx(k) || { status: "assigned" }) : Promise.resolve(true);
+    return Promise.resolve(live).then(function () {
+      var tk = typeof qToken === "function" ? qToken() : ""; if (!tk) throw new Error("sign in again");
+      return qWorker("/sms/tracker", { token: tk, rideId: id });
+    }).then(function (res) {
+      if (res && res.cardKey) folCardKey(res.cardKey);
+      if (res && res.why === "line_inactive") fol.bizInactive = true; else if (res && res.sent) fol.bizInactive = false;
+      cur.msg = folBizMsg(res); return res;
+    }, function (err) { cur.msg = folBizMsg(null, err); return null; }).then(function (r) { cur.busy = false; folRedraw(); return r; });
   }
   function folDriverBtnHtml(k, phone) {
     if (ROLE !== "driver" || fol.off || !syncOn() || !FOL_KEY_RE.test(k || "")) return "";
@@ -10119,6 +10195,7 @@
     if (!b) return;
     var a = b.getAttribute("data-fol-act"), k = b.getAttribute("data-fol-key");
     if (!FOL_KEY_RE.test(k || "")) return;
+    if (a === "bsms") { e.preventDefault(); folBizSend(k, b.getAttribute("data-fol-tok")); return; } /* v77.8 */
     if (a === "dsms") { /* the link opens Messages by itself (the driver presses Send); here we only make the link live */
       var t = b.getAttribute("data-fol-tok");
       if (FOL_TOKEN_RE.test(t || "") && folTokenFor(k) !== t) folCommit(k, t, "driver", folDriverCtx(k) || { status: "assigned" });
@@ -10152,7 +10229,7 @@
     setInterval(function () { try { folFastTick(); } catch (e) {} }, 500); /* v76f: checks twice a second, sends at most once a second */
     setInterval(function () { try { folSweep(); } catch (e) {} }, 60000);
     setTimeout(function () { try { folSweep(); } catch (e) {} }, 5000);
-    window.__pcsFollow = { autoMsg: folAutoMsg, clean: folClean, token: folNewToken, link: folLink, sms: folSmsHref, msg: folDriverMsg, riderMsg: folRiderMsg, e164: folPhoneE164,
+    window.__pcsFollow = { bizMsg: folBizMsg, bizSend: folBizSend, autoMsg: folAutoMsg, clean: folClean, token: folNewToken, link: folLink, sms: folSmsHref, msg: folDriverMsg, riderMsg: folRiderMsg, e164: folPhoneE164,
       ctxs: function () { return folDriverCtxs(); }, rider: function () { return folRiderCtx(); }, state: fol, fast: function () { folFastTick(); }, posOut: folPosOut, tick: function () { if (ROLE === "driver") folDriverTick(); else folRiderTick(); },
       sweep: function () { folSweep(); }, mine: folMine, route: folRoute, schedStops: folSchedStops, sig: folSig }; /* test hooks */
   }
@@ -10549,8 +10626,9 @@
     var w = res && res.why;
     return res && res.sent ? "Your client got a text with the tracking link." :
       w === "already_sent" ? "Your client already has the tracking link." :
-      w === "no_phone" ? "This ride is missing the client phone. Use the Text my client button below." :
-      w === "off" || w === "paused" || w === "not_configured" || w === "ride_off" ? "" : "Use the Text my client button below to send the tracking link.";
+      w === "not_configured" ? "Business line activating. The tracking text will go out from the PCS line once approved." :
+      w === "no_phone" ? "This ride is missing the client phone. Ask God mode to add it." :
+      w === "off" || w === "paused" || w === "ride_off" ? "" : "Tap Text my client a tracking link below to send it from the PCS line.";
   }
   function folAutoText(schedId) {
     var k = "c_" + schedId;
@@ -10561,7 +10639,7 @@
     return live.then(function () {
       var tk = typeof qToken === "function" ? qToken() : ""; if (!tk) return null;
       return qWorker("/notify/onway", { token: tk, rideId: schedId, link: folLink(t) });
-    }).then(function (res) { if (res && res.cardKey) folCardKey(res.cardKey); var m = folAutoMsg(res); if (m) schedMsgFor(schedId, m); return res; }).catch(function () { return null; });
+    }).then(function (res) { if (res && res.cardKey) folCardKey(res.cardKey); if (res && res.why === "not_configured") fol.bizInactive = true; var m = folAutoMsg(res); if (m) schedMsgFor(schedId, m); return res; }).catch(function () { return null; });
   }
   function folCardKey(set) { /* v77.3b: this driver's picture-card key, from the Worker (/notify/onway) */
     try { var lk = "pcs-dcard-key-" + driverPresenceId(); if (set && /^[A-Za-z0-9_-]{24}$/.test(String(set))) localStorage.setItem(lk, String(set)); var k = localStorage.getItem(lk) || ""; return /^[A-Za-z0-9_-]{24}$/.test(k) ? k : ""; } catch (e) { return ""; }
@@ -10740,6 +10818,12 @@
     saves.push(schedCloseNoCredit(r.id, { meterCode: md.code }));
     return Promise.all(saves).then(function () { return refreshScheduledRides(true); }, function () { return refreshScheduledRides(true); });
   }
+  /* v77.7: a scheduled card can't be completed more than 12 h before its start (pure, tested) */
+  function schedTooEarlyToComplete(row, now) {
+    var t = Date.parse(row && row.start || "");
+    return !isFinite(t) || t - now > 12 * 3600 * 1000; /* v77.8: fail closed on missing/bad start */
+  }
+  window.__pcsV777 = { tooEarly: schedTooEarlyToComplete };
   function completeScheduledRide(eventId) {
     var row = null;
     var i;
@@ -10750,6 +10834,10 @@
       }
     }
     if (!row) return Promise.resolve();
+    if (schedTooEarlyToComplete(row, Date.now())) { /* v77.7 (Anson 10/20: Oct 29 Barbara Curry return closed on Oct 20 = double pay) */
+      try { alert(isFinite(Date.parse(row.start || "")) ? "This ride is scheduled for " + prettyScheduleWhen(row.start) + ". It can be marked complete on the day of the ride." : "This ride needs a start time before it can be marked complete. Please ask PCS dispatch to add one."); } catch (e) {}
+      return Promise.resolve();
+    }
     if (schedAppPaid(row)) return schedCloseNoCredit(eventId); /* v75w: paid in the app, the meter already credited it */
     var mdV76i = schedMeterDone(row); if (mdV76i) return schedCloseMetered(row, mdV76i); /* v76i: ran on the meter -> never a second $0 entry */
     var pct = driverCommissionPct(); /* v75w: the driver's stored % */
@@ -13515,6 +13603,7 @@
     if (mb && mb.className !== meterMphBoxClass(M, mph)) mb.className = meterMphBoxClass(M, mph);
     set("meter-gps", meterGpsLine(M));
     set("meter-eta-chip", meterChipText(M)); /* v71 */
+    var eb = document.getElementById("meter-eta-box"), ebh = meterEtaBoxHtml(M); if (eb && eb.outerHTML !== ebh) eb.outerHTML = ebh; /* v77.8 */
     var chipEl = document.getElementById("meter-eta-chip");
     if (chipEl) chipEl.classList.toggle("has-dest", !!M.dest);
     set("meter-dest-eta", meterEtaLine(M));
@@ -14876,7 +14965,7 @@
       '<div class="meter-map-col"><div class="map-stage board-map meter-map" id="meter-map-stage">' + /* v76b: id for Full screen */
       '<div id="live-map" role="img" aria-label="Map: you during the metered ride"></div>' +
       '<div class="meter-topstack" id="meter-topstack">' + meterTurnHtml() + /* v72t: next turn right on the map; v72u: ETA on its own line below it */
-      '<button type="button" class="meter-eta-chip' + (state.meter && state.meter.dest ? " has-dest" : "") + '" id="meter-eta-chip">' + esc(meterChipText(state.meter)) + "</button></div>" + /* v71 */
+      '<button type="button" class="meter-eta-chip' + (state.meter && state.meter.dest ? " has-dest" : "") + '" id="meter-eta-chip">' + esc(meterChipText(state.meter)) + "</button>" + meterEtaBoxHtml(state.meter) + "</div>" + /* v71; v77.8 big ETA box */
       '<p class="map-caption">You · metered ride</p>' +
       "</div>" + meterEstLineHtml() + "</div></div>" + /* v72u: estimate under the map during the ride too */
       (isFinite(state.hereLat) ? "" : '<p class="fine">Allow location so the map can show where you are.</p>') +
@@ -14964,6 +15053,10 @@
   }
   function meterClockText(ms) {
     try { return new Date(ms).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }); } catch (e) { return ""; }
+  }
+  function meterEtaBoxHtml(M) { /* v77.8: drop-off ETA box (same look as the pickup one) */
+    navEtaStyle(); var e = null; try { e = meterEtaInfo(M); } catch (x) {}
+    return e && !e.arrived && !e.pending ? navEtaBoxHtml("meter-eta-box", e.min, e.miles, "dropoff") : navEtaBoxHtml("meter-eta-box", null, null, "dropoff");
   }
   function meterChipText(M) {
     var e = meterEtaInfo(M);
