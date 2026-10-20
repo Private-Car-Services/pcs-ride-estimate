@@ -390,7 +390,8 @@
         Object.keys(out.patch).forEach(function (k) { r[k] = out.patch[k]; });
         state.boardNotice = (r.prepaid ? prepaidLabel(r) + " saved for " : "Regular payment saved for ") + (r.rider || "ride") + ".";
         dbPrepaidClose();
-        return refresh();
+        var shareV = r.prepaid && sqGot && r.prepaidAmountCents != null && r.prepaidAmountCents !== Math.round(+sqGot.subtotalCents) ? r.prepaidAmountCents : null; /* God-typed split of one invoice */
+        return invLink(id, r.prepaid ? r.prepaidInvoiceNo : "", shareV, shareV != null ? r.prepaidTaxCents : null).catch(function () { state.boardNotice += " Invoice check with Square didn’t finish; open it and Save again."; }).then(refresh);
       }).catch(function () { msg.textContent = "Saving didn\u2019t finish. Check the connection and tap Save again."; });
     });
   }
@@ -794,6 +795,7 @@
         row.fareBeforeTax = fare; row.fixedFare = !!fixedFare;
         ["prepaidInvoiceNo", "squareInvoiceId", "prepaidEdited", "prepaidBy", "prepaidAt"].forEach(function (k) { if (k in patch) row[k] = patch[k]; });
         delete state.fareDrafts[eventId];
+        if (ip.patch) invLink(eventId, invNo).catch(function () {}); /* v77.11 r2: Worker reads Square + mirrors the amount */
         state.boardNotice = "Fare saved · " + fmtCents(Math.round(fare * 100)) + " for " + (row.rider || "ride") + (fixedFare ? " · driver app charges this fare" : "") + (row.prepaidInvoiceNo ? " · Invoice #" + row.prepaidInvoiceNo : "");
         return refresh();
       });
@@ -1383,10 +1385,145 @@
       if (!r || r.source !== "manual" || r.status !== "completed" || r.assignedDriverId !== driverId || !r.code || have[r.code]) return;
       try { var e = addRideHistoryEntry(r, r.completedAt); e.fromCalendar = true; list.push(e); have[r.code] = true; } catch (x) {}
     });
+    list = godDedupeEntries(list, chicagoToday()); /* v77.11: one row per real ride, no future rides */
+    list.forEach(function (e) { invApply(e, state.invKV || {}, { driverId: driverId, card: e && e.scheduleId ? (state.calendarRaw || {})[e.scheduleId] : null, pctFor: commissionPctFor, kvPct: state.ridePctKV || {} }); }); /* r3: God-side % + one entry per card; r4 KV % */
+    payBalance(list, { driverId: driverId, pctFor: commissionPctFor, kvPct: state.ridePctKV || {}, cards: state.calendarRaw || {}, charges: state.payCharges || {}, holds: state.payHolds || {}, kvDisc: state.discKV || {}, discPresets: state.discPresets || {} }); /* r5: normalize every entry (N1-N3) */
     return list.sort(function (a, b) {
       return Number(b.completedAt || 0) - Number(a.completedAt || 0);
     });
   }
+  /* v77.11 r2 (Harry M1/M2): one row per real ride, never hiding money.
+     Hide a card entry ONLY when it is $0 fare + $0 tip and its metered twin really exists (same scheduleId, or the code in its
+     meterCode is in the list), or when it exactly duplicates the metered entry (same fare, tax, tip). A card entry with real
+     money next to a metered entry stays and is flagged dupSuspect ("duplicate?"). Entries dated after today never count. (pure, tested) */
+  function godDedupeEntries(list, today) {
+    var metered = {}, codes = {}, gone = {};
+    list.forEach(function (e) { if (!e) return; codes[e.code] = e; if (e.rideType === "metered" && e.scheduleId) metered[e.scheduleId] = e; });
+    var zero = function (e) { return !(Number(e.fareSub) || 0) && !(Number(e.fareTotal) || 0) && !(Number(e.tipCents) || 0); };
+    var same = function (a, b) { return (Number(a.fareSub) || 0) === (Number(b.fareSub) || 0) && (Number(a.fareTax) || 0) === (Number(b.fareTax) || 0) && (Number(a.tipCents) || 0) === (Number(b.tipCents) || 0); };
+    list.forEach(function (e) {
+      if (!e || e.rideType === "metered") return;
+      var twin = (e.scheduleId && metered[e.scheduleId] && metered[e.scheduleId].code !== e.code) ? metered[e.scheduleId] : null;
+      if (!twin && e.meterCode && e.meterCode !== e.code && codes[e.meterCode]) twin = codes[e.meterCode];
+      if (!twin) return;
+      if (zero(e) || same(e, twin)) gone[e.code] = 1; else e.dupSuspect = twin.code;
+    });
+    return list.filter(function (e) { return e && !gone[e.code] && !(today && e.day && String(e.day) > today); });
+  }
+  /* v77.11 r2 (Harry M3): pay uses the Worker-verified invoice amount (KV, read from Square by the Worker), never the open
+     Firebase prepaidAmountCents. Mismatch -> the KV amount wins and the entry is flagged; no KV record -> flagged unverified. (pure, tested) */
+  /* r3 (Harry r2 #2/#3): commission is ALWAYS re-figured from God-controlled data: the God-set per-ride % on the card
+     (rideCommissionPctBy "god"), else the driver's saved rate (commissionPctFor). The entry's own commissionPct/commissionCents
+     are never used. One entry per card: the first entry (by the card's assigned driver) claims it; any other entry pointing at
+     the same card is flagged dupSuspect and not verified. opts = { driverId, card, pctFor } (God passes all three). (pure, tested) */
+  function invApply(e, kv, opts) {
+    if (!e) return e;
+    opts = opts || {};
+    var k = kv && e.scheduleId && Object.prototype.hasOwnProperty.call(kv, e.scheduleId) ? kv[e.scheduleId] : null;
+    var claims = !!(e.prepaidInvoiceNo || e.fareSource === "square_invoice" || e.paidVia === "square_invoice");
+    if (!k) { if (claims) e.invoiceUnverified = true; return e; }
+    var card = opts.card || null;
+    if (card && opts.driverId && String(card.assignedDriverId || "") !== String(opts.driverId)) { e.invoiceUnverified = true; e.invoiceWrongDriver = true; return e; }
+    if (!Object.prototype.hasOwnProperty.call(kv, "__claims")) Object.defineProperty(kv, "__claims", { value: {}, enumerable: false });
+    var owner = kv.__claims[e.scheduleId];
+    if (owner && owner !== e.code) { e.dupSuspect = owner; e.invoiceUnverified = true; delete e.invoiceVerified; return e; }
+    kv.__claims[e.scheduleId] = e.code;
+    var sub = Math.round(Number(k.amountCents) || 0), tax = Math.round(Number(k.amountTaxCents != null ? k.amountTaxCents : k.taxCents) || 0);
+    /* r4 (Harry r3): a % above 80 (policy max) is honored ONLY from the God-only Worker KV per-ride override (opts.kvPct);
+       Firebase-sourced % (card rideCommissionPct, roster rate) is capped at 80 and the ride flagged. No caller info -> 70% + unverified. */
+    var pct = null, kvp = opts.kvPct && e.scheduleId && Object.prototype.hasOwnProperty.call(opts.kvPct, e.scheduleId) ? opts.kvPct[e.scheduleId] : null;
+    if (kvp && isFinite(+kvp.pct)) pct = Math.min(100, Math.max(0, Math.round(+kvp.pct)));
+    else {
+      if (card && card.rideCommissionPct != null && card.rideCommissionPctBy === "god" && isFinite(+card.rideCommissionPct)) pct = Math.round(+card.rideCommissionPct);
+      else if (typeof opts.pctFor === "function" && opts.driverId) pct = Number(opts.pctFor(opts.driverId));
+      if (pct == null || !isFinite(pct)) { pct = typeof DEFAULT_COMMISSION_PCT !== "undefined" ? DEFAULT_COMMISSION_PCT : 70; e.invoiceUnverified = true; }
+      if (pct > 80) { e.pctCapped = { asked: pct }; pct = 80; }
+      pct = Math.max(0, pct);
+    }
+    if ((Number(e.fareSub) || 0) !== sub || (Number(e.fareTax) || 0) !== tax) {
+      e.invoiceMismatch = { appFareSub: Number(e.fareSub) || 0, appFareTax: Number(e.fareTax) || 0, appCommission: Number(e.commissionCents) || 0, invoiceNo: k.invoiceNo };
+      e.fareSub = sub; e.fareTax = tax; e.fareTotal = sub + tax;
+    }
+    var com = Math.round(sub * pct / 100);
+    if ((Number(e.commissionCents) || 0) !== com && !e.invoiceMismatch) e.invoiceMismatch = { appFareSub: sub, appFareTax: tax, appCommission: Number(e.commissionCents) || 0, invoiceNo: k.invoiceNo, commissionOnly: true };
+    e.commissionCents = com; e.commissionPct = pct;
+    if (e.invoiceUnverified) { delete e.invoiceVerified; return e; }
+    if (typeof Symbol === "function") e[Symbol.for("pcsInvPct")] = pct; /* r5: trusted this load only (JSON can't forge a Symbol key) */
+    e.invoiceVerified = String(k.invoiceNo || ""); return e;
+  }
+  function invFlagHtml(e) { /* r5: payout flags first, then the invoice flag */
+    if (!e) return "";
+    var r5 = (e.commissionAdjusted ? '<strong style="background:#b91c1c;color:#fff;padding:2px 6px;border-radius:6px">Share re-figured: app said ' + esc(fmtCents(e.commissionAdjusted.app)) + ", paying " + esc(fmtCents(e.commissionAdjusted.now)) + " (" + esc(String(e.commissionPct)) + "%)</strong><br>" : "") +
+      (e.owedAdjusted ? '<strong style="background:#b91c1c;color:#fff;padding:2px 6px;border-radius:6px">Cash owed re-figured: app said ' + esc(fmtCents(e.owedAdjusted.app)) + ", owed " + esc(fmtCents(e.owedAdjusted.now)) + "</strong><br>" : "") +
+      holdHtml(e) +
+      (e.discountUnconfirmed ? '<strong style="background:#b45309;color:#fff;padding:2px 6px;border-radius:6px">Discount not confirmed by PCS: share on the discounted fare</strong><br>' : "") +
+      (e.fareUnverified && !e.invoiceVerified ? '<span class="fine" style="color:#b45309">Fare not checked against a Square invoice (paid as logged).</span><br>' : "");
+    return r5 + invFlagHtmlBase(e);
+  }
+  /* r6: held money + God-only "Approve hold" (Worker KV holdok; never written to Firebase) */
+  function holdHtml(e) {
+    var h = e && e.held; if (!h) return "";
+    var key = typeof Symbol === "function" ? e[Symbol.for("pcsHoldKey")] : ""; if (!key) return "";
+    var btn = function (kind, cents, label) { return ' <button type="button" class="btn-hold-ok" data-hold-key="' + esc(key) + '" data-hold-kind="' + kind + '" data-hold-cents="' + esc(String(cents)) + '" style="background:#2e7d32;color:#fff;border:0;border-radius:10px;font-weight:800;font-size:16px;min-height:44px;padding:6px 14px">' + label + "</button>"; };
+    var red = function (t) { return '<strong style="background:#b91c1c;color:#fff;padding:2px 6px;border-radius:6px">' + t + "</strong>"; };
+    return (h.fare ? red("Fare over the limit: " + esc(fmtCents(h.fare)) + " held (no Square charge/invoice on file)") + btn("fare", h.fare, "Approve hold") + "<br>" : "") +
+      (h.toll ? red("Tolls over $50: " + esc(fmtCents(h.toll)) + " held") + btn("toll", h.toll, "Approve hold") + "<br>" : "") +
+      (h.collect ? red("No proof PCS was paid (no Square charge or invoice on file): counted as cash the driver owes") + btn("pcs_collected", 0, "Approve: PCS was paid (card / Zelle / check)") + "<br>" : "") +
+      (h.driver ? red("Square charge on file, but the driver isn't confirmed yet: counted as cash owed") + ' <button type="button" class="btn-chg-driver" data-chg-key="' + esc(key) + '" style="background:#2e7d32;color:#fff;border:0;border-radius:10px;font-weight:800;font-size:16px;min-height:44px;padding:6px 14px">Confirm driver</button><br>' : "") +
+      (h.dup ? red("Same Square charge as another ride (" + esc(String(e.dupSuspect || "")) + "): counted as cash owed until checked") + "<br>" : "");
+  }
+  if (typeof document !== "undefined") document.addEventListener("click", function (ev) { var b = ev.target && ev.target.closest ? ev.target.closest("[data-hold-key]") : null; if (!b) return;
+    var kind = b.getAttribute("data-hold-kind"), cents = Number(b.getAttribute("data-hold-cents")) || 0;
+    if (!window.confirm(kind === "pcs_collected" ? "Approve: PCS received the money for this ride (card, Zelle, check)?" : "Release " + fmtCents(cents) + " for this ride?")) return;
+    b.disabled = true;
+    atxPost("/god/hold/approve", { key: b.getAttribute("data-hold-key"), kind: kind, cents: cents, by: (typeof godWho === "function" ? godWho() : "god") }).then(function (d) {
+      state.payHolds = state.payHolds || {}; if (d && d.approved) state.payHolds[d.approved.key + "|" + d.approved.kind] = d.approved;
+      state.boardNotice = "Saved \u2713 Hold approved."; refresh();
+    }).catch(function (er) { b.disabled = false; window.alert("Couldn't save: " + String(er && er.message || er)); }); }, true);
+  if (typeof document !== "undefined") document.addEventListener("click", function (ev) { var b = ev.target && ev.target.closest ? ev.target.closest("[data-chg-key]") : null; if (!b) return; /* r8 */
+    var k = String(b.getAttribute("data-chg-key") || ""), cut = k.lastIndexOf("|"), drv = k.slice(0, cut), code = k.slice(cut + 1);
+    if (!drv || !code) return;
+    b.disabled = true;
+    /* r9: show every competing claim before confirming */
+    atxPost("/god/charge/claims", { code: code }).then(function (r) {
+      var c = (r && r.claims) || {}, nm = function (x) { return x ? String(x).split("_")[0] : "(none)"; };
+      var lines = ["Who drove ride " + code + "?", "",
+        "Signed fare (Worker): " + (c.signedFare ? nm(c.signedFare.driverId) + (c.signedFare.at ? " at " + new Date(c.signedFare.at).toLocaleString() : "") : "(none)"),
+        "Firebase ride: " + (c.firebase ? nm(c.firebase.assignedDriverId || c.firebase.driverId) : "(none)"),
+        "Square charge record: " + (c.charge ? nm(c.charge.driverId) : "(none)"),
+        "Payout lists with this ride: " + ((c.payoutEntries || []).map(nm).join(", ") || "(none)")];
+      var multi = (c.payoutEntries || []).length > 1 || (c.signedFare && c.signedFare.driverId && c.signedFare.driverId !== "god" && c.signedFare.driverId !== drv) || (c.firebase && c.firebase.assignedDriverId && c.firebase.assignedDriverId !== drv);
+      if (multi) lines.push("", "\u26a0 These don\u2019t all agree. Check before confirming.");
+      lines.push("", "Confirm " + nm(drv) + " drove this ride?");
+      if (!window.confirm(lines.join("\n"))) { b.disabled = false; return null; }
+      return atxPost("/god/charge/driver", { code: code, driverId: drv });
+    }).then(function (d) { if (!d) return;
+      state.payCharges = state.payCharges || {}; if (d && d.charge) state.payCharges[code] = d.charge;
+      state.boardNotice = "Saved \u2713 Driver confirmed."; refresh();
+    }).catch(function (er) { b.disabled = false; window.alert("Couldn't save: " + String(er && er.message || er)); }); }, true);
+  function invFlagHtmlBase(e) {
+    if (!e) return "";
+    if (e.pctCapped) return '<strong style="background:#b91c1c;color:#fff;padding:2px 6px;border-radius:6px">Asked for ' + esc(String(e.pctCapped.asked)) + "%: paid at 80% until PCS confirms the % on this ride in God mode</strong><br>";
+    if (e.invoiceWrongDriver) return '<strong style="background:#b91c1c;color:#fff;padding:2px 6px;border-radius:6px">Invoice ride belongs to another driver: check before payout</strong><br>';
+    if (e.invoiceMismatch && e.invoiceMismatch.commissionOnly) return '<strong style="background:#b91c1c;color:#fff;padding:2px 6px;border-radius:6px">Invoice #' + esc(e.invoiceMismatch.invoiceNo) + ": app share " + esc(fmtCents(e.invoiceMismatch.appCommission)) + ", re-figured " + esc(fmtCents(e.commissionCents)) + " (" + esc(String(e.commissionPct)) + "%)</strong><br>";
+    if (e.invoiceMismatch) return '<strong style="background:#b91c1c;color:#fff;padding:2px 6px;border-radius:6px">Invoice #' + esc(e.invoiceMismatch.invoiceNo) + ": app said " + esc(fmtCents(e.invoiceMismatch.appFareSub)) + ", Square " + esc(fmtCents(e.fareSub)) + " (Square used)</strong><br>";
+    if (e.invoiceUnverified) return '<strong style="background:#b45309;color:#fff;padding:2px 6px;border-radius:6px">Invoice not verified by PCS: check before payout</strong><br>';
+    if (e.dupSuspect) return '<strong style="background:#b45309;color:#fff;padding:2px 6px;border-radius:6px">Duplicate? Same ride as ' + esc(e.dupSuspect) + "</strong><br>";
+    return "";
+  }
+  function invLoad() {
+    atxPost("/god/payout/records", {}).then(function (d) { state.payCharges = (d && d.charges) || {}; state.payHolds = (d && d.holds) || {}; state.payRecLoaded = true; }) /* r6 */
+      .catch(function () { state.payCharges = state.payCharges || {}; state.payHolds = state.payHolds || {}; state.payRecLoaded = "failed"; }).then(function () { try { renderBoardLists(); } catch (e) {} });
+    var rp = atxPost("/god/ridepct/list", {}).then(function (d) { state.ridePctKV = (d && d.pcts) || {}; state.ridePctLoaded = true; }).catch(function () { state.ridePctKV = state.ridePctKV || {}; state.ridePctLoaded = "failed"; }); /* r4; r5: payouts wait for it */
+    return Promise.all([rp, atxPost("/god/invoices", {}).then(function (d) { state.invKV = (d && d.invoices) || {}; })]) /* fresh object = fresh one-entry-per-card claims */.catch(function () { state.invKV = state.invKV || {}; });
+  }
+  function invLink(id, invoiceNo, shareCents, shareTaxCents) { /* God-only: the Worker reads Square itself and stores the numbers */
+    var body = { cardId: id, invoiceNo: String(invoiceNo || "") };
+    if (shareCents != null) { body.shareCents = shareCents; if (shareTaxCents != null) body.shareTaxCents = shareTaxCents; }
+    return atxPost("/god/invoice/link", body).then(function (d) { if (d && d.ok) { state.invKV = state.invKV || {}; if (d.invoice) state.invKV[id] = d.invoice; else delete state.invKV[id]; } return d; });
+  }
+  if (typeof window !== "undefined") window.__pcsGodV7711r2 = { invApply: invApply };
+  if (typeof window !== "undefined") window.__pcsGodV7711 = { dedupe: godDedupeEntries };
 
   function totalsForDriver(driverId) {
     var entries = historyEntries(driverId);
@@ -3746,6 +3883,7 @@
     var calendarP = listCalendarRides().then(function (rows) {
       state.calendar = discOverlay(rows || [], state.discKV, state.discRev); /* r4: last Worker copy at once */
       discLoad().then(function () { try { renderBoardLists(); } catch (e) {} });
+      invLoad().then(function () { try { renderBoardLists(); } catch (e) {} }); /* v77.11 r2 */
       state.calendarError = "";
       state.calendarUpdated = new Date().toISOString();
     }).catch(function (err) {
@@ -4634,7 +4772,7 @@
           (e.canceled || e.status === "canceled" ? '<strong style="color:#ff9b9b">CANCELED</strong> ' + esc(e.cancelFee === "charge" ? "(cancellation fee to charge)" : "(fee waived, no earnings)") + (e.cancelReason ? " \u00b7 " + esc(e.cancelReason) : "") + "<br>" : "") + /* v73 */
           (Number(e.discountCents) > 0 ? '<strong style="color:#8fd0a8">' + (isCashEntry(e) && e.discountType !== "other" ? "Cash discount" : "Discount") + "</strong> " + /* v74b */ esc(({ senior: "Senior 65+ 10%", military: "Military 10%", other: "Other" })[e.discountType] || "Discount") + " \u2212" + esc(fmtCents(e.discountCents)) +
             (e.discountPaidBy ? discPaidByText(e.discountPaidBy) : /* v77.10; older entries keep the rule they were paid under */ e.discountType === "other" ? " (from the driver\u2019s portion; PCS share on the full fare" + (e.discountReason ? "; reason: " + esc(e.discountReason) : "") + (e.discountApprovedBy ? "; approved by " + esc(e.discountApprovedBy) : "") + ")" : isCashEntry(e) ? "" : " (PCS share reduced in proportion)") + "<br>" : "") +
-          (entryNeedsReview(e, state.discRev) ? '<strong style="background:#b91c1c;color:#fff;padding:2px 6px;border-radius:6px">Discount: review before payout</strong> ' + discReviewBtn("ride:" + String(e.code || "")) + presetAuditText(e, state.discPresets) + "<br>" : "") + /* r4 M4: Worker review state; Firebase discountReview ignored */
+          invFlagHtml(e) + (entryNeedsReview(e, state.discRev) ? '<strong style="background:#b91c1c;color:#fff;padding:2px 6px;border-radius:6px">Discount: review before payout</strong> ' + discReviewBtn("ride:" + String(e.code || "")) + presetAuditText(e, state.discPresets) + "<br>" : "") + /* r4 M4: Worker review state; Firebase discountReview ignored */
           "<strong>Ride total</strong> " + esc(fmtCents(e.fareTotal)) + "<br>" +
           "<strong>Commission</strong> " + esc(fmtCents(e.commissionCents)) +
           " (" + esc(String(e.commissionPct || "")) + "%)" +
@@ -4667,10 +4805,11 @@
       (totals.tollFeeTotal ? "<strong>All-time toll road fees (fare)</strong> " + esc(fmtCents(totals.tollFeeTotal)) + "<br>" : "") +
       "<strong>Pay week</strong> Mon–Sun · " + esc(monday) + " → " + esc(addDaysYmd(monday, 6)) +
       (function () { /* v72d: net per driver for the pay week */
-        var wk = payBalance(historyEntries(driverId).filter(function (e) { return weekDays.indexOf(e.day) >= 0; }));
+        var wk = payBalance(historyEntries(driverId).filter(function (e) { return weekDays.indexOf(e.day) >= 0; }), { driverId: driverId, pctFor: commissionPctFor, kvPct: state.ridePctKV || {}, cards: state.calendarRaw || {}, charges: state.payCharges || {}, holds: state.payHolds || {}, kvDisc: state.discKV || {}, discPresets: state.discPresets || {}, waitKv: true });
         return '<br><span class="pay-week-net"><strong>Week owed to driver</strong> ' + esc(fmtCents(wk.owedToDriver)) +
           " · <strong>owed by driver (cash)</strong> " + esc(fmtCents(wk.owedByDriver)) +
           " · <strong>Net</strong> " + esc(payNetText(wk)) + "</span>" +
+          (wk.held ? '<br><strong style="background:#b91c1c;color:#fff;padding:2px 6px;border-radius:6px">' + wk.held + " ride" + (wk.held === 1 ? "" : "s") + " with held money (" + esc(fmtCents(wk.heldCents)) + "): open the rides to approve</strong>" : "") + /* r6 */
           '<br><span class="pay-week-cash-tips"><strong>Cash tips received</strong> ' + esc(fmtCents(wk.cashTips)) + " (driver keeps 100%; not owed to PCS, not fare; record only)</span>" +
           (wk.tolls ? '<br><span class="pay-week-tolls"><strong>Week tolls paid back</strong> ' + esc(fmtCents(wk.tolls)) + " (100% to driver, in the owed-to-driver total)</span>" : "") + /* v76b */
           (wk.tollRoadFees ? '<br><span class="pay-week-tollfees"><strong>Week toll road fees</strong> ' + esc(fmtCents(wk.tollRoadFees)) + " (fare income, in the commission)</span>" : "");
@@ -4823,7 +4962,7 @@
       (wk.tolls ? mrow("Tolls paid back (100% driver, outside commission)", esc(fmtCents(wk.tolls)), "earn-wk-tolls-" + did) : "") + /* v76b */
       (wk.tollFees ? mrow("Toll road fees (fare, in the commission)", esc(fmtCents(wk.tollFees)), "earn-wk-tollfees-" + did) : "") +
       mrow("<strong>Owes PCS</strong> (cash rides: company share)", "<strong>" + esc(fmtCents(wk.owed)) + "</strong>", "earn-wk-owed-" + did) +
-      (function () { var b = payBalance(all.filter(function (e) { return days.indexOf(e.day) >= 0 && !earnIsTest(e); })); /* v74b: Owes PCS netted against the week payout */
+      (function () { var b = payBalance(all.filter(function (e) { return days.indexOf(e.day) >= 0 && !earnIsTest(e); }), { driverId: driverId, pctFor: commissionPctFor, kvPct: state.ridePctKV || {}, cards: state.calendarRaw || {}, charges: state.payCharges || {}, holds: state.payHolds || {}, kvDisc: state.discKV || {}, discPresets: state.discPresets || {}, waitKv: true }); /* v74b: Owes PCS netted against the week payout */
         return mrow("<strong>Week payout (net)</strong>", "<strong>" + esc(payNetText(b)) + "</strong>", "earn-wk-net-" + did); })() +
       (wk.tests ? '<p class="fine" style="margin:4px 0 0">' + wk.tests + " rate comparison / test ride" + (wk.tests === 1 ? "" : "s") + " shown, not counted ($0).</p>" : "") +
       "</div>" +
@@ -4967,7 +5106,7 @@
               "<strong>Ride total</strong> " + esc(fmtCents(totals.rideTotal)) + "<br>" +
               "<strong>Commission total</strong> " + esc(fmtCents(totals.commissionTotal)) +
               (function () { var wd = []; var m0 = mondayOfWeek(chicagoToday()); for (var k = 0; k < 7; k += 1) wd.push(addDaysYmd(m0, k));
-                var wk = payBalance(historyEntries(d.id).filter(function (e) { return wd.indexOf(e.day) >= 0; }));
+                var wk = payBalance(historyEntries(d.id).filter(function (e) { return wd.indexOf(e.day) >= 0; }), { driverId: d.id, pctFor: commissionPctFor, kvPct: state.ridePctKV || {}, cards: state.calendarRaw || {}, charges: state.payCharges || {}, holds: state.payHolds || {}, kvDisc: state.discKV || {}, discPresets: state.discPresets || {}, waitKv: true });
                 return '<br><strong>This week</strong> ' + esc(payNetText(wk)) + (wk.cashRides ? " (" + wk.cashRides + " cash ride" + (wk.cashRides === 1 ? "" : "s") + ", driver owes " + esc(fmtCents(wk.owedByDriver)) + ")" : "") +
                   (wk.cashTips ? '<br><span class="pay-week-cash-tips">Cash tips received ' + esc(fmtCents(wk.cashTips)) + " (driver's own, record only)</span>" : ""); })() + /* v72d */
               " · " + esc(String(totals.count)) + " logged rides" +
@@ -6458,6 +6597,10 @@
       if (!res.ok) throw new Error("save");
       return res.text().then(function (t) { var back = null; try { back = JSON.parse(t); } catch (e) {} if (back && typeof back === "object" && (back.rideCommissionPct == null ? null : Number(back.rideCommissionPct)) !== out.patch.rideCommissionPct) throw new Error("readback"); });
     }).then(function () {
+      return atxPost("/god/ridepct/set", { cardId: eventId, pct: out.patch.rideCommissionPct == null ? "" : out.patch.rideCommissionPct }).then(function (d) { /* r4: the pay-trusted copy */
+        state.ridePctKV = state.ridePctKV || {}; if (d && d.ok && d.pct != null) state.ridePctKV[eventId] = { pct: d.pct, by: "god", at: Date.now() }; else if (d && d.ok) delete state.ridePctKV[eventId];
+      });
+    }).then(function () {
       row.rideCommissionPct = out.patch.rideCommissionPct;
       state.boardNotice = "Saved: " + (row.assignedDriverName || "driver") + " gets " + ridePctFor(row) + "% on " + (row.rider || "this ride") + ".";
       return refresh();
@@ -7554,31 +7697,127 @@
   }
   function isCashEntry(e) {
     if (!e) return false;
+    if (typeof Symbol === "function" && typeof e[Symbol.for("pcsAsCash")] === "boolean") return e[Symbol.for("pcsAsCash")]; /* r6: normalizer's Worker-checked answer */
     if (isCardFailedCollect(e)) return true;
     return String(e.payMethod || "").toLowerCase() === "cash" || String(e.paidVia || "").toLowerCase() === "cash" || e.cashCollected === true;
   }
   function cashDriverOwesCents(e) {
     if (!isCashEntry(e)) return 0;
-    if (e.driverOwesCents != null && isFinite(+e.driverOwesCents)) return Math.max(0, Math.round(+e.driverOwesCents));
-    return Math.max(0, Math.round((Number(e.fareTotal) || 0) - (Number(e.commissionCents) || 0) - tollReimbCents(e))); /* v76b: the driver keeps the tolls he paid */
+    /* r5/r6 (Harry r4 N2, r5 F3): always computed from the fare the driver collected: max(fare total, fare + tax) minus the
+       re-figured driver share minus tolls the driver paid. The entry's driverOwesCents is never trusted. */
+    var o = (typeof payBalance === "function" && payBalance.__orig && payBalance.__orig.get(e)) || e;
+    var tot = Math.max(Math.round(Number(o.fareTotal) || 0), Math.round(Number(o.fareSub) || 0) + Math.round(Number(o.fareTax) || 0));
+    return Math.max(0, tot - Math.round(Number(e.commissionCents) || 0) - tollReimbCents(e)); /* v76b: the driver keeps the tolls he paid */
   }
   /* v76b: metered-ride tolls. tollCents = real tolls paid back 100% to the driver (outside commission); tollRoadFeeCents =
      "Toll road fee" in Matthew's DV-plate cars (fare income, already inside commissionCents). Shown as their own lines. */
   function tollReimbCents(e) { return e && !(e.isTest === true || String(e.paidVia || "") === "test") ? Math.max(0, Math.round(Number(e.tollCents) || 0)) : 0; }
   function tollFeeCents(e) { return e && !(e.isTest === true || String(e.paidVia || "") === "test") ? Math.max(0, Math.round(Number(e.tollRoadFeeCents) || 0)) : 0; }
-  function payBalance(entries) {
-    var out = { owedToDriver: 0, owedByDriver: 0, net: 0, cashRides: 0, cashTips: 0, tolls: 0, tollRoadFees: 0 };
+  /* r5/r6 (Harry r4 N1-N3, r5 F1-F4/M1): EVERY entry is normalized here before any payout number is shown.
+     Inputs are read ONCE per entry object (the first time it is seen) into a WeakMap snapshot; later calls never read the
+     entry's own bookkeeping, so forged commissionAppCents / tollAskedCents / driverOwesAppCents etc. do nothing.
+     % = Worker KV per-ride override (may exceed 80: Barbara Curry 100%) > Worker-verified invoice % (Symbol from invApply) >
+         God per-ride % on the card (max 80) > driver's saved rate (max 80) > 70.
+     Fare base = Worker-verified invoice amount, else capped at the Worker charge record (chg:<code>), else at God's set fare
+         (fixedFare) or $300 (estimates are not used: too tight for real trips); anything over is HELD (red) until God approves it (KV holdok via the Worker).
+     Discount: the pre-discount fare is used only when the discount is a God-set/KV discount or a Worker-recorded driver preset,
+         capped at fare + discount; "Driver covers it" takes the discount off the share. Tips untouched (100% driver).
+     Tolls paid back: up to $50 + any God-approved amount; the rest held.
+     Card vs cash: a ride labelled card/app-paid with no Worker charge record (and no verified invoice) counts as cash owed and is
+         red-flagged until God approves "card". Cash owed = max(fare total, fare + tax) - share - tolls paid.
+     opts = { driverId, pctFor, kvPct, cards, waitKv, charges, holds, kvDisc, discPresets } */
+  function payBalance(entries, opts) {
+    opts = opts || {};
+    var TOLL_CAP = 5000, FARE_CAP = 30000, TAX = 0.0825;
+    var S = function (n) { return Symbol.for(n); }, INV = S("pcsInvPct"), ASCASH = S("pcsAsCash"), HKEY = S("pcsHoldKey");
+    var ORIG = payBalance.__orig || (payBalance.__orig = new WeakMap()), used = {};
+    function payNormalize(e) {
+      if (!e || e.isTest === true || e.testRide === true || String(e.paidVia || "") === "test" || e.testKind) return e;
+      var o = ORIG.get(e); if (!o) { o = Object.assign({}, e); ORIG.set(e, o); }
+      var card = opts.cards && e.scheduleId ? opts.cards[e.scheduleId] : null;
+      var key = String(opts.driverId || "") + "|" + String(o.code || e.code || ""); e[HKEY] = key;
+      var ok = function (kind) { var h = opts.holds && opts.holds[key + "|" + kind]; return h && isFinite(+h.cents) ? Math.max(0, Math.round(+h.cents)) : null; };
+      var kvp = opts.kvPct && e.scheduleId && Object.prototype.hasOwnProperty.call(opts.kvPct, e.scheduleId) ? opts.kvPct[e.scheduleId] : null;
+      var pct = null, src = "";
+      delete e.pctCapped;
+      if (kvp && isFinite(+kvp.pct)) { pct = Math.min(100, Math.max(0, Math.round(+kvp.pct))); src = "kv"; }
+      else if (e[INV] != null) { pct = e[INV]; src = "invoice"; }
+      else {
+        if (card && card.rideCommissionPct != null && card.rideCommissionPctBy === "god" && isFinite(+card.rideCommissionPct)) { pct = Math.round(+card.rideCommissionPct); src = "ride"; }
+        else if (typeof opts.pctFor === "function" && opts.driverId) { pct = Number(opts.pctFor(opts.driverId)); src = "rate"; }
+        if (pct == null || !isFinite(pct)) { pct = typeof DEFAULT_COMMISSION_PCT !== "undefined" ? DEFAULT_COMMISSION_PCT : 70; src = "default"; }
+        if (pct > 80) { e.pctCapped = { asked: pct }; pct = 80; }
+        pct = Math.max(0, pct);
+      }
+      /* charge record: bound to this driver, one entry per charge per payout list (r7) */
+      var holds = {}, chg = opts.charges && o.code ? opts.charges[o.code] : null;
+      if (chg && !chg.driverId) { holds.driver = true; chg = null; delete e.chargeWrongDriver; } /* r8: charge with no confirmed driver -> held until God confirms */
+      else if (chg && !(opts.driverId && chg.driverId === opts.driverId)) { e.chargeWrongDriver = true; chg = null; } else delete e.chargeWrongDriver;
+      if (chg) { if (used[o.code] && used[o.code] !== e) { e.dupSuspect = o.code; holds.dup = true; chg = null; } else used[o.code] = e; }
+      /* discount: the AMOUNT comes only from the Worker (God KV discount or a Worker-recorded driver preset) (r7) */
+      var sub0 = Math.max(0, Math.round(Number(e[INV] != null ? e.fareSub : o.fareSub) || 0)), disc = 0;
+      var kd = opts.kvDisc && e.scheduleId ? opts.kvDisc[e.scheduleId] : null, pr = opts.discPresets && o.code ? opts.discPresets[o.code] : null, dd = kd && kd.d && typeof kd.d === "object" ? kd.d : null;
+      if (dd) {
+        var dp = dd.type === "military" || dd.type === "senior" ? 10 : (Number(dd.pct) > 0 && Number(dd.pct) <= 50 ? Number(dd.pct) : 0);
+        if (Number(dd.cents) > 0) disc = Math.round(Number(dd.cents)); else if (dp) disc = Math.round(sub0 / (1 - dp / 100)) - sub0;
+      } else if (pr && (pr.preset === "military" || pr.preset === "senior")) disc = Math.round(sub0 / 0.9) - sub0;
+      if (Math.round(Number(o.discountCents) || 0) > 0 && !disc) e.discountUnconfirmed = true; else delete e.discountUnconfirmed;
+      var driverCovers = !!(dd && dd.driverCovers === true);
+      /* fare cap applies to the pre-discount fare (r7) */
+      var grossAsk = sub0 + disc, gross = grossAsk, fareSrc = e[INV] != null ? "invoice" : "logged";
+      if (e[INV] == null) {
+        var cap = FARE_CAP;
+        if (chg) { cap = Math.round((Number(chg.fareCents) || 0) / (1 + TAX)) + 1 + disc; fareSrc = "charge"; }
+        else if (card && card.fixedFare === true && isFinite(+card.fareBeforeTax) && +card.fareBeforeTax > 0) { cap = Math.round(+card.fareBeforeTax * 100) + disc; fareSrc = "god_fare"; }
+        if (grossAsk > cap) { var fo = ok("fare"), extra = Math.min(grossAsk - cap, fo || 0); gross = cap + extra; if (gross < grossAsk) holds.fare = grossAsk - gross; }
+      }
+      var sub = Math.max(0, gross - disc);
+      e.fareSub = sub;
+      /* tolls */
+      var tollAsk = Math.max(0, Math.round(Number(o.tollCents) || 0)), tCap = TOLL_CAP + (ok("toll") || 0);
+      e.tollCents = Math.min(tollAsk, tCap); if (tollAsk > tCap) holds.toll = tollAsk - tCap;
+      var base = Math.max(0, gross - Math.min(tollAsk, gross));
+      var com = Math.round(base * pct / 100);
+      if (disc > 0 && driverCovers) com = Math.max(0, com - disc); /* "Driver covers it" from the Worker's discount record only */
+      var appCom = Math.round(Number(o.commissionCents) || 0);
+      if (Math.abs(appCom - com) > 1) e.commissionAdjusted = { app: appCom, now: com }; else delete e.commissionAdjusted;
+      e.commissionCents = com; e.commissionPct = pct; e.pctSource = src; e.fareSource = fareSrc === "invoice" ? "square_invoice" : fareSrc;
+      if (fareSrc === "logged" || fareSrc === "estimate") e.fareUnverified = true; else delete e.fareUnverified;
+      /* PCS-collected only with proof (r7, fail closed): a Worker charge record for this driver, a Worker-verified invoice, or
+         God's "pcs_collected" approval (Zelle / check / card / other paid to PCS; legacy "card" approval counts). Cash rides stay
+         cash; everything else (blank, unknown words, "square_invoice" without the Worker record) = cash owed + red hold. */
+      var asCash = isCashEntry(o);
+      var proof = !!chg || e[INV] != null || ok("pcs_collected") != null || ok("card") != null;
+      if (!asCash && !proof) { asCash = true; holds.collect = true; }
+      if (holds.dup) asCash = true;
+      e[ASCASH] = asCash;
+      if (asCash) {
+        var tot = Math.max(Math.round(Number(o.fareTotal) || 0), Math.round(Number(o.fareSub) || 0) + Math.round(Number(o.fareTax) || 0));
+        var owe = Math.max(0, tot - com - e.tollCents);
+        if (o.driverOwesCents != null && Math.abs(Math.round(Number(o.driverOwesCents) || 0) - owe) > 1) e.owedAdjusted = { app: Math.round(Number(o.driverOwesCents) || 0), now: owe }; else delete e.owedAdjusted;
+        e.driverOwesCents = owe;
+      }
+      if (holds.fare || holds.toll || holds.collect || holds.dup || holds.driver) e.held = holds; else delete e.held;
+      if (holds.toll) e.tollHeld = holds.toll; else delete e.tollHeld;
+      return e;
+    }
+    var out = { owedToDriver: 0, owedByDriver: 0, net: 0, cashRides: 0, cashTips: 0, tolls: 0, tollRoadFees: 0, tollsHeld: 0, heldCents: 0, held: 0, flagged: 0, loading: false };
+    if (opts.waitKv && typeof state !== "undefined" && (!state.ridePctLoaded || !state.payRecLoaded)) out.loading = true;
     (entries || []).forEach(function (e) {
       if (e && (e.isTest === true || e.testRide === true || String(e.paidVia || "") === "test" || e.testKind)) return; /* v76d: test rides count for nothing (same as isTestRide) */
+      payNormalize(e);
       /* v72s: cash tips are the driver's own money (100% kept, not part of the 30% owed, not fare): record only */
       if (isCashEntry(e)) { out.owedByDriver += cashDriverOwesCents(e); out.cashRides += 1; out.cashTips += Number(e.tipCents) || 0; }
       else out.owedToDriver += (Number(e.commissionCents) || 0) + (Number(e.tipCents) || 0) + tollReimbCents(e); /* v76b: + tolls paid back */
-      out.tolls += tollReimbCents(e); out.tollRoadFees += tollFeeCents(e);
+      out.tolls += tollReimbCents(e); out.tollRoadFees += tollFeeCents(e); out.tollsHeld += Number(e.tollHeld) || 0;
+      if (e.held) { out.held += 1; out.heldCents += (e.held.fare || 0) + (e.held.toll || 0); }
+      if (e.pctCapped || e.commissionAdjusted || e.owedAdjusted || e.held || e.invoiceMismatch || e.dupSuspect || e.invoiceWrongDriver || e.discountUnconfirmed) out.flagged += 1;
     });
     out.net = out.owedToDriver - out.owedByDriver;
     return out;
   }
   function payNetText(b) {
+    if (b && b.loading) return "Loading ride % and payment records… (payout shows when they are loaded)"; /* r5/r6 */
     return b.net >= 0 ? "PCS owes driver " + fmtCents(b.net) : "Driver owes PCS " + fmtCents(-b.net);
   }
 
