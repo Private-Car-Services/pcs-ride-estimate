@@ -9627,7 +9627,7 @@
       "#rfs-bar .rfs-close{flex:1 1 0;min-height:62px;margin:0;font-size:20px;font-weight:900;border-radius:14px;background:#d1fae5;color:#0b3d23;border:3px solid #0b3d23;cursor:pointer}" +
       "#rfs-bar .rfs-keep{flex:1 1 0;min-height:62px;margin:0;font-size:17px;font-weight:800;border-radius:14px;background:#fff;color:#0b3d23;border:3px solid #0b3d23;cursor:pointer}" +
       ".rfs-ask{margin:0 0 6px;font-size:18px;font-weight:800;color:#0b3d23;text-align:center}" +
-      "body.pcs-rfs-body #pcs-sos-btn{z-index:2147482100 !important;bottom:auto !important;top:150px;top:calc(env(safe-area-inset-top,0px) + 150px)}";
+      "body.pcs-rfs-body #pcs-sos-btn{z-index:2147482100 !important;bottom:auto !important;right:12px !important;top:250px;top:var(--pcs-sos-top,calc(env(safe-area-inset-top,0px) + 250px))}";
     document.head.appendChild(st);
   }
   /* in-ride full screen (metered ride / scheduled ride after pickup) */
@@ -13606,6 +13606,7 @@
     var eb = document.getElementById("meter-eta-box"), ebh = meterEtaBoxHtml(M); if (eb && eb.outerHTML !== ebh) eb.outerHTML = ebh; /* v77.8 */
     var chipEl = document.getElementById("meter-eta-chip");
     if (chipEl) chipEl.classList.toggle("has-dest", !!M.dest);
+    meterChipSync(); /* v77.8a */
     set("meter-dest-eta", meterEtaLine(M));
     set("meter-bar-fare", money(f.sub));
     set("meter-free", meterFreeLine(M));
@@ -14965,7 +14966,7 @@
       '<div class="meter-map-col"><div class="map-stage board-map meter-map" id="meter-map-stage">' + /* v76b: id for Full screen */
       '<div id="live-map" role="img" aria-label="Map: you during the metered ride"></div>' +
       '<div class="meter-topstack" id="meter-topstack">' + meterTurnHtml() + /* v72t: next turn right on the map; v72u: ETA on its own line below it */
-      '<button type="button" class="meter-eta-chip' + (state.meter && state.meter.dest ? " has-dest" : "") + '" id="meter-eta-chip">' + esc(meterChipText(state.meter)) + "</button>" + meterEtaBoxHtml(state.meter) + "</div>" + /* v71; v77.8 big ETA box */
+      '<button type="button" class="meter-eta-chip' + (state.meter && state.meter.dest ? " has-dest" : "") + '" id="meter-eta-chip"' + (meterEtaBoxHtml(state.meter).indexOf("display:none") === -1 ? ' style="display:none"' : "") + ">" + esc(meterChipText(state.meter)) + "</button>" + meterEtaBoxHtml(state.meter) + "</div>" + /* v71; v77.8 big ETA box */
       '<p class="map-caption">You · metered ride</p>' +
       "</div>" + meterEstLineHtml() + "</div></div>" + /* v72u: estimate under the map during the ride too */
       (isFinite(state.hereLat) ? "" : '<p class="fine">Allow location so the map can show where you are.</p>') +
@@ -15054,6 +15055,26 @@
   function meterClockText(ms) {
     try { return new Date(ms).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }); } catch (e) { return ""; }
   }
+  /* v77.8a (Matthew iPad 10/20): ONE ETA. The old gold chip hides whenever the big ETA box is showing, and the ALERT SOS
+     button is placed below the ETA stack (never on top of the box, banner, speed box, fare panel or map buttons). */
+  function meterChipSync() {
+    if (typeof document === "undefined") return;
+    var chip = document.getElementById("meter-eta-chip"), box = document.getElementById("meter-eta-box");
+    var boxOn = !!(box && box.style.display !== "none");
+    if (chip) chip.style.display = boxOn ? "none" : "";
+    sosPlace();
+  }
+  function sosPlace() {
+    if (typeof document === "undefined" || !document.body) return;
+    var b = document.body, top = 0;
+    ["meter-topstack", "sched-fs-top"].forEach(function (id) {
+      var el = document.getElementById(id); if (!el || !el.getBoundingClientRect) return;
+      var r = el.getBoundingClientRect(); if (r.height > 0 && r.bottom > top) top = r.bottom;
+    });
+    var v = top > 0 ? Math.round(top + 14) + "px" : "";
+    if (b.style.getPropertyValue("--pcs-sos-top") !== v) { if (v) b.style.setProperty("--pcs-sos-top", v); else b.style.removeProperty("--pcs-sos-top"); }
+  }
+  if (typeof window !== "undefined" && window.addEventListener) { window.addEventListener("resize", function () { try { sosPlace(); } catch (e) {} }); window.__pcsSosPlace = function () { meterChipSync(); }; }
   function meterEtaBoxHtml(M) { /* v77.8: drop-off ETA box (same look as the pickup one) */
     navEtaStyle(); var e = null; try { e = meterEtaInfo(M); } catch (x) {}
     return e && !e.arrived && !e.pending ? navEtaBoxHtml("meter-eta-box", e.min, e.miles, "dropoff") : navEtaBoxHtml("meter-eta-box", null, null, "dropoff");
@@ -16085,6 +16106,7 @@
 
   function render() {
     setTimeout(function () { try { homeMapFit(); } catch (e) {} }, 0); /* v72t */
+    setTimeout(function () { try { meterChipSync(); } catch (e) {} }, 0); /* v77.8a one ETA + SOS below it */
     try { ensureHomeStyle(); } catch (e) {}
     meterEnsureLoaded(); /* v70 */
     closeDriverOverlaysForGate(); /* v71 login fix */
