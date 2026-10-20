@@ -1926,6 +1926,7 @@
       return res.ok ? res.json() : null;
     }).then(function (data) {
       rideHistoryServer = data && typeof data === "object" ? data : {};
+      rideLogCleanOnce(); /* v77.11 */
       refreshMilesTodayDom();
     }).catch(function () {});
   }
@@ -1939,6 +1940,8 @@
       });
     }
     readRideLog().forEach(function (e) { if (e && e.code && e.day) byCode[e.code] = String(e.day); });
+    var gone7711 = supersededCodes(readRideLog().concat(Object.keys(rideHistoryServer || {}).map(function (c) { return Object.assign({ code: c }, rideHistoryServer[c]); })));
+    Object.keys(gone7711).forEach(function (c) { delete byCode[c]; }); /* v77.11 */
     var today = chicagoToday();
     var monday = mondayOfWeek(today);
     var out = { today: 0, week: 0, all: 0 };
@@ -9148,6 +9151,27 @@
     return { fareSub: sub, fareTax: tax, fareTotal: sub + tax, commissionCents: com };
   }
   if (typeof window !== "undefined") window.__pcsPrepaid = { of: prepaidOf, badge: prepaidBadgeText, week: prepaidWeekNumbers }; /* test hook */
+  /* v77.11 (Matthew 10/20, audit): a ride with a saved/prepaid Square invoice NEVER shows a meter dollar amount. Miles/time are
+     still tracked for records. Returns the text to show where the meter price would go (pure, tested). */
+  function invoiceFareText(pp) {
+    if (!pp) return "";
+    var n = pp.invoiceNo ? "Invoice #" + String(pp.invoiceNo).replace(/^#/, "") : "Square invoice";
+    return pp.amountCents != null ? n + " \u00b7 " + money(pp.amountCents) : n;
+  }
+  function meterMoneyShown(M, cents) { return M && M.prepaid ? invoiceFareText(M.prepaid) : money(cents); }
+  /* v77.11: the invoice before-tax amount is the fare of record; the meter stays as a record only (pure, tested) */
+  function invoiceWins(entry, pp, pct) {
+    if (!entry || !pp || pp.amountCents == null) return entry;
+    var sub = pp.amountCents, tax = pp.taxCents || 0, out = Object.assign({}, entry);
+    if (out.meterFareSub == null && entry.fareSub != null && entry.fareSub !== sub) { out.meterFareSub = entry.fareSub; out.meterFareTax = entry.fareTax; out.meterFareCents = entry.fareTotal; }
+    out.fareSub = sub; out.fareGrossSub = sub; out.fareTax = tax; out.fareTotal = sub + tax;
+    out.commissionPct = Number(pct) || 0; out.commissionCents = Math.round(sub * (Number(pct) || 0) / 100);
+    out.prepaidInvoiceNo = pp.invoiceNo || ""; out.fareSource = "square_invoice";
+    out.invoiceVerified = pp.verified === true; /* v77.11 r2: God re-checks against the Worker's KV before payout */
+    if (pp.mismatch) out.invoiceMismatchFb = pp.mismatch;
+    return out;
+  }
+  if (typeof window !== "undefined") window.__pcsV7711 = { invoiceFareText: invoiceFareText, invoiceWins: invoiceWins };
 
   function listScheduledRides() {
     if (!syncOn()) return Promise.resolve([]);
@@ -9197,6 +9221,7 @@
       state.scheduledRides = rows || [];
       state.scheduledError = "";
       try { var meD = driverPresenceId(); verDiscFetch((rows || []).filter(function (r) { return r && r.assignedDriverId === meD && r.status !== "completed"; }).map(function (r) { return r.id; })); } catch (e) {} /* r3 D1 */
+      try { var meI = driverPresenceId(); verInvFetch((rows || []).filter(function (r) { return r && r.assignedDriverId === meI && r.prepaid === true && r.status !== "completed"; }).map(function (r) { return r.id; })); } catch (e) {} /* v77.11 r2 */
       try { /* v73: PCS (God mode) canceled a scheduled ride assigned to me -> tell the driver once */
         var me = driverPresenceId();
         (rows || []).forEach(function (r) {
@@ -9279,6 +9304,25 @@
     return qWorker("/driver/discount", { token: tk, rideIds: ids }).then(function (d) {
       var got = (d && d.discounts) || {}; ids.forEach(function (id) { verDisc[id] = got[id] && typeof got[id] === "object" ? got[id] : null; }); return verDisc;
     }, function () { return verDisc; });
+  }
+  /* v77.11 r2 (Harry M3): the invoice amount used for pay comes ONLY from the Worker (KV, read from Square by the Worker).
+     Firebase prepaidAmountCents is display-only; a different Firebase amount is flagged, never used. */
+  var verInv = {};
+  function verInvFetch(ids) {
+    ids = (ids || []).filter(Boolean).slice(0, 30); var tk = qToken();
+    if (!ids.length || !tk) return Promise.resolve(verInv);
+    return qWorker("/driver/invoice", { token: tk, rideIds: ids }).then(function (d) {
+      var got = (d && d.invoices) || {}; ids.forEach(function (id) { verInv[id] = got[id] && typeof got[id] === "object" ? got[id] : null; }); return verInv;
+    }, function () { return verInv; });
+  }
+  function verifiedPrepaid(pp, ver) { /* pure (tested) */
+    if (!pp) return null;
+    var out = Object.assign({}, pp);
+    if (ver && ver.amountCents != null) {
+      if (pp.amountCents != null && (pp.amountCents !== ver.amountCents || (pp.taxCents || 0) !== (ver.taxCents || 0))) out.mismatch = { fbAmountCents: pp.amountCents, fbTaxCents: pp.taxCents };
+      out.amountCents = Math.round(+ver.amountCents); out.taxCents = Math.round(+ver.taxCents || 0); out.invoiceNo = String(ver.invoiceNo || pp.invoiceNo || ""); out.verified = true;
+    } else out.verified = false;
+    return out;
   }
   function schedGodDisc(r, ver) { /* pure (tested): ver = the Worker-verified discount for r (never r.meterDiscount) */
     var d = ver; if (!d || typeof d !== "object" || d.by !== "god") return null;
@@ -9728,7 +9772,7 @@
   }
   function rfsBarHtml(M) {
     var f = meterFare(M), t = meterTollInfo(M), pp = M.prepaid;
-    var html = '<div class="rfs-row"><div class="rfs-fare" id="rfs-fare" aria-label="Meter fare">' + money(f.sub) + "</div>" +
+    var html = '<div class="rfs-row"><div class="rfs-fare" id="rfs-fare" aria-label="Meter fare">' + meterMoneyShown(M, f.sub) + "</div>" +
       '<div class="rfs-stats"><span><b id="rfs-miles">' + f.miles.toFixed(2) + "</b> mi</span><span><b id=\"rfs-time\">" + meterClock(Date.now() - M.startedAt) + "</b></span>" +
       '<span class="rfs-tier" id="rfs-tier">' + esc(M.tierLabel || "Meter") + (M.taxRate ? " \u00b7 tax at the end" : "") + "</span></div></div>";
     if (pp) html += '<p class="rfs-paid" id="rfs-paid">\u2713 ' + esc(prepaidBadgeText(pp)) + " \u00b7 balance $0.00</p>";
@@ -9738,7 +9782,7 @@
           '<button type="button" class="rfs-toll-undo" id="rfs-toll-undo" data-rfs="tollundo">Undo</button>' : "") + "</div>";
     }
     if (state.meterConfirmEnd) {
-      html += '<p class="rfs-ask" id="rfs-ask">End this ride? Meter ' + money(f.sub) + ".</p>" +
+      html += '<p class="rfs-ask" id="rfs-ask">End this ride? ' + (M.prepaid ? invoiceFareText(M.prepaid) : "Meter " + money(f.sub)) + ".</p>" +
         '<div class="rfs-actions"><button type="button" class="rfs-end" id="rfs-end-yes" data-rfs="endyes">Yes, end ride</button>' +
         '<button type="button" class="rfs-keep" id="rfs-end-keep" data-rfs="endkeep">Keep the meter running</button></div>';
     } else {
@@ -9764,7 +9808,7 @@
     var bar = document.getElementById("rfs-bar"), M = state.meter;
     if (!bar || !M || M.status !== "running") return;
     var f = meterFare(M), set = function (id, v) { var el = document.getElementById(id); if (el && el.textContent !== v) el.textContent = v; };
-    set("rfs-fare", money(f.sub)); set("rfs-miles", f.miles.toFixed(2)); set("rfs-time", meterClock(Date.now() - M.startedAt));
+    set("rfs-fare", meterMoneyShown(M, f.sub)); set("rfs-miles", f.miles.toFixed(2)); set("rfs-time", meterClock(Date.now() - M.startedAt));
     var h = bar.offsetHeight, stage = rfsStage();
     if (stage && h && stage.__rfsBarH !== h) { stage.__rfsBarH = h; stage.style.setProperty("--rfs-bar", h + "px"); var mp = document.getElementById("fs-mph"); if (mp) mp.style.bottom = (h + 12) + "px"; }
   }
@@ -10916,6 +10960,7 @@
     if (row.manual && row.commissionDollars != null && isFinite(Number(row.commissionDollars))) commissionCents = Math.round(Number(row.commissionDollars) * 100); /* v72d: God override */
     var cashV72d = String(row.payMethod || "") === "cash";
     var ppMark = prepaidOf(row); /* v75v: prepaid ride marked complete: credit from the invoice amount */
+    if (ppMark) ppMark = verifiedPrepaid(ppMark, verInv[eventId]); /* v77.11 r2: Worker-verified amount wins */
     if (ppMark && ppMark.amountCents != null && !(row.manual && row.commissionDollars != null)) { var wkm = prepaidWeekNumbers(ppMark, null, pct); fareCentsV72d = wkm.fareSub; taxCentsV72d = wkm.fareTax; commissionCents = wkm.commissionCents; }
     if (ppMark) cashV72d = false;
     var day = chicagoToday();
@@ -11300,13 +11345,57 @@
   /* v72u (Matthew): Earnings & history were read from THIS phone's localStorage only, so another device (or a cleared /
      Home Screen copy) showed 0 rides / $0. Now: the driver's server ride history (rides/DRVRHSTY/{driver}) merged with
      the local log by ride code, and the day totals are computed from those rides. */
-  function ridesForDay(day) {
+  /* v77.11: a server entry fixed from a Square invoice is the record of truth; it beats this phone's copy (pure, tested) */
+  function serverWins(e) { return !!e && (e.fareSource === "square_invoice" || e.paidVia === "square_invoice" || !!e.invoiceAuto || !!e.prepaidInvoiceNo || !!e.repairedAt); }
+  /* v77.11: a calendar card's own entry is stale when a metered ride from the same card already carries the pay (pure, tested) */
+  function supersededCodes(list) { /* v77.11 r2 (Harry M1/M2): hide only $0/$0 or exact twins whose metered entry really exists */
+    var metered = {}, codes = {}, out = {};
+    list.forEach(function (e) { if (!e) return; codes[e.code] = e; if (e.rideType === "metered" && e.scheduleId) metered[e.scheduleId] = e; });
+    var zero = function (e) { return !(Number(e.fareSub) || 0) && !(Number(e.fareTotal) || 0) && !(Number(e.tipCents) || 0); };
+    var same = function (x, y) { return (Number(x.fareSub) || 0) === (Number(y.fareSub) || 0) && (Number(x.fareTax) || 0) === (Number(y.fareTax) || 0) && (Number(x.tipCents) || 0) === (Number(y.tipCents) || 0); };
+    list.forEach(function (e) {
+      if (!e || e.rideType === "metered") return;
+      var twin = (e.scheduleId && metered[e.scheduleId] && metered[e.scheduleId].code !== e.code) ? metered[e.scheduleId] : null;
+      if (!twin && e.meterCode && e.meterCode !== e.code && codes[e.meterCode]) twin = codes[e.meterCode];
+      if (twin && (zero(e) || same(e, twin))) out[e.code] = twin.code;
+    });
+    return out;
+  }
+  function ridesMerge(serverMap, localList, day, today) {
     var byCode = {}, out = [];
-    if (rideHistoryServer) Object.keys(rideHistoryServer).forEach(function (c) { var e = rideHistoryServer[c]; if (e && typeof e === "object" && e.day === day) byCode[e.code || c] = Object.assign({ code: c }, e); });
-    readRideLog().forEach(function (e) { if (e && e.day === day) byCode[e.code || ("L" + out.length)] = Object.assign({}, byCode[e.code] || {}, e); });
-    Object.keys(byCode).forEach(function (k) { out.push(byCode[k]); });
+    Object.keys(serverMap || {}).forEach(function (c) { var e = serverMap[c]; if (e && typeof e === "object" && e.day === day) byCode[e.code || c] = Object.assign({ code: c }, e); });
+    (localList || []).forEach(function (e, i) {
+      if (!e || e.day !== day) return;
+      var k = e.code || ("L" + i), sv = byCode[k];
+      byCode[k] = sv && serverWins(sv) ? sv : Object.assign({}, sv || {}, e);
+    });
+    var all = Object.keys(byCode).map(function (k) { return byCode[k]; });
+    var gone = supersededCodes(all);
+    all.forEach(function (e) {
+      if (gone[e.code]) return;
+      if (today && String(e.day) > today) return; /* v77.11: a future ride is never in earnings */
+      out.push(e);
+    });
     return out.sort(function (a, b) { return (Number(b.completedAt) || 0) - (Number(a.completedAt) || 0); });
   }
+  function ridesForDay(day) {
+    return ridesMerge(rideHistoryServer, readRideLog(), day, chicagoToday());
+  }
+  /* v77.11: one-time clean-up of this phone's log: drop superseded $0 card rows, take the server's invoice numbers */
+  function rideLogCleanOnce() {
+    try {
+      var key = "pcs-ridelog-clean-7711-" + driverPresenceId();
+      if (!rideHistoryServer || localStorage.getItem(key)) return;
+      var list = readRideLog(), merged = list.concat(Object.keys(rideHistoryServer).map(function (c) { return Object.assign({ code: c }, rideHistoryServer[c]); }));
+      var gone = supersededCodes(merged);
+      var next = list.filter(function (e) { return !(e && gone[e.code]); }).map(function (e) {
+        var sv = e && rideHistoryServer[e.code]; return sv && serverWins(sv) ? Object.assign({ code: e.code }, sv) : e;
+      });
+      writeRideLog(next);
+      localStorage.setItem(key, String(Date.now()));
+    } catch (e) {}
+  }
+  if (typeof window !== "undefined") window.__pcsV7711Rides = { merge: ridesMerge, superseded: supersededCodes, serverWins: serverWins };
   function appIsTestRide(e) { return !!e && (e.isTest === true || e.testRide === true || String(e.paidVia || "") === "test" || !!e.testKind); } /* v76d */
   function hubDayStats(day) {
     var local = readDayStats(day), rides = ridesForDay(day).filter(function (e) { return !appIsTestRide(e); }); /* v76d: test rides count for nothing */
@@ -13681,7 +13770,7 @@
     var f = meterFare(M);
     var set = function (id, txt) { var el = document.getElementById(id); if (el && el.textContent !== txt) el.textContent = txt; };
     try { meterEstDomRefresh(); } catch (e) {} /* v72x: never frozen (v72u skipped it forever once "About this estimate" was opened) */
-    set("meter-fare", money(f.sub));
+    set("meter-fare", meterMoneyShown(M, f.sub));
     set("meter-miles", f.miles.toFixed(2));
     set("meter-time", meterClock(Date.now() - M.startedAt));
     set("meter-wait", String(f.waitMin));
@@ -13697,7 +13786,7 @@
     if (chipEl) chipEl.classList.toggle("has-dest", !!M.dest);
     meterChipSync(); /* v77.8a */
     set("meter-dest-eta", meterEtaLine(M));
-    set("meter-bar-fare", money(f.sub));
+    set("meter-bar-fare", meterMoneyShown(M, f.sub));
     set("meter-free", meterFreeLine(M));
   }
   /* free waiting at the start: counts down until the car first moves (the meter's own rule decides the charge) */
@@ -14005,7 +14094,7 @@
     if (sr) { M.schedId = sr.id; M.setFareCents = Math.round(Number(sr.fareBeforeTax) * 100); M.schedRider = String(sr.rider || ""); }
     else if (state.schedStartId) { var srx = schedFind(state.schedStartId); if (srx) { M.schedId = srx.id; M.schedRider = String(srx.rider || ""); M.pickupAddress = String(srx.pickup || "").slice(0, 160); } } /* v75r: metered scheduled ride */
     state.schedStartId = "";
-    if (M.schedId) { var ppr = prepaidOf(schedFind(M.schedId)); if (ppr) M.prepaid = ppr; } /* v75v */
+    if (M.schedId) { var ppr = prepaidOf(schedFind(M.schedId)); if (ppr) M.prepaid = verifiedPrepaid(ppr, verInv[M.schedId]); } /* v75v; v77.11 r2 Worker amount */
     M.startFlags = rideSessionFlags(null, now, Number(state.gpsAt) || 0); /* v77.10: stale GPS at Start */
     if (M.schedId) { var gdz = schedGodDisc(schedFind(M.schedId), verDiscOf(M.schedId)); if (gdz) { M.discount = gdz; if (gdz.type === "military" || gdz.type === "senior") idVerifyPopup(gdz.type); }
       else { var sidV = M.schedId; verDiscFetch([sidV]).then(function () { var g2 = schedGodDisc(schedFind(sidV), verDiscOf(sidV)), Mn = state.meter; /* r3: asked the Worker at Start */
@@ -14059,6 +14148,7 @@
       discountApprovedBy: M.discount && M.discount.type === "other" && M.discount.status === "approved" ? String(M.discount.approvedBy || "Matthew") : null
     };
     void base;
+    if (M.prepaid) entry = invoiceWins(entry, M.prepaid, pct); /* v77.11: invoice amount = fare of record */
     var prev = null; /* v73: re-logging (fare edited before payment) replaces the old numbers instead of counting the ride twice */
     var list = readRideLog().filter(function (e) { if (e && e.code === M.code) prev = e; return !e || e.code !== M.code; });
     list.unshift(entry);
@@ -14172,7 +14262,7 @@
       (state.scheduledRides || []).forEach(function (r) { if (r && r.id === M.schedId) r.status = "completed"; });
     }
     meterIndexPatch(M, "ended", { paymentStatus: "unpaid" });
-    if (M.schedId) { var ppEnd = prepaidOf(schedFind(M.schedId)); if (ppEnd) M.prepaid = ppEnd; } /* v76d: marked prepaid after the meter started -> still credited from the invoice */
+    if (M.schedId) { var ppEnd = prepaidOf(schedFind(M.schedId)); if (ppEnd) M.prepaid = verifiedPrepaid(ppEnd, verInv[M.schedId]); } /* v76d: marked prepaid after the meter started -> still credited from the invoice */
     meterLogPayWeek(M);
     if (M.prepaid) meterFinishPrepaid(M, now); /* v75v: paid on a Square invoice, balance $0 */
     if (M.ridePct == null) { var pctUsedEnd = meterPct(M); rateRecheckAfterEnd(M.code, pctUsedEnd, function (p) { /* v76d: re-read the driver's % */
@@ -14762,6 +14852,7 @@
     });
   }
   function meterBreakdownHtml(M) {
+    if (M && M.prepaid) return '<div class="money-row" id="meter-invoice-row"><span>Fare</span><span>' + esc(invoiceFareText(M.prepaid)) + "</span></div>"; /* v77.11: never a meter price */
     var f = M.fare || meterFare(M);
     if (f.setFare) return ( /* v73: fare set before the ride; meter reading shown for testing only */
       '<div class="card" id="meter-breakdown">' +
@@ -14888,7 +14979,7 @@
     return (
       '<div class="card" id="meter-other-card">' +
       '<p class="tag">Paid another way</p>' +
-      '<p class="fine" id="meter-other-fare">Fare: <strong>' + esc(money(M.fare.total)) + "</strong></p>" +
+      '<p class="fine" id="meter-other-fare">Fare: <strong>' + esc(meterMoneyShown(M, M.fare.total)) + "</strong></p>" +
       '<div class="meter-methods" role="group" aria-label="How the rider paid">' +
       methods.map(function (m) {
         return '<button class="btn secondary meter-method" type="button" data-method="' + m[0] + '" aria-pressed="' + (state.meterOtherMethod === m[0] ? "true" : "false") + '">' + m[1] + "</button>";
@@ -14958,7 +15049,7 @@
         prepaidBadgeHtml(M.prepaid, "meter-paid-prepaid") +
         '<p class="meter-paid" id="meter-paid-amount">Paid by invoice</p>' +
         '<p class="meter-sub" id="meter-paid-detail">Balance due $0.00' + (P.invoiceAmountCents != null ? " \u00b7 your week is credited from " + money(P.invoiceAmountCents) : "") + "</p>" +
-        '<p class="fine">Meter reading ' + money(M.fare.total) + " (kept for reference). A tip from the rider is welcome and stays yours.</p>" +
+        '<p class="fine">Miles and time were kept for the record. A tip from the rider is welcome and stays yours.</p>' +
         '<button class="btn meter-big" type="button" id="meter-done">Done</button>' +
         "</section>");
       return (
@@ -14989,7 +15080,7 @@
       meterDiscountHtml(M) + /* v73 */
       meterTollHtml(M) + /* v76b: tolls still editable until the pay link opens */
       (state.meterOtherOpen /* v72s: one screen, no scrolling: the breakdown folds up while marking paid */
-        ? '<details class="card meter-bd-box" id="meter-breakdown-box"><summary>Total <strong id="meter-total-sum">' + money(f.total) + "</strong> \u00b7 breakdown</summary>" + meterBreakdownHtml(M) + "</details>"
+        ? '<details class="card meter-bd-box" id="meter-breakdown-box"><summary>Total <strong id="meter-total-sum">' + meterMoneyShown(M, f.total) + "</strong> \u00b7 breakdown</summary>" + meterBreakdownHtml(M) + "</details>"
         : meterBreakdownHtml(M)) + busy + err +
       (M.riderCard && !linkOpen
         ? '<div class="card" id="meter-rider-pay" style="border:2px solid #8fd0a8"><p class="tag" style="color:#8fd0a8">Rider saved a card</p>' +
@@ -15038,7 +15129,7 @@
       (rateOvLocked(M) ? rateOvBadgeHtml("meter-contract-badge") : '<p class="meter-rates" id="meter-profile">' + esc(M.tierLabel) + " · starts " + money(M.baseCents) + (Number(M.includedMiles) > 0 ? " incl. " + (Number(M.includedMiles) === 1 ? "1st mile" : esc(String(M.includedMiles)) + " mi") : "") +
         " · " + money(M.perMileCents) + "/mi after · " + money(M.waitCentsPerMin) + "/min under " + esc(String(M.slowMph)) + " mph</p>") +
       prepaidBadgeHtml(M.prepaid, "meter-prepaid-badge") + /* v75v */
-      '<p class="meter-fare" id="meter-fare" aria-live="off">' + money(f.sub) + "</p>" +
+      '<p class="meter-fare" id="meter-fare" aria-live="off">' + meterMoneyShown(M, f.sub) + "</p>" +
       '<p class="meter-sub">Meter' + (M.minCents > M.baseCents ? " · " + money(M.minCents) + " minimum" : "") + (M.taxRate ? " · tax added at the end" : "") + "</p>" +
       '<div class="meter-grid"><div><b id="meter-miles">' + f.miles.toFixed(2) + "</b><span>Miles</span></div>" +
       '<div><b id="meter-time">' + meterClock(Date.now() - M.startedAt) + "</b><span>Time</span></div>" +
@@ -15052,7 +15143,7 @@
       meterTollHtml(M) + /* v76b: + Toll $1.75 */
       (M.schedId ? folDriverBtnHtml("c_" + M.schedId, (schedFind(M.schedId) || {}).riderPhone) : "") + /* v76b: tracking link during the ride */
       (state.meterConfirmEnd
-        ? '<div id="meter-confirm-end"><p class="lede" style="margin:6px 0">End this ride? Meter ' + money(f.sub) + ".</p>" +
+        ? '<div id="meter-confirm-end"><p class="lede" style="margin:6px 0">End this ride? ' + (M.prepaid ? invoiceFareText(M.prepaid) : "Meter " + money(f.sub)) + ".</p>" +
           '<button class="btn meter-big meter-end" type="button" id="meter-end-yes">Yes, end ride</button>' +
           '<button class="btn ghost" type="button" id="meter-end-no">Keep the meter running</button></div>'
         : '<div class="meter-actions' + (meterQrShowing() ? " meter-actions-qr" : "") + '">' + (meterQrShowing() ? "" : '<button class="btn ghost meter-showrider" type="button" id="meter-show-rider">Show rider meter</button>') +
@@ -15079,8 +15170,8 @@
     ensureMeterStyle();
     var f = M.fare || meterFare(M);
     return '<button class="meter-bar" type="button" id="meter-reopen">' +
-      (M.status === "running" ? 'Metered ride running · <span id="meter-bar-fare">' + money(f.sub) + "</span> · Open" :
-        M.status === "paid" ? "Metered ride paid · Open" : "Metered ride ended · " + money(f.total) + " · Open to get paid") + "</button>";
+      (M.status === "running" ? 'Metered ride running · <span id="meter-bar-fare">' + meterMoneyShown(M, f.sub) + "</span> · Open" :
+        M.status === "paid" ? "Metered ride paid · Open" : "Metered ride ended · " + meterMoneyShown(M, f.total) + " · Open to get paid") + "</button>";
   }
   /* ---------- v71: optional DESTINATION + road route on the map + ETA (metered ride) ----------
      Optional on the Start screen and any time during the ride (map chip "+ Destination" or the card under the map).
