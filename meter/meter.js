@@ -155,14 +155,31 @@
     try { at = new Date(Date.now() + Number(e.min) * 60000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }); } catch (x) {}
     return "To your destination: about " + Math.max(1, Math.round(Number(e.min))) + " min \u00b7 " + Number(e.miles).toFixed(1) + " mi" + (at ? " \u00b7 arrive about " + at : "");
   }
+  /* v77.6: "Estimated fare $24\u2013$27" once the driver adds the destination (Worker sends it only for regular meter rates) */
+  function estCents(d) {
+    var e = d && d.live && d.live.est;
+    if (!e || (d.mode && /^contract rate$/i.test(String(d.mode.label || "")))) return 0;
+    var c = Number(e.cents != null ? e.cents : e.loCents);
+    return isFinite(c) && c > 0 ? c : 0;
+  }
+  /* v77.6 (Matthew): one whole-dollar number, tax included: "Estimated fare $31 (tax included)" */
+  function estAmount(d) { var c = estCents(d); return c ? "$" + Math.round(c / 100) + " (tax included)" : ""; }
+  function estText(d) { var a = estAmount(d); return a ? "Estimated fare " + a : ""; }
   function mphText(m) { return m === null ? "--" : String(m); }
   function mphSlow(d, m) { return m !== null && m < (Number(d.rates && d.rates.slowMph) || 10); }
   function mphLabel(d, m) { return mphSlow(d, m) ? "MPH \u00b7 slow" : "MPH"; }
   function mphClass(d, m) { return "rm-mph" + (m === null ? " is-none" : mphSlow(d, m) ? " is-slow" : ""); }
   function runningHtml(d) {
-    return testTag(d) + '<p class="tag">Your meter · live</p>' + modeHtml(d) +
-      '<p class="rm-fare" id="rm-fare" aria-live="off">' + money(d.live.fareCents) + "</p>" +
-      '<p class="rm-sub">Meter' + (d.rates.taxRate > 0 ? " · tax " + pct(d.rates.taxRate) + " added at the end" : "") + "</p>" +
+    var est0 = estText(d);
+    return testTag(d) + /* v77.6 (Matthew 10/20): the estimate leads; the running number is clearly "Fare so far" */
+      '<div class="rm-est-box" id="rm-est-box" style="background:#111;border:3px solid #f0d48a;border-radius:16px;padding:12px 14px;margin:4px 0 12px;text-align:center' + (est0 ? "" : ";display:none") + '">' +
+        '<p class="rm-est-k" style="margin:0;font-size:15px;font-weight:800;letter-spacing:.08em;text-transform:uppercase;color:#fff">Estimated fare</p>' +
+        '<p class="rm-est" id="rm-est" style="margin:2px 0 0;font-size:38px;font-weight:900;line-height:1.1;color:#f0d48a">' + esc(estAmount(d)) + "</p>" +
+        '<p class="rm-est-n" style="margin:4px 0 0;font-size:13px;color:#ddd">Based on the live road route and traffic. Your final fare shows when the ride ends.</p></div>' +
+      '<p class="tag">Your meter · live</p>' + modeHtml(d) +
+      '<p class="rm-sofar-k" id="rm-sofar-k" style="margin:6px 0 0;text-align:center;font-size:15px;font-weight:800;letter-spacing:.06em;text-transform:uppercase">Fare so far</p>' +
+      '<p class="rm-fare rm-sofar" id="rm-fare" aria-live="off" style="font-size:26px;margin:0;text-align:center">' + money(d.live.fareCents) + "</p>" +
+      '<p class="rm-sub">Running meter, still counting' + (d.rates.taxRate > 0 ? " · tax " + pct(d.rates.taxRate) + " added at the end" : "") + "</p>" +
       '<div class="rm-grid"><div><b id="rm-miles">' + Number(d.live.miles || 0).toFixed(2) + "</b><span>Miles</span></div>" +
       '<div><b id="rm-time">0:00</b><span>Time</span></div>' +
       '<div><b id="rm-wait">' + (d.live.waitMin || 0) + "</b><span>Slow min</span></div>" +
@@ -355,6 +372,8 @@
       var left = d.live.moved ? 0 : Math.ceil((Number(d.rates.freeWaitSec) || 0) - (now() - d.startedAt) / 1000);
       setText("rm-free", left > 0 ? "Free waiting " + clock(left * 1000) + " left" : "");
       setText("rm-eta", etaText(d));
+      setText("rm-est", estAmount(d));
+      var eb = $("rm-est-box"); if (eb) { var show = !!estText(d); if ((eb.style.display !== "none") !== show) eb.style.display = show ? "" : "none"; }
       var age = d.live.at ? Math.max(0, Math.round((now() - d.live.at) / 1000)) : -1;
       setText("rm-updated", age < 0 ? "Waiting for the first update from the car…" : age <= 12 ? "Live · updated just now" : age < 60 ? "Live · updated " + age + " s ago" :
         "Waiting for the driver\u2019s phone (last update " + Math.floor(age / 60) + " min ago). The meter keeps running in the car.");
