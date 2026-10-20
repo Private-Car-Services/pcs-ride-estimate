@@ -604,7 +604,7 @@
     return { ok: true, patch: { prepaidInvoiceNo: v, squareInvoiceId: "", prepaidEdited: true, prepaidBy: by || "god", prepaidAt: now } };
   }
   var SQ_INV_RE = /^[A-Za-z0-9_:-]{6,64}$/;
-  function sqInvoiceUrl(id) { return SQ_INV_RE.test(String(id || "")) ? "https://app.squareup.com/dashboard/invoices/" + encodeURIComponent(String(id)) : ""; }
+  function sqInvoiceUrl(id) { return SQ_INV_RE.test(String(id || "")) ? "https://app.squareup.com/dashboard/invoices/" + String(id) /* Square ids look like inv:0-ChAbC...; ':' stays as is (allowed in a path; the regex allows only A-Z a-z 0-9 _ : -) */ : ""; }
   function invLinkHtml(r) {
     var n = String((r && r.prepaidInvoiceNo) || ""); if (!n) return "";
     var u = sqInvoiceUrl(r.squareInvoiceId), st = ' style="color:#f0d48a;font-weight:800;text-decoration:underline"';
@@ -624,10 +624,10 @@
     if (!ip.ok) return Promise.reject(new Error("invoice"));
     if (ip.patch) Object.assign(patch, ip.patch);
     var invNo = ip.patch ? ip.patch.prepaidInvoiceNo : String(row.prepaidInvoiceNo || "");
-    var needId = !!invNo && (!!ip.patch || !SQ_INV_RE.test(String(row.squareInvoiceId || "")));
+    var needId = !!invNo; /* Harry r3: look the id up again on every Save fare (never trust a stored one) */
     var look = needId ? sqInvoiceLookup(invNo).then(function (out) { /* read-only Square search; a miss just leaves the plain number */
       var iid = out && out.ok && out.invoice ? String(out.invoice.invoiceId || "") : "";
-      if (SQ_INV_RE.test(iid)) { patch.squareInvoiceId = iid; if (!ip.patch) { patch.prepaidEdited = true; } }
+      patch.squareInvoiceId = SQ_INV_RE.test(iid) ? iid : ""; if (!ip.patch) patch.prepaidEdited = true; /* miss -> plain number + Find in Square */
     }, function () {}) : Promise.resolve();
     return look.then(function () { return godFetch(calendarUrl(eventId), {
       method: "PATCH",
