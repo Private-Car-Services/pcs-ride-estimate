@@ -4427,6 +4427,16 @@
     })));
   }
   if (typeof window !== "undefined" && ROLE === "driver") { setTimeout(function () { hosResetCheck(); }, 3000); setInterval(function () { hosResetCheck(); }, 20000); }
+  /* v77.2: start (ms) of the Cycle window = midnight America/Chicago, (days - 1) calendar days before today. DST-safe. */
+  function hosCycleWindowStart(now, days) {
+    days = Math.max(1, Math.round(Number(days) || 8));
+    var parts = {}; new Intl.DateTimeFormat("en-US", { timeZone: "America/Chicago", year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(new Date(now)).forEach(function (x) { parts[x.type] = x.value; });
+    var y = +parts.year, mo = +parts.month, d = +parts.day - (days - 1);
+    var guess = Date.UTC(y, mo - 1, d, 6, 0, 0); /* CST midnight = 06:00 UTC; CDT = 05:00 UTC */
+    var off = function (t) { var q = {}; new Intl.DateTimeFormat("en-US", { timeZone: "America/Chicago", hourCycle: "h23", hour: "2-digit", day: "2-digit" }).formatToParts(new Date(t)).forEach(function (x) { q[x.type] = x.value; }); return q; };
+    var q = off(guess); if (+q.hour === 1) guess -= 3600000; /* CDT: 06:00 UTC is 1 AM local */
+    return guess;
+  }
   function hosStatus(now) {
     now = now || Date.now();
     var c = hosCfg, H = 3600000;
@@ -4434,7 +4444,7 @@
     var segs = hosDutySegs(now);
     var drv = hosAllDrive(now); /* v72u: local + server + estimated from shift miles */
     /* last off-duty gap >= resetHours -> duty period start; >= restartHours -> cycle restart */
-    var dutyStart = 0, cycleFrom = now - c.cycleDays * 24 * H, i, gapEnd;
+    var dutyStart = 0, cycleFrom = hosCycleWindowStart(now, c.cycleDays), i, gapEnd; /* v77.2 (Matthew 10/20): 70 h / 8 days = today + previous 7 CALENDAR days, rolling over at midnight Chicago time */
     var lastEnd = segs.length ? segs[segs.length - 1][1] : 0;
     var offNow = !st && lastEnd ? now - lastEnd : (st ? 0 : Infinity);
     var offl = hosOffline(now), offlineNow = false; try { offlineNow = qOffline(); } catch (e) {}
