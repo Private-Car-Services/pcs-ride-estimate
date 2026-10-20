@@ -268,7 +268,7 @@
       commissionCents: raw.commissionCents != null ? Number(raw.commissionCents) : null,
       completedAt: raw.completedAt || null,
       source: String(raw.source || ""), payMethod: String(raw.payMethod || ""), stops: Array.isArray(raw.stops) ? raw.stops : [], /* v72d */
-      riderPhone: String(raw.riderPhone || ""), riderPhoneEdited: raw.riderPhoneEdited === true, riderPhoneSrc: String(raw.riderPhoneSrc || ""), autoText: raw.autoText !== false, /* v77.3 */ balance: raw.balance != null ? Number(raw.balance) : null,
+      riderPhone: String(raw.riderPhone || ""), riderPhoneEdited: raw.riderPhoneEdited === true, riderPhoneSrc: String(raw.riderPhoneSrc || ""), autoText: raw.autoText !== false, /* v77.3 */ teenRider: raw.teenRider === true, teenPhone: String(raw.teenPhone || ""), extraPhoneOnce: String(raw.extraPhoneOnce || ""), /* v77.5 */ balance: raw.balance != null ? Number(raw.balance) : null,
       paidSquareCents: raw.paidSquareCents != null && isFinite(+raw.paidSquareCents) ? Math.round(+raw.paidSquareCents) : null, paidEdits: Array.isArray(raw.paidEdits) ? raw.paidEdits : [], /* v75w */
       tipCents: Number(raw.tipCents) || 0, tipVia: raw.tipVia ? String(raw.tipVia) : null, tipEdits: Array.isArray(raw.tipEdits) ? raw.tipEdits : [], /* v73 */
       cancelledAt: Number(raw.cancelledAt) || null, cancelledBy: raw.cancelledBy ? String(raw.cancelledBy) : null, cancelReason: raw.cancelReason ? String(raw.cancelReason) : null,
@@ -6368,16 +6368,43 @@
     if (p === null) return { ok: false, error: "Enter a 10-digit US phone, like 936-555-1212." };
     return { ok: true, patch: { riderPhone: p, riderPhoneEdited: true, riderPhoneBy: by || "god", riderPhoneAt: now, riderPhoneSrc: "god", updatedAt: now } };
   }
+  /* v77.5 (Matthew 10/20): Teen rider + teen's phone (saved on the ride, survives the calendar sync like riderPhone) and a
+     one-time Additional number (extraPhoneOnce: this ride's texts only, never saved to the client or the calendar;
+     the Worker drops it when the ride is completed or cancelled). Inputs use the full letter keyboard (Matthew 10/20). */
+  function teenPatch(on, raw, now, by) { /* pure (tested) */
+    if (on !== true) return { ok: true, patch: { teenRider: false, teenRiderBy: by || "god", teenRiderAt: now, updatedAt: now } };
+    var p = cphNorm(raw);
+    if (!p) return { ok: false, error: "Enter the teen\u2019s 10-digit US phone, like 936-555-1212." };
+    return { ok: true, patch: { teenRider: true, teenPhone: p, teenRiderBy: by || "god", teenRiderAt: now, updatedAt: now } };
+  }
+  function extraPhonePatch(raw, now) { /* pure (tested): "" clears it (null = Firebase delete) */
+    var p = cphNorm(raw);
+    if (p === null) return { ok: false, error: "Enter a 10-digit US phone, like 936-555-1212." };
+    return { ok: true, patch: { extraPhoneOnce: p || null, updatedAt: now } };
+  }
   function autoTextPatch(on, now) { return { autoText: on !== false, updatedAt: now }; } /* pure (tested) */
   function cphHtml(r) {
     var id = esc(r.id), on = r.autoText !== false, big = ' style="font-size:18px;min-height:44px;width:220px"';
     return '<div class="db-cph" style="border:2px solid #0b6b3a;background:#0b3d23;border-radius:10px;padding:8px;margin:6px 0">' +
       '<div style="font-weight:800;margin-bottom:4px">Client phone' + (r.riderPhone ? ' \u2713 <span class="fine">' + esc(cphShow(r.riderPhone)) + (r.riderPhoneSrc === "calendar" ? " \u00b7 from the calendar" : "") + "</span>" : "") + "</div>" +
       '<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">' +
-      '<input id="cph-' + id + '" type="tel" inputmode="tel" autocomplete="off" placeholder="936-555-1212" value="' + esc(r.riderPhone ? cphShow(r.riderPhone) : "") + '"' + big + ">" +
+      '<input id="cph-' + id + '" type="text" inputmode="text" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" placeholder="936-555-1212" value="' + esc(r.riderPhone ? cphShow(r.riderPhone) : "") + '"' + big + ">" +
       '<button type="button" class="btn btn-gold btn-cph-save" data-event-id="' + id + '" style="min-height:44px">Save phone</button>' +
       '<label style="font-weight:700;font-size:17px;min-height:44px;display:flex;align-items:center;gap:6px"><input type="checkbox" class="cph-auto" data-event-id="' + id + '"' + (on ? " checked" : "") + ' style="width:26px;height:26px"> Auto text the tracking link</label>' +
-      "</div></div>";
+      "</div>" + teenHtml(r) + "</div>";
+  }
+  function teenHtml(r) { /* v77.5 */
+    var id = esc(r.id), teen = r.teenRider === true, big = ' style="font-size:18px;min-height:44px;width:220px"';
+    return '<div class="db-teen" style="margin-top:8px;border-top:1px solid #c9a227;padding-top:6px">' +
+      '<label style="font-weight:700;font-size:17px;min-height:44px;display:flex;align-items:center;gap:6px"><input type="checkbox" class="teen-on" data-event-id="' + id + '"' + (teen ? " checked" : "") + ' style="width:26px;height:26px"> Teen rider</label>' +
+      '<div id="teenbox-' + id + '" style="display:' + (teen ? "block" : "none") + ';margin:4px 0 6px 32px">' +
+      '<div style="font-weight:800;margin-bottom:4px">Teen\u2019s phone' + (teen && r.teenPhone ? ' \u2713 <span class="fine">' + esc(cphShow(r.teenPhone)) + "</span>" : "") + "</div>" +
+      '<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center"><input id="teenph-' + id + '" type="text" inputmode="text" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" placeholder="936-555-1212" value="' + esc(r.teenPhone ? cphShow(r.teenPhone) : "") + '"' + big + ">" +
+      '<button type="button" class="btn btn-gold btn-teen-save" data-event-id="' + id + '" style="min-height:44px">Save teen phone</button></div></div>' +
+      '<div style="font-weight:800;margin:6px 0 4px">Additional number' + (r.extraPhoneOnce ? ' \u2713 <span class="fine">' + esc(cphShow(r.extraPhoneOnce)) + "</span>" : "") + ' <span class="fine">(this ride only, never saved to the client)</span></div>' +
+      '<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center"><input id="xph-' + id + '" type="text" inputmode="text" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" placeholder="936-555-1212" value="' + esc(r.extraPhoneOnce ? cphShow(r.extraPhoneOnce) : "") + '"' + big + ">" +
+      '<button type="button" class="btn btn-gold btn-xph-save" data-event-id="' + id + '" style="min-height:44px">Use for this ride</button></div>' +
+      "</div>";
   }
   function cphSave(id, patch, msg) {
     var row = rovRow(id); if (!row) return Promise.resolve(false);
@@ -6416,11 +6443,23 @@
     dcardWire(); /* v77.3b */
     document.addEventListener("toggle", function (e) { if (e.target && e.target.classList && e.target.classList.contains("atx-panel")) { state.atx = state.atx || {}; var was = state.atx.open; state.atx.open = e.target.open; if (e.target.open && !was) atxLoad(); } }, true);
     document.addEventListener("change", function (e) {
-      var t = e.target; if (!t || !t.classList || !t.classList.contains("cph-auto")) return;
+      var t = e.target; if (t && t.classList && t.classList.contains("teen-on")) { /* v77.5 */
+        var tid = t.getAttribute("data-event-id"), box = document.getElementById("teenbox-" + tid); if (box) box.style.display = t.checked ? "block" : "none";
+        if (t.checked) { var tel = document.getElementById("teenph-" + tid); if (tel) { if (!tel.value) { tel.focus(); return; } var tp = teenPatch(true, tel.value, Date.now(), "god"); if (tp.ok) cphSave(tid, tp.patch, "Teen rider ON: texts also go to " + cphShow(tp.patch.teenPhone) + "."); } return; }
+        cphSave(tid, teenPatch(false, "", Date.now(), "god").patch, "Teen rider OFF for this ride."); return;
+      }
+      if (!t || !t.classList || !t.classList.contains("cph-auto")) return;
       var id = t.getAttribute("data-event-id"); cphSave(id, autoTextPatch(t.checked, Date.now()), t.checked ? "Auto text ON for this ride." : "Auto text OFF for this ride.");
     }, true);
     document.addEventListener("click", function (e) {
-      var t = e.target && e.target.closest ? e.target.closest(".btn-cph-save,#atx-toggle,#atx-refresh") : null; if (!t) return;
+      var t = e.target && e.target.closest ? e.target.closest(".btn-cph-save,.btn-teen-save,.btn-xph-save,#atx-toggle,#atx-refresh") : null; if (!t) return;
+      if (t.classList.contains("btn-teen-save") || t.classList.contains("btn-xph-save")) { /* v77.5 */
+        var vid = t.getAttribute("data-event-id"), isTeen = t.classList.contains("btn-teen-save"), vel = document.getElementById((isTeen ? "teenph-" : "xph-") + vid);
+        var vo = isTeen ? teenPatch(true, vel ? vel.value : "", Date.now(), "god") : extraPhonePatch(vel ? vel.value : "", Date.now());
+        if (!vo.ok) { state.boardNotice = "NOT SAVED: " + vo.error; renderBoardLists(); return; }
+        t.disabled = true;
+        cphSave(vid, vo.patch, isTeen ? "Saved: teen\u2019s phone " + cphShow(vo.patch.teenPhone) + "." : (vo.patch.extraPhoneOnce ? "Additional number " + cphShow(vo.patch.extraPhoneOnce) + " gets this ride\u2019s texts." : "Additional number cleared.")); return;
+      }
       if (t.id === "atx-refresh") { atxLoad(); return; }
       if (t.id === "atx-toggle") { var on = !(state.atx && state.atx.on); t.disabled = true;
         atxPost("/god/autotext", { on: on }).then(function (d) { state.atx.on = !!d.on; state.atx.err = ""; }).catch(function (er) { state.atx.err = "NOT SAVED: " + (er && er.message || er); }).then(function () { renderBoardLists(); }); return; }
@@ -6505,7 +6544,7 @@
         .catch(function (er) { state.dcard.err = String(er && er.message || er); }).then(function () { renderBoardLists(); });
     }, true);
   }
-  if (typeof window !== "undefined") window.__pcsGodAutoText = { norm: cphNorm, phonePatch: clientPhonePatch, autoPatch: autoTextPatch, html: cphHtml, panel: autoTextPanelHtml, why: atxWhy };
+  if (typeof window !== "undefined") window.__pcsGodAutoText = { norm: cphNorm, phonePatch: clientPhonePatch, autoPatch: autoTextPatch, teenPatch: teenPatch, extraPatch: extraPhonePatch, teenHtml: teenHtml, html: cphHtml, panel: autoTextPanelHtml, why: atxWhy };
   /* v76d: Square invoice lookup (read-only, through the Worker). Amounts are pre-tax subtotal / tax / total in cents. */
   function sqInvoiceLine(q) {
     if (!q) return "";
@@ -6581,6 +6620,7 @@
     var now = Date.now(), code = ownCode(row); /* v76d */
     var next = Object.assign({}, row, { status: "cancelled", cancelledAt: now, cancelledBy: "owner", cancelReason: reason, cancelFee: fee === "charge" ? "charge" : "waived",
       cancelFeeStatus: fee === "charge" ? "to_charge" : "waived", code: code, updatedAt: now });
+    delete next.extraPhoneOnce; /* v77.5: one-time Additional number ends with the ride */
     return putCalendarRide(next).then(function () {
       if (!row.assignedDriverId) return null;
       var cEntry = { scheduleId: eventId, canceled: true, riderName: row.rider || "", day: boardDayKey(row.start) || chicagoToday() };
