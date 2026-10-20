@@ -13545,6 +13545,7 @@
     var f = meterFare(M);
     var mph = meterMphNow(M);
     var eta = meterEtaInfo(M);
+    var est = null; try { est = meterLiveEst(M); } catch (e) { est = null; }
     return { miles: f.miles, waitMin: f.waitMin, freeUsed: Number(M.freeUsed) || 0, moved: !!M.moved, fareCents: f.sub, at: Date.now(),
       gpsOk: !!(M.gpsAt && Date.now() - M.gpsAt <= 30000), mph: mph, mphAt: mph === null ? 0 : Number(M.mphAt) || 0, /* v71: live MPH (null = no fresh GPS) */
       etaMin: eta && !eta.pending ? eta.min : null, etaMiles: eta && !eta.pending ? eta.miles : null, /* v71: ETA numbers */
@@ -13552,7 +13553,17 @@
          rider meter page never shows them). Car only with a fresh fix. */
       car: M.lastPt && M.gpsAt && Date.now() - M.gpsAt <= 30000 && isCoord(M.lastPt.lat) && isCoord(M.lastPt.lng) ? { lat: Math.round(+M.lastPt.lat * 1e4) / 1e4, lng: Math.round(+M.lastPt.lng * 1e4) / 1e4 } : null,
       dest: M.dest && isCoord(M.dest.lat) && isCoord(M.dest.lng) ? { lat: +M.dest.lat, lng: +M.dest.lng, label: [M.dest.label, M.dest.sub].filter(Boolean).join(", ").slice(0, 120) } : null,
-      pickupLabel: String(M.pickupAddress || "").slice(0, 120) || null };
+      pickupLabel: String(M.pickupAddress || "").slice(0, 120) || null,
+      estCents: est ? est.cents : null, estLoCents: est ? est.cents : null, estHiCents: est ? est.cents : null }; /* v77.6: predicted fare (whole dollars, in cents; lo = hi kept for compatibility) */
+  }
+  /* v77.6 (Matthew 10/20): the same estimate the driver sees ("Estimated fare $lo-$hi"), in whole dollars, for the rider's
+     screen. Only with a destination; never for a contract rate or a fare set before the ride (those stay private / fixed). */
+  function meterLiveEst(M) {
+    if (!M || M.status !== "running" || !M.dest || rateOvLocked(M) || Math.round(Number(M.setFareCents) || 0) > 0) return null;
+    var done = Number(M.miles) || 0, wait = Math.floor(Number(M.waitMin) || 0), eta = meterEtaInfo(M), c = 0;
+    if (eta && !eta.pending) c = eta.arrived ? meterEstPoint(0, 0, done, wait) : meterEstPoint(eta.milesExact != null ? eta.milesExact : eta.miles, eta.slowMin, done, wait);
+    else { var sl = meterStraightLeft(M); if (sl) c = meterEstPoint(sl, 0, done, wait); } /* route still loading / failed: straight line x1.3 */
+    return c > 0 ? { cents: meterEstDollars(c) * 100 } : null;
   }
   function meterPushLive(M) {
     meterLiveAt = Date.now();
@@ -14948,7 +14959,8 @@
     if (!R || R.key !== meterDestKey(M.dest) + (M.stop && !M.stopDone ? "|" + meterDestKey(M.stop) : "")) return { pending: true };
     var left = Math.max(0, R.miles - Math.max(0, (Number(M.miles) || 0) - R.milesAt));
     var min = R.miles > 0 ? R.minutes * left / R.miles : 0;
-    return { miles: Math.round(left * 10) / 10, min: Math.max(left > 0.05 ? 1 : 0, Math.round(min)), approx: !!R.approx, at: Date.now() + min * 60000 };
+    return { miles: Math.round(left * 10) / 10, min: Math.max(left > 0.05 ? 1 : 0, Math.round(min)), approx: !!R.approx, at: Date.now() + min * 60000,
+      milesExact: left, slowMin: R.miles > 0 ? (Number(R.slowMin) || 0) * left / R.miles : 0 };
   }
   function meterClockText(ms) {
     try { return new Date(ms).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }); } catch (e) { return ""; }
@@ -15161,6 +15173,23 @@
       trip: state.meter ? state.meter.trip : state.meterTripPending,
       baseOverride: state.meter ? state.meter : null };
   }
+  /* v77.6 (Matthew 10/20): ONE number. The meter's own final-fare formula (meterFare with status "ended": base, included
+     miles, per-mile, slow-minute wait, step rounding, minimum, airport fee, discount, tolls so far, tax) on
+     miles so far + the rest of the road route, and wait so far + Google's traffic delay as slow minutes.
+     Running: this ride's saved rates (holiday / night / airport tier as set at Start). Before Start: the current time band.
+     Returns whole cents (the total incl. tax), or 0. */
+  function meterEstPoint(miles, slowMin, doneMiles, doneWait) {
+    var M = state.meter, r;
+    if (M && M.status === "running") r = Object.assign({}, M);
+    else { r = meterEstRates(); delete r.baseOverride; }
+    r.status = "ended";
+    r.miles = (Number(doneMiles) || 0) + Math.max(0, Number(miles) || 0);
+    r.waitMin = Math.floor(Number(doneWait) || 0) + Math.max(0, Math.round(Number(slowMin) || 0));
+    var t = meterFare(r).total;
+    return isFinite(t) && t > 0 ? Math.round(t) : 0;
+  }
+  function meterEstDollars(cents) { return Math.round((Number(cents) || 0) / 100); } /* nearest whole dollar */
+  function meterEstText(cents) { return "$" + meterEstDollars(cents) + " (tax included)"; }
   /* range: road miles, no waiting (low) .. +10 % miles and 20 % of the drive time in slow traffic (high); incl. tax */
   function meterEstRange(miles, minutes, doneMiles, doneWait) {
     var r = meterEstRates(), M = r.baseOverride; delete r.baseOverride;
@@ -15193,9 +15222,9 @@
     var M = state.meter, run = !!(M && M.status === "running");
     if (run && d) { /* v72u: during the ride = fare so far + the rest of the road route */
       var eta = meterEtaInfo(M);
-      if (eta && !eta.pending) { var rr = meterEstRange(eta.arrived ? 0 : eta.miles, eta.arrived ? 0 : eta.min, Number(M.miles) || 0, Math.floor(Number(M.waitMin) || 0)); est = "$" + rr.lo + "\u2013$" + rr.hi; }
-      else { var sl = meterStraightLeft(M); est = sl ? (function (q) { return "$" + q.lo + "\u2013$" + q.hi; })(meterEstRange(sl, sl * 2, Number(M.miles) || 0, Math.floor(Number(M.waitMin) || 0))) : "Estimating\u2026"; } /* v72x: no road route yet -> straight line x1.3 */
-    } else if (d && E && E.key === key) { var rg = meterEstRange(E.miles, E.minutes); est = "$" + rg.lo + "\u2013$" + rg.hi; }
+      var le = rateOvLocked(M) || Number(M.setFareCents) > 0 ? null : meterLiveEst(M); /* v77.6: one number, same as the rider sees */
+      est = le ? meterEstText(le.cents) : (rateOvLocked(M) || Number(M.setFareCents) > 0 ? "" : "Estimating\u2026");
+    } else if (d && E && E.key === key) { var pc = meterEstPoint(E.miles, E.slowMin, 0, 0); est = pc > 0 ? meterEstText(pc) : ""; }
     else if (d) est = state.meterEstBusy ? "Estimating\u2026" : (meterHerePt() ? "" : "Allow location for an estimate.");
     /* v72z (Matthew): prominent "Estimated fare" block right under the map (big gold range, destination below) */
     var isRange = /^\$\d/.test(est);
@@ -15236,11 +15265,13 @@
       if (!r || !c || c.length < 2 || !isFinite(+r.distance) || !isFinite(+r.duration)) throw new Error("osrm");
       var steps = [];
       (r.legs || []).forEach(function (lg) { (lg.steps || []).forEach(function (st) { var mv = st.maneuver || {}; if (mv.location) steps.push({ lat: +mv.location[1], lng: +mv.location[0], text: meterTurnText(st) }); }); });
-      return { line: c.map(function (p) { return [p[1], p[0]]; }), miles: +r.distance / 1609.344, minutes: +r.duration / 60, approx: false, steps: steps };
+      var sd = Number(r.staticDuration); /* v77.6: Google traffic delay = expected slow minutes (OSRM: unknown -> 0) */
+      return { line: c.map(function (p) { return [p[1], p[0]]; }), miles: +r.distance / 1609.344, minutes: +r.duration / 60, approx: false, steps: steps,
+        slowMin: isFinite(sd) && sd > 0 && +r.duration > sd ? (+r.duration - sd) / 60 : 0 };
     }).catch(function () {
       var mi = 0, i;
       for (i = 1; i < pts.length; i += 1) mi += haversineMi(pts[i - 1].lat, pts[i - 1].lng, pts[i].lat, pts[i].lng) * 1.3;
-      return { line: pts.map(function (p) { return [p.lat, p.lng]; }), miles: mi, minutes: mi * 2, approx: true }; /* 30 mph */
+      return { line: pts.map(function (p) { return [p.lat, p.lng]; }), miles: mi, minutes: mi * 2, approx: true, slowMin: 0 }; /* 30 mph */
     });
   }
   /* v72t: turn-by-turn text from the OSRM route steps */
