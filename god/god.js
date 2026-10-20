@@ -343,12 +343,12 @@
       '<h2 style="margin:4px 0 6px;color:#0b3d23">Prepaid (Square invoice) \u00b7 ' + esc(r.rider || "ride") + "</h2>" +
       '<label style="display:flex;gap:10px;align-items:center;font-size:20px;font-weight:800;color:#111;margin:8px 0"><input type="checkbox" id="db-prepaid-on" style="width:28px;height:28px"' + (r.prepaid ? " checked" : "") + "> Paid on a Square invoice</label>" +
       '<label for="db-prepaid-amt" style="display:block;font-weight:800;color:#111;margin:8px 0 4px">Amount for this ride before tax (optional)</label>' +
-      '<input id="db-prepaid-amt" type="text" inputmode="numeric" pattern="[0-9.]*" autocomplete="off" data-money-reg="1" value="' + esc(r.prepaidAmountCents != null ? (r.prepaidAmountCents / 100).toFixed(2) : "") + '" style="width:100%;font-size:20px;padding:10px;border:2px solid #0b3d23;border-radius:10px;background:#fff;color:#111">' +
+      '<input id="db-prepaid-amt" type="text" inputmode="decimal" pattern="[0-9.]*" autocomplete="off" data-money-reg="1" value="' + esc(r.prepaidAmountCents != null ? (r.prepaidAmountCents / 100).toFixed(2) : "") + '" style="width:100%;font-size:20px;padding:10px;border:2px solid #0b3d23;border-radius:10px;background:#fff;color:#111">' +
       '<label for="db-prepaid-inv" style="display:block;font-weight:800;color:#111;margin:8px 0 4px">Invoice # (optional)</label>' +
       '<input id="db-prepaid-inv" type="text" autocomplete="off" value="' + esc(r.prepaidInvoiceNo || "") + '" style="width:100%;font-size:20px;padding:10px;border:2px solid #0b3d23;border-radius:10px;background:#fff;color:#111">' +
       '<button type="button" id="db-prepaid-lookup" style="' + big + 'background:#fff;color:#0b3d23;border:3px solid #0b6b3a">Look up in Square</button>' + /* v76d */
       '<label for="db-prepaid-tax" style="display:block;font-weight:800;color:#111;margin:8px 0 4px">Tax on the invoice (never paid to the driver)</label>' +
-      '<input id="db-prepaid-tax" type="text" inputmode="numeric" autocomplete="off" data-money-reg="1" value="' + esc(r.prepaidTaxCents != null ? (r.prepaidTaxCents / 100).toFixed(2) : "") + '" style="width:100%;font-size:20px;padding:10px;border:2px solid #0b3d23;border-radius:10px;background:#fff;color:#111">' +
+      '<input id="db-prepaid-tax" type="text" inputmode="decimal" autocomplete="off" data-money-reg="1" value="' + esc(r.prepaidTaxCents != null ? (r.prepaidTaxCents / 100).toFixed(2) : "") + '" style="width:100%;font-size:20px;padding:10px;border:2px solid #0b3d23;border-radius:10px;background:#fff;color:#111">' +
       '<p id="db-prepaid-sq" style="color:#0b3d23;font-weight:800;margin:6px 0">' + esc(r.sqInvoice ? sqInvoiceLine(r.sqInvoice) : "") + "</p>" +
       '<p id="db-prepaid-msg" role="status" style="color:#7c2d12;font-weight:700;margin:6px 0"></p>' +
       '<button type="button" id="db-prepaid-save" style="' + big + 'background:#0b6b3a;color:#fff;border:0">Save</button>' +
@@ -592,7 +592,27 @@
   /* v73 fix (Matthew 2026-10-12, Hector PCSCLUD9): saving the fare ONLY saves the fare. Status, driver, earnings untouched.
      PATCH through the God db (Worker read-back), so a refused save shows up instead of looking saved. fixedFare = account ride:
      the driver app charges this set fare instead of the meter price. */
-  function saveCalendarFare(eventId, fareBeforeTax, fixedFare) {
+  /* v77.6 (Matthew): Invoice # typed on the ride card -> prepaidInvoiceNo (the same field the Prepaid / Square invoice
+     dialog, the Square invoice lookup and the shared-invoice check use). Leading zeros kept ("000519"). prepaidEdited:true
+     so the calendar sync (calsync PREPAID_KEYS + Worker CAL_KEEP) keeps it. squareInvoiceId = Square's invoice id from the
+     read-only God lookup (/sq/invoice), for the Dashboard link; cleared when the number changes. Pure (tested). */
+  function invoiceNoPatch(text, prev, now, by) {
+    if (text == null) return { ok: true, patch: null };
+    var v = String(text).replace(/^\s*#/, "").replace(/\s+/g, "");
+    if (v && !/^\d{1,20}$/.test(v)) return { ok: false };
+    if (v === String(prev || "")) return { ok: true, patch: null };
+    return { ok: true, patch: { prepaidInvoiceNo: v, squareInvoiceId: "", prepaidEdited: true, prepaidBy: by || "god", prepaidAt: now } };
+  }
+  var SQ_INV_RE = /^[A-Za-z0-9_:-]{6,64}$/;
+  function sqInvoiceUrl(id) { return SQ_INV_RE.test(String(id || "")) ? "https://app.squareup.com/dashboard/invoices/" + encodeURIComponent(String(id)) : ""; }
+  function invLinkHtml(r) {
+    var n = String((r && r.prepaidInvoiceNo) || ""); if (!n) return "";
+    var u = sqInvoiceUrl(r.squareInvoiceId), st = ' style="color:#f0d48a;font-weight:800;text-decoration:underline"';
+    return '<span class="fine day-inv-saved" id="inv-saved-' + esc(r.id) + '">' + (u
+      ? '<a href="' + esc(u) + '" target="_blank" rel="noopener"' + st + ">Invoice #" + esc(n) + "</a>"
+      : "Invoice #" + esc(n) + ' <a href="https://app.squareup.com/dashboard/invoices" target="_blank" rel="noopener" style="font-size:12px;color:#f0d48a">Find in Square</a>') + "</span>";
+  }
+  function saveCalendarFare(eventId, fareBeforeTax, fixedFare, invoiceText) {
     var row = null;
     (state.calendar || []).forEach(function (r) { if (r && r.id === eventId) row = r; });
     if (!row) return Promise.reject(new Error("missing"));
@@ -600,7 +620,16 @@
     if (String(fareBeforeTax == null ? "" : fareBeforeTax).trim() === "" || !isFinite(fare) || fare < 0) return Promise.reject(new Error("fare"));
     fare = Math.round(fare * 100) / 100;
     var patch = { fareBeforeTax: fare, fixedFare: !!fixedFare, updatedAt: Date.now() };
-    return godFetch(calendarUrl(eventId), {
+    var ip = invoiceNoPatch(invoiceText, row.prepaidInvoiceNo, patch.updatedAt, "god");
+    if (!ip.ok) return Promise.reject(new Error("invoice"));
+    if (ip.patch) Object.assign(patch, ip.patch);
+    var invNo = ip.patch ? ip.patch.prepaidInvoiceNo : String(row.prepaidInvoiceNo || "");
+    var needId = !!invNo && (!!ip.patch || !SQ_INV_RE.test(String(row.squareInvoiceId || "")));
+    var look = needId ? sqInvoiceLookup(invNo).then(function (out) { /* read-only Square search; a miss just leaves the plain number */
+      var iid = out && out.ok && out.invoice ? String(out.invoice.invoiceId || "") : "";
+      if (SQ_INV_RE.test(iid)) { patch.squareInvoiceId = iid; if (!ip.patch) { patch.prepaidEdited = true; } }
+    }, function () {}) : Promise.resolve();
+    return look.then(function () { return godFetch(calendarUrl(eventId), {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(patch)
@@ -610,11 +639,12 @@
         var back = null; try { back = JSON.parse(t); } catch (e) {}
         if (back && typeof back === "object" && back.fareBeforeTax != null && Number(back.fareBeforeTax) !== fare) throw new Error("fare-readback");
         row.fareBeforeTax = fare; row.fixedFare = !!fixedFare;
+        ["prepaidInvoiceNo", "squareInvoiceId", "prepaidEdited", "prepaidBy", "prepaidAt"].forEach(function (k) { if (k in patch) row[k] = patch[k]; });
         delete state.fareDrafts[eventId];
-        state.boardNotice = "Fare saved · " + fmtCents(Math.round(fare * 100)) + " for " + (row.rider || "ride") + (fixedFare ? " · driver app charges this fare" : "");
+        state.boardNotice = "Fare saved · " + fmtCents(Math.round(fare * 100)) + " for " + (row.rider || "ride") + (fixedFare ? " · driver app charges this fare" : "") + (row.prepaidInvoiceNo ? " · Invoice #" + row.prepaidInvoiceNo : "");
         return refresh();
       });
-    });
+    }); });
   }
   /* v75s: God-mode copy of the driver app's meter estimate math (generated from app/app.js by /workspace/pcs-sched-ride/v2/gen.py;
      keep in step: tests compare God and driver estimates for the same rides). Own scope, so no name clashes. */
@@ -5119,7 +5149,7 @@
       ".odo-req .btn-ghost,.god-dvir-flag .btn-ghost,.god-dvir-missed .btn-ghost,.booking-alert .btn-ghost,#god-dvir-alerts .btn-ghost{background:#1f2937 !important;color:#fff !important;border:2px solid #fff !important;text-shadow:none}" +
       ".odo-req .btn-gold,#god-dvir-alerts .btn-gold,.booking-alert .btn-gold{background:#d4af37 !important;color:#111 !important;border:2px solid #111 !important}";
     (document.head || document.documentElement).appendChild(st); })();
-  function moneyRegAttrs() { return ' type="text" inputmode="numeric" pattern="[0-9.]*" autocomplete="off" data-money-reg="1"'; } /* v76j: digit pad, register style */ /* v74b: numeric keypad with a decimal point */
+  function moneyRegAttrs() { return ' type="text" inputmode="decimal" pattern="[0-9.]*" autocomplete="off" data-money-reg="1"'; } /* v76j: digit pad, register style */ /* v74b: numeric keypad with a decimal point */
   function moneyRegVal(n) { var x = Number(n); return n === "" || n == null || !isFinite(x) ? "" : x.toFixed(2); }
   if (typeof document !== "undefined") {
     document.addEventListener("input", function (e) {
@@ -5355,11 +5385,11 @@
       btn.addEventListener("click", function () {
         var id = btn.getAttribute("data-event-id");
         if (!id) return;
-        var fi = document.getElementById("fare-" + id), fx = document.getElementById("fixed-" + id);
+        var fi = document.getElementById("fare-" + id), fx = document.getElementById("fixed-" + id), iv = document.getElementById("inv-" + id);
         btn.disabled = true;
-        saveCalendarFare(id, fi ? fi.value : state.fareDrafts[id], !!(fx && fx.checked)).then(function () { btn.disabled = false; }).catch(function (err) {
+        saveCalendarFare(id, fi ? fi.value : state.fareDrafts[id], !!(fx && fx.checked), iv ? iv.value : null).then(function () { btn.disabled = false; }).catch(function (err) {
           btn.disabled = false;
-          state.boardNotice = err && err.message === "fare" ? "Type the fare before tax first." : "Fare NOT saved. Try again.";
+          state.boardNotice = err && err.message === "fare" ? "Type the fare before tax first." : err && err.message === "invoice" ? "Invoice # takes digits only, like 000519." : "Fare NOT saved. Try again.";
           renderBoardLists();
         });
       });
@@ -6218,7 +6248,7 @@
     var p = ridePctOf(r), own = commissionPctFor(r.assignedDriverId);
     return '<div class="db-ridecomm" style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin:4px 0">' +
       '<label for="rcomm-' + esc(r.id) + '">Commission % this ride</label>' +
-      '<input id="rcomm-' + esc(r.id) + '" class="db-rcomm-in" data-event-id="' + esc(r.id) + '" type="text" inputmode="numeric" pattern="[0-9]*" placeholder="' + esc(String(own)) + '" value="' + esc(p != null ? String(p) : "") + '" style="width:80px">' +
+      '<input id="rcomm-' + esc(r.id) + '" class="db-rcomm-in" data-event-id="' + esc(r.id) + '" type="text" inputmode="decimal" pattern="[0-9]*" placeholder="' + esc(String(own)) + '" value="' + esc(p != null ? String(p) : "") + '" style="width:80px">' +
       '<button type="button" class="btn btn-gold btn-save-rcomm" data-event-id="' + esc(r.id) + '">Save</button>' +
       '<span class="fine">' + (p != null ? esc(r.assignedDriverName || "Driver") + " gets " + p + "% on this ride (usual " + own + "%)" : "Blank = " + esc(r.assignedDriverName || "driver") + "'s usual " + own + "%") + "</span></div>";
   }
@@ -6292,9 +6322,9 @@
       '<div style="font-weight:800;margin-bottom:4px">Rate override (God mode only)' + (o ? ' \u2713 <span class="fine">' + esc(rovDesc(o)) + (o.setBy === "contract" ? " \u00b7 contract " + esc(o.contractName || "") : "") + "</span>" : "") + "</div>" +
       '<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:end">' +
       '<select class="rov-preset" data-event-id="' + id + '" style="min-height:44px">' + rovPresetOptions() + "</select>" +
-      '<label>Base / drop-off $<br><input id="rov-b-' + id + '" inputmode="numeric" data-money-reg="1" value="' + esc(o && o.base ? Number(o.base).toFixed(2) : "") + '"' + big + "></label>" +
-      '<label>Per mile $<br><input id="rov-m-' + id + '" inputmode="numeric" data-money-reg="1" value="' + esc(o && o.perMile ? Number(o.perMile).toFixed(2) : "") + '"' + big + "></label>" +
-      '<label>Flat fare $ (wins)<br><input id="rov-f-' + id + '" inputmode="numeric" data-money-reg="1" value="' + esc(o && o.flat ? Number(o.flat).toFixed(2) : "") + '"' + big + "></label>" +
+      '<label>Base / drop-off $<br><input id="rov-b-' + id + '" inputmode="decimal" data-money-reg="1" value="' + esc(o && o.base ? Number(o.base).toFixed(2) : "") + '"' + big + "></label>" +
+      '<label>Per mile $<br><input id="rov-m-' + id + '" inputmode="decimal" data-money-reg="1" value="' + esc(o && o.perMile ? Number(o.perMile).toFixed(2) : "") + '"' + big + "></label>" +
+      '<label>Flat fare $ (wins)<br><input id="rov-f-' + id + '" inputmode="decimal" data-money-reg="1" value="' + esc(o && o.flat ? Number(o.flat).toFixed(2) : "") + '"' + big + "></label>" +
       '<button type="button" class="btn btn-gold btn-rov-save" data-event-id="' + id + '" style="min-height:44px">Save rate</button>' +
       (o ? '<button type="button" class="btn btn-ghost btn-rov-clear" data-event-id="' + id + '" style="min-height:44px">Clear</button>' : "") +
       "</div></div>";
@@ -6316,8 +6346,8 @@
       '<div style="display:grid;grid-template-columns:1fr 1fr;gap:6px">' +
       '<input id="rc-name" placeholder="Customer name"' + big + '><input id="rc-phone" type="tel" placeholder="Phone"' + big + ">" +
       '<input id="rc-email" type="email" placeholder="Email"' + big + '><select id="rc-preset"' + big + ">" + rovPresetOptions() + "</select>" +
-      '<input id="rc-base" inputmode="numeric" data-money-reg="1" placeholder="Base / drop-off $"' + big + '><input id="rc-per" inputmode="numeric" data-money-reg="1" placeholder="Per mile $"' + big + ">" +
-      '<input id="rc-flat" inputmode="numeric" data-money-reg="1" placeholder="Flat fare $ (optional)"' + big + '><button type="button" class="btn btn-gold" id="rc-save" style="min-height:44px">Save contract</button></div>' +
+      '<input id="rc-base" inputmode="decimal" data-money-reg="1" placeholder="Base / drop-off $"' + big + '><input id="rc-per" inputmode="decimal" data-money-reg="1" placeholder="Per mile $"' + big + ">" +
+      '<input id="rc-flat" inputmode="decimal" data-money-reg="1" placeholder="Flat fare $ (optional)"' + big + '><button type="button" class="btn btn-gold" id="rc-save" style="min-height:44px">Save contract</button></div>' +
       '<p class="error" id="rc-err" role="alert">' + esc(state.rcErr || "") + "</p></details>";
   }
   function rovWire() {
@@ -6388,7 +6418,7 @@
     return '<div class="db-cph" style="border:2px solid #0b6b3a;background:#0b3d23;border-radius:10px;padding:8px;margin:6px 0">' +
       '<div style="font-weight:800;margin-bottom:4px">Client phone' + (r.riderPhone ? ' \u2713 <span class="fine">' + esc(cphShow(r.riderPhone)) + (r.riderPhoneSrc === "calendar" ? " \u00b7 from the calendar" : "") + "</span>" : "") + "</div>" +
       '<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">' +
-      '<input id="cph-' + id + '" type="text" inputmode="text" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" placeholder="936-555-1212" value="' + esc(r.riderPhone ? cphShow(r.riderPhone) : "") + '"' + big + ">" +
+      '<input id="cph-' + id + '" type="tel" inputmode="tel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" placeholder="936-555-1212" value="' + esc(r.riderPhone ? cphShow(r.riderPhone) : "") + '"' + big + ">" +
       '<button type="button" class="btn btn-gold btn-cph-save" data-event-id="' + id + '" style="min-height:44px">Save phone</button>' +
       '<label style="font-weight:700;font-size:17px;min-height:44px;display:flex;align-items:center;gap:6px"><input type="checkbox" class="cph-auto" data-event-id="' + id + '"' + (on ? " checked" : "") + ' style="width:26px;height:26px"> Auto text the tracking link</label>' +
       "</div>" + teenHtml(r) + "</div>";
@@ -6399,10 +6429,10 @@
       '<label style="font-weight:700;font-size:17px;min-height:44px;display:flex;align-items:center;gap:6px"><input type="checkbox" class="teen-on" data-event-id="' + id + '"' + (teen ? " checked" : "") + ' style="width:26px;height:26px"> Teen rider</label>' +
       '<div id="teenbox-' + id + '" style="display:' + (teen ? "block" : "none") + ';margin:4px 0 6px 32px">' +
       '<div style="font-weight:800;margin-bottom:4px">Teen\u2019s phone' + (teen && r.teenPhone ? ' \u2713 <span class="fine">' + esc(cphShow(r.teenPhone)) + "</span>" : "") + "</div>" +
-      '<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center"><input id="teenph-' + id + '" type="text" inputmode="text" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" placeholder="936-555-1212" value="' + esc(r.teenPhone ? cphShow(r.teenPhone) : "") + '"' + big + ">" +
+      '<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center"><input id="teenph-' + id + '" type="tel" inputmode="tel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" placeholder="936-555-1212" value="' + esc(r.teenPhone ? cphShow(r.teenPhone) : "") + '"' + big + ">" +
       '<button type="button" class="btn btn-gold btn-teen-save" data-event-id="' + id + '" style="min-height:44px">Save teen phone</button></div></div>' +
       '<div style="font-weight:800;margin:6px 0 4px">Additional number' + (r.extraPhoneOnce ? ' \u2713 <span class="fine">' + esc(cphShow(r.extraPhoneOnce)) + "</span>" : "") + ' <span class="fine">(this ride only, never saved to the client)</span></div>' +
-      '<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center"><input id="xph-' + id + '" type="text" inputmode="text" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" placeholder="936-555-1212" value="' + esc(r.extraPhoneOnce ? cphShow(r.extraPhoneOnce) : "") + '"' + big + ">" +
+      '<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center"><input id="xph-' + id + '" type="tel" inputmode="tel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" placeholder="936-555-1212" value="' + esc(r.extraPhoneOnce ? cphShow(r.extraPhoneOnce) : "") + '"' + big + ">" +
       '<button type="button" class="btn btn-gold btn-xph-save" data-event-id="' + id + '" style="min-height:44px">Use for this ride</button></div>' +
       "</div>";
   }
@@ -6802,11 +6832,15 @@
                   options.join("") +
                 "</select>" +
                 '<button type="button" class="btn btn-gold btn-assign-ride" data-event-id="' + esc(r.id) + '"' + assignDisabled + ">Assign</button>" +
-                '<label class="fare-label" for="fare-' + esc(r.id) + '">Fare before tax $</label>' +
-                '<input id="fare-' + esc(r.id) + '" class="day-fare" data-event-id="' + esc(r.id) + '"' + moneyRegAttrs() + ' value="' + esc(moneyRegVal(fareVal)) + '"' + assignDisabled + ">" +
+                '<div class="day-fare-row" style="display:flex;flex-wrap:wrap;gap:8px 12px;align-items:flex-end;flex-basis:100%">' + /* v77.6 (Matthew): Invoice # beside the fare; Save fare saves both */
+                  '<div style="display:flex;flex-direction:column;flex:1 1 140px;min-width:120px"><label class="fare-label fine" for="fare-' + esc(r.id) + '">Fare before tax $</label>' +
+                  '<input id="fare-' + esc(r.id) + '" class="day-fare" data-event-id="' + esc(r.id) + '"' + moneyRegAttrs() + ' value="' + esc(moneyRegVal(fareVal)) + '"' + assignDisabled + "></div>" +
+                  '<div style="display:flex;flex-direction:column;flex:1 1 140px;min-width:120px"><label class="inv-label fine" for="inv-' + esc(r.id) + '">Invoice #</label>' +
+                  '<input id="inv-' + esc(r.id) + '" class="day-inv" data-event-id="' + esc(r.id) + '" type="text" inputmode="numeric" pattern="[0-9]*" autocomplete="off" placeholder="000519" value="' + esc(r.prepaidInvoiceNo || "") + '"' + assignDisabled + "></div>" +
+                "</div>" +
                 '<label class="fine day-fixed-lbl" style="display:inline-flex;gap:4px;align-items:center"><input type="checkbox" class="day-fixed" id="fixed-' + esc(r.id) + '" data-event-id="' + esc(r.id) + '"' + (r.fixedFare ? " checked" : "") + assignDisabled + "> Account ride: driver app charges this fare</label>" +
                 '<button type="button" class="btn btn-gold btn-save-fare" data-event-id="' + esc(r.id) + '"' + assignDisabled + ">Save fare</button>" +
-                (r.fareBeforeTax != null ? '<span class="fine" id="fare-saved-' + esc(r.id) + '">Saved ' + esc(fmtCents(Math.round(Number(r.fareBeforeTax) * 100))) + (r.fixedFare ? " · set fare" : "") + "</span>" : "") +
+                (r.fareBeforeTax != null ? '<span class="fine" id="fare-saved-' + esc(r.id) + '">Saved ' + esc(fmtCents(Math.round(Number(r.fareBeforeTax) * 100))) + (r.fixedFare ? " · set fare" : "") + "</span>" : "") + invLinkHtml(r) +
                 '<button type="button" class="btn btn-ghost btn-complete-ride" data-event-id="' + esc(r.id) + '"' + completeDisabled + ">Complete ride…</button>" +
               "</div>" + dbCancelHtml(r)
             )) +
