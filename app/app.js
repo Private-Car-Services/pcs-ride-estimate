@@ -9196,6 +9196,7 @@
       });
       state.scheduledRides = rows || [];
       state.scheduledError = "";
+      try { var meD = driverPresenceId(); verDiscFetch((rows || []).filter(function (r) { return r && r.assignedDriverId === meD && r.status !== "completed"; }).map(function (r) { return r.id; })); } catch (e) {} /* r3 D1 */
       try { /* v73: PCS (God mode) canceled a scheduled ride assigned to me -> tell the driver once */
         var me = driverPresenceId();
         (rows || []).forEach(function (r) {
@@ -9251,9 +9252,43 @@
      Range = road miles (low) .. +10 % miles and 20 % of the drive time as slow minutes (high), like the meter's estimate.
      Set-fare (account) rides show "Set fare $X". Saved on the ride row (est*) so the driver app and God mode show one number. */
   function schedEstDisc(r) {
-    if (r && r.meterDiscount && typeof r.meterDiscount === "object" && r.meterDiscount.type) return r.meterDiscount;
+    var vd = r && r.id ? schedGodDisc(r, verDiscOf(r.id)) : null; if (vd) return vd; /* r3: Worker-verified only */
     var p = Number(r && r.discountPct);
-    return p > 0 ? { type: "other", status: "approved", pct: p } : null;
+    return p > 0 ? { type: "other", status: "approved", pct: Math.min(p, 50) } : null; /* r4: fallback capped at 50% */
+  }
+  /* v77.10 (Matthew 10/20): a discount God approved on this ride card (meterDiscount {type "other", status "approved", by "god"})
+     goes straight onto the meter as the ride's one approved discount (existing rules: its own line; the "other" commission rule). Pure (tested). */
+  function idVerifyText(type) { return type === "military" ? "Verify military ID" : type === "senior" ? "Verify ID: rider 65+" : ""; } /* pure (tested) */
+  function idVerifyPopup(type, onOk, self) { /* r5: onOk runs after the big green OK (driver self-applied preset) */
+    var t = idVerifyText(type); if (!t || typeof document === "undefined") { if (onOk) onOk(); return; }
+    var el = document.getElementById("id-verify-pop"); if (!el) { el = document.createElement("div"); el.id = "id-verify-pop"; document.body.appendChild(el); }
+    el.innerHTML = '<div role="alertdialog" aria-modal="true" style="position:fixed;inset:0;background:rgba(0,0,0,.8);z-index:99999;display:flex;align-items:center;justify-content:center;padding:16px">' +
+      '<div style="background:#fff;color:#0b3d23;border:4px solid #2e7d32;border-radius:16px;max-width:420px;width:100%;padding:18px;text-align:center"><p style="font-size:24px;font-weight:800;margin:0 0 8px">' + t + "</p>" +
+      '<p style="font-size:16px;margin:0 0 12px">' + (type === "military" ? "Military discount (10%)" : "Senior discount, 65+ (10%)") + (self ? " applies after you check the rider\u2019s ID." : " is on this ride. Check the rider\u2019s ID before the trip.") + "</p>" +
+      '<button type="button" id="id-verify-ok" style="background:#2e7d32;color:#fff;border:0;border-radius:12px;font-weight:800;font-size:22px;min-height:60px;width:100%">OK</button></div></div>';
+    var ok = document.getElementById("id-verify-ok"); if (ok) ok.addEventListener("click", function () { el.innerHTML = ""; if (onOk) onOk(); });
+  }
+  /* v77.10 r3 (Harry D1): the meter uses ONLY the discount the Worker serves (POST /driver/discount, driver token, rides
+     assigned to me; God saves it into Worker KV). r.meterDiscount in Firebase is display-only and is never applied. */
+  var verDisc = {};
+  var DISC_UNCONFIRMED_TEXT = "Discount not confirmed by PCS yet: the meter shows the full fare. Ask dispatch to confirm it.";
+  function verDiscOf(id) { return Object.prototype.hasOwnProperty.call(verDisc, id) ? verDisc[id] : null; }
+  function verDiscFetch(ids) {
+    ids = (ids || []).filter(Boolean).slice(0, 30); var tk = qToken();
+    if (!ids.length || !tk) return Promise.resolve(verDisc);
+    return qWorker("/driver/discount", { token: tk, rideIds: ids }).then(function (d) {
+      var got = (d && d.discounts) || {}; ids.forEach(function (id) { verDisc[id] = got[id] && typeof got[id] === "object" ? got[id] : null; }); return verDisc;
+    }, function () { return verDisc; });
+  }
+  function schedGodDisc(r, ver) { /* pure (tested): ver = the Worker-verified discount for r (never r.meterDiscount) */
+    var d = ver; if (!d || typeof d !== "object" || d.by !== "god") return null;
+    var dc = d.driverCovers === true ? { driverCovers: true } : {}; /* v77.10: default PCS absorbs it */
+    if (d.type === "military" || d.type === "senior") return Object.assign({ type: d.type, status: "applied", by: "god", at: Number(d.at) || 0 }, dc); /* standing 10% presets (METER_DISC_PCT) */
+    if (d.type !== "other" || d.status !== "approved") return null;
+    var pct = Number(d.pct), cents = Math.round(Number(d.cents));
+    if (cents > 0) return Object.assign({ type: "other", status: "approved", cents: cents, by: "god", at: Number(d.at) || 0 }, dc);
+    if (pct > 0 && pct <= 50) return Object.assign({ type: "other", status: "approved", pct: pct, by: "god", at: Number(d.at) || 0 }, dc); /* r3: max 50%; $ is capped at the fare by meterDiscountCents */
+    return null;
   }
   function schedEstSetFare(r) { return !!r && r.fixedFare === true && r.fareBeforeTax != null && isFinite(Number(r.fareBeforeTax)) && Number(r.fareBeforeTax) > 0; }
   function schedEstKey(r) {
@@ -10463,7 +10498,7 @@
         "<p><strong>Pickup:</strong> " + esc(r.pickup || "") + "</p>" +
         (st ? "<p><strong>Stop:</strong> " + esc(st.address) + "</p>" : "") +
         "<p><strong>Drop-off:</strong> " + esc(r.dropoff || "Add it in the ride card") + "</p>" +
-        (r.prepaid ? "<p><strong>Paid:</strong> Square invoice</p>" : r.payMethod === "cash" ? "<p><strong>CASH ride:</strong> you collect the fare</p>" : "") +
+        (r.prepaid ? "<p><strong>Paid:</strong> Square invoice</p>" : r.payMethod === "cash" ? "<p><strong>Cash ride: collect payment at drop-off</strong>" + (r.fareBeforeTax != null ? " ($" + (Number(r.fareBeforeTax) + (Number(r.taxFees) || 0)).toFixed(2) + ")" : "") + "</p>" : "") /* v77.10 */ +
         (r.notes ? "<p><strong>Notes:</strong> " + esc(r.notes) + "</p>" : "") + "</div>" : "") +
       (state.schedMsg && state.schedMsgId === t.id ? '<p class="na-msg" role="status">' + esc(state.schedMsg) + "</p>" : "") +
       '<button type="button" class="na-start" id="sched-arr-start" data-arr="start">Start ride</button>' +
@@ -10601,7 +10636,7 @@
         '<p style="margin:0 0 6px;color:#1a1a1a"><strong style="' + SCHED_LBL + '">Drop-off:</strong> ' + (r.dropoff ? esc(r.dropoff) : '<span style="color:#7c2d12;font-weight:700">Add the drop-off</span>') + "</p>" +
         (est ? '<p style="margin:0 0 6px;color:#1a1a1a"><strong style="' + SCHED_LBL + '">Estimate:</strong> <span id="sched-est-' + esc(r.id) + '">' + esc(est) + "</span></p>" : "") +
         (notes ? '<p style="margin:0 0 6px;color:#1a1a1a"><strong style="' + SCHED_LBL + '">Calendar note:</strong> ' + esc(notes) + "</p>" : "") +
-        (r.payMethod === "cash" ? '<p style="color:#7c2d12;background:#ffedd5;padding:6px 8px;border-radius:8px"><strong style="color:#7c2d12 !important">CASH ride:</strong> you collect the fare' + (r.fareBeforeTax != null ? " ($" + (Number(r.fareBeforeTax) + (Number(r.taxFees) || 0)).toFixed(2) + ")" : "") + "; the PCS share is taken from your weekly balance.</p>" : "") +
+        (r.payMethod === "cash" ? '<p style="color:#7c2d12;background:#ffedd5;padding:6px 8px;border-radius:8px"><strong style="color:#7c2d12 !important">Cash ride: collect payment at drop-off</strong>' + (r.fareBeforeTax != null ? " ($" + (Number(r.fareBeforeTax) + (Number(r.taxFees) || 0)).toFixed(2) + ")" : "") + "; the PCS share is taken from your weekly balance.</p>" : "") +
         (r.notes ? '<p style="margin:0 0 6px;color:#374151;font-size:14px">' + esc(r.notes) + "</p>" : "") +
         (onMeter || inTrip ? "" : '<button type="button" data-sched-edit="pick" data-sched-id="' + esc(r.id) + '" style="' + SCHED_BTN_2 + '">' + (r.pickup ? "Change pickup" : "Add pickup") + "</button>") + /* v75t: before the ride starts */
         (onMeter ? "" : '<div style="display:flex;gap:8px"><button type="button" data-sched-edit="drop" data-sched-id="' + esc(r.id) + '" style="' + SCHED_BTN_2 + ';flex:1">' + (r.dropoff ? "Change drop-off" : "Add drop-off") + "</button>" +
@@ -13156,15 +13191,15 @@
   /* v73 (Matthew): ONE discount per ride. Senior 10% / Military 10% apply at once; "Other" is a request with a typed reason,
      Matthew sets the amount ($ or %) in God mode or declines; it counts only once approved. */
   var METER_DISC_PCT = { senior: 10, military: 10 };
-  var METER_DISC_NAME = { senior: "Senior discount", military: "Military discount", other: "Discount" };
+  var METER_DISC_NAME = { senior: "Senior discount, 65+", military: "Military discount", other: "Discount" };
   function meterDiscountCents(M, sub) {
     var d = M && M.discount;
     if (!d || !d.type) return { cents: 0, type: "", label: "" };
     var c = 0, lab = "";
-    if (METER_DISC_PCT[d.type]) { c = Math.round(sub * METER_DISC_PCT[d.type] / 100); lab = METER_DISC_NAME[d.type] + " (" + METER_DISC_PCT[d.type] + "%)"; }
-    else if (d.type === "other" && d.status === "approved") {
+    if (METER_DISC_PCT[d.type] && (d.status === "approved" || (d.status === "applied" && (d.by === "god" || (d.by === "driver" && d.via === "worker"))))) { c = Math.round /* r5: God's, or the driver's Worker-recorded preset */(sub * METER_DISC_PCT[d.type] / 100); lab = METER_DISC_NAME[d.type] + " (" + METER_DISC_PCT[d.type] + "%)"; }
+    else if (d.type === "other" && d.status === "approved" && (d.via === "worker" || d.by === "god")) { /* r5 M6: Worker-decided (or God's Worker-served) only */
       if (Number(d.cents) > 0) { c = Math.round(Number(d.cents)); lab = "Discount (approved by owner)"; }
-      else if (Number(d.pct) > 0) { c = Math.round(sub * Math.min(100, Number(d.pct)) / 100); lab = "Discount " + Number(d.pct) + "% (approved by owner)"; }
+      else if (Number(d.pct) > 0) { c = Math.round(sub * Math.min(50, Number(d.pct)) / 100); lab = "Discount " + Number(d.pct) + "% (approved by owner)"; }
     }
     c = Math.max(0, Math.min(sub, c));
     return { cents: c, type: c > 0 ? d.type : "", label: lab };
@@ -13173,9 +13208,11 @@
      Other = PCS share figured on the undiscounted fare, so the whole discount comes out of the driver's portion */
   function meterCommissionCents(f, pct) {
     var reimb = Math.max(0, Number(f && f.tollReimburseCents) || 0); /* v76b: real tolls = pass-through, paid to the driver 100% (tollCents), never split */
-    if (f && f.discountType === "other") {
-      var gb = Math.max(0, (Number(f.grossSub) || 0) - reimb - EXTRA_FEE);
-      return Math.max(0, Math.round(gb * (pct / 100)) - (Number(f.discountCents) || 0));
+    /* v77.10 (Matthew 10/20, replaces the v73 split): PCS absorbs EVERY discount (Military, Senior 65+, custom, approved "other"):
+       the driver's % is on the UNDISCOUNTED fare. Only when God checked "Driver covers it" does the whole discount come off the driver. */
+    if (f && Number(f.discountCents) > 0 && f.grossSub != null) {
+      var gb = Math.max(0, (Number(f.grossSub) || 0) - reimb - EXTRA_FEE), full = Math.round(gb * (pct / 100));
+      return f.discountDriverCovers === true ? Math.max(0, full - (Number(f.discountCents) || 0)) : full;
     }
     return Math.round(Math.max(0, (Number(f.sub) || 0) - reimb - EXTRA_FEE) * (pct / 100));
   }
@@ -13280,7 +13317,7 @@
     sub = Math.max(0, sub - disc.cents) + toll.cents;
     var bp = Math.round((Number(M.taxRate) || 0) * 1000000); /* rate in millionths: whole-number math, half-cent rounds up */
     var tax = bp > 0 ? Math.round(sub * bp / 1000000) : 0;
-    return { grossSub: grossSub, discountCents: disc.cents, discountType: disc.type, discountLabel: disc.label, base: base, miles: Math.round(miles * 100) / 100, includedMiles: incl, afterMiles: Math.round(afterMiles * 100) / 100,
+    return { discountDriverCovers: !!(disc.cents > 0 && M && M.discount && M.discount.driverCovers === true), grossSub: grossSub, discountCents: disc.cents, discountType: disc.type, discountLabel: disc.label, base: base, miles: Math.round(miles * 100) / 100, includedMiles: incl, afterMiles: Math.round(afterMiles * 100) / 100,
       mileCents: mileCents, waitMin: waitMin, waitCents: waitCents, raw: raw,
       roundCents: stepped - raw, meter: stepped, minAdd: meterSub - stepped, minApplied: meterSub > stepped, /* v73: meter vs minimum only (airport fee / discount are their own lines) */ minCents: min, freeMin: Math.max(0, Number(M.freeUsed) || 0),
       feeLines: air.lines, airportCents: air.airportCents, intlCents: air.intlCents, meterSub: meterSub,
@@ -13357,15 +13394,33 @@
       '<div class="meter-disc-opts" style="display:flex;gap:6px;flex-wrap:wrap">' + btn("senior", "Senior 10%") + btn("military", "Military 10%") + btn("other", "Other") + "</div>" +
       (ed ? "" : '<p class="fine">Locked while the pay link is open.</p>') + st + form + "</div>";
   }
-  function meterDiscUrl(code) { return databaseURL() + "/rides/DSCNTRQS/" + encodeURIComponent(code) + ".json"; }
   /* v73 / Worker v69.8: "Other" discount requests go to the Worker with the driver token (KV); no token or an older Worker -> Firebase */
   function meterDiscWorker(path, body) {
     var tok = ""; try { tok = qToken(); } catch (e) {}
     if (!tok || state.meterDiscFb) return Promise.reject(new Error("fb"));
     return qWorker(path, Object.assign({ token: tok }, body)).catch(function (e) { if (e && e.status === 404) state.meterDiscFb = true; throw e; });
   }
+  var DISC_RETRY_TEXT = "Discount request will send when connection returns.";
+  function meterDiscSend(M, rq) { /* r5 M6: the ONLY way a request leaves the app (Worker /disc/ask); never the Firebase request list */
+    if (M.discount) M.discount.retryRq = rq;
+    if (state.meterDiscWithdrawRetry === M.code) state.meterDiscWithdrawRetry = ""; /* a new ask replaces the old one */
+    return meterDiscWorker("/disc/ask", rq).then(function () {
+      var cur = state.meter; if (cur && cur.code === M.code && cur.discount && cur.discount.status === "pending") { cur.discount.via = "worker"; delete cur.discount.retryRq; }
+      if (state.meterError === DISC_RETRY_TEXT) state.meterError = ""; meterSave(); render();
+    }, function () { state.meterError = DISC_RETRY_TEXT; meterSave(); render(); });
+  }
+  function meterPresetSend(M, type) {
+    var cur0 = M.discount || {}; if (cur0.type === "other" || (cur0.status === "pending" && cur0.retryRq)) meterDiscWithdraw(M);
+    M.discount = { type: type, status: "pending", by: "driver", requestedAt: Date.now(), retryPreset: type }; meterRefareEnded(M);
+    return meterDiscWorker("/disc/preset", { code: M.code, preset: type }).then(function (d) {
+      var cur = state.meter; if (!cur || cur.code !== M.code || !cur.discount || cur.discount.type !== type) return;
+      cur.discount = { type: type, status: "applied", by: "driver", via: "worker", at: Number(d && d.at) || Date.now() };
+      if (state.meterError === DISC_RETRY_TEXT) state.meterError = ""; meterRefareEnded(cur);
+    }, function () { state.meterError = DISC_RETRY_TEXT; meterSave(); render(); });
+  }
   function meterDiscWithdraw(M) {
-    meterDiscWorker("/disc/ask", { code: M.code, withdraw: true }).catch(function () { meterWrite(meterDiscUrl(M.code), "PATCH", { status: "withdrawn", updatedAt: Date.now() }); });
+    if (M && M.discount && M.discount.by === "driver" && M.discount.via === "worker") meterDiscWorker("/disc/preset", { code: M.code, preset: null }).catch(function () {}); /* r5: clear the recorded preset */
+    var c = M.code; meterDiscWorker("/disc/ask", { code: c, withdraw: true }).catch(function () { state.meterDiscWithdrawRetry = c; }); /* r5 M6: Worker only, retried by meterDiscPoll */
   }
   function meterRefareEnded(M, extra) {
     M.fare = meterFare(M);
@@ -13385,13 +13440,16 @@
     if (!M || M.status !== "ended" || !meterTripEditable(M)) return;
     var cur = M.discount || {};
     if (cur.type === type) { /* tap again = remove */
-      if (type === "other") meterDiscWithdraw(M);
+      if (type === "other" || cur.status === "pending" || cur.by === "driver") meterDiscWithdraw(M);
       M.discount = null; state.meterDiscOtherOpen = false; meterRefareEnded(M); return;
     }
     if (type === "other") { state.meterDiscOtherOpen = true; render(); return; }
-    if (cur.type === "other") meterDiscWithdraw(M);
-    M.discount = { type: type, status: "applied", at: Date.now() }; state.meterDiscOtherOpen = false;
-    meterRefareEnded(M);
+    if (cur.type === "other" || cur.status === "pending") meterDiscWithdraw(M);
+    /* r5 (Matthew overrides Harry M5): the driver MAY self-apply Military or Senior 65+ (exactly 10%, one per ride, replaces any other),
+       after "Verify with ID" + OK. It is recorded by the Worker (POST /disc/preset, driver token -> KV by:"driver") and applies only once
+       the Worker confirms it; God still sees "review before payout". */
+    state.meterDiscOtherOpen = false;
+    idVerifyPopup(type, function () { meterPresetSend(M, type); }, true);
   }
   function meterDiscSendOther() {
     var M = state.meter;
@@ -13404,18 +13462,21 @@
     state.meterDiscOtherOpen = false; state.meterDiscReason = ""; state.meterError = "";
     var rq = { code: M.code, driverId: M.driverId, driverName: M.driverName, reason: reason.slice(0, 200), fareSubCents: f0.sub,
       fareTotalCents: f0.total, status: "pending", requestedAt: now, rideType: "metered" };
-    meterDiscWorker("/disc/ask", rq).then(function () { M.discount.via = "worker"; meterSave(); }).catch(function () { meterWrite(meterDiscUrl(M.code), "PUT", rq); });
+    meterDiscSend(M, rq); /* r5 M6: Worker only; kept pending here and retried when the connection returns */
     meterRefareEnded(M);
   }
   /* poll the owner's answer while the request is open and the ride is not paid yet */
   function meterDiscPoll() {
     var M = state.meter;
-    if (!M || M.status !== "ended" || !M.discount || M.discount.type !== "other" || M.discount.status !== "pending" || !syncOn()) return;
-    (M.discount.via === "worker" ? meterDiscWorker("/disc/mine", { code: M.code }).then(function (d) { return d && d.request; })
-      : authFetch(meterDiscUrl(M.code)).then(function (r) { return r.ok ? r.json() : null; })).then(function (q) {
+    if (state.meterDiscWithdrawRetry && syncOn()) { var wc = state.meterDiscWithdrawRetry; meterDiscWorker("/disc/ask", { code: wc, withdraw: true }).then(function () { if (state.meterDiscWithdrawRetry === wc) state.meterDiscWithdrawRetry = ""; }, function () {}); }
+    if (!M || M.status !== "ended" || !M.discount || M.discount.status !== "pending" || !syncOn()) return; /* r4: presets are polled too */
+    if (M.discount.retryPreset && M.discount.via !== "worker" && !meterDiscPoll.busy) { meterDiscPoll.busy = true; meterPresetSend(M, M.discount.retryPreset).then(function () { meterDiscPoll.busy = false; }, function () { meterDiscPoll.busy = false; }); return; } /* r5 */
+    if (M.discount.via !== "worker") { if (M.discount.retryRq && !meterDiscPoll.busy) { meterDiscPoll.busy = true; meterDiscSend(M, M.discount.retryRq).then(function () { meterDiscPoll.busy = false; }); } return; } /* r5: resend, never Firebase */
+    meterDiscWorker("/disc/mine", { code: M.code }).then(function (d) { return d && d.request; }).then(function (q) {
       var cur = state.meter;
       if (!q || !cur || cur.code !== M.code || !cur.discount || cur.discount.status !== "pending" || cur.status !== "ended") return;
       if (q.status === "approved" && (Number(q.amountCents) > 0 || Number(q.pct) > 0)) {
+        if (cur.discount.type !== "other") Object.assign(cur.discount, { status: "approved", pct: 10, cents: 0, approvedBy: String(q.decidedBy || "Matthew"), decidedAt: Number(q.decidedAt) || Date.now() }); else
         Object.assign(cur.discount, { status: "approved", cents: Number(q.amountCents) > 0 ? Math.round(Number(q.amountCents)) : 0, pct: Number(q.pct) > 0 ? Number(q.pct) : 0,
           approvedBy: String(q.decidedBy || "Matthew"), decidedAt: Number(q.decidedAt) || Date.now() });
         if (meterTripEditable(cur)) meterRefareEnded(cur); else { meterSave(); render(); } /* pay link open: shown, applied only if the link is closed */
@@ -13945,6 +14006,11 @@
     else if (state.schedStartId) { var srx = schedFind(state.schedStartId); if (srx) { M.schedId = srx.id; M.schedRider = String(srx.rider || ""); M.pickupAddress = String(srx.pickup || "").slice(0, 160); } } /* v75r: metered scheduled ride */
     state.schedStartId = "";
     if (M.schedId) { var ppr = prepaidOf(schedFind(M.schedId)); if (ppr) M.prepaid = ppr; } /* v75v */
+    M.startFlags = rideSessionFlags(null, now, Number(state.gpsAt) || 0); /* v77.10: stale GPS at Start */
+    if (M.schedId) { var gdz = schedGodDisc(schedFind(M.schedId), verDiscOf(M.schedId)); if (gdz) { M.discount = gdz; if (gdz.type === "military" || gdz.type === "senior") idVerifyPopup(gdz.type); }
+      else { var sidV = M.schedId; verDiscFetch([sidV]).then(function () { var g2 = schedGodDisc(schedFind(sidV), verDiscOf(sidV)), Mn = state.meter; /* r3: asked the Worker at Start */
+        var fbD = (schedFind(sidV) || {}).meterDiscount; if (!g2 && fbD && typeof fbD === "object" && Mn && Mn.schedId === sidV) { state.meterError = DISC_UNCONFIRMED_TEXT; try { render(); } catch (e) {} } /* r4 optional */
+        if (g2 && Mn && Mn.schedId === sidV && Mn.status === "running" && !Mn.discount) { Mn.discount = g2; try { meterSave(); } catch (e) {} if (g2.type === "military" || g2.type === "senior") idVerifyPopup(g2.type); } }); } } /* v77.10: God-approved per-ride discount; ID check at Start */
     if (M.schedId) { var rpx = ridePctOf(schedFind(M.schedId)); if (rpx != null) M.ridePct = rpx; } /* v76d per-ride % */
     var ovx = M.schedId ? rateOvOf(schedFind(M.schedId)) : null; /* v76j contract rate */
     var tp = meterTripOf({ trip: state.meterTripPending }); /* v72t trip type */
@@ -13987,6 +14053,8 @@
       tollCents: f.tollReimburseCents || 0, /* real tolls: 100% to the driver (reimbursement), not in commissionCents */
       tollRoadFeeCents: f.tollRoadFeeCents || 0, /* DV-plate cars: fare income, already inside the commission split */
       fareGrossSub: f.grossSub != null ? f.grossSub : f.sub, discountType: f.discountType || null, discountCents: f.discountCents || 0, /* v73 */
+      discountPaidBy: (f.discountCents || 0) > 0 ? (f.discountDriverCovers ? "driver" : "pcs") : null, discountLabel: f.discountLabel || null, /* v77.10 */
+      discountReview: (f.discountCents || 0) > 0 ? "pending" : null, /* r3: every discounted ride waits for God review before payout */
       discountReason: M.discount && M.discount.type === "other" ? String(M.discount.reason || "") : null,
       discountApprovedBy: M.discount && M.discount.type === "other" && M.discount.status === "approved" ? String(M.discount.approvedBy || "Matthew") : null
     };
@@ -14068,6 +14136,7 @@
     M.endPt = M.lastPt ? { lat: M.lastPt.lat, lng: M.lastPt.lng } : (M.startPt || null);
     M.minutes = Math.max(1, Math.ceil((now - M.startedAt) / 60000));
     M.fare = meterFare(M);
+    M.sessionFlags = rideSessionFlags(M, now, Number(state.gpsAt) || 0).concat((M.startFlags || []).map(function (x) { return "start_" + x; })); /* v77.10 */
     M.pay = { status: "unpaid" };
     state.meterConfirmEnd = false;
     state.meterBusy = "";
@@ -14080,6 +14149,8 @@
       dropLat: M.endPt ? M.endPt.lat : null, dropLng: M.endPt ? M.endPt.lng : null,
       pickupLat: M.startPt ? M.startPt.lat : null, pickupLng: M.startPt ? M.startPt.lng : null,
       meterMiles: f.miles, billedMiles: f.miles, meterMinutes: M.minutes, waitMinutes: f.waitMin, gpsGapFills: M.gapFills || 0,
+      sessionFlags: (M.sessionFlags || []).length ? M.sessionFlags.slice() : null, sessionCheckAt: now, /* v77.10: offline / quick completion flagged for God */
+      discountReview: (f.discountCents || 0) > 0 ? "pending" : null, /* r3 */
       fareBase: f.contractRate ? Math.max(0, f.sub - (f.tollCents || 0)) : f.base, fareMileCents: f.contractRate ? 0 : f.mileCents, fareWaitCents: f.contractRate ? 0 : f.waitCents, fareSub: f.sub, /* v76j */ fareTax: f.tax, fareTotal: f.total,
       feeLines: meterRideFeeLines(f), airportFeeCents: f.airportCents || 0, internationalFeeCents: f.intlCents || 0, meterTrip: meterTripOf(M), /* v72t; v76b + toll line */
       tollCount: f.tollCount || 0, tollCents: f.tollCents || 0, tollKind: f.tollKind || "toll", tollLabel: f.tollLabel || "", tolls: (f.tolls || []).slice(),
@@ -14095,7 +14166,8 @@
     }
     if (M.schedId && syncOn()) { /* v73: the scheduled ride is done (the metered ride carries the earnings; no second entry) */
       try { /* v76i: through the outbox, so a weak signal at the curb can't leave the card open */
-        saveWrite(calendarHubUrl(M.schedId), "PATCH", { status: "completed", completedAt: now, meterCode: M.code, meterReadingCents: f.meterReadingCents, updatedAt: now });
+        saveWrite(calendarHubUrl(M.schedId), "PATCH", { status: "completed", completedAt: now, meterCode: M.code, meterReadingCents: f.meterReadingCents, updatedAt: now,
+          sessionFlags: (M.sessionFlags || []).length ? M.sessionFlags.slice() : null, discountReview: (f.discountCents || 0) > 0 ? "pending" : null }); /* v77.10 / r3 */
       } catch (e) {}
       (state.scheduledRides || []).forEach(function (r) { if (r && r.id === M.schedId) r.status = "completed"; });
     }
@@ -18859,6 +18931,47 @@
     }
   }
 
+  /* v77.10 (Matthew 10/20): on return to the foreground, take a GPS fix right away and publish it (dispatch sees the driver at once),
+     then show "Keep the PCS app open while online" + an optional "Turn on dispatch alerts" (so God's Ping reaches the phone). */
+  function fgLocateNow() {
+    try { lastGpsPollAt = 0; if (navigator.geolocation) navigator.geolocation.getCurrentPosition(function (pos) { onGpsFix(pos); try { publishDriverPresence(); } catch (e) {} }, function () {}, { enableHighAccuracy: true, maximumAge: 0, timeout: 15000 }); } catch (e) {}
+    try { if (driverIsOnlineNow()) keepOpenBanner(); } catch (e) {}
+  }
+  function driverIsOnlineNow() { try { return !qOffline() && canGoOnline(); } catch (e) { return false; } } /* same rule publishDriverPresence uses */
+  var KEEP_OPEN_TEXT = "Keep the PCS app open while online";
+  function keepOpenBanner() {
+    if (typeof document === "undefined") return; var el = document.getElementById("keep-open-banner");
+    if (!el) { el = document.createElement("div"); el.id = "keep-open-banner"; document.body.appendChild(el); }
+    var canPush = "serviceWorker" in navigator && "PushManager" in window && "Notification" in window && Notification.permission !== "granted";
+    el.innerHTML = '<div role="status" style="position:fixed;left:8px;right:8px;bottom:8px;z-index:99998;background:#14532d;color:#fff;border:2px solid #9be7b0;border-radius:14px;padding:12px;font-weight:800;font-size:18px;box-shadow:0 4px 18px rgba(0,0,0,.4)">' +
+      KEEP_OPEN_TEXT + '<div style="font-weight:600;font-size:15px;margin-top:4px">Dispatch only sees you while the app is open on screen.</div>' +
+      '<div style="display:flex;gap:8px;margin-top:8px">' + (canPush ? '<button type="button" id="drv-push-on" style="flex:1;background:#2e7d32;color:#fff;border:0;border-radius:10px;font-weight:800;font-size:16px;min-height:48px">Turn on dispatch alerts</button>' : "") +
+      '<button type="button" id="keep-open-ok" style="flex:1;background:#9be7b0;color:#0b3d23;border:0;border-radius:10px;font-weight:800;font-size:18px;min-height:48px">OK</button></div></div>';
+    var ok = document.getElementById("keep-open-ok"); if (ok) ok.addEventListener("click", function () { el.innerHTML = ""; });
+    var pb = document.getElementById("drv-push-on"); if (pb) pb.addEventListener("click", function () { driverPushOn().then(function () { el.innerHTML = ""; }, function () { pb.textContent = "Alerts not available on this phone"; }); });
+  }
+  function driverPushOn() { /* driver's own device: subscribe for God's "Ping driver" */
+    var tk = qToken(); if (!tk) return Promise.reject(new Error("token"));
+    return navigator.serviceWorker.register("sw-driver.js", { scope: "./" }).then(function () { return Notification.requestPermission(); }).then(function (perm) {
+      if (perm !== "granted") throw new Error("perm");
+      return Promise.all([navigator.serviceWorker.ready, fetch(METER_WORKER + "/push/key").then(function (r) { return r.json(); })]);
+    }).then(function (a) {
+      var k = String((a[1] && a[1].publicKey) || ""), pad = "=".repeat((4 - k.length % 4) % 4), raw = atob((k + pad).replace(/-/g, "+").replace(/_/g, "/")), arr = new Uint8Array(raw.length);
+      for (var i = 0; i < raw.length; i++) arr[i] = raw.charCodeAt(i);
+      return a[0].pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: arr });
+    }).then(function (sub) { return qWorker("/driver/push/subscribe", { token: tk, subscription: sub.toJSON ? sub.toJSON() : sub }); });
+  }
+  /* v77.10 (Matthew 10/20): ride integrity. Start / pickup / complete need an active app session: a GPS fix from THIS session within the
+     last 2 minutes. They still go through (a ride is never stuck), but the record is flagged for God. Pure (tested). */
+  function rideSessionFlags(M, now, lastFixAt) {
+    var out = [], gpsAge = lastFixAt ? now - lastFixAt : Infinity;
+    if (!(gpsAge <= 120000)) out.push("stale_gps");
+    if (M && M.startedAt && M.endedAt && M.endedAt - M.startedAt < 60000) out.push("under_1_min");
+    if (M && M.startPt && M.endPt && Math.abs(M.startPt.lat - M.endPt.lat) < 0.0005 && Math.abs(M.startPt.lng - M.endPt.lng) < 0.0005) out.push("same_spot");
+    if (M && M.schedId && M.fare && Number(M.fare.miles) === 0) out.push("zero_miles");
+    if (typeof document !== "undefined" && document.visibilityState === "hidden") out.push("app_hidden");
+    return out;
+  }
   function nudgeGps() {
     if (!navigator.geolocation || ROLE !== "driver" || !signedIn()) return;
     if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
@@ -19049,6 +19162,7 @@
       if (ROLE === "driver" && signedIn()) {
         presenceApp.foregroundAt = Date.now();
         publishDriverPresence(); /* v64: appState foreground + fresh at */
+        fgLocateNow(); /* v77.10: send the location at once, then remind */
       }
       if (ROLE === "driver" && signedIn()) {
         nudgeGps();
