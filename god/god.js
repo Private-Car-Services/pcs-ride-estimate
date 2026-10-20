@@ -268,7 +268,7 @@
       commissionCents: raw.commissionCents != null ? Number(raw.commissionCents) : null,
       completedAt: raw.completedAt || null,
       source: String(raw.source || ""), payMethod: String(raw.payMethod || ""), stops: Array.isArray(raw.stops) ? raw.stops : [], /* v72d */
-      riderPhone: String(raw.riderPhone || ""), balance: raw.balance != null ? Number(raw.balance) : null,
+      riderPhone: String(raw.riderPhone || ""), riderPhoneEdited: raw.riderPhoneEdited === true, riderPhoneSrc: String(raw.riderPhoneSrc || ""), autoText: raw.autoText !== false, /* v77.3 */ balance: raw.balance != null ? Number(raw.balance) : null,
       paidSquareCents: raw.paidSquareCents != null && isFinite(+raw.paidSquareCents) ? Math.round(+raw.paidSquareCents) : null, paidEdits: Array.isArray(raw.paidEdits) ? raw.paidEdits : [], /* v75w */
       tipCents: Number(raw.tipCents) || 0, tipVia: raw.tipVia ? String(raw.tipVia) : null, tipEdits: Array.isArray(raw.tipEdits) ? raw.tipEdits : [], /* v73 */
       cancelledAt: Number(raw.cancelledAt) || null, cancelledBy: raw.cancelledBy ? String(raw.cancelledBy) : null, cancelReason: raw.cancelReason ? String(raw.cancelReason) : null,
@@ -1248,12 +1248,10 @@
     try { return kind === "local" ? window.localStorage : window.sessionStorage; } catch (err) { return null; }
   }
 
-  /* Session tag is bound to the current password hash + owner email.
-     Changing the God password (new hash in god-auth.js) invalidates every kept sign-in. */
-  function keepTag(email) {
-    var h = expectedGodHash();
-    if (!h || !window.crypto || !window.crypto.subtle) return Promise.resolve("");
-    return sha256Hex("pcs-god-keep|" + h + "|" + normalizeEmail(email));
+  /* v77.4: God auth is Worker-only. A kept sign-in is just a marker; the real proof is the Worker God token,
+     re-checked at /god/session on every open. Changing the password revokes every token (Worker side). */
+  function keepTag() {
+    try { var b = new Uint8Array(32); crypto.getRandomValues(b); return Promise.resolve(Array.prototype.map.call(b, function (x) { return x.toString(16).padStart(2, "0"); }).join("")); } catch (e) { return Promise.resolve(""); }
   }
 
   function readKeepRaw() {
@@ -1276,16 +1274,24 @@
   /* Resolves to the owner email when a kept sign-in is valid for the current hash, else "". */
   function restoreSession() {
     var data = readKeepRaw();
-    if (!data) return Promise.resolve("");
-    return keepTag(data.email).then(function (tag) {
-      if (tag && tag === data.tag) return OWNER_EMAIL;
-      clearSession();
-      return "";
-    }).catch(function () { return ""; });
+    var tok = "";
+    try { tok = gqTok(); } catch (e) { tok = ""; }
+    if (!data || !tok) { clearSession(); return Promise.resolve(""); }
+    return fetch(PAY_WORKER + "/god/session", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ godToken: tok }) })
+      .then(function (res) { return res.json().catch(function () { return {}; }).then(function (d) { d = d || {}; d.httpStatus = res.status; return d; }); })
+      .then(function (d) {
+        if (d.ok) {
+          if (d.godToken) gqSetTok(d.godToken);
+          gq.tokOn = true; state.godPwMust = d.mustChange === true; state.godPwDays = d.days || 45;
+          return OWNER_EMAIL;
+        }
+        if (d.httpStatus === 401 || d.httpStatus === 403 || d.httpStatus === 400) { gqSetTok(""); clearSession(); }
+        return "";
+      }).catch(function () { return ""; });
   }
 
   function writeSession(email) {
-    return keepTag(email).then(function (tag) {
+    return keepTag().then(function (tag) {
       if (!tag) return;
       var payload = JSON.stringify({ email: normalizeEmail(email), tag: tag, at: Date.now() });
       ["local", "session"].forEach(function (kind) {
@@ -1315,22 +1321,6 @@
       } catch (err) {}
     });
     clearLegacySession();
-  }
-
-  function sha256Hex(text) {
-    var data = new TextEncoder().encode(String(text || ""));
-    return crypto.subtle.digest("SHA-256", data).then(function (buf) {
-      return Array.prototype.map.call(new Uint8Array(buf), function (b) {
-        return b.toString(16).padStart(2, "0");
-      }).join("");
-    });
-  }
-
-  function expectedGodHash() {
-    var h = "";
-    try { h = String(window.PCS_GOD_PASSWORD_HASH || "").trim().toLowerCase(); } catch (err) { h = ""; }
-    if (!/^[a-f0-9]{64}$/.test(h)) return "";
-    return h;
   }
 
   function fmtMoney(n) {
@@ -1451,49 +1441,30 @@
       state.loginError = "Enter your password.";
       return Promise.resolve(false);
     }
-    var expected = expectedGodHash();
-    if (!expected) {
-      state.loginError = "God login is not configured (missing password hash). See DEPLOY-NOTES.md.";
-      return Promise.resolve(false);
-    }
-    if (!window.crypto || !window.crypto.subtle) {
-      state.loginError = "This browser cannot verify the password securely.";
-      return Promise.resolve(false);
-    }
-    /* v77.1: the Worker checks the God password (it can be changed in-app) and says when it's time for a new one.
-       Only an old Worker (404) or a network failure falls back to the on-device check. */
-    var viaWorker = fetch(PAY_WORKER + "/god/login", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ godPassword: String(password) }) })
+    /* v77.4: the Worker is the only place the God password is checked (the old on-phone hash is gone). */
+    return fetch(PAY_WORKER + "/god/login", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ godPassword: String(password) }) })
       .then(function (res) { return res.json().catch(function () { return {}; }).then(function (d) { d = d || {}; d.httpStatus = res.status; return d; }); })
-      .catch(function () { return { httpStatus: 0 }; });
-    return viaWorker.then(function (d) {
-      if (d.ok) {
-        try { if (d.godToken) { gqSetTok(d.godToken); gq.tokOn = true; } gq.pw = String(password); } catch (e2) {}
-        state.godPwMust = d.mustChange === true; state.godPwDays = d.days || 45;
-        return writeSession(e).then(function () { state.sessionEmail = e; state.screen = "board"; state.loginError = ""; return true; });
-      }
-      if (d.httpStatus === 403 || d.httpStatus === 429) { state.loginError = d.httpStatus === 429 ? "Too many tries. Wait a minute." : "Wrong email or password."; return false; }
-      return localGodCheck();
-    });
-    function localGodCheck() {
-    return sha256Hex(password).then(function (got) {
-      if (got !== expected) {
-        state.loginError = "Wrong email or password.";
+      .catch(function () { return { httpStatus: 0 }; })
+      .then(function (d) {
+        if (d.ok && d.godToken) {
+          try { gqSetTok(d.godToken); gq.tokOn = true; gq.pw = ""; } catch (e2) {}
+          state.godPwMust = d.mustChange === true; state.godPwDays = d.days || 45;
+          return writeSession(e).then(function () { state.sessionEmail = e; state.screen = "board"; state.loginError = ""; return true; });
+        }
+        if (d.httpStatus === 403) state.loginError = "Wrong email or password.";
+        else if (d.httpStatus === 429) state.loginError = "Too many tries. Wait a minute.";
+        else if (d.httpStatus === 0) state.loginError = "Couldn't reach PCS. Check signal and try again.";
+        else state.loginError = d.error || "Sign-in isn't available right now. Try again in a minute.";
         return false;
-      }
-      return writeSession(e).then(function () {
-        state.sessionEmail = e;
-        state.screen = "board";
-        state.loginError = "";
-        try { if (typeof gq !== "undefined" && gq && !gqTok()) gq.pw = String(password); } catch (e2) {} /* v77.1: first roster read through the Worker gets the God token (memory only) */
-        return true;
       });
-    }).catch(function () {
-      state.loginError = "Could not verify password.";
-      return false;
-    });
-    }
   }
   /* v77.1: God password change (forced after the limit, or any time from the Password button) + the days setting */
+  function pwWeakMsg(np) { /* v77.4: same rule as the Worker */
+    np = String(np || "");
+    if (np.length < 12) return "Use at least 12 characters for the new password.";
+    if (!/[A-Za-z]/.test(np) || !/[0-9]/.test(np)) return "Use letters and at least one number in the new password.";
+    return "";
+  }
   function godPwScreenHtml() {
     var big = "display:block;width:100%;min-height:58px;font-size:20px;font-weight:700;border-radius:12px;border:0;background:#1f7a3a;color:#fff;margin-top:14px";
     var box = "display:block;width:100%;min-height:50px;font-size:18px;padding:10px;border-radius:10px;border:2px solid #1f7a3a;margin:6px 0 10px;box-sizing:border-box";
@@ -1503,7 +1474,7 @@
       '<p style="font-size:17px">' + (forced ? "God mode asks for a fresh password every " + esc(String(state.godPwDays || 45)) + " days. Set a new one to continue." : "Your God password is changed here.") + '</p>' +
       '<form id="godpw-form" autocomplete="off" novalidate>' +
       '<label for="godpw-cur">Current password</label><input id="godpw-cur" type="password" autocomplete="current-password" style="' + box + '">' +
-      '<label for="godpw-new">New password (8 or more characters)</label><input id="godpw-new" type="password" autocomplete="new-password" style="' + box + '">' +
+      '<label for="godpw-new">New password (12+ characters, letters and a number)</label><input id="godpw-new" type="password" autocomplete="new-password" style="' + box + '">' +
       '<label for="godpw-confirm">New password again</label><input id="godpw-confirm" type="password" autocomplete="new-password" style="' + box + '">' +
       '<p class="login-error" id="godpw-error" role="alert" style="font-size:17px">' + esc(state.godPwError || "") + '</p>' +
       '<button type="submit" style="' + big + '"' + (state.godPwBusy ? " disabled" : "") + '>' + (state.godPwBusy ? "Saving…" : "Save new password") + '</button></form>' +
@@ -1524,8 +1495,8 @@
       var cur = g("godpw-cur"), np = g("godpw-new"), cf = g("godpw-confirm");
       var fail = function (m) { state.godPwError = m; state.godPwBusy = false; render(); };
       if (!cur) return fail("Enter your current password.");
-      if (np.length < 8) return fail("Use at least 8 characters for the new password.");
-      if (np !== cf) return fail("The two new passwords must match.");
+      var weak = pwWeakMsg(np); if (weak) return fail(weak);
+      if (np !== cf) return fail("Passwords must match.");
       if (np === cur) return fail("Pick a new password that's different from the last one.");
       state.godPwBusy = true; state.godPwError = ""; render();
       fetch(PAY_WORKER + "/god/changepw", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ godPassword: cur, newPassword: np }) })
@@ -6382,6 +6353,159 @@
       godFetch(calendarUrl(row.id), { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(p) }).then(function (res) { if (res.ok) { row.rateOverride = p.rateOverride; row.rateOverrideCleared = false; renderBoardLists(); } }).catch(function () {}); });
   }
   if (typeof window !== "undefined") window.__pcsGodRateOv = { patch: rateOvPatch, clear: rateOvClearPatch, match: contractMatch, auto: rateOvAutoPatch, presets: RATE_PRESETS, html: rateOvHtml };
+  /* ---------- v77.3 (Matthew 10/20): CLIENT PHONE + AUTO "ON THE WAY" TEXT (God mode) ----------
+     Client phone on any board row: saved as riderPhone (+ riderPhoneEdited, so the calendar sync never overwrites it).
+     Per-ride "Auto text" switch: autoText false = this client is never auto-texted. Master switch + "Texts sent" log go through
+     the pcs-pay Worker (/god/autotext, /god/smslog). Texts go out from the one PCS texting number (Twilio), never from 7878. */
+  function cphNorm(raw) { /* pure (tested): US phone -> +1XXXXXXXXXX, "" = cleared, null = bad */
+    var t = String(raw == null ? "" : raw).trim(); if (!t) return "";
+    var d = t.replace(/\D/g, ""); if (d.length === 11 && d.charAt(0) === "1") d = d.slice(1);
+    return d.length === 10 && /^[2-9]/.test(d) ? "+1" + d : null;
+  }
+  function cphShow(e) { var d = String(e || "").replace(/\D/g, "").slice(-10); return d.length === 10 ? "(" + d.slice(0, 3) + ") " + d.slice(3, 6) + "-" + d.slice(6) : String(e || ""); }
+  function clientPhonePatch(raw, now, by) { /* pure (tested) */
+    var p = cphNorm(raw);
+    if (p === null) return { ok: false, error: "Enter a 10-digit US phone, like 936-555-1212." };
+    return { ok: true, patch: { riderPhone: p, riderPhoneEdited: true, riderPhoneBy: by || "god", riderPhoneAt: now, riderPhoneSrc: "god", updatedAt: now } };
+  }
+  function autoTextPatch(on, now) { return { autoText: on !== false, updatedAt: now }; } /* pure (tested) */
+  function cphHtml(r) {
+    var id = esc(r.id), on = r.autoText !== false, big = ' style="font-size:18px;min-height:44px;width:220px"';
+    return '<div class="db-cph" style="border:2px solid #0b6b3a;background:#0b3d23;border-radius:10px;padding:8px;margin:6px 0">' +
+      '<div style="font-weight:800;margin-bottom:4px">Client phone' + (r.riderPhone ? ' \u2713 <span class="fine">' + esc(cphShow(r.riderPhone)) + (r.riderPhoneSrc === "calendar" ? " \u00b7 from the calendar" : "") + "</span>" : "") + "</div>" +
+      '<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">' +
+      '<input id="cph-' + id + '" type="tel" inputmode="tel" autocomplete="off" placeholder="936-555-1212" value="' + esc(r.riderPhone ? cphShow(r.riderPhone) : "") + '"' + big + ">" +
+      '<button type="button" class="btn btn-gold btn-cph-save" data-event-id="' + id + '" style="min-height:44px">Save phone</button>' +
+      '<label style="font-weight:700;font-size:17px;min-height:44px;display:flex;align-items:center;gap:6px"><input type="checkbox" class="cph-auto" data-event-id="' + id + '"' + (on ? " checked" : "") + ' style="width:26px;height:26px"> Auto text the tracking link</label>' +
+      "</div></div>";
+  }
+  function cphSave(id, patch, msg) {
+    var row = rovRow(id); if (!row) return Promise.resolve(false);
+    return godFetch(calendarUrl(id), { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(patch) }).then(function (res) {
+      if (!res.ok) throw new Error("save"); Object.keys(patch).forEach(function (k) { row[k] = patch[k]; });
+      if (msg) state.boardNotice = msg; return refresh();
+    }).catch(function () { state.boardNotice = "NOT SAVED: try again."; renderBoardLists(); return false; });
+  }
+  function atxPost(path, body) {
+    var auth = godWriteAuth(); if (!auth) return Promise.reject(new Error("The God password is needed once on this device."));
+    return fetch(PAY_WORKER + path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(Object.assign({}, body || {}, auth)) })
+      .then(function (res) { return res.json().catch(function () { return {}; }).then(function (d) { if (!res.ok || !d.ok) throw new Error(d.error || "Server error " + res.status); return d; }); });
+  }
+  function atxWhy(w) { return ({ sent: "Sent", failed: "Did not send (texting service error)", no_phone: "Client phone missing", not_configured: "Texting number not set up yet", already_sent: "Already sent", ride_off: "Auto text off for this ride", paused: "Paused" })[w] || String(w || ""); }
+  function autoTextPanelHtml() {
+    var s = state.atx || {}, log = s.log || [];
+    var status = s.configured === false ? "Texting number not set up yet (Twilio keys missing). Nothing is sent." : s.on ? "ON: clients get the tracking link when the driver taps Start, or 30 min before pickup." : "OFF: nothing is sent.";
+    return '<details class="atx-panel" style="margin:6px 0;border:2px solid #0b6b3a;border-radius:10px;padding:6px 8px"' + (s.open ? " open" : "") + '><summary style="cursor:pointer;font-weight:800">Auto text the tracking link (' + (s.on ? "ON" : "OFF") + ")</summary>" +
+      '<p class="fine">' + esc(status) + "</p>" +
+      '<button type="button" class="btn ' + (s.on ? "btn-ghost" : "btn-gold") + '" id="atx-toggle" style="min-height:52px;font-size:18px"' + (s.configured === false ? " disabled" : "") + ">" + (s.on ? "Turn auto texts OFF" : "Turn auto texts ON") + "</button> " +
+      '<button type="button" class="btn btn-ghost" id="atx-refresh" style="min-height:52px">Refresh log</button>' +
+      '<p class="error" role="alert">' + esc(s.err || "") + "</p>" +
+      "<b>Texts today (" + log.length + ")</b>" +
+      (log.length ? log.slice().reverse().map(function (x) {
+        var t = ""; try { t = new Date(x.at).toLocaleTimeString("en-US", { timeZone: "America/Chicago", hour: "numeric", minute: "2-digit" }); } catch (e) {}
+        return '<div class="card" style="padding:4px 8px;margin:3px 0">' + esc(t) + " CT \u00b7 " + esc(atxWhy(x.why)) + (x.to4 ? " \u00b7 to \u2026" + esc(x.to4) : "") + " \u00b7 " + esc(x.rider || x.rideId || "") + " \u00b7 " + esc(x.by === "cron" ? "30-min backup" : x.by === "god" ? "God mode" : "driver tapped Start") + "</div>";
+      }).join("") : '<p class="fine">Nothing yet today.</p>') + dcardPanelHtml() + "</details>";
+  }
+  function atxLoad() {
+    state.atx = state.atx || {};
+    return atxPost("/god/smslog", {}).then(function (d) { state.atx.on = !!d.on; state.atx.configured = d.configured !== false; state.atx.log = Array.isArray(d.log) ? d.log : []; state.atx.err = ""; })
+      .catch(function (e) { state.atx.err = String(e && e.message || e); }).then(function () { renderBoardLists(); });
+  }
+  function cphWire() {
+    if (cphWire.done || typeof document === "undefined") return; cphWire.done = true;
+    dcardWire(); /* v77.3b */
+    document.addEventListener("toggle", function (e) { if (e.target && e.target.classList && e.target.classList.contains("atx-panel")) { state.atx = state.atx || {}; var was = state.atx.open; state.atx.open = e.target.open; if (e.target.open && !was) atxLoad(); } }, true);
+    document.addEventListener("change", function (e) {
+      var t = e.target; if (!t || !t.classList || !t.classList.contains("cph-auto")) return;
+      var id = t.getAttribute("data-event-id"); cphSave(id, autoTextPatch(t.checked, Date.now()), t.checked ? "Auto text ON for this ride." : "Auto text OFF for this ride.");
+    }, true);
+    document.addEventListener("click", function (e) {
+      var t = e.target && e.target.closest ? e.target.closest(".btn-cph-save,#atx-toggle,#atx-refresh") : null; if (!t) return;
+      if (t.id === "atx-refresh") { atxLoad(); return; }
+      if (t.id === "atx-toggle") { var on = !(state.atx && state.atx.on); t.disabled = true;
+        atxPost("/god/autotext", { on: on }).then(function (d) { state.atx.on = !!d.on; state.atx.err = ""; }).catch(function (er) { state.atx.err = "NOT SAVED: " + (er && er.message || er); }).then(function () { renderBoardLists(); }); return; }
+      var id = t.getAttribute("data-event-id"), el = document.getElementById("cph-" + id), out = clientPhonePatch(el ? el.value : "", Date.now(), "god");
+      if (!out.ok) { state.boardNotice = "NOT SAVED: " + out.error; renderBoardLists(); return; }
+      t.disabled = true; cphSave(id, out.patch, out.patch.riderPhone ? "Saved: client phone " + cphShow(out.patch.riderPhone) + "." : "Client phone cleared.");
+    }, true);
+  }
+  /* ---------- v77.3b (Matthew 10/20 "more professional"): DRIVER PICTURE CARDS for the "on the way" text ----------
+     Each driver's card (1200x630 JPEG) is drawn HERE from their profile (first name + photo + car + plate ONLY), then stored
+     by the Worker (POST /god/dcard/put) under a random key. The auto text then goes as a picture message (MMS) with the card;
+     a driver without a card gets the plain text. Remake a card after a driver changes photo or car. */
+  function dcardLines(p) { /* pure (tested): the words on the card */
+    p = p || {}; var c = p.car || {};
+    var car = [c.year, c.make, c.model].filter(Boolean).join(" ");
+    return { top: "Your PCS driver is on the way", name: String(p.first || "Your driver"), car: car + (car && c.color ? " \u00b7 " + c.color : (!car ? c.color || "" : "")),
+      plate: String(c.plate || ""), site: "www.PCSrides.com", brand: "PRIVATE CAR SERVICES" };
+  }
+  function dcardImg(src) {
+    return new Promise(function (ok) { if (!src) return ok(null); var im = new Image(); im.onload = function () { ok(im); }; im.onerror = function () { ok(null); }; im.src = src; });
+  }
+  function dcardDraw(p, img) { /* -> { card, photo } base64 JPEGs (no data: prefix) */
+    var L = dcardLines(p), W = 1200, H = 630, cv = document.createElement("canvas"); cv.width = W; cv.height = H;
+    var x = cv.getContext("2d"), GOLD = "#d4b15a", CREAM = "#f3ead2", SERIF = "Georgia,'Times New Roman',serif", SANS = "Helvetica,Arial,sans-serif";
+    var g = x.createLinearGradient(0, 0, W, H); g.addColorStop(0, "#0e4a2b"); g.addColorStop(1, "#0a2e1a"); x.fillStyle = g; x.fillRect(0, 0, W, H);
+    var rg = x.createRadialGradient(270, 300, 40, 270, 300, 420); rg.addColorStop(0, "rgba(212,177,90,.18)"); rg.addColorStop(1, "rgba(212,177,90,0)"); x.fillStyle = rg; x.fillRect(0, 0, W, H);
+    x.strokeStyle = GOLD; x.lineWidth = 3; x.strokeRect(22, 22, W - 44, H - 44); x.lineWidth = 1; x.strokeRect(32, 32, W - 64, H - 64);
+    var cx = 270, cy = 300, r = 175;
+    x.save(); x.beginPath(); x.arc(cx, cy, r, 0, Math.PI * 2); x.closePath(); x.clip();
+    if (img) { var s = Math.max(2 * r / img.width, 2 * r / img.height), w = img.width * s, h = img.height * s; x.drawImage(img, cx - w / 2, cy - h / 2, w, h); }
+    else { x.fillStyle = "#20371d"; x.fillRect(cx - r, cy - r, 2 * r, 2 * r); x.fillStyle = GOLD; x.font = "bold 170px " + SERIF; x.textAlign = "center"; x.textBaseline = "middle"; x.fillText(L.name.charAt(0).toUpperCase(), cx, cy + 8); }
+    x.restore(); x.beginPath(); x.arc(cx, cy, r + 4, 0, Math.PI * 2); x.strokeStyle = GOLD; x.lineWidth = 8; x.stroke();
+    var tx = 520, fit = function (t, px, font, max) { x.font = px + "px " + font; while (x.measureText(t).width > max && px > 18) { px -= 2; x.font = px + "px " + font; } return px; };
+    x.textAlign = "left"; x.textBaseline = "alphabetic";
+    x.fillStyle = GOLD; fit(L.top.toUpperCase(), 30, SANS, 620); x.font = "bold " + x.font; x.fillText(L.top.toUpperCase(), tx, 170);
+    x.fillStyle = CREAM; x.font = "italic " + fit(L.name, 96, SERIF, 620) + "px " + SERIF; x.fillText(L.name, tx, 275);
+    x.fillStyle = GOLD; x.fillRect(tx, 300, 120, 3);
+    x.fillStyle = CREAM; fit(L.car, 40, SANS, 620); x.fillText(L.car, tx, 365);
+    if (L.plate) { x.font = "bold 44px " + SANS; var pw = x.measureText(L.plate).width + 48; x.fillStyle = "#fff"; x.strokeStyle = GOLD; x.lineWidth = 4;
+      x.beginPath(); if (x.roundRect) x.roundRect(tx, 395, pw, 70, 12); else x.rect(tx, 395, pw, 70); x.fill(); x.stroke();
+      x.fillStyle = "#0b3d23"; x.fillText(L.plate, tx + 24, 446); x.font = "22px " + SANS; x.fillStyle = CREAM; x.fillText("PLATE", tx + pw + 16, 440); }
+    x.fillStyle = GOLD; x.font = "bold 34px " + SANS; x.fillText(L.site, tx, 548);
+    x.fillStyle = "rgba(243,234,210,.75)"; x.font = "italic 20px " + SANS; x.fillText(L.brand, tx, 578);
+    var card = cv.toDataURL("image/jpeg", 0.86).split(",")[1], photo = "";
+    if (img) { var pv = document.createElement("canvas"); pv.width = pv.height = 240; var px = pv.getContext("2d"), s2 = Math.max(240 / img.width, 240 / img.height);
+      px.drawImage(img, 120 - img.width * s2 / 2, 120 - img.height * s2 / 2, img.width * s2, img.height * s2); photo = pv.toDataURL("image/jpeg", 0.85).split(",")[1]; }
+    return { card: card, photo: photo };
+  }
+  function dcardPanelHtml() {
+    var s = state.dcard || {}, list = s.drivers || [];
+    return '<div class="dcard-panel" style="margin-top:10px;border-top:2px solid #0b6b3a;padding-top:8px"><b>Driver picture cards (sent with the text)</b>' +
+      '<p class="fine">Shows ONLY first name, photo, car and plate. A driver without a card gets the plain text.</p>' +
+      '<button type="button" class="btn btn-ghost" id="dcard-load" style="min-height:52px">' + (list.length ? "Reload drivers" : "Show drivers") + "</button>" +
+      '<p class="error" role="alert">' + esc(s.err || "") + "</p>" +
+      list.map(function (d) {
+        var L = dcardLines(d), url = d.cardKey ? PAY_WORKER + "/dcard/" + d.cardKey + ".jpg?v=" + (d.cardAt || 0) : "";
+        return '<div class="card" style="padding:6px 8px;margin:4px 0"><b>' + esc(L.name) + "</b> \u00b7 " + esc(L.car || "car missing") + (L.plate ? " \u00b7 " + esc(L.plate) : "") + (d.photo ? "" : ' <span class="fine">(photo missing: initial shown)</span>') +
+          (url ? '<div><img src="' + esc(url) + '" alt="Card" style="width:100%;max-width:420px;border-radius:8px;margin:4px 0"></div>' : "") +
+          '<button type="button" class="btn btn-gold dcard-make" data-driver="' + esc(d.driverId) + '" style="min-height:52px;font-size:18px">' + (url ? "Remake card" : "Make card") + "</button>" +
+          (url ? ' <button type="button" class="btn btn-ghost dcard-del" data-driver="' + esc(d.driverId) + '" style="min-height:52px">Remove card</button>' : "") + "</div>";
+      }).join("") + "</div>";
+  }
+  function dcardLoad() {
+    state.dcard = state.dcard || {};
+    return atxPost("/god/dcard/src", {}).then(function (d) { state.dcard.drivers = d.drivers || []; state.dcard.err = ""; })
+      .catch(function (e) { state.dcard.err = String(e && e.message || e); }).then(function () { renderBoardLists(); });
+  }
+  function dcardMake(id) {
+    var d = ((state.dcard || {}).drivers || []).filter(function (x) { return x.driverId === id; })[0]; if (!d) return Promise.resolve();
+    return dcardImg(d.photo).then(function (img) { var out = dcardDraw(d, img); return atxPost("/god/dcard/put", { driverId: id, card: out.card, photo: out.photo }); })
+      .then(function (r) { d.cardKey = r.cardKey; d.cardAt = r.cardAt; state.dcard.err = ""; state.boardNotice = "Card saved for " + dcardLines(d).name + "."; })
+      .catch(function (e) { state.dcard.err = "NOT SAVED: " + (e && e.message || e); }).then(function () { renderBoardLists(); });
+  }
+  function dcardWire() {
+    if (dcardWire.done || typeof document === "undefined") return; dcardWire.done = true;
+    document.addEventListener("click", function (e) {
+      var t = e.target && e.target.closest ? e.target.closest("#dcard-load,.dcard-make,.dcard-del") : null; if (!t) return;
+      if (t.id === "dcard-load") { dcardLoad(); return; }
+      var id = t.getAttribute("data-driver"); t.disabled = true;
+      if (t.classList.contains("dcard-make")) { dcardMake(id); return; }
+      atxPost("/god/dcard/del", { driverId: id }).then(function () { (state.dcard.drivers || []).forEach(function (x) { if (x.driverId === id) { delete x.cardKey; delete x.cardAt; } }); })
+        .catch(function (er) { state.dcard.err = String(er && er.message || er); }).then(function () { renderBoardLists(); });
+    }, true);
+  }
+  if (typeof window !== "undefined") window.__pcsGodAutoText = { norm: cphNorm, phonePatch: clientPhonePatch, autoPatch: autoTextPatch, html: cphHtml, panel: autoTextPanelHtml, why: atxWhy };
   /* v76d: Square invoice lookup (read-only, through the Worker). Amounts are pre-tax subtotal / tax / total in cents. */
   function sqInvoiceLine(q) {
     if (!q) return "";
@@ -6625,6 +6749,7 @@
           (r.assignedDriverId ? dbTipHtml(r) : "") + /* v73 Tip (paid in Square) */
           (r.assignedDriverId && st !== "cancelled" ? rideCommHtml(r) : "") + /* v76d per-ride Commission % */
           (st !== "cancelled" && st !== "completed" ? rateOvHtml(r) : "") + /* v76j rate override */
+          (st !== "cancelled" && st !== "completed" ? cphHtml(r) : "") + /* v77.3 client phone + auto text */
           (r.sqInvoice ? '<p class="day-line db-sqinv"><span>Invoice</span> #' + esc(r.prepaidInvoiceNo || r.sqInvoice.number || "") + " \u00b7 " + esc(sqInvoiceLine(r.sqInvoice)) + "</p>" : "") +
           gfolHtml(r) + /* v76b: Text my client a tracking link */
           (st === "completed"
@@ -7158,6 +7283,7 @@
     var name = String(f.name || "").trim().slice(0, 200);
     if (!name) return { ok: false, error: "Enter the client's name." };
     var phone = String(f.phone || "").replace(/[^\d+]/g, "").slice(0, 20);
+    if (phone && cphNorm(phone)) phone = cphNorm(phone); /* v77.3 */
     var pickup = String(f.pickup || "").trim().slice(0, 400);
     var dropoff = String(f.dropoff || "").trim().slice(0, 400);
     if (!pickup || !dropoff) return { ok: false, error: "Enter pickup and drop-off." };
@@ -7186,7 +7312,7 @@
       id: (prev && prev.id) || addRideNewId(now),
       source: "manual",
       title: "PCS – " + name,
-      rider: name, riderPhone: phone,
+      rider: name, riderPhone: phone, riderPhoneEdited: !!phone || !!(prev && prev.riderPhoneEdited), /* v77.3: sync never overwrites it */
       pickup: pickup, dropoff: dropoff, stops: stops,
       start: start, end: "",
       description: (stops.length ? "Stops: " + stops.join(" | ") + "\n" : "") + (notes ? "Notes: " + notes : ""),
@@ -7586,6 +7712,7 @@
     var head = '<button type="button" class="btn btn-gold" data-add-ride-driver="">+ Add ride</button>' +
       '<p class="fine" style="opacity:.75;margin:6px 0">Tip: open a driver and tap Add ride to pre-pick them.</p>';
     head += rateContractsHtml(); rovWire(); /* v76j */
+    head += autoTextPanelHtml(); cphWire(); /* v77.3 */
     if (!rows.length) return head;
     /* v73: the added-rides list folds into one row so the map stays in view on iPad / iPhone; remembers open / closed */
     return head + '<details class="manual-list"' + (state.manualListOpen ? " open" : "") + ' style="margin:4px 0"><summary style="cursor:pointer;padding:6px 0;font-weight:700">Added rides (' + rows.length + ")</summary>" + rows.map(function (r) {
