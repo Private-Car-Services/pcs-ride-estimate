@@ -4,7 +4,7 @@
    where the phone supports it; silent, no sound).
    v76f: 2.5 s updates, GPS speed/heading when shared, gliding arrow. v76e: big live speed + ETA + heading arrow (computed here). v76b (Matthew 10/17): "Follow my ride" / driver tracking link. /follow/?t=<32-character token>.
    Read-only. Reads ONE small public copy: /rides/FLWSHARE/<token> (written by the rider / driver / God apps, see app.js
-   folClean). Shows: status, driver first name, car + plate, the car on a map with the route, pickup + drop-off, ETA and
+   folClean). Shows: status, driver first name + photo (v77.3b, from the picture card), car + plate, the car on a map with the route, pickup + drop-off, ETA and
    the PCS phone. Never the fare, payment, card or the rider's phone / email (they are never in the copy). Everything read
    is treated as untrusted text (escaped, numbers checked). 30 min after the ride is completed / cancelled, when sharing
    stops, or after 24 h, the page shows "This ride has ended" with no map. No buttons here change anything. */
@@ -29,6 +29,7 @@
     var st = document.createElement("style"); st.id = "fl-style";
     st.textContent = "#fl-live{background:#f0fdf4;color:#0b3d23;border:3px solid #2e9d4f;border-radius:16px;padding:12px}" +
       "#fl-live p{color:#0b3d23}.fl-status{display:block;margin:0 0 8px;padding:10px 12px;border-radius:12px;background:#0b6b3a;color:#fff !important;font-size:21px;font-weight:900;text-align:center}" +
+      ".fl-drv{display:flex;align-items:center;gap:10px;background:#0b3d23;color:#f3ead2;border:2px solid #d4b15a;border-radius:14px;padding:6px 10px;margin:0 0 6px}.fl-drv .fl-who,.fl-drv .fl-car{color:#f3ead2}.fl-photo{width:64px;height:64px;border-radius:50%;object-fit:cover;border:3px solid #d4b15a;flex:none;background:#20371d}.fl-drv-t{min-width:0}.fl-drv .fl-plate{color:#0b3d23}" +
       ".fl-who{font-size:18px;font-weight:800;margin:4px 0}.fl-car{font-size:16px;font-weight:700;margin:2px 0 8px}.fl-plate{display:inline-block;background:#fff;border:2px solid #0b3d23;border-radius:8px;padding:0 8px;margin-left:4px;font-weight:900;letter-spacing:.06em}" +
       "#fl-map{height:62vh;min-height:340px;border-radius:14px;margin:6px 0 10px;border:2px solid #0b3d23}" +
       ".fl-eta{font-size:19px;font-weight:900;text-align:center;margin:6px 0}.fl-row{margin:3px 0;font-size:16px}.fl-row b{display:inline-block;min-width:44px}" +
@@ -63,6 +64,9 @@
     if (st === "cancelled") return "This ride was cancelled";
     return "Following the ride";
   }
+  function photoSrc(k) { /* pure (tested): only a 24-char card key, only our Worker */
+    return /^[A-Za-z0-9_-]{24}$/.test(String(k || "")) ? "https://pcs-pay.pcsrides.workers.dev/dcard/" + k + "-p.jpg" : "";
+  }
   function carText(c) {
     if (!c || typeof c !== "object") return "";
     return [txt(c.color, 20), txt(c.year, 4), txt(c.make, 30), txt(c.model, 30)].filter(Boolean).join(" ");
@@ -70,7 +74,7 @@
   function shell() {
     style();
     app.innerHTML = '<div class="card" id="fl-live"><p class="fl-status" id="fl-status" role="status" aria-live="polite"></p>' +
-      '<p class="fl-who" id="fl-who"></p><p class="fl-car" id="fl-car"></p>' +
+      '<div class="fl-drv" id="fl-drv"><img class="fl-photo" id="fl-photo" alt="Your PCS driver" hidden width="64" height="64"><div class="fl-drv-t"><p class="fl-who" id="fl-who"></p><p class="fl-car" id="fl-car"></p></div></div>' +
       '<div class="fl-big" id="fl-big" hidden><div class="fl-spd" id="fl-spd"><b id="fl-mph">--</b><span id="fl-mph-l">mph</span><small id="fl-mph-n"></small></div>' +
       '<div class="fl-arr" id="fl-arr"><span class="k" id="fl-arr-k"></span><b id="fl-arr-t"></b><span id="fl-arr-m"></span><small id="fl-arr-to"></small></div></div>' +
       '<p class="fl-eta" id="fl-eta"></p>' +
@@ -266,6 +270,8 @@
     var car = $("fl-car"), ct = carText(d.car), plate = d.car && typeof d.car === "object" ? txt(d.car.plate, 12) : "";
     var ch = (ct ? esc(ct) : "") + (plate ? ' <span class="fl-plate" aria-label="License plate">' + esc(plate) + "</span>" : "");
     if (car && car.__h !== ch) { car.innerHTML = ch; car.__h = ch; }
+    var ph = $("fl-photo"), src = photoSrc(d.cardKey); /* v77.3b: the driver's photo (from their PCS picture card) */
+    if (ph && ph.__s !== src) { ph.__s = src; if (src) { ph.onerror = function () { ph.hidden = true; }; ph.src = src; ph.hidden = false; } else ph.hidden = true; }
     var live = d.status === "on_way" || d.status === "arrived" || d.status === "picked_up";
     var done = d.status === "completed" || d.status === "cancelled";
     var e = d.eta, etaOk = live && e && num(e.min) !== null && num(e.miles) !== null && (!num(d.etaAt) || now - num(d.etaAt) <= 180000);

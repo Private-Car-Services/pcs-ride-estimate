@@ -6,6 +6,23 @@
   <meta name="theme-color" content="#0b1c33">
   <meta name="robots" content="noindex, nofollow">
   <meta name="referrer" content="no-referrer">
+  <!-- v77.3: rich link preview (one shared card for every tracking link; never ride details) -->
+  <meta name="description" content="Tap to follow your car live. www.PCSrides.com">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="PCS · Private Car Services">
+  <meta property="og:title" content="Your PCS driver is on the way">
+  <meta property="og:description" content="Tap to follow your car live. www.PCSrides.com">
+  <meta property="og:url" content="https://private-car-services.github.io/pcs-ride-estimate/follow/">
+  <meta property="og:image" content="https://private-car-services.github.io/pcs-ride-estimate/app/img/tracker-card.jpg">
+  <meta property="og:image:secure_url" content="https://private-car-services.github.io/pcs-ride-estimate/app/img/tracker-card.jpg">
+  <meta property="og:image:type" content="image/jpeg">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="PCS: Your driver is on the way. www.PCSrides.com">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Your PCS driver is on the way">
+  <meta name="twitter:description" content="Tap to follow your car live. www.PCSrides.com">
+  <meta name="twitter:image" content="https://private-car-services.github.io/pcs-ride-estimate/app/img/tracker-card.jpg">
   <title>Follow the ride · PCS · Private Car Services</title>
   <link rel="stylesheet" href="../app/styles.css?v=46">
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
@@ -50,6 +67,7 @@
       #fl-live .fl-spd small,#fl-live .fl-arr small{font-size:12px !important}
       #fl-live .fl-call{min-height:36px !important;line-height:36px !important;font-size:16px !important}
       body[data-app="follow"] header.top svg{max-height:28px !important;height:28px !important}
+      #fl-live .fl-photo{width:44px;height:44px;border-width:2px}
     }
   </style>
 </head>
@@ -61,6 +79,6 @@
   </div>
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script src="follow.js?v=76b"></script>
-  <script src="follow-live.js?v=76g"></script>
+  <script src="follow-live.js?v=773b"></script>
 </body>
 </html>
