@@ -3628,6 +3628,9 @@
         try { var pl = normalizePlate(acc.carPlate || "") || "car", vm = JSON.parse(localStorage.getItem("pcs-dvir-veh") || "{}") || {}; vm[pl] = Object.assign({}, vm[pl] || {}, rec.vehDates || {}, { updatedAt: Date.now(), driver: driverPresenceId(), vehicle: [acc.carYear, acc.carMake, acc.carModel].filter(Boolean).join(" ") }); localStorage.setItem("pcs-dvir-veh", JSON.stringify(vm));
           if (syncOn()) authFetch(databaseURL() + "/rides/DVIRVEH/" + encodeURIComponent(pl) + ".json", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(vm[pl]) }).catch(function () {}); } catch (e) {}
         rec.plate = normalizePlate(acc.carPlate || "");
+        if (k === "post" && rec.vehDates && rec.vehDates.carwash) { var lw = { date: rec.vehDates.carwash, at: Number(rec.at) || Date.now(), plate: rec.plate }; /* v77.9: last car wash per driver (God mode shows it) */
+          try { localStorage.setItem("pcs-last-wash", JSON.stringify(lw)); } catch (e) {}
+          if (syncOn()) authFetch(databaseURL() + "/rides/DRVRHSLG/" + encodeURIComponent(driverPresenceId()) + "/lastWash.json", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(lw) }).catch(function () {}); }
         try { if (k === "post") rec.shiftStart = currentShiftSince() || null; else if (k === "pre") { var cs = !state.milesNeedStart && (todayMilesRow() || readShift()) ? Number(currentShiftInfo().shiftStartedAt) || 0 : 0; rec.shiftStart = cs && preTripDoneToday() ? cs : Number(rec.at); } } catch (e) {} /* v76h: every inspection names its shift */
         if (k === "pre" && Number(rec.odometer) > 0) { try { localStorage.setItem("pcs-dvir-odo", JSON.stringify({ odo: Number(rec.odometer), at: Date.now(), plate: rec.plate, driver: driverPresenceId() })); } catch (e) {} } /* v75: reused as the opening odometer */
         var all = dlRec("dvir"); all[d] = all[d] || {};
@@ -3793,22 +3796,47 @@
     if (cw && (cw.maxAgeHours || cw.maxAgeDays) && vd.carwash && L.washState) { var ws = L.washState(vd.carwash, now, cw); /* v76d-pretrip: calendar days (America/Chicago), reminder first */
       if (ws && ws.block) out.push({ k: "carwash", label: cw.label, why: "more than " + ws.grace + " days since last wash" });
       else if (ws && (ws.remind || ws.overdue)) qd.washMsg = (ws.remind ? "Car wash reminder: last wash " + ws.last + ", please wash by " + ws.washBy + "." : "Car wash due: last wash " + ws.last + ". Please wash the car.") + (cw.block && ws.remind ? " Going online pauses starting " + ws.blockFrom + "." : ""); } /* v76g wording */
+    if (cw && cw.washQ && !vd.carwash && L.WASH_WARN) qd.washMsg = "Car wash: last wash not recorded yet. Answer \u201cDid you get your car washed today?\u201d on your post-trip. " + L.WASH_WARN; /* v77.9: never recorded = reminder only (existing drivers aren't locked out) */
     if (its.some(function (i) { return i.group === "Fluids" && i.block; })) { var days = Number(localStorage.getItem("pcs-dvir-fluids-days")) || 7, fd = L.fluidsDue(vd.fluids, now, days);
       if (fd.due && fd.why !== "weekend") out.push({ k: "fluids", label: "Fluids check", why: fd.why === "never" ? "never checked" : "not checked in " + fd.days + " days" }); }
     var av = dlDvirRec(dlToday(), "avail"); /* God already cleared these exact blocks today */
     if (av && av.cleared && out.every(function (b) { return (av.blocks || []).some(function (x) { return x.k === b.k; }); })) return [];
     return out;
   }
+  /* v77.9 (Matthew 10/20): "Did you get your car washed today?" on the blocked screen. Yes = today's wash (same writes as the
+     post-trip: per vehicle rides/DVIRVEH/{plate} + rides/DRVRHSLG/{driver}/lastWash) and goes straight back to going online. */
+  function washRecordToday() {
+    var t = dlToday(), mdy = t.slice(5, 7) + "/" + t.slice(8, 10) + "/" + t.slice(0, 4), acc = readDriverAccount() || {}, pl = dlPlate() || "car", now = Date.now();
+    try { var vm = JSON.parse(localStorage.getItem("pcs-dvir-veh") || "{}") || {}; vm[pl] = Object.assign({}, vm[pl] || ((hosReadHist().veh || {})[pl]) || {}, { carwash: mdy, updatedAt: now, driver: driverPresenceId(), vehicle: [acc.carYear, acc.carMake, acc.carModel].filter(Boolean).join(" ") }); localStorage.setItem("pcs-dvir-veh", JSON.stringify(vm));
+      var lw = { date: mdy, at: now, plate: dlPlate(), from: "blocked-screen" }; localStorage.setItem("pcs-last-wash", JSON.stringify(lw));
+      if (syncOn()) { authFetch(databaseURL() + "/rides/DVIRVEH/" + encodeURIComponent(pl) + ".json", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(vm[pl]) }).catch(function () {});
+        authFetch(databaseURL() + "/rides/DRVRHSLG/" + encodeURIComponent(driverPresenceId()) + "/lastWash.json", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(lw) }).catch(function () {}); } } catch (e) {}
+    return mdy;
+  }
+  function washAskHtml() {
+    if (!qd.washAsk) return "";
+    return '<div id="q-wash-ask" style="margin:8px 0;padding:10px;border:2px solid #2e7d32;border-radius:12px;background:#f1faf3"><div style="font-weight:800;font-size:17px;color:#0b3d23;margin-bottom:8px">Did you get your car washed today?</div>' +
+      '<div style="display:flex;gap:10px"><button type="button" data-wash-ask="yes" style="flex:1;min-height:56px;border-radius:12px;border:3px solid #2e7d32;background:#2e7d32;color:#fff;font-size:20px;font-weight:800">Yes</button>' +
+      '<button type="button" data-wash-ask="no" style="flex:1;min-height:56px;border-radius:12px;border:3px solid #2e7d32;background:#fff;color:#1b5e20;font-size:20px;font-weight:800">No</button></div>' +
+      (qd.washNo ? '<p class="fine" id="q-wash-ask-no" style="margin:8px 0 0;color:#5c3a00;font-weight:700">Going online stays paused until the car is washed.</p>' : "") + "</div>";
+  }
+  document.addEventListener("click", function (e) {
+    var b = e.target && e.target.closest ? e.target.closest("[data-wash-ask]") : null; if (!b) return; e.preventDefault();
+    if (b.getAttribute("data-wash-ask") === "yes") { washRecordToday(); qd.washAsk = false; qd.washNo = false; qd.brkMsg = ""; availFlow(); }
+    else { qd.washNo = true; render(); }
+  });
   function availBlockMsg(bk) {
     if (bk && (bk.blocks || []).length && bk.blocks.every(function (b) { return b && b.k === "carwash"; })) { /* v76g: the car wash is a pause, not an unsafe defect */
       var L = window.PCSDriverLog, vd = {}; try { vd = (JSON.parse(localStorage.getItem("pcs-dvir-veh") || "{}") || {})[dlPlate() || "car"] || ((hosReadHist().veh || {})[dlPlate() || "car"]) || {}; } catch (e) {}
       var ws = L && L.washState && vd.carwash ? L.washState(vd.carwash, Date.now(), { block: true }) : null, wl = L && L.washLine ? L.washLine(ws, "pre") : null;
+      if (L && L.washWarnText) return L.washWarnText(vd.carwash) + " Going online is paused until PCS clears it in God mode."; /* v77.9: same wording as the post-trip warning */
       return wl && wl.level === "block" ? wl.text : "Car wash overdue. Going online is paused until the car is washed and PCS clears it."; }
     var bl = (bk && bk.blocks || []).map(function (b) { return b.label + (b.why === "photo" ? " (photo waiting for God approval)" : b.why !== "defect" ? " (" + b.why + ")" : ""); }).join(", ");
     return "Unsafe vehicle defect reported" + (bl ? ": " + bl : "") + ". You can\u2019t go Available until God mode clears it." + (bk && bk.rejected ? " God mode rejected the photo: " + bk.rejected.reason + ". Do a new inspection with a new photo." : ""); }
   /* v74b: a missed post-trip (flagged by the Worker's midnight check) must be completed first, then today's pre-trip */
   function missedPostDay() { var m = dlRec("missed"), ds = Object.keys(m).filter(function (d) { var x = m[d]; if (!x || !x.at || x.resolvedAt) return false; var p = dlDvirRec(d, "post"); return !(p && Number(p.at) >= Number(x.at)); }).sort(); return ds[0] || null; }
   function availFlow() {
+    qd.washAsk = false; /* v77.9 */
     return dvirRefresh().then(function () {
       if (dvirBlock()) { qd.brkMsg = availBlockMsg(dvirBlock()); render(); return; }
       var md = missedPostDay();
@@ -3819,7 +3847,7 @@
         var d = dlToday(), rec = { at: Date.now(), kind: "avail", unsafe: true, defects: 0, blocks: vb, items: {}, plate: dlPlate(), driver: (readDriverAccount() || {}).name || "" };
         var all = dlRec("dvir"); all[d] = all[d] || {}; all[d].avail = rec; try { localStorage.setItem(dlKey("dvir"), JSON.stringify(all)); } catch (e) {}
         if (syncOn()) authFetch(databaseURL() + "/rides/DRVRHSLG/" + encodeURIComponent(driverPresenceId()) + "/dvir/" + d + "/avail.json", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(rec) }).catch(function () {});
-        qd.brkMsg = availBlockMsg({ blocks: vb }); render(); return;
+        qd.brkMsg = availBlockMsg({ blocks: vb }); qd.washAsk = vb.every(function (b) { return b && b.k === "carwash"; }); qd.washNo = false; render(); return; /* v77.9: car-wash-only block asks the question here too */
       }
       state.availAfterPre = false; var wm = qd.washMsg; qSetOffline(false); qd.washMsg = wm || ""; /* v76d-pretrip: car wash reminder stays on screen (never blocks) */
     });
@@ -19361,6 +19389,7 @@
       "</div>" +
       (tok || off ? "" : qDriverAuthHtml()) +
       (qd.brkMsg ? '<p class="fine" id="q-break-msg" role="alert" style="color:#b91c1c;font-weight:700">' + esc(qd.brkMsg) + "</p>" : "") +
+      (qd.brkMsg ? washAskHtml() : "") + /* v77.9 */
       (qd.washMsg && !qd.brkMsg ? '<p class="fine" id="q-wash-msg" style="background:#fff4d6;color:#4a3000;border-radius:8px;padding:6px 8px;font-weight:700">' + esc(qd.washMsg) + "</p>" : "") + /* v76d-pretrip */
       (brk && brkEarly ? '<p class="fine" id="q-break-early">Won\u2019t count as your 30-min break until ' + esc(String(hosCfg.breakMinOnDutyHours)) + " h on duty since your last break. Shift and Cycle are paused.</p>" : "") +
       '<p class="fine" id="q-avail-note">' + esc(off

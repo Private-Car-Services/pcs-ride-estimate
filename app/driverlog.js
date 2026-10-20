@@ -152,6 +152,12 @@
      notes + photo; v74: safety items block until God clears, others flag only). Date items are remembered per vehicle and prefilled next time. */
   var WK = [["Working", 0], ["Not working", 1]], LF = [["Low", 1], ["Full", 0]], YN_NOBAD = [["Yes", 0], ["No", 1]], YN_YESBAD = [["Yes", 1], ["No", 0]];
   function ch(k, label, opts, group, extra) { return Object.assign({ k: k, label: label, group: group || "", type: "choice", opts: opts.map(function (o) { return { label: o[0], bad: !!o[1] }; }), required: true }, extra || {}); }
+  /* v77.9 (Matthew 10/20): the car wash is a post-trip Yes/No question (removed from the pre-trip). Yes records today as the
+     driver's last wash (per vehicle + per driver). The 3-day rule (block, God override) is unchanged. */
+  var WASH_WARN = "Cars must be washed at least once every three days, or the account will not be able to go online.";
+  var WASHQ = { k: "carwash", label: "Did you get your car washed today?", type: "choice", opts: [{ label: "Yes", bad: false }, { label: "No", bad: true }], required: true, kinds: ["post"], washQ: true, noteOnly: true, noPhoto: true, noCamera: true, vehicle: true, block: true, maxAgeDays: 3 };
+  function washLastText(v) { var t = parseMdy(v); if (t == null) return "not recorded yet"; var d = ymd(t + 3 * 3600000); return d.slice(5, 7) + "/" + d.slice(8, 10) + "/" + d.slice(0, 4); }
+  function washWarnText(last) { return WASH_WARN + " Last car wash: " + washLastText(last) + "."; }
   var DVIR = [
     ch("lowbeam", "Low beam", WK, "Headlights", { block: true }), ch("highbeam", "High beam", WK, "Headlights", { block: true }),
     ch("turn", "Turn signals and hazards", WK, "", { block: true }), ch("brakelights", "Brake lights", WK, "", { block: true }), ch("taillights", "Taillights", WK), ch("brakes", "Brakes", WK, "", { block: true }), ch("brakenoise", "Do the wheels make a scratching or grinding noise while driving at low speeds?", YN_YESBAD, "", { sub: true, noPhoto: true, noCamera: true, warn: "A brake job may be necessary before continuing operation." }), /* v74: flag + warning; blocking OFF until Matthew decides (God editor toggle) */ ch("ebrake", "Emergency / parking brake", WK, "", { block: true }),
@@ -165,7 +171,7 @@
     ch("dash", "Dash warning lights on", YN_YESBAD, "", { text: true, textLabel: "Which warning lights?", noPhoto: true, noCamera: true }),
     ch("interior", "Interior clean", YN_NOBAD), ch("exterior", "Exterior clean", YN_NOBAD),
     ch("fulltank", "Full tank of gas", YN_NOBAD, "", { kinds: ["post"], noteOnly: true }), /* v74 (Matthew): post-trip only; No = a note in God mode, never unsafe */
-    { k: "carwash", label: "Last date of car wash", type: "date", required: true, vehicle: true, block: true, maxAgeDays: 3 }, /* v76d-pretrip: 3 calendar days of reminders, then blocks going online */
+    WASHQ, /* v77.9 (Matthew 10/20): post-trip only "Did you get your car washed today?" Yes = today becomes the last wash date */
     { k: "regexp", label: "Registration expiration (month/year)", type: "date", monthYear: true, required: true, vehicle: true, expiry: true },
     { k: "insexp", label: "Insurance card expiration date", type: "date", required: true, vehicle: true, expiry: true }
   ];
@@ -173,6 +179,7 @@
   function norm1(x) {
     if (Array.isArray(x)) return ch(String(x[0]), String(x[1]), YN_NOBAD, "", { required: x[2] !== false }); /* old [key, label, required] -> OK/Defect style Yes/No */
     if (!x || !x.k || !x.label) return null;
+    if (x.k === "carwash") return Object.assign({}, WASHQ, { block: x.block !== false, maxAgeDays: Number(x.maxAgeDays) > 0 ? Number(x.maxAgeDays) : 3 }); /* v77.9: an older God checklist (date item) reads as the post-trip question */
     var o = Object.assign({}, x); o.type = o.type === "date" ? "date" : "choice"; if (o.k === "regexp") o.monthYear = true; /* v75: MM/YYYY even with a God-edited checklist */ o.required = o.required !== false;
     if (o.type === "choice" && !(Array.isArray(o.opts) && o.opts.length)) o.opts = [{ label: "OK", bad: false }, { label: "Defect", bad: true }];
     return o;
@@ -314,6 +321,9 @@
           return '<div class="dl-dvir-group" style="font-weight:700;margin-top:10px">Fluids</div><div class="dl-fluids-ok" style="padding:8px 0 8px 12px;color:#2e7d32;border-bottom:1px solid #eee">Fluids checked ' + esc(fl.last) + ", next due by " + esc(fl.next) + "</div>"; }
         var h = grp(it, pg) + (it.group === "Fluids" && it.group !== pg ? '<div class="dl-fluids-due" style="padding:2px 0 4px 12px;color:#b45309;font-size:13px">' + (fl.why === "never" ? "Fluids check due (no check on record)" : fl.why === "weekend" ? "Weekly fluids check due this weekend (last " + esc(fl.last) + ")" : "Fluids check due (last " + esc(fl.last) + ", " + fl.since + " days ago)") + "</div>" : ""); pg = it.group; var pad = it.group || it.sub ? "padding-left:12px;" : "";
         if (it.type === "date") return h + '<div class="dl-dvir-item" data-item="' + esc(it.k) + '" data-type="date" style="' + pad + 'border-bottom:1px solid #eee;padding-top:8px;padding-bottom:8px"><label style="display:flex;gap:6px;align-items:center"><span style="flex:1">' + esc(it.label) + (it.required ? "" : ' <small style="color:#595959">(optional)</small>') + '</span><input type="text" inputmode="numeric" pattern="[0-9]*" autocomplete="off" autocorrect="off" spellcheck="false" data-date-mask="' + (it.monthYear ? "my" : "mdy") + '" placeholder="' + (it.monthYear ? "MM/YYYY" : "MM/DD/YYYY") + '" maxlength="' + (it.monthYear ? 7 : 10) + '" name="date-' + esc(it.k) + '" value="' + esc(it.monthYear ? myShow(vd[it.k]) : (vd[it.k] || "")) + '" style="width:120px"></label></div>';
+        if (it.washQ) return h + '<div class="dl-dvir-item dl-wash-q" data-item="carwash" data-note-only="1" style="' + pad + 'border-bottom:1px solid #eee;padding-top:10px;padding-bottom:10px"><div style="font-weight:700;font-size:17px;margin-bottom:8px">' + esc(it.label) + "</div>" +
+          '<div style="display:flex;gap:10px">' + it.opts.map(function (o, i) { return '<label class="dl-wash-btn" style="flex:1;display:flex;align-items:center;justify-content:center;min-height:56px;border-radius:12px;font-size:20px;font-weight:800;cursor:pointer;border:3px solid ' + (o.bad ? "#2e7d32;background:#fff;color:#1b5e20" : "#2e7d32;background:#2e7d32;color:#fff") + '"><input type="radio" name="dv-carwash" value="' + i + '" data-bad="' + (o.bad ? "note" : 0) + '" style="width:22px;height:22px;margin-right:8px"> ' + esc(o.label) + "</label>"; }).join("") + "</div>" +
+          '<p class="dl-wash-warn" role="alert" hidden data-last="' + esc(washLastText(vd.carwash)) + '" style="margin:10px 0 0;background:#fff4e0;color:#5c3a00;border:2px solid #d9a441;border-radius:10px;padding:10px;font-weight:700">' + esc(washWarnText(vd.carwash)) + "</p></div>";
         if (it.noteOnly) return h + '<div class="dl-dvir-item" data-item="' + esc(it.k) + '" data-note-only="1" style="' + pad + 'border-bottom:1px solid #eee;padding-top:8px;padding-bottom:8px"><div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap"><span style="flex:1">' + esc(it.label) + "</span>" +
           it.opts.map(function (o, i) { return '<label><input type="radio" name="dv-' + esc(it.k) + '" value="' + i + '" data-bad="' + (o.bad ? "note" : 0) + '"> ' + esc(o.label) + "</label>"; }).join(" ") + "</div>" +
           (it.k === "fulltank" ? '<div class="dl-fuel" hidden style="margin-top:6px"><label>Fuel level (required) <select name="fuel-fulltank" required><option value="">Pick\u2026</option>' + FUEL_LEVELS.map(function (v) { return '<option value="' + v + '">' + v + "</option>"; }).join("") + "</select></label></div>" : "") + /* v74b */
@@ -378,6 +388,10 @@
       var r = form.querySelector('input[name="dv-' + it.k + '"]:checked');
       if (!r) { if (it.required && !err) err = "Answer: " + (it.group ? it.group + " \u2013 " : "") + it.label; out[it.k] = x; return; }
       var o = it.opts[+r.value] || {}; x.answer = o.label; x.bad = !!o.bad;
+      if (it.washQ) { x.bad = false; x.washQ = true;
+        if (!o.bad) { x.date = mdyOf(ymd(now)); x.washedAt = now; vehDates.carwash = x.date; }
+        else { var lw = (meta && meta.vehDates && meta.vehDates() || {}).carwash; x.noteFlag = true; notes++; x.lastWash = washLastText(lw); x.note = "Car wash: last " + x.lastWash; x.washNote = washWarnText(lw); if (lw) x.date = lw; }
+        out[it.k] = x; return; } /* v77.9: Yes = washed today; No = a God note + the 3-day warning, never a defect */
       if (it.noteOnly) { x.bad = false; if (o.bad) { x.noteFlag = true; notes++;
           if (it.k === "fulltank") { x.fuel = String((form.querySelector('select[name="fuel-fulltank"]') || {}).value || ""); /* v74b: required fuel level when the tank isn't full */
             if (FUEL_LEVELS.indexOf(x.fuel) < 0) { if (!err) err = "Pick the fuel level (Full tank of gas = No)."; } else { x.answer = o.label + " \u00b7 fuel level " + x.fuel; x.note = "Fuel level " + x.fuel; } } }
@@ -486,6 +500,7 @@
       });
       var oi = dform.querySelector("#dl-dvir-odo"); if (oi) oi.addEventListener("input", function () { var v = oi.value.replace(/\..*$/, "").replace(/\D/g, ""); if (v !== oi.value) oi.value = v; });
     }
+    if (dform) dform.addEventListener("change", function (e) { if (e.target.name === "dv-carwash") { var ww = dform.querySelector(".dl-wash-warn"); if (ww) ww.hidden = e.target.getAttribute("data-bad") !== "note"; } }); /* v77.9 */
     if (dform) dform.addEventListener("change", function (e) { if (e.target.name === "dv-fulltank") { var fu = dform.querySelector(".dl-fuel"); if (fu) fu.hidden = e.target.getAttribute("data-bad") !== "note"; } }); /* v74b */
     if (dform) dform.addEventListener("change", function (e) { var it = e.target.closest(".dl-dvir-item"); if (it && /^dv-/.test(e.target.name)) { var dd = it.querySelector(".dl-dvir-def"); if (dd) dd.hidden = e.target.getAttribute("data-bad") !== "1"; } });
     var st = document.getElementById("dl-print-style");
@@ -497,7 +512,7 @@
       if (id === "dl-sig-save") { if (!pad || !pad.__ink) { window.alert("Sign with your finger first."); return; }
         meta.onSign(day.day, { img: pad.toDataURL("image/png"), at: Date.now(), hash: dayHash(day), cert: CERT }); open(days, meta, "day:" + day.day + ":sign"); return; }
       if (t.classList.contains("dl-dvir-kind")) { open(days, meta, "day:" + day.day + ":insp" + (t.getAttribute("data-kind") === "post" ? "-post" : "")); return; }
-      if (id === "dl-dvir-nodef") { Array.prototype.forEach.call(w.querySelectorAll('#dl-dvir-form input[data-bad="0"]'), function (r) { r.checked = true; }); Array.prototype.forEach.call(w.querySelectorAll(".dl-dvir-def"), function (d) { d.hidden = true; }); return; }
+      if (id === "dl-dvir-nodef") { Array.prototype.forEach.call(w.querySelectorAll('#dl-dvir-form input[data-bad="0"]:not([name="dv-carwash"])'), function (r) { r.checked = true; }); Array.prototype.forEach.call(w.querySelectorAll(".dl-dvir-def"), function (d) { d.hidden = true; }); return; }
       if (id === "dl-dvir-save") {
         var f = w.querySelector("#dl-dvir-form"), err = w.querySelector("#dl-dvir-err"), odoRaw = String(f.odometer.value).replace(/[,\s]/g, ""), odo = Number(odoRaw);
         if (f.__startedAt && Date.now() - f.__startedAt < f.__minMs) { err.textContent = "Take at least " + Math.round(f.__minMs / 1000) + " seconds to inspect the vehicle (" + Math.ceil((f.__startedAt + f.__minMs - Date.now()) / 1000) + " s left)."; return; }
@@ -587,5 +602,5 @@
     if (mk === "mdy" && (d.length > 4 || (d.length === 4 && !del))) out = d.slice(0, 2) + "/" + d.slice(2, 4) + "/" + d.slice(4);
     if (out !== t.value) t.value = out;
   }, true);
-  window.PCSDriverLog = { recView: recView, washLine: washLine, minTimeGate: minTimeGate, fmtDur: fmtDur, motionGate: motionGate, fluidsDue: fluidsDue, readDvir: readDvir, parseMdy: parseMdy, expiryState: expiryState, washState: washState, EXTRAS: DVIR_EXTRAS, items: items, DVIR: DVIR, CERT: CERT, dayHash: dayHash, snapshot: snapshot, historyHtml: historyHtml, build: build, html: html, gridSvg: gridSvg, listHtml: listHtml, detailHtml: detailHtml, csv: csv, open: open, close: close, download: download, midnight: midnight, CARRIER: CARRIER };
+  window.PCSDriverLog = { washWarnText: washWarnText, washLastText: washLastText, WASH_WARN: WASH_WARN, recView: recView, washLine: washLine, minTimeGate: minTimeGate, fmtDur: fmtDur, motionGate: motionGate, fluidsDue: fluidsDue, readDvir: readDvir, parseMdy: parseMdy, expiryState: expiryState, washState: washState, EXTRAS: DVIR_EXTRAS, items: items, DVIR: DVIR, CERT: CERT, dayHash: dayHash, snapshot: snapshot, historyHtml: historyHtml, build: build, html: html, gridSvg: gridSvg, listHtml: listHtml, detailHtml: detailHtml, csv: csv, open: open, close: close, download: download, midnight: midnight, CARRIER: CARRIER };
 })();
