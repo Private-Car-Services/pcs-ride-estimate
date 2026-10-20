@@ -6261,7 +6261,8 @@
   }
   function saveRideCommission(eventId, raw) {
     var row = null; (state.calendar || []).forEach(function (r) { if (r && r.id === eventId) row = r; });
-    if (!row) return Promise.reject(new Error("missing"));
+    if (!row) { state.boardNotice = "NOT SAVED: refresh the board, this ride is not loaded."; renderBoardLists(); return Promise.resolve(false); }
+    state.boardNotice = "";
     var out = rideCommPatch(raw, Date.now());
     if (!out.ok) { state.boardNotice = "NOT SAVED: " + out.error; renderBoardLists(); return Promise.resolve(false); }
     return godFetch(calendarUrl(eventId), { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(out.patch) }).then(function (res) {
@@ -6271,8 +6272,18 @@
       row.rideCommissionPct = out.patch.rideCommissionPct;
       state.boardNotice = "Saved: " + (row.assignedDriverName || "driver") + " gets " + ridePctFor(row) + "% on " + (row.rider || "this ride") + ".";
       return refresh();
-    }).catch(function () { state.boardNotice = "NOT SAVED: the ride commission % did not save. Try again."; renderBoardLists(); return false; });
+    }).catch(function (err) { /* v77.7: keep the real reason (God sign-in needed, server error) instead of a bare "try again" */
+      var why = rideCommFailText(state.boardNotice, err);
+      state.boardNotice = "NOT SAVED: the ride commission % did not save" + (why ? " (" + why + ")" : "") + ". Try again."; renderBoardLists(); return false; });
   }
+  function rideCommFailText(prev, err) { /* pure (tested) */
+    var p = String(prev || "");
+    if (/^not saved: /i.test(p)) return p.replace(/^not saved: /i, "").replace(/\.$/, "");
+    if (err && err.message === "readback") return "the server kept a different value";
+    if (err && err.message === "missing") return "refresh the board";
+    return "";
+  }
+  window.__pcsV777RideComm = { fail: rideCommFailText };
   window.__pcsV76dRideComm = { patch: rideCommPatch };
   /* ---------- v76j (Matthew 10/19): RATE OVERRIDE / contract rates. God mode only.
      Per ride: rateOverride { base, perMile, flat, setBy, at } on the board row (flat wins). Per customer: saved list at
@@ -6541,7 +6552,7 @@
   function dcardPanelHtml() {
     var s = state.dcard || {}, list = s.drivers || [];
     return '<div class="dcard-panel" style="margin-top:10px;border-top:2px solid #0b6b3a;padding-top:8px"><b>Driver picture cards (sent with the text)</b>' +
-      '<p class="fine">Shows ONLY first name, photo, car and plate. A driver without a card gets the plain text.</p>' +
+      '<p class="fine">Shows ONLY first name, photo, car and plate. A driver without a card (or without a signup photo) gets the generic PCS card.</p>' +
       '<button type="button" class="btn btn-ghost" id="dcard-load" style="min-height:52px">' + (list.length ? "Reload drivers" : "Show drivers") + "</button>" +
       '<p class="error" role="alert">' + esc(s.err || "") + "</p>" +
       list.map(function (d) {
@@ -6559,6 +6570,7 @@
   }
   function dcardMake(id) {
     var d = ((state.dcard || {}).drivers || []).filter(function (x) { return x.driverId === id; })[0]; if (!d) return Promise.resolve();
+    if (!d.photo) { state.dcard.err = "NOT SAVED: " + dcardLines(d).name + " needs a signup photo first. Until then the generic PCS card is sent."; renderBoardLists(); return Promise.resolve(); } /* v77.8 Matthew: real photo only */
     return dcardImg(d.photo).then(function (img) { var out = dcardDraw(d, img); return atxPost("/god/dcard/put", { driverId: id, card: out.card, photo: out.photo }); })
       .then(function (r) { d.cardKey = r.cardKey; d.cardAt = r.cardAt; state.dcard.err = ""; state.boardNotice = "Card saved for " + dcardLines(d).name + "."; })
       .catch(function (e) { state.dcard.err = "NOT SAVED: " + (e && e.message || e); }).then(function () { renderBoardLists(); });
