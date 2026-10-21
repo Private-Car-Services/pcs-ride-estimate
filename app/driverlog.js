@@ -261,11 +261,13 @@
   /* v76g: show any stored inspection by TODAY's car-wash rule (records saved under the old 48 h rule, or a post-trip that
      stored a car-wash block, stop showing "Blocked" + "1 defect(s)"). Display only; nothing is written back. The car wash is
      judged on the inspection's own date + the wash date in it. Everything that is not the car wash is left as stored. */
+  /* v77.15 (Anson 10/20-21): pick the more recent of two wash dates (either may be blank/unreadable) */
+  function newerWash(a, b) { var ta = parseMdy(a), tb = parseMdy(b); if (ta == null) return tb == null ? (a || b || "") : b; if (tb == null) return a; return tb > ta ? b : a; }
   function recView(rec, kind, meta, fallbackWash) {
     if (!rec || typeof rec !== "object") return rec;
     var cw = items(meta || {}).filter(function (i) { return i.k === "carwash"; })[0] || { k: "carwash", label: "Last date of car wash", block: true, maxAgeDays: 3 };
     var its = rec.items && typeof rec.items === "object" ? rec.items : {}, out = {}, wx = its.carwash;
-    var date = (wx && wx.date) || fallbackWash || "", at = Number(rec.at) || Date.now();
+    var date = newerWash((wx && wx.date) || "", fallbackWash || ""), at = Number(rec.at) || Date.now(); /* v77.15: a wash recorded after this inspection clears its car-wash block */
     var ws = date ? washState(date, at, cw) : null, wl = washLine(ws, kind), wBlock = kind !== "post" && !!(ws && ws.block);
     Object.keys(its).forEach(function (k) {
       var x = its[k];
@@ -602,5 +604,5 @@
     if (mk === "mdy" && (d.length > 4 || (d.length === 4 && !del))) out = d.slice(0, 2) + "/" + d.slice(2, 4) + "/" + d.slice(4);
     if (out !== t.value) t.value = out;
   }, true);
-  window.PCSDriverLog = { washWarnText: washWarnText, washLastText: washLastText, WASH_WARN: WASH_WARN, recView: recView, washLine: washLine, minTimeGate: minTimeGate, fmtDur: fmtDur, motionGate: motionGate, fluidsDue: fluidsDue, readDvir: readDvir, parseMdy: parseMdy, expiryState: expiryState, washState: washState, EXTRAS: DVIR_EXTRAS, items: items, DVIR: DVIR, CERT: CERT, dayHash: dayHash, snapshot: snapshot, historyHtml: historyHtml, build: build, html: html, gridSvg: gridSvg, listHtml: listHtml, detailHtml: detailHtml, csv: csv, open: open, close: close, download: download, midnight: midnight, CARRIER: CARRIER };
+  window.PCSDriverLog = { newerWash: newerWash, washWarnText: washWarnText, washLastText: washLastText, WASH_WARN: WASH_WARN, recView: recView, washLine: washLine, minTimeGate: minTimeGate, fmtDur: fmtDur, motionGate: motionGate, fluidsDue: fluidsDue, readDvir: readDvir, parseMdy: parseMdy, expiryState: expiryState, washState: washState, EXTRAS: DVIR_EXTRAS, items: items, DVIR: DVIR, CERT: CERT, dayHash: dayHash, snapshot: snapshot, historyHtml: historyHtml, build: build, html: html, gridSvg: gridSvg, listHtml: listHtml, detailHtml: detailHtml, csv: csv, open: open, close: close, download: download, midnight: midnight, CARRIER: CARRIER };
 })();

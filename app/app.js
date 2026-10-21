@@ -3666,10 +3666,15 @@
     if (syncOn()) authFetch(databaseURL() + "/rides/DRVRHSLG/" + encodeURIComponent(driverPresenceId()) + "/" + k + "/" + d + ".json", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(rec) }).catch(function () {});
   }
   /* an inspection with a defect marked NOT safe to operate blocks Available until God mode clears it (logged) */
+  function dvirSoftBlock(b) { return !!b && (b.k === "carwash" || /days since last wash|^not checked in|never checked/.test(String(b.why || ""))); } /* v77.15 */
   function dvirBlock() {
-    var loc = dlRec("dvir"), srv = hosReadHist().dvir || {}, hit = null;
+    var loc = dlRec("dvir"), srv = hosReadHist().dvir || {}, hit = null, cleanPre = 0;
+    /* v77.15 (Anson 10/20): a newer CLEAN pre-trip supersedes older inspection / Available blocks (previous shifts) */
+    [loc, srv].forEach(function (m) { Object.keys(m || {}).forEach(function (d) { var p = m[d] && m[d].pre; if (p && !p.unsafe && Number(p.at) > cleanPre && (!p.plate || !dlPlate() || p.plate === dlPlate())) cleanPre = Number(p.at); }); });
     [loc, srv].forEach(function (m) { Object.keys(m || {}).forEach(function (d) { ["pre", "post", "avail"].forEach(function (k) {
       var r = m[d] && m[d][k]; if (!r || !r.unsafe) return;
+      var sup = cleanPre && Number(r.at) > 0 && Number(r.at) < cleanPre; /* v77.15 (Harry): a newer clean pre-trip supersedes ONLY wash / stale blocks (add2: never photo/Cracks) */
+      if (sup && (r.blocks || []).length && (r.blocks || []).every(dvirSoftBlock)) return;
       /* v76d-pretrip: a car-wash block follows the current wash date (calendar days). v76g: a POST-trip never blocks for the car wash (end of shift). */
       var bl = (r.blocks || []).filter(function (b) { return !(b && b.k === "carwash" && (k === "post" || !washBlockNow())); });
       if ((r.blocks || []).length && !bl.length) return;
@@ -3786,7 +3791,9 @@
     var pl = dlPlate() || "car", vd = {}; try { vd = (JSON.parse(localStorage.getItem("pcs-dvir-veh") || "{}") || {})[pl] || ((hosReadHist().veh || {})[pl]) || {}; } catch (e) {}
     var cfg = null; try { cfg = JSON.parse(localStorage.getItem("pcs-dvir-cfg") || "null"); } catch (e) {}
     var cw = L.items({ dvirItems: cfg }).filter(function (i) { return i.k === "carwash"; })[0];
-    if (!cw || !vd.carwash) return false; var ws = L.washState(vd.carwash, now || Date.now(), cw); return !!(ws && ws.block);
+    var wd = vd.carwash || ""; /* v77.15: also the driver's last recorded wash (post-trip Yes / blocked-screen "I washed it"), newest wins */
+    try { var lw = JSON.parse(localStorage.getItem("pcs-last-wash") || "null"); if (lw && lw.date && (!lw.plate || !dlPlate() || lw.plate === dlPlate())) wd = L.newerWash ? L.newerWash(wd, lw.date) : (wd || lw.date); } catch (e) {}
+    if (!cw || !wd) return false; var ws = L.washState(wd, now || Date.now(), cw); return !!(ws && ws.block);
   }
   function vehAvailBlocks(now) {
     var L = window.PCSDriverLog; if (!L) return [];
