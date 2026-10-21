@@ -576,18 +576,18 @@
   function topHtml(c) {
     var g = c.g, h = "";
     h += '<div class="row" style="justify-content:space-between"><h1>Monthly Goal</h1><button class="btn ghost" id="gl-b-lock">Lock</button></div>';
-    h += GS ? gsBarHtml() + '<div class="row" style="justify-content:flex-end"><span class="fine" id="gl-ver" style="opacity:.7">goal v77.18-hr-test \u00b7 75x</span></div>' : '<div class="row" style="justify-content:space-between"><span id="gl-sync" style="color:#7ee08f;font-weight:700;font-size:15px"></span><span class="fine" id="gl-ver" style="opacity:.7">goal v77.18-hr \u00b7 75x</span></div>';
+    h += GS ? gsBarHtml() + '<div class="row" style="justify-content:flex-end"><span class="fine" id="gl-ver" style="opacity:.7">goal v77.19-hr-test \u00b7 75x</span></div>' : '<div class="row" style="justify-content:space-between"><span id="gl-sync" style="color:#7ee08f;font-weight:700;font-size:15px"></span><span class="fine" id="gl-ver" style="opacity:.7">goal v77.19-hr \u00b7 75x</span></div>';
     var roll = '<div class="fine">' + (c.dayOv != null ? "you set it for today" : c.snap ? "fixed for today" : "") + '</div>', tr = c.todayRem;
     h += '<div class="card hero"><b class="t">TODAY \u00b7 ' + esc(c.t) + '</b><div class="grid">' + big("Weekly goal", $m(c.weekGoal), weekBar(c)) + big("Days left in week", c.dLeft == null ? "\u2014" : String(c.dLeft), '<div class="fine">' + (c.typedToday ? "you typed it for today" : c.offToday ? "Sunday is off" : c.sunWork ? "Mon\u2013Sun, working Sunday" : "Mon\u2013Sat, Sunday off") + '</div>') + /* v77.13b: hourly moved under DAILY TOTAL */
       big("Today's goal", $m(c.daily, true), roll + '<button type="button" class="btn" id="gl-b-recalc" style="font-size:20px;padding:12px 22px;margin-top:6px">Recalculate today</button>') + big("Today remaining", tr != null && tr < 0 ? "ahead by " + $m(-tr, true) : $m(tr, true)) + big("Week remaining", $m(left(c.weekRem), true), '<div class="fine">before today ' + $m(c.weekRemBefore, true) + '</div>') + big("Month remaining", $m(left(c.monthRem), true), '<div class="fine">before today ' + $m(c.monthRemBefore, true) + '</div>') + big("Month daily pace", $m(c.monthPace, true), '<div class="fine">' + c.mdLeft + ' days, ' + (c.sunWork ? "7 this week, then 6 a week" : "6 a week") + '</div>') +
       '</div>' + sunToggleHtml(c) + sunLine(c) + howToday(c) + '</div>';
     var ids = Object.keys(D.entries).filter(function (k) { return D.entries[k].date === c.t && D.entries[k].line !== "exp"; }).sort(function (a, b) { return (D.entries[a].at || 0) - (D.entries[b].at || 0); });
     var run = 0, tape = ids.map(function (k) { var e = D.entries[k]; run += Number(e.amount) || 0; var rem = c.daily == null ? null : c.daily - run;
-      var tm = entTime(e); return '<tr class="b"><td style="text-align:left">' + esc(name(e.line).replace(/ \(.*\)/, "") + (e.line === "exp" ? "" : e.tip ? " tip" : " ride")) + (tm ? '<div class="gl-tm" style="font-size:13px;color:#b9cdb9;font-weight:600">' + esc(tm) + '</div>' : "") + '</td><td class="r">+' + $m(e.amount, true) + '</td><td class="r pos">' + $m(run, true) + '</td><td class="r" style="color:' + (rem != null && rem <= 0 ? "var(--lite)" : "var(--goldt)") + '">' + (rem != null && rem < 0 ? "ahead by " + $m(-rem, true) : $m(rem, true)) + '</td><td class="r"><button class="btn ghost" data-del="' + esc(k) + '">Undo</button></td></tr>'; }).reverse().join("");
+      var tm = entTime(e); return '<tr class="b"><td style="text-align:left">' + esc(name(e.line).replace(/ \(.*\)/, "") + (e.line === "exp" ? "" : e.tip ? " tip" : " ride")) + (tm ? '<div class="gl-tm" style="font-size:13px;color:#b9cdb9;font-weight:600">' + esc(tm) + '</div>' : "") + '</td><td class="r">+' + $m(e.amount, true) + '</td><td class="r pos">' + $m(run, true) + '</td><td class="r" style="color:' + (rem != null && rem <= 0 ? "var(--lite)" : "var(--goldt)") + '">' + (rem != null && rem < 0 ? "ahead by " + $m(-rem, true) : $m(rem, true)) + '</td><td class="gl-nt">' + noteCell(k, e) + '</td><td class="r"><button class="btn ghost" data-del="' + esc(k) + '">Undo</button></td></tr>'; }).reverse().join("");
     h += '<div class="card day"><div class="fine">DAILY TOTAL</div><div class="total">' + $m(c.dayGross, true) + '</div><div id="gl-hr">' + hrHtml(c.t) + '</div>' + pastDaysHtml(c.t) +
-      '<form id="gl-f-q" class="row"><input id="gl-q-amt" type="text" inputmode="decimal" autocomplete="off" placeholder="Ride 0.00" aria-label="Ride amount"><input id="gl-q-tip" type="text" inputmode="decimal" autocomplete="off" placeholder="Tip" aria-label="Tip (optional)" style="font-size:28px;width:120px;text-align:right"><select id="gl-q-line" aria-label="Source">' +
+      '<form id="gl-f-q" class="row"><input id="gl-q-amt" type="text" inputmode="decimal" autocomplete="off" placeholder="Ride 0.00" aria-label="Ride amount"><input id="gl-q-tip" type="text" inputmode="decimal" autocomplete="off" placeholder="Tip" aria-label="Tip (optional)" style="font-size:28px;width:120px;text-align:right"><input id="gl-q-note" type="text" maxlength="120" autocomplete="off" placeholder="Note" aria-label="Note (optional)" style="font-size:18px;flex:1 1 140px;min-width:110px;max-width:260px"><select id="gl-q-line" aria-label="Source">' +
       LINES.map(function (l) { return '<option value="' + l[0] + '"' + (l[0] === "pcs" ? " selected" : "") + ">" + l[1] + "</option>"; }).join("") + '</select><button class="btn" type="submit" style="font-size:20px;padding:10px 26px">Add</button></form>' +
-      (tape ? '<table style="margin-top:8px"><tr class="fine"><th style="text-align:left">Source</th><th class="r">Amount</th><th class="r">Daily total</th><th class="r">Goal left</th><th></th></tr>' + tape + "</table>" : "") +
+      (tape ? '<table style="margin-top:8px"><tr class="fine"><th style="text-align:left">Source</th><th class="r">Amount</th><th class="r">Daily total</th><th class="r">Goal left</th><th style="text-align:left">Note</th><th></th></tr>' + tape + "</table>" : "") +
       "</div>";
     h += '<div class="card"><b class="t">Week</b><table>' + row("WEEKLY GOAL", $m(c.weekGoal)) + row("<b>Left for the week</b>", $m(left(c.weekRem))) + row("WEEK TOTAL", $m(c.weekTotal)) +
       row("UBER GOAL", $m(c.uberG)) + row("UBER WEEK TOTAL", $m(g("w", "uber"))) + row("UBER REMAINING", $m(left(c.uberRem))) + row("UBER TODAY'S GOAL", $m(left(c.uberDaily), true)) + "</table></div>";
@@ -640,6 +640,13 @@
     var c = calc(); paint.daysShown = String(c.dLeft == null ? "" : c.dLeft);
     if (typeof document !== "undefined" && document.getElementById) { var de = document.getElementById("gl-s-days"); if (de) de.value = paint.daysShown; }
     if (app) { paintTop(); save(); } return on; }
+  /* v77.19 (Matthew 10/21): a note on each money entry, typed with Add or tapped later in the list. Text only (escaped on output),
+     max 120 characters, saved in the entry inside the existing encrypted backup. Amounts / totals never change. Pure parts tested. */
+  var NOTE_MAX = 120;
+  function noteClean(v) { return String(v == null ? "" : v).replace(/[\u0000-\u001f\u007f]+/g, " ").replace(/\s+/g, " ").trim().slice(0, NOTE_MAX); }
+  function noteSet(entries, k, v) { var e = entries && entries[k]; if (!e) return false; var n = noteClean(v); if ((e.note || "") === n) return false; e.note = n; return true; }
+  function noteCell(k, e) { var n = String((e && e.note) || ""); return '<button type="button" class="gl-note" data-note="' + esc(k) + '" aria-label="' + (n ? "Edit note" : "Add a note") + '" style="background:none;border:0;padding:6px 2px;min-height:36px;color:' + (n ? "#e8f3e8" : "#8fa88f") + ';font-size:14px;text-align:left;max-width:220px;overflow-wrap:anywhere;cursor:pointer">' + (n ? esc(n) : "+ note") + "</button>"; }
+  if (typeof window !== "undefined") window.__pcsGoalNote = { clean: noteClean, set: noteSet, cell: noteCell, MAX: 120 };
   function bindTop() {
     var sb = document.getElementById("gl-b-sun"); if (sb) sb.onclick = function () { sunToggle(); };
     var rc = document.getElementById("gl-b-recalc"); if (rc) rc.onclick = function () { if (!confirm("Recalculate today\u2019s goal from the numbers right now?")) return; snapToday(true); paint(); save(); };
@@ -647,9 +654,12 @@
     document.getElementById("gl-f-q").onsubmit = function (e) { e.preventDefault(); var a = num(document.getElementById("gl-q-amt").value), l = document.getElementById("gl-q-line").value;
       var tp = num(document.getElementById("gl-q-tip").value);
       if (!(a > 0) && !(tp > 0)) { document.getElementById("gl-q-amt").focus(); return; } var at = Date.now();
-      if (a > 0) D.entries[newId(at)] = { date: today(), line: l, amount: Math.round(a * 100) / 100, note: "", at: at, source: "quick" };
-      if (tp > 0 && l !== "exp") D.entries[newId(at + 1)] = { date: today(), line: l, amount: Math.round(tp * 100) / 100, note: "", at: at + 1, source: "quick", tip: true };
+      var nb = document.getElementById("gl-q-note"), nt = noteClean(nb ? nb.value : ""); /* v77.19: note goes on the ride line (or the tip if no ride) */
+      if (a > 0) D.entries[newId(at)] = { date: today(), line: l, amount: Math.round(a * 100) / 100, note: nt, at: at, source: "quick" };
+      if (tp > 0 && l !== "exp") D.entries[newId(at + 1)] = { date: today(), line: l, amount: Math.round(tp * 100) / 100, note: a > 0 ? "" : nt, at: at + 1, source: "quick", tip: true };
       D.lastLine = l; paint.focusQ = true; paint(); save(); };
+    Array.prototype.forEach.call(document.querySelectorAll("#gl-top [data-note]"), function (b) { b.onclick = function () { var k = b.getAttribute("data-note"), e = D.entries[k]; if (!e) return; /* v77.19 */
+      var v = typeof prompt === "function" ? prompt("Note for this entry (up to " + NOTE_MAX + " characters):", e.note || "") : null; if (v == null) return; noteSet(D.entries, k, v); paint(); save(); }; });
     Array.prototype.forEach.call(document.querySelectorAll("#gl-top [data-del]"), function (b) { b.onclick = function () { if (confirm("Undo this entry?")) { delete D.entries[b.getAttribute("data-del")]; paint(); save(); } }; });
   }
   function bindRest() {
