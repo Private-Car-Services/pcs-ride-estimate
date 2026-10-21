@@ -545,7 +545,7 @@
     return { sum: Math.round(sum * 100) / 100, from: from, kind: kind, mins: mins, rate: rate }; }
   function hrText(h) { if (!h.kind) return "Starts with your first entry today";
     var t = new Date(h.from).toLocaleTimeString("en-US", { timeZone: "America/Chicago", hour: "numeric", minute: "2-digit" }), dur = Math.floor(h.mins / 60) + "h " + (h.mins % 60) + "m";
-    var money = (h.rate == null ? "$0.00" : "$" + h.rate.toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ",")) + "/hr \u00b7 ";
+    var money = (h.rate == null || h.mins < 15 ? "\u2014" : /* v77.18: dash for the first 15 min (Harry) */ "$" + h.rate.toFixed(2).replace(/\B(?=(\d{3})+(?!\d))/g, ",")) + "/hr \u00b7 ";
     if (h.kind === "shift" && h.open === false) return money + dur + " on shift \u00b7 clocked out " + new Date(h.end).toLocaleTimeString("en-US", { timeZone: "America/Chicago", hour: "numeric", minute: "2-digit" }) + " CT"; /* v77.13 */
     if (h.kind === "shift" && h.shifts > 1) return money + dur + " on shift (" + h.shifts + " shifts) CT";
     return money + dur + (h.kind === "shift" ? " since " + t : " since first entry " + t) + " CT"; }
@@ -555,21 +555,28 @@
   /* v77.13b (Matthew 10/20 "grouped with my daily numbers"): each day's hours on shift + $/hr are kept with the day (D.dayHrs[day], synced per day
      like settings) so past days show $/hr next to their totals. Pure (tested). */
   function hrRecord(h) { return h && h.kind === "shift" ? { mins: h.mins, rate: h.rate, sum: h.sum, end: h.open ? 0 : h.end || 0, open: !!h.open } : null; }
-  function hrNeedSave(prev, rec) { if (!rec) return false; if (!prev) return true; return prev.open !== rec.open || prev.end !== rec.end || prev.sum !== rec.sum || Math.abs((prev.mins || 0) - rec.mins) >= 15; }
+  function hrNeedSave(prev, rec) { if (!rec) return false; if (!prev) return true; return prev.open !== rec.open || prev.end !== rec.end || prev.sum !== rec.sum || (!rec.open && prev.rate !== rec.rate) /* v77.18: closed shift saves its final rate */ || Math.abs((prev.mins || 0) - rec.mins) >= 15; }
   function hrStore(day, h) { if (!D) return; var rec = hrRecord(h), m = D.dayHrs = D.dayHrs || {}; if (!hrNeedSave(m[day], rec)) return; m[day] = rec; try { var p = save(); if (p && p.catch) p.catch(function () {}); } catch (e) {} }
+  /* v77.18 (Matthew 10/21: 10/20 row $473.67, 13h 57m, $0.00/hr): past-day $/hr is computed at render time = daily total /
+     on-shift hours (the stored rate was saved while the total was still 0 and nothing re-saved it after midnight). Pure (tested). */
+  function hrRateOf(total, mins) { return mins > 0 ? Math.round(total / (mins / 60) * 100) / 100 : null; }
+  function hrFixPast(m, day, total) { var r = m && m[day]; if (!r || !(r.mins > 0) || r.open) return false; var rt = hrRateOf(total, r.mins);
+    if (r.rate === rt && r.sum === total) return false; m[day] = Object.assign({}, r, { rate: rt, sum: total }); return true; }
   function dayTotal(day) { var s = 0; Object.keys((D && D.entries) || {}).forEach(function (k) { var e = D.entries[k]; if (e && e.date === day && e.line !== "exp" && e.type !== "adjustment") s += Number(e.amount) || 0; }); return Math.round(s * 100) / 100; }
   function pastDaysHtml(t) { var hr = (D && D.dayHrs) || {}, days = {}; Object.keys(hr).forEach(function (d) { if (d < t) days[d] = 1; });
     Object.keys((D && D.entries) || {}).forEach(function (k) { var d = String(D.entries[k].date || ""); if (d < t && d >= addDays(t, -7)) days[d] = 1; });
     var list = Object.keys(days).sort().reverse().slice(0, 7); if (!list.length) return "";
+    var fixed = false; list.forEach(function (d) { if (hrFixPast(hr, d, dayTotal(d))) fixed = true; }); /* v77.18: save the corrected rate once */
+    if (fixed && D) { try { var sp = save(); if (sp && sp.catch) sp.catch(function () {}); } catch (e) {} }
     return '<table style="margin-top:8px"><tr class="fine"><th style="text-align:left">Past days</th><th class="r">Daily total</th><th class="r">On shift</th><th class="r">$/hr</th></tr>' + list.map(function (d) { var r = hr[d];
-      return '<tr class="b"><td style="text-align:left">' + esc(fmtD(d)) + '</td><td class="r pos">' + $m(dayTotal(d), true) + '</td><td class="r">' + (r ? Math.floor(r.mins / 60) + "h " + (r.mins % 60) + "m" : "\u2014") + '</td><td class="r pos">' + (r && r.rate != null ? "$" + Number(r.rate).toFixed(2) : "\u2014") + "</td></tr>"; }).join("") + "</table>"; }
+      return '<tr class="b"><td style="text-align:left">' + esc(fmtD(d)) + '</td><td class="r pos">' + $m(dayTotal(d), true) + '</td><td class="r">' + (r ? Math.floor(r.mins / 60) + "h " + (r.mins % 60) + "m" : "\u2014") + '</td><td class="r pos">' + (r && r.mins > 0 ? "$" + hrRateOf(dayTotal(d), r.mins).toFixed(2) : "\u2014") /* v77.18 */ + "</td></tr>"; }).join("") + "</table>"; }
   function hrPaint() { var el = typeof document !== "undefined" && document.getElementById("gl-hr"); if (el && D) el.innerHTML = hrHtml(today()); }
   if (typeof setInterval === "function") setInterval(hrPaint, 60000);
-  if (typeof window !== "undefined") window.__pcsGoalHourly = { hrCalc: hrCalc, hrText: hrText, hrShiftStart: hrShiftStart, hrPrevDay: hrPrevDay, hrSpans: hrSpans, hrDayStartMs: hrDayStartMs, hrRecord: hrRecord, hrNeedSave: hrNeedSave };
+  if (typeof window !== "undefined") window.__pcsGoalHourly = { hrCalc: hrCalc, hrText: hrText, hrShiftStart: hrShiftStart, hrPrevDay: hrPrevDay, hrSpans: hrSpans, hrDayStartMs: hrDayStartMs, hrRecord: hrRecord, hrNeedSave: hrNeedSave, hrRateOf: hrRateOf, hrFixPast: hrFixPast, pastDaysHtml: function (t) { return pastDaysHtml(t); } };
   function topHtml(c) {
     var g = c.g, h = "";
     h += '<div class="row" style="justify-content:space-between"><h1>Monthly Goal</h1><button class="btn ghost" id="gl-b-lock">Lock</button></div>';
-    h += GS ? gsBarHtml() + '<div class="row" style="justify-content:flex-end"><span class="fine" id="gl-ver" style="opacity:.7">goal v77.15-hr-test \u00b7 75x</span></div>' : '<div class="row" style="justify-content:space-between"><span id="gl-sync" style="color:#7ee08f;font-weight:700;font-size:15px"></span><span class="fine" id="gl-ver" style="opacity:.7">goal v77.15-hr \u00b7 75x</span></div>';
+    h += GS ? gsBarHtml() + '<div class="row" style="justify-content:flex-end"><span class="fine" id="gl-ver" style="opacity:.7">goal v77.18-hr-test \u00b7 75x</span></div>' : '<div class="row" style="justify-content:space-between"><span id="gl-sync" style="color:#7ee08f;font-weight:700;font-size:15px"></span><span class="fine" id="gl-ver" style="opacity:.7">goal v77.18-hr \u00b7 75x</span></div>';
     var roll = '<div class="fine">' + (c.dayOv != null ? "you set it for today" : c.snap ? "fixed for today" : "") + '</div>', tr = c.todayRem;
     h += '<div class="card hero"><b class="t">TODAY \u00b7 ' + esc(c.t) + '</b><div class="grid">' + big("Weekly goal", $m(c.weekGoal), weekBar(c)) + big("Days left in week", c.dLeft == null ? "\u2014" : String(c.dLeft), '<div class="fine">' + (c.typedToday ? "you typed it for today" : c.offToday ? "Sunday is off" : c.sunWork ? "Mon\u2013Sun, working Sunday" : "Mon\u2013Sat, Sunday off") + '</div>') + /* v77.13b: hourly moved under DAILY TOTAL */
       big("Today's goal", $m(c.daily, true), roll + '<button type="button" class="btn" id="gl-b-recalc" style="font-size:20px;padding:12px 22px;margin-top:6px">Recalculate today</button>') + big("Today remaining", tr != null && tr < 0 ? "ahead by " + $m(-tr, true) : $m(tr, true)) + big("Week remaining", $m(left(c.weekRem), true), '<div class="fine">before today ' + $m(c.weekRemBefore, true) + '</div>') + big("Month remaining", $m(left(c.monthRem), true), '<div class="fine">before today ' + $m(c.monthRemBefore, true) + '</div>') + big("Month daily pace", $m(c.monthPace, true), '<div class="fine">' + c.mdLeft + ' days, ' + (c.sunWork ? "7 this week, then 6 a week" : "6 a week") + '</div>') +
