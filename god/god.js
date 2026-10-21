@@ -5455,7 +5455,7 @@
         var chk = assignPickPatch(crow, did ? { id: did } : null, Date.now()); if (!chk.ok) { state.boardNotice = chk.error; renderBoardLists(); return; }
         state.assignDrafts[eid] = did; state.dbHoldUntil = 0; t.disabled = true;
         (did ? assignCalendarRide(eid, did) : unassignCalendarRide(eid)).then(function () {
-          delete state.assignDrafts[eid]; if (did) state.boardNotice = "Saved \u2713 " + state.boardNotice; renderBoardLists(); })
+          delete state.assignDrafts[eid]; if (did) state.boardNotice = "Saved \u2713 " + state.boardNotice; t.disabled = false; boardForceRebuild(); }) /* v77.12 */
           .catch(function (err) { delete state.assignDrafts[eid]; t.disabled = false;
             state.boardNotice = "NOT SAVED: " + (err && err.message === "driver" ? "that driver isn\u2019t on the roster." : err && err.message && err.message !== "missing" ? err.message : "try again."); renderBoardLists(); });
       }
@@ -5683,11 +5683,13 @@
           renderBoardLists();
           return;
         }
+        var cur = rovRow(id); /* v77.12: the pick already saved it (change handler) -> say so instead of looking dead */
+        if (cur && cur.assignedDriverId === driverId && cur.status === "assigned") { state.boardNotice = "Saved \u2713 already assigned to " + (cur.assignedDriverName || driverId) + "."; boardForceRebuild(); return; }
         btn.disabled = true;
         state.dbHoldUntil = 0;
         assignCalendarRide(id, driverId).then(function () {
           delete state.assignDrafts[id];
-          btn.disabled = false;
+          btn.disabled = false; boardForceRebuild(); /* v77.12 */
         }).catch(function (err) {
           btn.disabled = false;
           state.boardNotice = "Could not assign that ride" + (err && err.message === "driver" ? " (driver not on the roster)." : err && err.message ? " (" + err.message + ")." : ".");
@@ -6735,7 +6737,23 @@
     var d = t.replace(/\D/g, ""); if (d.length === 11 && d.charAt(0) === "1") d = d.slice(1);
     return d.length === 10 && /^[2-9]/.test(d) ? "+1" + d : null;
   }
-  function cphShow(e) { var d = String(e || "").replace(/\D/g, "").slice(-10); return d.length === 10 ? "(" + d.slice(0, 3) + ") " + d.slice(3, 6) + "-" + d.slice(6) : String(e || ""); }
+  function cphShow(e) { var d = String(e || "").replace(/\D/g, "").slice(-10); return d.length === 10 ? d.slice(0, 3) + "-" + d.slice(3, 6) + "-" + d.slice(6) : String(e || ""); } /* v77.12: 936-206-8840 */
+  /* v77.12 (Matthew 10/20): typed phone boxes keep their digits across the 5 s board rebuild (state.phDrafts, keyed by box id),
+     and a big green 0-9 keypad (iPad Safari has no web number pad: inputmode only gives the numbers/symbols keyboard). */
+  function phDraftVal(boxId, saved) { var d = state.phDrafts && Object.prototype.hasOwnProperty.call(state.phDrafts, boxId) ? state.phDrafts[boxId] : null; return d != null ? d : saved; } /* pure-ish (tested) */
+  function phPadKey(cur, key) { /* pure (tested): keypad -> 936-206-8840 as you type, max 10 digits */
+    var d = String(cur || "").replace(/\D/g, ""); if (d.length === 11 && d.charAt(0) === "1") d = d.slice(1);
+    if (key === "back") d = d.slice(0, -1); else if (key === "clear") d = ""; else if (/^[0-9]$/.test(key) && d.length < 10 && !(d === "" && (key === "0" || key === "1"))) d += key; /* US area codes never start with 0/1 */
+    return d.length > 6 ? d.slice(0, 3) + "-" + d.slice(3, 6) + "-" + d.slice(6) : d.length > 3 ? d.slice(0, 3) + "-" + d.slice(3) : d;
+  }
+  function phPadHtml(boxId) {
+    var open = state.phPad === boxId, b = 'style="font-size:26px;font-weight:800;min-width:64px;min-height:56px;border-radius:12px;background:#2e7d32;color:#fff;border:0;margin:3px"';
+    var keys = ["1", "2", "3", "4", "5", "6", "7", "8", "9", "clear", "0", "back"];
+    return '<button type="button" class="btn btn-ghost btn-ph-pad" data-box="' + esc(boxId) + '" style="min-height:44px">' + (open ? "Hide keypad" : "Keypad 0-9") + "</button>" +
+      (open ? '<div class="ph-pad" style="display:grid;grid-template-columns:repeat(3,72px);margin-top:4px">' + keys.map(function (k) {
+        return '<button type="button" class="ph-pad-key" data-box="' + esc(boxId) + '" data-key="' + k + '" ' + b + ">" + (k === "back" ? "\u232b" : k === "clear" ? "C" : k) + "</button>"; }).join("") + "</div>" : "");
+  }
+  function phAttrs() { return ' type="tel" inputmode="numeric" pattern="[0-9]*" autocomplete="tel" autocorrect="off" autocapitalize="off" spellcheck="false" maxlength="14" '; }
   function clientPhonePatch(raw, now, by) { /* pure (tested) */
     var p = cphNorm(raw);
     if (p === null) return { ok: false, error: "Enter a 10-digit US phone, like 936-555-1212." };
@@ -6838,8 +6856,8 @@
     return cashBoxHtml(r) + godDiscHtml(r) + /* v77.10 */ '<div class="db-cph" style="border:2px solid #0b6b3a;background:#0b3d23;border-radius:10px;padding:8px;margin:6px 0">' +
       '<div style="font-weight:800;margin-bottom:4px">Client phone' + (r.riderPhone ? ' \u2713 <span class="fine">' + esc(cphShow(r.riderPhone)) + (r.riderPhoneSrc === "calendar" ? " \u00b7 from the calendar" : r.riderPhoneSrc === "client" ? " \u00b7 saved for this client" : "") + "</span>" : (cphSaved ? ' <span class="fine">\u00b7 saved for this client: ' + esc(cphShow(cphSaved.phone)) + " (tap Save phone)</span>" : "")) + "</div>" +
       '<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">' +
-      '<input id="cph-' + id + '" type="tel" inputmode="tel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" placeholder="936-555-1212" value="' + esc(r.riderPhone ? cphShow(r.riderPhone) : cphSaved ? cphShow(cphSaved.phone) : "") + '"' + big + ">" +
-      '<button type="button" class="btn btn-gold btn-cph-save" data-event-id="' + id + '" style="min-height:44px">Save phone</button>' +
+      '<input id="cph-' + id + '" class="ph-box"' + phAttrs() + 'placeholder="936-555-1212" value="' + esc(phDraftVal("cph-" + r.id, r.riderPhone ? cphShow(r.riderPhone) : cphSaved ? cphShow(cphSaved.phone) : "")) + '"' + big + ">" +
+      '<button type="button" class="btn btn-gold btn-cph-save" data-event-id="' + id + '" style="min-height:44px">Save phone</button>' + phPadHtml("cph-" + r.id) +
       '<label style="font-weight:700;font-size:17px;min-height:44px;display:flex;align-items:center;gap:6px"><input type="checkbox" class="cph-auto" data-event-id="' + id + '"' + (on ? " checked" : "") + ' style="width:26px;height:26px"> Auto text the tracking link</label>' +
       "</div>" + teenHtml(r) + "</div>";
   }
@@ -6849,20 +6867,36 @@
       '<label style="font-weight:700;font-size:17px;min-height:44px;display:flex;align-items:center;gap:6px"><input type="checkbox" class="teen-on" data-event-id="' + id + '"' + (teen ? " checked" : "") + ' style="width:26px;height:26px"> Teen rider</label>' +
       '<div id="teenbox-' + id + '" style="display:' + (teen ? "block" : "none") + ';margin:4px 0 6px 32px">' +
       '<div style="font-weight:800;margin-bottom:4px">Teen\u2019s phone' + (teen && r.teenPhone ? ' \u2713 <span class="fine">' + esc(cphShow(r.teenPhone)) + "</span>" : "") + "</div>" +
-      '<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center"><input id="teenph-' + id + '" type="tel" inputmode="tel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" placeholder="936-555-1212" value="' + esc(r.teenPhone ? cphShow(r.teenPhone) : "") + '"' + big + ">" +
-      '<button type="button" class="btn btn-gold btn-teen-save" data-event-id="' + id + '" style="min-height:44px">Save teen phone</button></div></div>' +
+      '<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center"><input id="teenph-' + id + '" class="ph-box"' + phAttrs() + 'placeholder="936-555-1212" value="' + esc(phDraftVal("teenph-" + r.id, r.teenPhone ? cphShow(r.teenPhone) : "")) + '"' + big + ">" +
+      '<button type="button" class="btn btn-gold btn-teen-save" data-event-id="' + id + '" style="min-height:44px">Save teen phone</button>' + phPadHtml("teenph-" + r.id) + '</div></div>' +
       '<div style="font-weight:800;margin:6px 0 4px">Additional number' + (r.extraPhoneOnce ? ' \u2713 <span class="fine">' + esc(cphShow(r.extraPhoneOnce)) + "</span>" : "") + ' <span class="fine">(this ride only, never saved to the client)</span></div>' +
-      '<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center"><input id="xph-' + id + '" type="tel" inputmode="tel" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" placeholder="936-555-1212" value="' + esc(r.extraPhoneOnce ? cphShow(r.extraPhoneOnce) : "") + '"' + big + ">" +
-      '<button type="button" class="btn btn-gold btn-xph-save" data-event-id="' + id + '" style="min-height:44px">Use for this ride</button></div>' +
+      '<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center"><input id="xph-' + id + '" class="ph-box"' + phAttrs() + 'placeholder="936-555-1212" value="' + esc(phDraftVal("xph-" + r.id, r.extraPhoneOnce ? cphShow(r.extraPhoneOnce) : "")) + '"' + big + ">" +
+      '<button type="button" class="btn btn-gold btn-xph-save" data-event-id="' + id + '" style="min-height:44px">Use for this ride</button>' + phPadHtml("xph-" + r.id) + '</div>' +
       "</div>";
+  }
+  function boardForceRebuild(draftKeys) { /* v77.12: after a save the card must show what was saved (blur the box, drop drafts, rebuild now) */
+    (draftKeys || []).forEach(function (k) { if (state.phDrafts) delete state.phDrafts[k]; }); state.phPad = "";
+    try { var a = document.activeElement; if (a && a !== document.body && a.blur) a.blur(); } catch (e) {}
+    state.dbHoldUntil = 0; renderBoardLists();
   }
   function cphSave(id, patch, msg) {
     var row = rovRow(id); if (!row) return Promise.resolve(false);
     return godFetch(calendarUrl(id), { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(patch) }).then(function (res) {
       if (!res.ok) throw new Error("save"); Object.keys(patch).forEach(function (k) { row[k] = patch[k]; });
-      if (msg) state.boardNotice = msg;
+      if (msg) state.boardNotice = msg; boardForceRebuild(["cph-", "teenph-", "xph-"].map(function (p) { return p + id; })); /* v77.12 */
       return (patch.riderPhone ? clientRemember(row.rider || row.title, patch.riderPhone) : Promise.resolve()).then(refresh); /* v77.10 */
     }).catch(function () { state.boardNotice = "NOT SAVED: try again."; renderBoardLists(); return false; });
+  }
+  if (typeof document !== "undefined") { /* v77.12 phone drafts + keypad */
+    document.addEventListener("input", function (e) { var t = e.target; if (t && t.classList && t.classList.contains("ph-box") && t.id) { state.phDrafts = state.phDrafts || {}; state.phDrafts[t.id] = t.value; } }, true);
+    document.addEventListener("click", function (e) {
+      var t = e.target && e.target.closest ? e.target.closest(".btn-ph-pad,.ph-pad-key") : null; if (!t) return;
+      var box = t.getAttribute("data-box"); if (!box) return;
+      if (t.classList.contains("btn-ph-pad")) { var el0 = document.getElementById(box); state.phDrafts = state.phDrafts || {}; if (el0 && state.phDrafts[box] == null) state.phDrafts[box] = el0.value;
+        state.phPad = state.phPad === box ? "" : box; try { if (document.activeElement && document.activeElement.blur) document.activeElement.blur(); } catch (x) {} state.dbHoldUntil = 0; renderBoardLists(); return; }
+      var el = document.getElementById(box); state.phDrafts = state.phDrafts || {};
+      var v = phPadKey(phDraftVal(box, el ? el.value : ""), t.getAttribute("data-key")); state.phDrafts[box] = v; if (el) el.value = v;
+    }, true);
   }
   function atxPost(path, body) {
     var auth = godWriteAuth(); if (!auth) return Promise.reject(new Error("The God password is needed once on this device."));
@@ -6922,8 +6956,8 @@
     document.addEventListener("click", function (e) {
       var t = e.target && e.target.closest ? e.target.closest(".btn-cph-save,.btn-teen-save,.btn-xph-save,#atx-toggle,#atx-refresh") : null; if (!t) return;
       if (t.classList.contains("btn-teen-save") || t.classList.contains("btn-xph-save")) { /* v77.5 */
-        var vid = t.getAttribute("data-event-id"), isTeen = t.classList.contains("btn-teen-save"), vel = document.getElementById((isTeen ? "teenph-" : "xph-") + vid);
-        var vo = isTeen ? teenPatch(true, vel ? vel.value : "", Date.now(), "god") : extraPhonePatch(vel ? vel.value : "", Date.now());
+        var vid = t.getAttribute("data-event-id"), isTeen = t.classList.contains("btn-teen-save"), vel = document.getElementById((isTeen ? "teenph-" : "xph-") + vid), vtx = phDraftVal((isTeen ? "teenph-" : "xph-") + vid, vel ? vel.value : "");
+        var vo = isTeen ? teenPatch(true, vtx, Date.now(), "god") : extraPhonePatch(vtx, Date.now());
         if (!vo.ok) { state.boardNotice = "NOT SAVED: " + vo.error; renderBoardLists(); return; }
         t.disabled = true;
         cphSave(vid, vo.patch, isTeen ? "Saved: teen\u2019s phone " + cphShow(vo.patch.teenPhone) + "." : (vo.patch.extraPhoneOnce ? "Additional number " + cphShow(vo.patch.extraPhoneOnce) + " gets this ride\u2019s texts." : "Additional number cleared.")); return;
@@ -6931,7 +6965,10 @@
       if (t.id === "atx-refresh") { atxLoad(); return; }
       if (t.id === "atx-toggle") { var on = !(state.atx && state.atx.on); t.disabled = true;
         atxPost("/god/autotext", { on: on }).then(function (d) { state.atx.on = !!d.on; state.atx.err = ""; }).catch(function (er) { state.atx.err = "NOT SAVED: " + (er && er.message || er); }).then(function () { renderBoardLists(); }); return; }
-      var id = t.getAttribute("data-event-id"), el = document.getElementById("cph-" + id), out = clientPhonePatch(el ? el.value : "", Date.now(), "god");
+      var id = t.getAttribute("data-event-id"), el = document.getElementById("cph-" + id), typed = phDraftVal("cph-" + id, el ? el.value : "");
+      if (!String(typed || "").trim()) { var hadRow = rovRow(id); /* v77.12: a blank box never silently wipes a saved phone */
+        if (!(hadRow && hadRow.riderPhone) || !window.confirm("Clear this client\u2019s phone?")) { state.boardNotice = "NOT SAVED: type the 10-digit phone first."; renderBoardLists(); return; } }
+      var out = clientPhonePatch(typed, Date.now(), "god");
       if (!out.ok) { state.boardNotice = "NOT SAVED: " + out.error; renderBoardLists(); return; }
       t.disabled = true; cphSave(id, out.patch, out.patch.riderPhone ? "Saved: client phone " + cphShow(out.patch.riderPhone) + "." : "Client phone cleared.");
     }, true);
