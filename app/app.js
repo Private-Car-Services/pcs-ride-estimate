@@ -12527,7 +12527,8 @@
       "</div>" +
       '<div class="group"><p class="group-title">Rider</p>' +
       field("rider-name", "Name", state.name, "required") +
-      field("rider-phone", "Phone", state.phone, 'type="tel" inputmode="tel" required') +
+      field("rider-phone", "Phone", state.phone, 'type="tel" inputmode="tel" required aria-describedby="rider-phone-consent"') +
+      '<p class="sms-consent" id="rider-phone-consent" style="font-size:12px;line-height:1.45;color:#6b7280;margin:6px 0 0">By providing your mobile number, you agree to receive ride update text messages from Private Car Services (Private Taxi Services LLC), such as booking confirmations, driver details, and live tracking links. Message frequency varies by ride. Msg &amp; data rates may apply. Reply STOP to opt out, HELP for help. Consent is not a condition of purchase. See our <a href="policies/#sms" target="_blank" rel="noopener">SMS Terms</a> and <a href="policies/#privacy" target="_blank" rel="noopener">Privacy Policy</a>.</p>' + /* v77.20 A2P opt-in disclosure */
       "</div>" +
       '<p class="note">Miles round up to the next whole mile. Texas tax is 8.25% and is estimate-only, not a charge.</p>' +
       paymentInfoCopy() +
