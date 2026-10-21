@@ -6562,10 +6562,12 @@
         ".side>.side-section{order:4;padding:0 12px;margin:8px 0 0!important;background:var(--panel)}" +
         ".side>#add-ride-section{order:1}.side>.side-section.drivers-section{order:2}.map-pane{order:3;flex:0 0 auto;margin-top:8px}}" +
         /* legend: small and tucked in the corner so it covers little of the map */
-        ".pcs-pill-row{display:inline-flex;gap:8px;align-items:center;margin-left:auto}" + /* v77.15 */
-        ".pcs-paid-pill{min-height:44px;min-width:88px;padding:8px 14px!important;font-size:15px;font-weight:800;letter-spacing:.06em;cursor:pointer;-webkit-tap-highlight-color:transparent;touch-action:manipulation}" +
-        ".pcs-paid-pill.is-paid{background:linear-gradient(180deg,#1f8a4c,#0b6b3a);color:#fff;border:1px solid #7ee08f;box-shadow:0 1px 4px rgba(0,0,0,.35)}" +
-        ".pcs-paid-pill.is-unpaid{background:rgba(240,212,138,0.2);color:#f0d48a;border:1px solid rgba(240,212,138,0.75)}" +
+        ".pcs-pill-row{display:inline-flex;gap:6px;align-items:center;margin-left:auto;white-space:nowrap}.pcs-pill-row>.badge{margin-left:0}" + /* v77.15; v77.16 */
+        /* v77.16 (Matthew): same size as the Assigned/Open pill (.badge: 10px, 2px 7px, 999px, .06em); button defaults reset; invisible 44px hit area */
+        ".pcs-paid-pill{position:relative;font:inherit;font-size:10px;line-height:normal;font-weight:inherit;padding:2px 7px;margin:0;min-height:0;min-width:0;border-radius:999px;letter-spacing:.06em;text-transform:uppercase;vertical-align:middle;cursor:pointer;-webkit-appearance:none;appearance:none;-webkit-tap-highlight-color:transparent;touch-action:manipulation}" +
+        ".pcs-paid-pill::after{content:\"\";position:absolute;left:-8px;right:-8px;top:50%;height:44px;transform:translateY(-50%)}" +
+        ".pcs-paid-pill.is-paid{background:rgba(46,160,90,0.22);color:#7ee08f;border:1px solid rgba(126,224,143,0.65)}" +
+        ".pcs-paid-pill.is-unpaid{background:rgba(240,212,138,0.2);color:#f0d48a;border:1px solid rgba(240,212,138,0.55)}" +
         ".pcs-paid-pill:disabled{opacity:.6}" +
         ".map-hint{max-width:min(240px,calc(100% - 24px))!important;font-size:10.5px!important;padding:4px 7px!important;opacity:.85;left:8px!important;bottom:22px!important}";
       document.head.appendChild(st);
