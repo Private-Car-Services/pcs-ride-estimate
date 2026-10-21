@@ -45,7 +45,7 @@
   /* Allowed owner email only. A real private password comes next — do not store one in this file. */
   var OWNER_EMAIL = "mwragge78@gmail.com";
   var ONLINE_MS = 2 * 60 * 1000;
-  var POLL_MS = 5000;
+  var POLL_MS = 15000; /* v77.15: was 5 s; live changes still arrive via the ride stream (backup polls ~3x fewer) */
   var BOARD_CENTER = { lat: 30.39, lng: -95.65 };
 
   var CAR_SVG =
@@ -168,9 +168,16 @@
     var pw = window.prompt("God password (asked once on this device) to save changes:", "");
     return pw ? { godPassword: pw } : null;
   }
+  /* v77.15 (Harry must-fix): slow Worker lists (discounts, payout records, ride %, invoices, discount requests) at most
+     every 60 s; any God write (godFetch non-GET) forces the next refresh to reload them. */
+  var SLOW_MS = 60000, slowAt = {}, slowForce = {};
+  function slowDue(k) { var n = Date.now(); if (slowForce[k] || !slowAt[k] || n - slowAt[k] >= SLOW_MS) { slowAt[k] = n; slowForce[k] = false; return true; } return false; }
+  function slowKick() { slowForce.kv = true; slowForce.dr = true; slowForce.ro = true; }
+  window.__pcsSlowDue = slowDue; /* test hook */
   function godFetch(url, opts) {
     opts = opts || {};
     var m = String(opts.method || "GET").toUpperCase(), root = baseUrl() + "/rides/";
+    if (m !== "GET") slowKick();
     if (m === "GET" || String(url).indexOf(root) !== 0 || state.godDbOff) return fetch(url, opts);
     var path = "/rides/" + String(url).slice(root.length).split("?")[0].replace(/\.json$/, "").split("/").map(function (x) { try { return decodeURIComponent(x); } catch (e) { return x; } }).join("/");
     var auth = godWriteAuth();
@@ -285,7 +292,8 @@
       prepaidTaxCents: raw.prepaidTaxCents != null && isFinite(+raw.prepaidTaxCents) ? Math.round(+raw.prepaidTaxCents) : null, prepaidInvoiceNo: String(raw.prepaidInvoiceNo || ""),
       rideCommissionPct: raw.rideCommissionPct != null && raw.rideCommissionPct !== "" && isFinite(+raw.rideCommissionPct) ? Math.round(+raw.rideCommissionPct) : null, /* v76d */
       sqInvoice: raw.sqInvoice && typeof raw.sqInvoice === "object" ? raw.sqInvoice : null, contractId: raw.contractId ? String(raw.contractId) : "",
-      rateOverride: raw.rateOverride && typeof raw.rateOverride === "object" ? raw.rateOverride : null, rateOverrideCleared: raw.rateOverrideCleared === true /* v76j */
+      rateOverride: raw.rateOverride && typeof raw.rateOverride === "object" ? raw.rateOverride : null, rateOverrideCleared: raw.rateOverrideCleared === true /* v76j */,
+      paidMark: raw.paidMark === "paid" || raw.paidMark === "unpaid" ? raw.paidMark : "", paidMarkBy: raw.paidMarkBy ? String(raw.paidMarkBy) : "", paidMarkAt: Number(raw.paidMarkAt) || null /* v77.15 Paid/Unpaid pill */
     };
   }
 
@@ -329,6 +337,37 @@
     if (!r || r.prepaid !== true) return "";
     return "PAID, Square invoice" + (r.prepaidInvoiceNo ? " #" + r.prepaidInvoiceNo : "") + (r.prepaidAmountCents != null ? " \u00b7 " + fmtCents(r.prepaidAmountCents) : "");
   }
+  /* v77.15 (Matthew 10/21): Paid / Unpaid pill on each Scheduled ride card. Automatic PAID = prepaid, a Square invoice
+     marked PAID, or a charge record. A tap saves paidMark ("paid" | "unpaid") + who/when on the board row; it is a
+     display / bookkeeping flag only (never changes prepaid, so the driver app's End ride and pay are untouched).
+     The calendar sync keeps paidMark* (V76D_KEEP); the 5 s board rebuild re-reads it from the row. */
+  function paidAuto(r) {
+    if (!r) return false;
+    if (r.prepaid === true) return true;
+    var q = r.sqInvoice; if (q && (q.paid === true || String(q.status || "").toUpperCase() === "PAID")) return true;
+    var ch = (typeof state !== "undefined" && state.payCharges) || {}, c = r.code && ch[r.code];
+    return !!(c && typeof c === "object");
+  }
+  function paidNow(r) { return r && r.paidMark === "paid" ? true : r && r.paidMark === "unpaid" ? false : paidAuto(r); }
+  function paidSquare(r) { var q = r && r.sqInvoice; return !!(q && (q.paid === true || String(q.status || "").toUpperCase() === "PAID")); }
+  function paidPillHtml(r) {
+    var p = paidNow(r), by = r.paidMark ? " (set by " + (r.paidMarkBy || "God mode") + ")" : "";
+    return '<button type="button" class="badge pcs-paid-pill ' + (p ? "is-paid" : "is-unpaid") + '" data-paid-toggle="' + esc(r.id) + '" aria-pressed="' + (p ? "true" : "false") + '" aria-label="' + (p ? "Paid" : "Unpaid") + esc(by) + '. Tap to change.">' + (p ? "PAID" : "UNPAID") + "</button>";
+  }
+  function paidToggle(id, btn) {
+    var r = dbDropRow(id); if (!r) return;
+    var to = paidNow(r) ? "unpaid" : "paid";
+    if (to === "unpaid" && paidSquare(r) && !window.confirm("Square shows invoice" + (r.sqInvoice && r.sqInvoice.number ? " #" + r.sqInvoice.number : "") + " as PAID for " + (r.rider || "this ride") + ". Mark it UNPAID anyway?")) return;
+    var now = Date.now(), patch = { paidMark: to, paidMarkBy: "god", paidMarkAt: now, updatedAt: now };
+    if (btn) btn.disabled = true;
+    godFetch(calendarUrl(id), { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(patch) }).then(function (res) {
+      if (!res.ok) throw new Error("save");
+      Object.keys(patch).forEach(function (k) { r[k] = patch[k]; });
+      state.boardNotice = (to === "paid" ? "Marked PAID: " : "Marked UNPAID: ") + (r.rider || "ride") + ".";
+      refresh();
+    }).catch(function () { if (btn) btn.disabled = false; state.boardNotice = "Saving didn\u2019t finish. Check the connection and tap again."; try { renderBoardLists(); } catch (e) {} });
+  }
+  window.__pcsGodPaid = { auto: paidAuto, now: paidNow, html: function (r) { return paidPillHtml(r); } }; /* test hook */
   window.__pcsGodPrepaid = { patch: prepaidPatch, label: function (r) { return prepaidLabel(r); } }; /* test hook */
   function dbPrepaidClose() { var m = document.getElementById("db-prepaid-modal"); if (m) m.remove(); }
   function dbPrepaidOpen(id) {
@@ -3778,7 +3817,7 @@
     if (state.screen !== "board") return;
     state.loading = true;
 
-    var rosterP = listRoster().then(function (rows) {
+    var rosterP = (slowDue("ro") ? listRoster() : Promise.resolve(state.roster)).then(function (rows) { /* v77.15 add2: roster every 60 s (or after a save) */
       state.rosterError = "";
       state.roster = rows || {};
     }).catch(function (err) {
@@ -3882,8 +3921,10 @@
 
     var calendarP = listCalendarRides().then(function (rows) {
       state.calendar = discOverlay(rows || [], state.discKV, state.discRev); /* r4: last Worker copy at once */
-      discLoad().then(function () { try { renderBoardLists(); } catch (e) {} });
-      invLoad().then(function () { try { renderBoardLists(); } catch (e) {} }); /* v77.11 r2 */
+      if (slowDue("kv")) { /* v77.15 (Harry): Worker KV lists every 60 s or right after a God save, not every refresh */
+        discLoad().then(function () { try { renderBoardLists(); } catch (e) {} });
+        invLoad().then(function () { try { renderBoardLists(); } catch (e) {} }); /* v77.11 r2 */
+      } else discOverlay(state.calendar, state.discKV, state.discRev);
       state.calendarError = "";
       state.calendarUpdated = new Date().toISOString();
     }).catch(function (err) {
@@ -3898,7 +3939,7 @@
       state.paymentsError = err && err.denied ? "denied" : "error";
     });
 
-    var discP = listDiscReqs().then(function (d) { state.discReqs = d; }).catch(function () {}); /* v73 */
+    var discP = slowDue("dr") ? listDiscReqs().then(function (d) { state.discReqs = d; }).catch(function () {}) : Promise.resolve(); /* v73; v77.15: 60 s */
     var rcP = listRateContracts().then(function (L) { state.rateContracts = L; }).catch(function () {}); /* v76j */
     Promise.all([rosterP, driversP, ridesP, milesP, historyP, calendarP, safetyP, paymentsP, discP, rcP]).then(function () {
       try { rovAutoApply(); } catch (e) {} /* v76j */
@@ -3930,7 +3971,7 @@
   function startPoll() {
     stopPoll();
     refresh();
-    pollTimer = setInterval(refresh, POLL_MS);
+    pollTimer = setInterval(function () { if (document.visibilityState === "hidden") return; refresh(); }, POLL_MS); /* v77.15: paused when the tab is hidden */
     startRideStream(); /* v64g: live changes within ~1 s */
   }
 
@@ -4523,7 +4564,7 @@
     }).catch(function (er) { var m = document.getElementById("hos-ovr-msg"); if (m) m.textContent = (er && er.message) || "Could not save. Try again."; });
   });
   setTimeout(hosOvrLoad, 700);
-  setInterval(hosOvrLoad, 10000);
+  setInterval(function () { if (document.visibilityState !== "hidden") hosOvrLoad(); }, 30000); /* v77.15: was 10 s */
   state.hosCfg = Object.assign({}, HOS_DEF);
   state.hosDraft = null;
   function hosUrl() { return baseUrl() + "/rides/HSLGLMTS.json"; }
@@ -6521,9 +6562,18 @@
         ".side>.side-section{order:4;padding:0 12px;margin:8px 0 0!important;background:var(--panel)}" +
         ".side>#add-ride-section{order:1}.side>.side-section.drivers-section{order:2}.map-pane{order:3;flex:0 0 auto;margin-top:8px}}" +
         /* legend: small and tucked in the corner so it covers little of the map */
+        ".pcs-pill-row{display:inline-flex;gap:8px;align-items:center;margin-left:auto}" + /* v77.15 */
+        ".pcs-paid-pill{min-height:44px;min-width:88px;padding:8px 14px!important;font-size:15px;font-weight:800;letter-spacing:.06em;cursor:pointer;-webkit-tap-highlight-color:transparent;touch-action:manipulation}" +
+        ".pcs-paid-pill.is-paid{background:linear-gradient(180deg,#1f8a4c,#0b6b3a);color:#fff;border:1px solid #7ee08f;box-shadow:0 1px 4px rgba(0,0,0,.35)}" +
+        ".pcs-paid-pill.is-unpaid{background:rgba(240,212,138,0.2);color:#f0d48a;border:1px solid rgba(240,212,138,0.75)}" +
+        ".pcs-paid-pill:disabled{opacity:.6}" +
         ".map-hint{max-width:min(240px,calc(100% - 24px))!important;font-size:10.5px!important;padding:4px 7px!important;opacity:.85;left:8px!important;bottom:22px!important}";
       document.head.appendChild(st);
     } catch (e) {}
+    document.addEventListener("click", function (ev) { /* v77.15 Paid/Unpaid pill */
+      var pb = ev.target && ev.target.closest ? ev.target.closest("[data-paid-toggle]") : null;
+      if (!pb || pb.disabled) return; ev.preventDefault(); ev.stopPropagation(); paidToggle(pb.getAttribute("data-paid-toggle"), pb);
+    });
     document.addEventListener("click", function (ev) {
       var t = ev.target && ev.target.closest ? ev.target.closest("#day-board-toggle,[data-day-card-toggle]") : null;
       if (!t) return;
@@ -6899,6 +6949,7 @@
     }, true);
   }
   function atxPost(path, body) {
+    if (!/^\/(?:god\/(?:discounts|payout\/records|ridepct\/list|invoices|roster|charge\/claims|dvir\/reviewed|clients\/list)|disc\/list)$/.test(String(path))) slowKick(); /* v77.15: a Worker write reloads the 60 s lists next refresh */
     var auth = godWriteAuth(); if (!auth) return Promise.reject(new Error("The God password is needed once on this device."));
     return fetch(PAY_WORKER + path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(Object.assign({}, body || {}, auth)) })
       .then(function (res) { return res.json().catch(function () { return {}; }).then(function (d) { if (!res.ok || !d.ok) throw new Error(d.error || "Server error " + res.status); return d; }); });
@@ -7274,7 +7325,7 @@
           '<div class="day-card-top">' +
             '<button type="button" class="btn btn-ghost db-card-toggle" data-day-card-toggle="' + esc(r.id) + '" aria-expanded="' + (dbCards[r.id] ? "false" : "true") + '" aria-label="Collapse or expand this ride" style="padding:2px 8px;min-height:0">' + (dbCards[r.id] ? "\u25B6" : "\u25BC") + "</button>" +
             '<p class="day-time">' + esc(fmtBoardWhen(r.start)) + "</p>" +
-            badge +
+            '<span class="pcs-pill-row">' + (st === "canceled" || st === "cancelled" ? "" : paidPillHtml(r)) + badge + "</span>" + /* v77.15 */
           "</div>" +
           '<h3 class="day-rider">' + esc(r.rider) + "</h3>" + driverLineHtml(r) + /* v77.10 */
           '<div class="day-card-body"' + (dbCards[r.id] ? ' style="display:none"' : "") + ">" +
@@ -8810,7 +8861,7 @@
   function gqTok() { try { var t = localStorage.getItem(GQ_TOK_KEY) || ""; var exp = Number(t.split(".")[1]) || 0; return exp > Date.now() + 60000 ? t : ""; } catch (e) { return ""; } }
   function gqSetTok(t) { try { if (t) localStorage.setItem(GQ_TOK_KEY, t); else localStorage.removeItem(GQ_TOK_KEY); } catch (e) {} }
   function gqAuth() { return gq.pw ? { godPassword: gq.pw } : { godToken: gqTok() }; }
-  if (gqTok()) { gq.pw = ""; gq.tokOn = true; setTimeout(function () { gqLoad(); if (!gq.timer) gq.timer = setInterval(gqLoad, 6000); }, 0); }
+  if (gqTok()) { gq.pw = ""; gq.tokOn = true; setTimeout(function () { gqLoad(); if (!gq.timer) gq.timer = setInterval(function () { if (document.visibilityState !== "hidden") gqLoad(); }, 20000); /* v77.15: was 6 s */ }, 0); }
   function gqMins(ms) { var m = Math.max(0, Math.round((Date.now() - (Number(ms) || Date.now())) / 60000)); return m < 1 ? "just now" : m + " min"; }
   function gqName(id) { var d = (state.drivers || []).concat(state.offlineDrivers || []).filter(function (x) { return x && x.id === id; })[0]; return (d && d.name) || ((state.roster || {})[id] || {}).name || id; }
   function gqRide(code) { return (state.rides || []).filter(function (r) { return r && String(r.code) === String(code); })[0] || {}; }
@@ -8869,7 +8920,7 @@
       if (!pw) return;
       gq.pw = pw; gq.typed = ""; gq.busy = true; gqRender();
       gqLoad().then(function () { gq.busy = false; gqRender(); });
-      if (!gq.timer) gq.timer = setInterval(gqLoad, 6000);
+      if (!gq.timer) gq.timer = setInterval(function () { if (document.visibilityState !== "hidden") gqLoad(); }, 20000); /* v77.15: was 6 s */
     }
     if (t.id === "gq-pin-go") {
       var id = String((document.getElementById("gq-pin-id") || {}).value || "").trim().toLowerCase();
@@ -8951,9 +9002,9 @@
     Promise.all(Object.keys(ids).map(function (id) { return fetch(baseUrl() + "/rides/DRVRHSLG/" + encodeURIComponent(id) + "/lastWash.json").then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }).then(function (w) { if (w && w.date) state.lastWash[id] = w; else delete state.lastWash[id]; }); })).then(function () { try { dvirPaint(); } catch (e) {} });
     return Promise.all(Object.keys(ids).map(function (id) {
       return revP.then(function () { return fetch(baseUrl() + "/rides/DRVRHSLG/" + encodeURIComponent(id) + "/dvir.json").then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }).then(function (o) {
-        var out = [], L = window.PCSDriverLog; Object.keys(o || {}).forEach(function (d) { var ek = Object.keys((o[d] && o[d].earlier) || {}); ["pre", "post", "avail"].concat(ek).forEach(function (k0) { var k = String(k0).split("-")[0], r = o[d] && (k0 === k ? o[d][k] : o[d].earlier[k0]); /* v76h: earlier same-day inspections (other shifts) are checked too */
+        var out = [], L = window.PCSDriverLog, cp = 0; Object.keys(o || {}).forEach(function (d) { var p = o[d] && o[d].pre; if (p && !p.unsafe && Number(p.at) > cp) cp = Number(p.at); }); /* v77.15: newest clean pre-trip */ Object.keys(o || {}).forEach(function (d) { var ek = Object.keys((o[d] && o[d].earlier) || {}); ["pre", "post", "avail"].concat(ek).forEach(function (k0) { var k = String(k0).split("-")[0], r = o[d] && (k0 === k ? o[d][k] : o[d].earlier[k0]); /* v76h: earlier same-day inspections (other shifts) are checked too */
           var rpath = d + "/" + (k0 === k ? k : "earlier/" + k0); /* v77.10: Dismiss (reviewed, Worker KV) */
-          if (r && L && L.recView) { var fw = "", fd = Infinity; ["pre", "post"].forEach(function (q) { var y = o[d][q], dt = y && y.items && y.items.carwash && y.items.carwash.date; if (dt && Math.abs(Number(y.at) - Number(r.at)) < fd) { fd = Math.abs(Number(y.at) - Number(r.at)); fw = dt; } }); r = L.recView(r, k, { dvirItems: state.dvirCfg }, fw); } /* v76g: today's car-wash rule (old 48 h records, post-trips never block) */
+          if (r && L && L.recView) { var fw = "", fd = Infinity; ["pre", "post"].forEach(function (q) { var y = o[d][q], dt = y && y.items && y.items.carwash && y.items.carwash.date; if (dt && Math.abs(Number(y.at) - Number(r.at)) < fd) { fd = Math.abs(Number(y.at) - Number(r.at)); fw = dt; } }); if (L.newerWash && state.lastWash && state.lastWash[id] && state.lastWash[id].date) fw = L.newerWash(fw, state.lastWash[id].date); /* v77.15: a later recorded wash clears the car-wash block */ r = L.recView(r, k, { dvirItems: state.dvirCfg }, fw); if (r && r.unsafe && !r.cleared && cp && Number(r.at) > 0 && Number(r.at) < cp && (r.blocks || []).length && r.blocks.every(function (b) { return !!b && (b.k === "carwash" || /days since last wash|^not checked in|never checked/.test(String(b.why || ""))); })) r = Object.assign({}, r, { unsafe: false, superseded: true }); /* v77.15 (Harry): older wash/stale-only block (photo = Cracks, needs God approve) + newer clean pre-trip; real defects keep blocking */ } /* v76g: today's car-wash rule (old 48 h records, post-trips never block) */
           if (r && (r.unsafe || r.defects > 0 || r.notes > 0 || r.motion === "unverified") && (Number(r.at) > since || (r.unsafe && !r.cleared)) && !dvirHidden(r, (state.dvirRev || {})["dvir:" + id + ":" + rpath])) out.push({ id: id, day: d, kind: k, r: r, path: rpath }); }); });
         return out; }); });
     })).then(function (lists) { state.dvirFlags = [].concat.apply([], lists).sort(function (a, b) { return Number(b.r.at) - Number(a.r.at); });
@@ -9019,8 +9070,8 @@
             Object.keys(x.r.items || {}).filter(function (k) { return x.r.items[k].needsApproval; }).map(function (k) { return '<div class="god-dvir-photos">' + (x.r.items[k].photos || []).map(function (ph) { return /^data:image\//.test(ph) ? '<img src="' + esc(ph) + '" alt="Windshield photo" style="height:90px;margin:4px 4px 0 0;border-radius:4px">' : ""; }).join("") + "</div>"; }).join("") +
             (x.r.rejected ? ' <span class="badge">Photo rejected by ' + esc(x.r.rejected.by) + ": " + esc(x.r.rejected.reason) + "</span>" : "") +
             (Object.keys(x.r.items || {}).some(function (k) { return x.r.items[k].needsApproval; })
-              ? ' <button type="button" class="btn btn-gold" data-dvir-approve="' + esc(x.id + "|" + x.day + "|" + x.kind) + '">Approve photo' + ((x.r.blocks || []).length > 1 ? " & clear" : "") + '</button> <button type="button" class="btn btn-ghost" data-dvir-reject="' + esc(x.id + "|" + x.day + "|" + x.kind) + '">Reject photo</button>'
-              : ' <button type="button" class="btn btn-gold" data-dvir-clear="' + esc(x.id + "|" + x.day + "|" + x.kind) + '">Clear (override)</button>')) : "") +
+              ? ' <button type="button" class="btn btn-gold" data-dvir-approve="' + esc(x.id + "|" + x.day + "|" + x.kind + "|" + x.path) + '">Approve photo' + ((x.r.blocks || []).length > 1 ? " & clear" : "") + '</button> <button type="button" class="btn btn-ghost" data-dvir-reject="' + esc(x.id + "|" + x.day + "|" + x.kind + "|" + x.path) + '">Reject photo</button>'
+              : ' <button type="button" class="btn btn-gold" data-dvir-clear="' + esc(x.id + "|" + x.day + "|" + x.kind + "|" + x.path) + '">Clear (override)</button>')) : "") +
         (dvirDismissable(x.r) ? '<br><button type="button" class="btn god-dvir-dismiss" data-dvir-dismiss="' + esc("dvir|" + x.id + "|" + x.path) + '"' + DSM_BTN + ">Dismiss</button>" : "") + "</div>";
     }).join("") + (f.filter(function (x) { return dvirDismissable(x.r); }).length > 1 ? '<button type="button" class="btn god-dvir-dismiss-all" data-dvir-dismiss-all="dvir"' + DSM_BTN + ">Clear all reviewed</button>" : "") + "</div>");
   }
@@ -9029,14 +9080,17 @@
     var ap = b.hasAttribute("data-dvir-approve"), rj = b.hasAttribute("data-dvir-reject");
     var a = b.getAttribute(ap ? "data-dvir-approve" : rj ? "data-dvir-reject" : "data-dvir-clear").split("|"), reason = (window.prompt(ap ? "Approve the windshield photo. Note (logged):" : rj ? "Reason for rejecting the photo (logged; the driver stays blocked):" : "Reason for clearing this unsafe defect (logged):", ap ? "Photo approved" : "") || "").trim();
     if (reason.length < 3) return;
+    /* v77.15 (Anson 10/20): write to the EXACT record shown (earlier same-day pre-trips, Available checks), not always day/kind */
+    var rp = a[3] && /^\d{4}-\d{2}-\d{2}\/(?:pre|post|avail|earlier\/[A-Za-z0-9_-]{1,40})$/.test(a[3]) ? a[3] : a[1] + "/" + a[2];
+    if (!/^\d{4}-\d{2}-\d{2}\/[A-Za-z0-9_\/-]{1,60}$/.test(rp)) return;
     if (rj) { var rr = { by: godWho(), at: Date.now(), reason: reason.slice(0, 200) }, ub = baseUrl() + "/rides/DRVRHSLG/" + encodeURIComponent(a[0]);
-      fetch(ub + "/dvir/" + a[1] + "/" + a[2] + "/rejected.json", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(rr) })
-        .then(function () { return fetch(ub + "/overrides/" + rr.at + ".json", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(Object.assign({ kind: "dvir-photo-rejected", day: a[1], inspection: a[2] }, rr)) }); })
+      fetch(ub + "/dvir/" + rp + "/rejected.json", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(rr) })
+        .then(function () { return fetch(ub + "/overrides/" + rr.at + ".json", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(Object.assign({ kind: "dvir-photo-rejected", day: a[1], inspection: a[2], path: rp }, rr)) }); })
         .then(dvirLoad).catch(function () { window.alert("Couldn't save. Try again."); }); return; }
     var rec = { by: godWho(), at: Date.now(), reason: reason.slice(0, 200) }; if (ap) rec.photoApproved = true;
     var put = function (u, body) { return fetch(u, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }); };
-    put(baseUrl() + "/rides/DRVRHSLG/" + encodeURIComponent(a[0]) + "/dvir/" + a[1] + "/" + a[2] + "/cleared.json", rec)
-      .then(function () { return put(baseUrl() + "/rides/DRVRHSLG/" + encodeURIComponent(a[0]) + "/overrides/" + rec.at + ".json", Object.assign({ kind: ap ? "dvir-photo-approved" : "dvir-unsafe-cleared", day: a[1], inspection: a[2], grantedAt: rec.at }, rec)); })
+    put(baseUrl() + "/rides/DRVRHSLG/" + encodeURIComponent(a[0]) + "/dvir/" + rp + "/cleared.json", rec)
+      .then(function () { return put(baseUrl() + "/rides/DRVRHSLG/" + encodeURIComponent(a[0]) + "/overrides/" + rec.at + ".json", Object.assign({ kind: ap ? "dvir-photo-approved" : "dvir-unsafe-cleared", day: a[1], inspection: a[2], path: rp, grantedAt: rec.at }, rec)); })
       .then(dvirLoad).catch(function () { window.alert("Couldn't clear it. Try again."); });
   });
   /* v77.10: God-only "Ping driver": the Worker sends "PCS: please open your driver app so dispatch can see you." to the driver's
@@ -9063,7 +9117,7 @@
       .then(function () { b.textContent = "Logged out (driver app returns to login on next sync)"; })
       .catch(function () { b.disabled = false; window.alert("Couldn't log the driver out. Try again."); });
   });
-  setTimeout(dvirLoad, 1500); setInterval(dvirLoad, 30000); setTimeout(dvirVehLoad, 1600); setInterval(dvirVehLoad, 60000);
+  setTimeout(dvirLoad, 1500); setInterval(function () { if (document.visibilityState !== "hidden") dvirLoad(); }, 60000); /* v77.15 */ setTimeout(dvirVehLoad, 1600); setInterval(dvirVehLoad, 60000);
   /* v73: God-editable DVIR checklist (rides/DVIRCFG = { items: [{k, label, required}], updatedAt, by }). Optional items never flag or block. */
   var DVIR_DEFAULT = window.PCSDriverLog ? window.PCSDriverLog.items({}) : [];
   state.dvirCfg = null;
@@ -9149,7 +9203,7 @@
       if (ev.target && ev.target.id === "gp-dlw-ok") { dlwAck(item.code); hideGodRidePopup(key); }
     });
   }
-  setTimeout(dlwLoad, 2500); setInterval(dlwLoad, 15000);
+  setTimeout(dlwLoad, 2500); setInterval(function () { if (document.visibilityState !== "hidden") dlwLoad(); }, 30000); /* v77.15: was 15 s */
   window.pcsGodDriverAlerts = { load: dlwLoad, ack: dlwAck }; /* test hook */
 })();
 /* v75p+numpad (Matthew): every money/number box in God mode opens the number pad. decimal = dollars/percent/hours, numeric = whole counts (miles, days, PIN). Runs after every render. */
