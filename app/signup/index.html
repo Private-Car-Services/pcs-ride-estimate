@@ -39,7 +39,8 @@
         <label for="full-name">Full name</label>
         <input id="full-name" name="name" type="text" autocomplete="name" required>
         <label for="mobile">Mobile phone</label>
-        <input id="mobile" name="phone" type="tel" inputmode="tel" autocomplete="tel" required>
+        <input id="mobile" name="phone" type="tel" inputmode="tel" autocomplete="tel" required aria-describedby="mobile-consent">
+        <p class="sms-consent" id="mobile-consent" style="font-size:12px;line-height:1.45;color:#6b7280;margin:6px 0 0">By providing your mobile number, you agree to receive ride update text messages from Private Car Services (Private Taxi Services LLC), such as booking confirmations, driver details, and live tracking links. Message frequency varies by ride. Msg &amp; data rates may apply. Reply STOP to opt out, HELP for help. Consent is not a condition of purchase. See our <a href="../policies/#sms">SMS Terms</a> and <a href="../policies/#privacy">Privacy Policy</a>.</p> <!-- v77.20 -->
         <label for="email">Email</label>
         <input id="email" name="email" type="email" autocomplete="email" required>
         <label for="password">Password</label>
