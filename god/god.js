@@ -3820,6 +3820,7 @@
     var rosterP = (slowDue("ro") ? listRoster() : Promise.resolve(state.roster)).then(function (rows) { /* v77.15 add2: roster every 60 s (or after a save) */
       state.rosterError = "";
       state.roster = rows || {};
+      try { lastWashLoad(Object.keys(state.roster)); } catch (e) {} /* v77.17 */
     }).catch(function (err) {
       /* Keep prior roster in memory if a poll fails; mark error for UI. */
       state.rosterError = err && err.denied ? "denied" : "error";
@@ -8996,12 +8997,29 @@
   });
   /* v73 DVIR: defects flagged in God mode; an "unsafe" defect blocks the driver from going Available until cleared here (reason logged) */
   state.dvirFlags = [];
+  /* v77.17 (Matthew 6:20 AM "last car wash not recorded yet" for every driver): the wash dates were only fetched inside
+     dvirLoad (1.5 s after open, then every 60 s while visible). If the roster wasn't loaded at 1.5 s (or the tab was hidden at
+     each tick) nothing was fetched and the card said "not recorded yet". Now: fetched for any driver not yet tried as soon as
+     the roster arrives, on return to the tab, and by dvirLoad; a fetch error keeps the last known date; and the card says
+     "checking..." until the first answer. Read-only. */
+  state.lastWashTried = state.lastWashTried || {};
+  function lastWashLoad(list, all) {
+    state.lastWash = state.lastWash || {};
+    var want = (list || []).filter(function (id) { return id && (all || !state.lastWashTried[id]); });
+    if (!want.length) return Promise.resolve();
+    return Promise.all(want.map(function (id) {
+      return fetch(baseUrl() + "/rides/DRVRHSLG/" + encodeURIComponent(id) + "/lastWash.json").then(function (r) { if (!r.ok) throw new Error("http"); return r.json(); })
+        .then(function (w) { state.lastWashTried[id] = Date.now(); if (w && w.date) state.lastWash[id] = w; else delete state.lastWash[id]; })
+        .catch(function () { if (!state.lastWashTried[id]) state.lastWashTried[id] = -1; }); /* keep the last known date on errors */
+    })).then(function () { try { dvirPaint(); } catch (e) {} });
+  }
+  window.__pcsLastWashLoad = lastWashLoad; /* test hook */
   function dvirLoad() {
     var ids = {}; Object.keys(state.roster || {}).forEach(function (k) { ids[k] = 1; }); (state.drivers || []).concat(state.offlineDrivers || []).forEach(function (d) { if (d && d.id) ids[d.id] = 1; });
     var since = Date.now() - 15 * 86400000;
     var revP = dvirRevLoad(); /* r2 */
     state.lastWash = state.lastWash || {}; /* v77.9: last car wash per driver (post-trip Yes) */
-    Promise.all(Object.keys(ids).map(function (id) { return fetch(baseUrl() + "/rides/DRVRHSLG/" + encodeURIComponent(id) + "/lastWash.json").then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }).then(function (w) { if (w && w.date) state.lastWash[id] = w; else delete state.lastWash[id]; }); })).then(function () { try { dvirPaint(); } catch (e) {} });
+    lastWashLoad(Object.keys(ids), true); /* v77.17: shared loader (also runs as soon as the roster arrives) */
     return Promise.all(Object.keys(ids).map(function (id) {
       return revP.then(function () { return fetch(baseUrl() + "/rides/DRVRHSLG/" + encodeURIComponent(id) + "/dvir.json").then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }).then(function (o) {
         var out = [], L = window.PCSDriverLog, cp = 0; Object.keys(o || {}).forEach(function (d) { var p = o[d] && o[d].pre; if (p && !p.unsafe && Number(p.at) > cp) cp = Number(p.at); }); /* v77.15: newest clean pre-trip */ Object.keys(o || {}).forEach(function (d) { var ek = Object.keys((o[d] && o[d].earlier) || {}); ["pre", "post", "avail"].concat(ek).forEach(function (k0) { var k = String(k0).split("-")[0], r = o[d] && (k0 === k ? o[d][k] : o[d].earlier[k0]); /* v76h: earlier same-day inspections (other shifts) are checked too */
@@ -9026,7 +9044,7 @@
     var L = window.PCSDriverLog, lw = state.lastWash || {}, ids = {}; Object.keys(state.roster || {}).forEach(function (k) { ids[k] = 1; }); Object.keys(lw).forEach(function (k) { ids[k] = 1; });
     var rows = Object.keys(ids).map(function (id) { var w = lw[id], ws = w && L && L.washState ? L.washState(w.date, Date.now(), { block: true, maxAgeDays: 3 }) : null;
       var col = !w ? "#f0d48a" : ws && ws.block ? "#ff9b9b" : "#9be7b0";
-      return '<div class="god-last-wash" data-wash-driver="' + esc(id) + '" style="padding:4px 0;color:' + col + '">' + esc(gqName(id) || id) + " \u00b7 last car wash " + (w ? esc(L && L.washLastText ? L.washLastText(w.date) : w.date) + (w.plate ? " (" + esc(w.plate) + ")" : "") + (ws && ws.block ? " \u00b7 over 3 days: going online is paused (Clear (override) below)" : "") : "not recorded yet") + "</div>"; });
+      return '<div class="god-last-wash" data-wash-driver="' + esc(id) + '" style="padding:4px 0;color:' + col + '">' + esc(gqName(id) || id) + " \u00b7 last car wash " + (w ? esc(L && L.washLastText ? L.washLastText(w.date) : w.date) + (w.plate ? " (" + esc(w.plate) + ")" : "") + (ws && ws.block ? " \u00b7 over 3 days: going online is paused (Clear (override) below)" : "") : (state.lastWashTried && state.lastWashTried[id] > 0 ? "not recorded yet" : "checking\u2026")) + "</div>"; }); /* v77.17 */
     return rows.length ? '<div class="card god-wash-card" style="border:2px solid #2e7d32;background:#12261a;color:#fff;padding:10px;margin:8px 0"><b>Car wash</b>' + rows.join("") + "</div>" : "";
   }
   /* v77.10 (Matthew 10/20): Dismiss reviewed notes. A note hides once God marks it reviewed {by, at}; the record stays in Firebase
@@ -9119,6 +9137,7 @@
       .then(function () { b.textContent = "Logged out (driver app returns to login on next sync)"; })
       .catch(function () { b.disabled = false; window.alert("Couldn't log the driver out. Try again."); });
   });
+  document.addEventListener("visibilitychange", function () { if (document.visibilityState === "visible") { try { dvirLoad(); } catch (e) {} } }); /* v77.17 */
   setTimeout(dvirLoad, 1500); setInterval(function () { if (document.visibilityState !== "hidden") dvirLoad(); }, 60000); /* v77.15 */ setTimeout(dvirVehLoad, 1600); setInterval(dvirVehLoad, 60000);
   /* v73: God-editable DVIR checklist (rides/DVIRCFG = { items: [{k, label, required}], updatedAt, by }). Optional items never flag or block. */
   var DVIR_DEFAULT = window.PCSDriverLog ? window.PCSDriverLog.items({}) : [];
