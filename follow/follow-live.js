@@ -87,7 +87,7 @@
       /* v76g: the viewer touched the map (drag, pinch, wheel, the +/- buttons): auto-zoom waits 10 s, then picks up again */
       var mapEl = $("fl-map"), touched = function () { S.userUntil = Date.now() + USER_PAUSE_MS; };
       ["touchstart", "pointerdown", "mousedown", "wheel"].forEach(function (ev) { try { mapEl.addEventListener(ev, touched, { passive: true }); } catch (e) {} });
-      window.L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom: 19, attribution: "&copy; OpenStreetMap" }).addTo(S.map);
+      window.L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", { referrerPolicy: "strict-origin-when-cross-origin", maxZoom: 19, attribution: "&copy; OpenStreetMap" }).addTo(S.map);
       S.layers = window.L.layerGroup().addTo(S.map);
       window.addEventListener("resize", function () { try { S.map.invalidateSize(); } catch (e) {} });
       setTimeout(function () { try { S.map.invalidateSize(); } catch (e) {} }, 300);
