@@ -4028,8 +4028,37 @@
     if (!state.loginGate || ROLE !== "driver" || !signedIn() || !state.milesNeedStart || state.preGateOpenedAt || state.logoutAfterPost) return; /* v76h: Log out always gets the POST-trip, never the login pre-trip */
     try { if (driverMidRide() || meterActive() || document.getElementById("dl-overlay")) return; } catch (e) { return; }
     state.preGateOpenedAt = Date.now();
-    setTimeout(function () { openDriverLog("day:" + dlToday() + ":insp"); }, 50);
+    /* v2.0c (Matthew 10/23, on the highway): a fresh login / wiped storage must not re-ask a pre-trip the server already has.
+       Check Firebase first; open the pre-trip only when the server has no open shift with today's clean pre-trip. */
+    /* v2.0c r2 (Harry): 8 s cap + reject/throw handling; the pre-trip opens exactly once if the server can't confirm */
+    var done = false, go = function (ok) { if (done) return; done = true; if (ok) { try { render(); } catch (e) {} return; } setTimeout(function () { openDriverLog("day:" + dlToday() + ":insp"); }, 50); };
+    setTimeout(function () { go(false); }, 8000);
+    try { serverShiftRestore().then(go, function () { go(false); }); } catch (e) { go(false); }
   }
+  function serverShiftRestoreFrom(pre, post, row, now) { /* pure: does the server show this shift still open + covered? */
+    now = now || Date.now();
+    if (!pre || !(Number(pre.at) > 0) || pre.unsafe) return false;
+    if (post && Number(post.at) >= Number(pre.at)) return false;
+    if (!row || typeof row !== "object" || row.shiftClosed === true || !(Number(row.startOdometer) > 0) || !(Number(row.shiftStartAt) > 0)) return false;
+    if (row.endOdometer != null && row.endOdometer !== "") return false;
+    var pl = dlPlate(); if (pre.plate && pl && normalizePlate(pre.plate) !== pl) return false;
+    var last = Math.max(Number(row.lastUpdate) || 0, Number(row.shiftStartAt) || 0, Number(pre.at) || 0);
+    return now - last < shiftResetMs();
+  }
+  function serverShiftRestore() {
+    if (!syncOn()) return Promise.resolve(false);
+    var d = dlToday(), id = driverPresenceId(), get = function (u) { return authFetch(u).then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }); };
+    return Promise.all([get(databaseURL() + "/rides/DRVRHSLG/" + encodeURIComponent(id) + "/dvir/" + d + ".json"), get(milesUrl(id, d))]).then(function (a) {
+      var dv = a[0] || {}, row = a[1];
+      if (!serverShiftRestoreFrom(dv.pre, dv.post, row, Date.now())) return false;
+      try { var all = dlRec("dvir"); all[d] = Object.assign({}, all[d] || {}, { pre: dv.pre }); localStorage.setItem(dlKey("dvir"), JSON.stringify(all)); } catch (e) {}
+      try { var map = readMilesLocal(); map[d] = Object.assign({}, row, map[d] || {}); writeMilesLocal(map); } catch (e) {}
+      try { if (!readShift()) writeShift({ startOdo: Number(row.startOdometer), shiftStartedAt: Number(row.shiftStartAt), startDay: d, trackedMiles: Number(row.gpsMiles) || 0, filledInMiles: Number(row.filledMiles) || 0 }); } catch (e) {}
+      state.milesNeedStart = false; state.loginGate = false;
+      return true;
+    }).catch(function () { return false; });
+  }
+  window.__pcsShiftRestore = { from: function (a, b, c, n) { return serverShiftRestoreFrom(a, b, c, n); } }; /* v2.0c test hook */
   function dvirCfgPull() {
     if (!syncOn()) return Promise.resolve();
     return authFetch(databaseURL() + "/rides/DVIRCFG.json").then(function (r) { return r.ok ? r.json() : null; }).then(function (o) {
