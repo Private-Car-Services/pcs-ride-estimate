@@ -19993,7 +19993,7 @@
     if (want) qPaintHosts();
   }
   function qClick(ev) {
-    var t = ev.target && ev.target.closest ? ev.target.closest("#q-join,#q-unjoin,#q-leave,#q-leave-yes,#q-leave-no,#q-set-available,#q-set-onride,#q-set-break,#q-set-offline,#q-auth-go") : null;
+    var t = ev.target && ev.target.closest ? ev.target.closest("#q-join,#q-unjoin,#q-leave,#q-leave-yes,#q-leave-no,#q-set-available,#q-set-onride,#q-set-break,#q-set-offline,#q-auth-go,#hos-gap-ok,#hos-gap-drove") : null;
     if (!t || t.disabled) return;
     if (t.id === "q-auth-go") {
       var pass = (document.getElementById("q-auth-pass") || {}).value || "";
