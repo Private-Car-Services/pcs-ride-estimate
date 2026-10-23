@@ -154,6 +154,7 @@
     contactName: document.getElementById('contact-name'),
     contactEmail: document.getElementById('contact-email'),
     contactPhone: document.getElementById('contact-phone'),
+    smsOptIn: document.getElementById('contact-sms-optin'), // v77.23
     flightDetails: document.getElementById('flight-details'),
     airline: document.getElementById('airline'),
     flightNumber: document.getElementById('flight-number'),
@@ -1526,6 +1527,7 @@
       'Service area: ' + serviceArea(),
       'Name: ' + els.contactName.value.trim(),
       'Phone: ' + els.contactPhone.value.trim(),
+      'Ride update texts: ' + (els.smsOptIn && els.smsOptIn.checked ? 'YES (checked the opt-in box)' : 'not opted in'),
     ];
     const email = els.contactEmail.value.trim();
     if (email) lines.push('Email: ' + email);
@@ -2094,6 +2096,7 @@
       name: els.contactName.value.trim(),
       phone: els.contactPhone.value.trim(),
       email: els.contactEmail.value.trim(),
+      ...smsOptinRecord(), // v77.23 express opt-in (false = not opted in)
       pickupStreet: pu.street, pickupLine2: pu.line2, pickupCity: pu.city, pickupState: pu.state, pickupZip: pu.zip,
       pickupAddress: pu.address, pickupLat: pu.lat, pickupLng: pu.lng,
       dropStreet: dr.street, dropLine2: dr.line2, dropCity: dr.city, dropState: dr.state, dropZip: dr.zip,
@@ -2130,9 +2133,22 @@
     };
   }
 
+  // v77.23 (Twilio A2P 30909): express SMS opt-in, an UNCHECKED box next to the phone field. Booking never needs it.
+  const SMS_OPTIN_TEXT = "Text me ride updates from Private Car Services (driver on the way, arrival, receipts). Msg frequency varies, about 1-5 per ride. Msg & data rates may apply. Reply STOP to opt out, HELP for help. Help: 936-261-7878. Consent is not a condition of booking. See SMS Terms and Privacy at www.PCSrides.com.";
+  function smsOptinYes() { return !!(els.smsOptIn && els.smsOptIn.checked); }
+  function smsOptinRecord() { const y = smsOptinYes(); return { smsOptIn: y, smsOptInAt: Date.now(), smsOptInText: y ? SMS_OPTIN_TEXT : null, smsOptInSource: 'quote-page' }; }
+  function smsOptinPost(phone, code, at) { // v77.23 r1b: checked box only, after the ride exists (Worker checks code + phone)
+    const d = String(phone || '').replace(/\D/g, ''); if (d.length < 10 || !smsOptinYes()) return;
+    try { fetch('https://pcs-pay.pcsrides.workers.dev/sms/optin', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ phone: d, optIn: true, text: SMS_OPTIN_TEXT, source: 'quote-page', code: code || '', at: at || Date.now() }) })
+      .then((r) => r.json().catch(() => null)).then((o) => {
+        if (o && o.needsStart && els.routeStatus) { els.routeStatus.hidden = false; els.routeStatus.textContent = 'You texted STOP earlier, so texts stay off. Text START to (936) 236-4050 to turn ride texts back on.'; }
+      }).catch(() => {}); } catch (e) {}
+  }
+
   /** REQUESTS summary row (what God mode polls). Mirrors the rider app's openSummaryFromRide. */
   function openSummary(ride) {
-    const keys = ['code', 'status', 'source', 'name', 'phone', 'email', 'pickupStreet', 'pickupCity', 'pickupState', 'pickupLine2',
+    const keys = ['code', 'status', 'source', 'name', 'phone', 'email', 'smsOptIn', 'smsOptInAt', 'pickupStreet', 'pickupCity', 'pickupState', 'pickupLine2',
       'pickupZip', 'pickupAddress', 'dropStreet', 'dropCity', 'dropState', 'dropLine2', 'dropZip', 'dropAddress', 'stops',
       'stopAddresses', 'cardStatus', 'date', 'time', 'asap', 'when', 'pickupLat', 'pickupLng', 'dropLat', 'dropLng', 'isTest',
       'estimateCents', 'amountDueCents', 'payChoice', 'serviceArea', 'passengers', 'internationalArrival'];
@@ -2208,6 +2224,7 @@
         .then(() => dbPut('/rides/' + OPEN_HUB + '/' + code, openSummary(ride)))
         .then(() => {
           notifyOwnerWebhook(ride);
+          if (!ride.isTest) smsOptinPost(ride.phone, code, ride.smsOptInAt); // v77.23
           return ride;
         });
     });
@@ -2768,7 +2785,7 @@
           dragging: !L.Browser.mobile, // one-finger page scrolling keeps working over the map on phones
           attributionControl: true,
         });
-        L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { referrerPolicy: "strict-origin-when-cross-origin",
           maxZoom: 19,
           attribution: '&copy; OpenStreetMap',
         }).addTo(leafletMap);
