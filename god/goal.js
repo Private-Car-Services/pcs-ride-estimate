@@ -472,7 +472,7 @@
     h += ". Weekly " + $m(c.weekGoal) + " \u2212 week income before today " + $m(c.wBefore, true) + " = " + $m(c.weekGoal == null ? null : Math.max(0, c.weekGoal - c.wBefore), true) + (c.offToday ? "; today is Sunday and Sunday is off this week, so today\u2019s goal is $0.00 (turn on Working Sunday to make the week remaining today\u2019s goal)" : " \u00f7 " + (c.dLeft == null ? "?" : dWord(c.dLeft)) + " left" + wkWord(c) + " = today " + $m(c.dailyAuto, true)) + (c.dayOv != null ? "; you typed today " + $m(c.dayOv, true) + ", so that is used" : "") + ".</p>";
     if (mg != null && c.mBefore > mg) h += '<p class="err">October income before this week (' + $m(c.mBefore) + ') is already more than the monthly goal, so the weekly auto shows $0. If that number looks too big, open Adjustments and check the list for an entry counted twice.</p>';
     return h; }
-  function paint() {
+  function paint() { paint.editK = null; /* v2.0d.4 r2 (Harry): every redraw rebuilds the add row as "Add", so no edit may survive it */
     if (snapToday()) save(); /* first open after midnight, or once goals are set */
     var c = calc(), s = D.settings, h = "";
     h += '<div id="gl-top">' + topHtml(c) + '</div>';
@@ -583,10 +583,10 @@
       '</div>' + sunToggleHtml(c) + sunLine(c) + howToday(c) + '</div>';
     var ids = Object.keys(D.entries).filter(function (k) { return D.entries[k].date === c.t && D.entries[k].line !== "exp"; }).sort(function (a, b) { return (D.entries[a].at || 0) - (D.entries[b].at || 0); });
     var run = 0, tape = ids.map(function (k) { var e = D.entries[k]; run += Number(e.amount) || 0; var rem = c.daily == null ? null : c.daily - run;
-      var tm = entTime(e); return '<tr class="b"><td style="text-align:left">' + esc(name(e.line).replace(/ \(.*\)/, "") + (e.line === "exp" ? "" : e.tip ? " tip" : " ride")) + (tm ? '<div class="gl-tm" style="font-size:13px;color:#b9cdb9;font-weight:600">' + esc(tm) + '</div>' : "") + '</td><td class="r">+' + $m(e.amount, true) + '</td><td class="r pos">' + $m(run, true) + '</td><td class="r" style="color:' + (rem != null && rem <= 0 ? "var(--lite)" : "var(--goldt)") + '">' + (rem != null && rem < 0 ? "ahead by " + $m(-rem, true) : $m(rem, true)) + '</td><td class="gl-nt">' + noteCell(k, e) + '</td><td class="r"><button class="btn ghost" data-del="' + esc(k) + '">Undo</button></td></tr>'; }).reverse().join("");
+      var tm = entTime(e); return '<tr class="b"><td style="text-align:left">' + esc(name(e.line).replace(/ \(.*\)/, "") + (e.line === "exp" ? "" : e.tip ? " tip" : " ride")) + (tm ? '<div class="gl-tm" style="font-size:13px;color:#b9cdb9;font-weight:600">' + esc(tm) + '</div>' : "") + '</td><td class="r">+' + $m(e.amount, true) + '</td><td class="r pos">' + $m(run, true) + '</td><td class="r" style="color:' + (rem != null && rem <= 0 ? "var(--lite)" : "var(--goldt)") + '">' + (rem != null && rem < 0 ? "ahead by " + $m(-rem, true) : $m(rem, true)) + '</td><td class="gl-nt">' + noteCell(k, e) + '</td><td class="r"><button class="btn ghost" data-edit="' + esc(k) + '">Edit</button> <button class="btn ghost" data-del="' + esc(k) + '">Undo</button></td></tr>'; }).reverse().join("");
     h += '<div class="card day"><div class="fine">DAILY TOTAL</div><div class="total">' + $m(c.dayGross, true) + '</div><div id="gl-hr">' + hrHtml(c.t) + '</div>' + pastDaysHtml(c.t) +
       '<form id="gl-f-q" class="row"><input id="gl-q-amt" type="text" inputmode="decimal" autocomplete="off" placeholder="Ride 0.00" aria-label="Ride amount"><input id="gl-q-tip" type="text" inputmode="decimal" autocomplete="off" placeholder="Tip" aria-label="Tip (optional)" style="font-size:28px;width:120px;text-align:right"><input id="gl-q-note" type="text" maxlength="120" autocomplete="off" placeholder="Note" aria-label="Note (optional)" style="font-size:18px;flex:1 1 140px;min-width:110px;max-width:260px"><select id="gl-q-line" aria-label="Source">' +
-      LINES.map(function (l) { return '<option value="' + l[0] + '"' + (l[0] === "pcs" ? " selected" : "") + ">" + l[1] + "</option>"; }).join("") + '</select><button class="btn" type="submit" style="font-size:20px;padding:10px 26px">Add</button></form>' +
+      LINES.map(function (l) { return '<option value="' + l[0] + '"' + (l[0] === "pcs" ? " selected" : "") + ">" + l[1] + "</option>"; }).join("") + '</select><button class="btn" type="submit" id="gl-q-go" style="font-size:20px;padding:10px 26px">Add</button><button class="btn ghost" type="button" id="gl-q-cancel" style="display:none">Cancel edit</button></form>' +
       (tape ? '<table style="margin-top:8px"><tr class="fine"><th style="text-align:left">Source</th><th class="r">Amount</th><th class="r">Daily total</th><th class="r">Goal left</th><th style="text-align:left">Note</th><th></th></tr>' + tape + "</table>" : "") +
       "</div>";
     h += '<div class="card"><b class="t">Week</b><table>' + row("WEEKLY GOAL", $m(c.weekGoal)) + row("<b>Left for the week</b>", $m(left(c.weekRem))) + row("WEEK TOTAL", $m(c.weekTotal)) +
@@ -655,12 +655,22 @@
       var tp = num(document.getElementById("gl-q-tip").value);
       if (!(a > 0) && !(tp > 0)) { document.getElementById("gl-q-amt").focus(); return; } var at = Date.now();
       var nb = document.getElementById("gl-q-note"), nt = noteClean(nb ? nb.value : ""); /* v77.19: note goes on the ride line (or the tip if no ride) */
+      var ek = paint.editK, ee = ek && D.entries[ek]; paint.editK = null; /* v2.0d.4 (Matthew): Edit updates the same entry in place, no duplicate */
+      if (ee) { var main = a > 0 ? a : tp; D.entries[ek] = Object.assign({}, ee, { line: l, amount: Math.round(main * 100) / 100, note: nt, tip: a > 0 || l === "exp" ? undefined : true, editedAt: at });
+        if (a > 0 && tp > 0 && l !== "exp") D.entries[newId(at + 1)] = { date: ee.date, line: l, amount: Math.round(tp * 100) / 100, note: "", at: (ee.at || at) + 1, source: "quick", tip: true }; /* a tip typed onto a ride edit is a new tip line */
+        a = 0; tp = 0; }
       if (a > 0) D.entries[newId(at)] = { date: today(), line: l, amount: Math.round(a * 100) / 100, note: nt, at: at, source: "quick" };
       if (tp > 0 && l !== "exp") D.entries[newId(at + 1)] = { date: today(), line: l, amount: Math.round(tp * 100) / 100, note: a > 0 ? "" : nt, at: at + 1, source: "quick", tip: true };
       D.lastLine = l; /* v77.25: close the keyboard/9-key pad on Save */ try { kpClose(); if (document.activeElement && document.activeElement.blur) document.activeElement.blur(); } catch (x) {} paint.focusQ = true; paint(); save(); };
     Array.prototype.forEach.call(document.querySelectorAll("#gl-top [data-note]"), function (b) { b.onclick = function () { var k = b.getAttribute("data-note"), e = D.entries[k]; if (!e) return; /* v77.19 */
       var v = typeof prompt === "function" ? prompt("Note for this entry (up to " + NOTE_MAX + " characters):", e.note || "") : null; if (v == null) return; noteSet(D.entries, k, v); paint(); save(); }; });
-    Array.prototype.forEach.call(document.querySelectorAll("#gl-top [data-del]"), function (b) { b.onclick = function () { if (confirm("Undo this entry?")) { delete D.entries[b.getAttribute("data-del")]; paint(); save(); } }; });
+    Array.prototype.forEach.call(document.querySelectorAll("#gl-top [data-edit]"), function (b) { b.onclick = function () { var k = b.getAttribute("data-edit"), e = D.entries[k]; if (!e) return; /* v2.0d.4: prefill the add row */
+      paint.editK = k; var v = function (id, x) { var el = document.getElementById(id); if (el) el.value = x; }, m = (Number(e.amount) || 0).toFixed(2);
+      v("gl-q-amt", e.tip ? "" : m); v("gl-q-tip", e.tip ? m : ""); v("gl-q-note", e.note || ""); v("gl-q-line", e.line);
+      var g = document.getElementById("gl-q-go"); if (g) g.textContent = "Save edit"; var c = document.getElementById("gl-q-cancel"); if (c) c.style.display = "";
+      var f = document.getElementById("gl-f-q"); if (f && f.scrollIntoView) f.scrollIntoView({ block: "center" }); }; });
+    (function () { var c = document.getElementById("gl-q-cancel"); if (c) c.onclick = function () { paint.editK = null; paint(); }; })();
+    Array.prototype.forEach.call(document.querySelectorAll("#gl-top [data-del]"), function (b) { b.onclick = function () { if (confirm("Undo this entry?")) { if (paint.editK === b.getAttribute("data-del")) paint.editK = null; delete D.entries[b.getAttribute("data-del")]; paint(); save(); } }; });
   }
   function bindRest() {
     document.getElementById("gl-f-add").onsubmit = function (e) { e.preventDefault(); var a = num(document.getElementById("gl-a-amt").value), d = document.getElementById("gl-a-date").value;

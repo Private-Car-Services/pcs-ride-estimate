@@ -303,7 +303,7 @@
      charge; the driver's pay week is credited from the invoice amount. Pure helper (tested): */
   /* v76d: what the card keeps from a Square lookup; "overridden" when Matthew changed the amounts */
   function sqInvoiceRecord(q, patch) {
-    var rec = { number: String(q.number || patch.prepaidInvoiceNo || ""), subtotalCents: Math.round(+q.subtotalCents) || 0, taxCents: Math.round(+q.taxCents) || 0, totalCents: Math.round(+q.totalCents) || 0,
+    var rec = { number: String(q.number || patch.prepaidInvoiceNo || ""), subtotalCents: Math.round(+q.subtotalCents) || 0, taxCents: Math.round(+q.taxCents) || 0, totalCents: Math.round(+q.totalCents) || 0, tipCents: Math.max(0, Math.round(+q.tipCents) || 0), /* v2.0d.4 r2: Square tip kept */
       status: String(q.status || ""), paid: q.paid === true, amountDueCents: q.amountDueCents != null && isFinite(+q.amountDueCents) ? Math.max(0, Math.round(+q.amountDueCents)) : null, /* v2.0d.3 r3c: Square amount_due_money */ serviceDate: String(q.serviceDate || ""), source: String(q.source || "square"), fetchedAt: q.fetchedAt || Date.now() };
     rec.overridden = (patch.prepaidAmountCents != null && patch.prepaidAmountCents !== rec.subtotalCents) || (patch.prepaidTaxCents != null && patch.prepaidTaxCents !== rec.taxCents);
     return rec;
@@ -448,7 +448,7 @@
       '<button type="button" id="db-prepaid-close" style="' + big + 'background:#0b3d23;color:#fff;border:0;margin-top:0">Close</button>' +
       '<h2 style="margin:4px 0 6px;color:#0b3d23">Prepaid (Square invoice) \u00b7 ' + esc(r.rider || "ride") + "</h2>" +
       '<label style="display:flex;gap:10px;align-items:center;font-size:20px;font-weight:800;color:#111;margin:8px 0"><input type="checkbox" id="db-prepaid-on" style="width:28px;height:28px"' + (r.prepaid ? " checked" : "") + "> Billed on a Square invoice (shows paid only after Square confirms payment)</label>" +
-      '<label for="db-prepaid-amt" style="display:block;font-weight:800;color:#111;margin:8px 0 4px">Amount for this ride before tax (optional)</label>' +
+      '<label for="db-prepaid-amt" style="display:block;font-weight:800;color:#111;margin:8px 0 4px">Subtotal for this ride (optional)</label>' +
       '<input id="db-prepaid-amt" type="text" inputmode="decimal" pattern="[0-9.]*" autocomplete="off" data-money-reg="1" value="' + esc(r.prepaidAmountCents != null ? (r.prepaidAmountCents / 100).toFixed(2) : "") + '" style="width:100%;font-size:20px;padding:10px;border:2px solid #0b3d23;border-radius:10px;background:#fff;color:#111">' +
       '<label for="db-prepaid-inv" style="display:block;font-weight:800;color:#111;margin:8px 0 4px">Invoice # (optional)</label>' +
       '<input id="db-prepaid-inv" type="text" autocomplete="off" value="' + esc(r.prepaidInvoiceNo || "") + '" style="width:100%;font-size:20px;padding:10px;border:2px solid #0b3d23;border-radius:10px;background:#fff;color:#111">' +
@@ -1308,7 +1308,10 @@
     var fareCentsV72d = Math.round(fare * 100); /* v72d: fare box is dollars; history is cents */
     if (row.prepaid && row.prepaidAmountCents != null && row.paidSquareCents == null) { fareCentsV72d = Math.round(+row.prepaidAmountCents); } /* v76d: invoice (pre-tax) wins; tax never to the driver */
     var paidTaxV75w = 0;
-    if (row.paidSquareCents != null) { var pm = paidSquareMath((row.paidSquareCents / 100).toFixed(2), "", pct, 0); fareCentsV72d = pm.preTaxCents; paidTaxV75w = pm.taxCents; } /* v75w: paid in Square (incl. tax) wins; driver % on the pre-tax part */
+    var sqF = sqPaidFigures(row); /* v2.0d.4 r2 (Harry): Square-verified PAID -> Square pre-tax + tax; the tip is its own 100% line, never in the commission base */
+    var sqS = sqF ? sqRideShare(row, sqF) : null; /* v2.0d.4 r3 (Harry): this ride's share of the invoice, same rule as invoice_sync.py plan_for */
+    if (sqS && sqS.subCents > 0) { fareCentsV72d = sqS.subCents; paidTaxV75w = sqS.taxCents; }
+    else if (row.paidSquareCents != null) { var pm = paidSquareMath((row.paidSquareCents / 100).toFixed(2), "", pct, 0); fareCentsV72d = pm.preTaxCents; paidTaxV75w = pm.taxCents; } /* v75w: paid in Square (incl. tax) wins; driver % on the pre-tax part */
     var commissionCents = Math.round(fareCentsV72d * (pct / 100));
     var day = boardDayKey(row.start) || chicagoToday();
     var code = ownCode(row); /* v76d */
@@ -3870,7 +3873,7 @@
     if (fare === null || fare === undefined || fare === "" || !isFinite(+fare)) {
       var totalOnly = fmtMoney(ride.estimatedTotal || ride.fareTotal);
       if (totalOnly) {
-        return { label: totalOnly + " trip total (no before-tax fare yet)", amount: null };
+        return { label: totalOnly + " trip total (no subtotal yet)", amount: null };
       }
       return { label: "No trip revenue recorded yet", amount: null };
     }
@@ -3882,7 +3885,7 @@
     var wc = Number(ride.waitCents) || 0;
     if (wc > 0) waitNote = " · wait " + fmtCents(wc);
     return {
-      label: money + " · " + pct + "% of " + fmtMoney(fare) + " before tax" + waitNote,
+      label: money + " · " + pct + "% of " + fmtMoney(fare) + " subtotal" + waitNote,
       amount: money,
       pct: pct
     };
@@ -5657,7 +5660,7 @@
     el.style.cssText = "position:fixed;inset:0;z-index:2147482500;background:rgba(0,0,0,.6);display:flex;align-items:center;justify-content:center;padding:14px";
     el.innerHTML = '<div role="dialog" aria-modal="true" aria-labelledby="gd-title" style="background:#141414;color:#fff;border:2px solid #f0d48a;border-radius:16px;max-width:460px;width:100%;padding:16px">' +
       '<h2 id="gd-title" style="margin:0 0 6px">Discount request \u00b7 ' + esc(q.code) + "</h2>" +
-      '<p class="meta" id="gd-who">' + esc(q.driverName || q.driverId || "Driver") + " \u00b7 fare " + esc(fmtCents(q.fareSubCents)) + " before tax" + (pend.length > 1 ? " \u00b7 " + (pend.length - 1) + " more waiting" : "") + "</p>" +
+      '<p class="meta" id="gd-who">' + esc(q.driverName || q.driverId || "Driver") + " \u00b7 fare " + esc(fmtCents(q.fareSubCents)) + " subtotal" + (pend.length > 1 ? " \u00b7 " + (pend.length - 1) + " more waiting" : "") + "</p>" +
       '<p id="gd-reason" style="font-weight:700">Reason: ' + esc(q.reason || "") + "</p>" +
       (q.preset ? '<p style="font-weight:800;color:#9be7b0">' + (q.preset === "military" ? "Military discount (10%): check the military ID" : "Senior discount, 65+ (10%): check ID showing age 65+") + '</p><input id="gd-pct" type="hidden" value="10">' : /* r4 M5 */
       '<div style="display:flex;gap:8px;align-items:end;flex-wrap:wrap"><div><label for="gd-amount">Amount off ($)</label><input id="gd-amount"' + moneyRegAttrs() + ' style="width:120px"></div>' +
@@ -5835,7 +5838,7 @@
         btn.disabled = true;
         saveCalendarFare(id, fi ? fi.value : state.fareDrafts[id], !!(fx && fx.checked), iv ? iv.value : null).then(function () { btn.disabled = false; }).catch(function (err) {
           btn.disabled = false;
-          state.boardNotice = err && err.message === "fare" ? "Type the fare before tax first." : err && err.message === "invoice" ? "Invoice # takes digits only, like 000519." : "Fare NOT saved. Try again.";
+          state.boardNotice = err && err.message === "fare" ? "Type the subtotal first." : err && err.message === "invoice" ? "Invoice # takes digits only, like 000519." : "Fare NOT saved. Try again.";
           renderBoardLists();
         });
       });
@@ -6735,8 +6738,8 @@
   function paidSquareLine(paidCents, pct) {
     if (paidCents == null) return "";
     var m = paidSquareMath((paidCents / 100).toFixed(2), "", pct, 0);
-    if (pct == null) return "before tax " + fmtCents(m.preTaxCents) + " (assign a driver to see their share)";
-    return "before tax " + fmtCents(m.preTaxCents) + ", driver " + (Number(pct) || 0) + "% " + fmtCents(m.commissionCents);
+    if (pct == null) return "subtotal " + fmtCents(m.preTaxCents) + " (assign a driver to see their share)";
+    return "subtotal " + fmtCents(m.preTaxCents) + ", driver " + (Number(pct) || 0) + "% " + fmtCents(m.commissionCents);
   }
   window.__pcsGodPaidSquare = paidSquareMath; /* test hook */
   /* v76d: Commission % for THIS ride only (e.g. Anson 100% on Barbara Curry's DAL rides). Blank = the driver's own %. */
@@ -7329,7 +7332,7 @@
   /* v76d: Square invoice lookup (read-only, through the Worker). Amounts are pre-tax subtotal / tax / total in cents. */
   function sqInvoiceLine(q) {
     if (!q) return "";
-    return (q.source === "square" ? "From Square: " : "Typed in: ") + "before tax " + fmtCents(q.subtotalCents) + ", tax " + fmtCents(q.taxCents) + ", total " + fmtCents(q.totalCents) +
+    return (q.source === "square" ? "From Square: " : "Typed in: ") + "subtotal " + fmtCents(q.subtotalCents) + ", tax " + fmtCents(q.taxCents) + ", total " + fmtCents(q.totalCents) +
       (q.status ? " \u00b7 " + String(q.status) : "") + (q.serviceDate ? " \u00b7 service " + String(q.serviceDate) : "") + (q.overridden ? " \u00b7 changed by Matthew" : "");
   }
   function sqInvoiceLookup(invoiceNo) {
@@ -7345,8 +7348,23 @@
   }
   window.__pcsV76dSq = { line: sqInvoiceLine };
   function dbTipHtml(r) {
+    /* v2.0d.4 (Matthew 10/23 "which box is which? shouldn't this be filled from Square"): Square-verified PAID -> read-only
+       Square figures, no inputs, no Save. Otherwise each box gets its own label stacked above it. */
+    var sqF = sqPaidFigures(r);
+    if (sqF) { /* v2.0d.4 r2 (Harry): Square-verified PAID alone decides; Square's own figures, read-only */
+      return '<div class="day-tip day-tip-sq" style="margin:4px 0"><p class="fine day-paid-ro" id="paid-ro-' + esc(r.id) + '" style="margin:0;font-weight:700">' + esc(squarePaidText(sqF, sqRideShare(r, sqF))) + "</p></div>";
+    }
+    if (sqCardFromSquare(r)) { /* v2.0d.4 r4 (Matthew): Square invoice, not cash -> Square's figures only, no manual boxes */
+      var uq = sqUnpaidFigures(r, sqLiveGet(r));
+      if (!uq && sqCardOpen(r)) sqLiveKick(r); else sqLiveClearRetry(sqInvNo(r)); /* r6: closed card drops its retry timer */ /* r5 (Harry): only an open card on a visible board, only with a saved God login */
+      var ue = !uq && sqLiveErr(r);
+      return '<div class="day-tip day-tip-sq" style="margin:4px 0"><p class="fine day-paid-ro" id="paid-ro-' + esc(r.id) + '" style="margin:0;font-weight:700">' +
+        (ue ? esc("Invoice #" + sqInvNo(r) + " \u00b7 ") + '<button type="button" class="btn btn-ghost sq-retry" data-sq-retry="' + esc(sqInvNo(r)) + '" style="margin:0">Square didn\u2019t answer \u00b7 tap to retry</button>'
+          : esc(squareUnpaidText(r, uq))) + "</p></div>";
+    }
     var v = state.tipDrafts && state.tipDrafts[r.id] != null ? state.tipDrafts[r.id] : (Number(r.tipCents) > 0 ? (Number(r.tipCents) / 100).toFixed(2) : "");
     var pv = state.paidDrafts && state.paidDrafts[r.id] != null ? state.paidDrafts[r.id] : (r.paidSquareCents != null ? (r.paidSquareCents / 100).toFixed(2) : "");
+    if (DB_TIP_STACKED) return dbTipStackedHtml(r, v, pv); /* v2.0d.4 (pending Matthew); DB_TIP_STACKED = false -> v2.0d.3 boxes below */
     return '<div class="day-tip" style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin:4px 0">' +
       '<label for="paid-' + esc(r.id) + '">Invoice total $ (amount only; paid shows after Square confirms)</label>' +
       '<input id="paid-' + esc(r.id) + '" class="day-paid-in" data-event-id="' + esc(r.id) + '"' + moneyRegAttrs() + ' value="' + esc(pv) + '" style="width:110px">' +
@@ -7357,6 +7375,117 @@
       '<p class="fine day-paid-pre" id="paid-pre-' + esc(r.id) + '" style="flex-basis:100%;margin:0;font-weight:700">' + esc(paidSquareLine(pv !== "" && isFinite(+pv) ? Math.round(+pv * 100) : null, r.assignedDriverId ? ridePctFor(r) : null)) + "</p>" +
       (Number(r.tipCents) > 0 ? '<span class="fine" id="tip-saved-' + esc(r.id) + '">Saved ' + esc(fmtCents(r.tipCents)) + " card tip</span>" : "") + "</div>";
   }
+  /* ---- v2.0d.4 label stacking, pending Matthew. Self-contained: set DB_TIP_STACKED = false to drop it (or delete this block + the one line above). ---- */
+  var DB_TIP_STACKED = true;
+  function dbTipStackedHtml(r, v, pv) {
+    var fld = 'style="display:flex;flex-direction:column;gap:2px;min-width:0;flex:0 1 130px"', inp = 'style="width:100%;max-width:130px;box-sizing:border-box"';
+    return '<div class="day-tip" style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;margin:4px 0;max-width:100%">' +
+      '<div class="day-fld" ' + fld + '><label for="paid-' + esc(r.id) + '">Invoice total $</label>' +
+      '<input id="paid-' + esc(r.id) + '" class="day-paid-in" data-event-id="' + esc(r.id) + '"' + moneyRegAttrs() + ' value="' + esc(pv) + '" ' + inp + '></div>' +
+      '<div class="day-fld" ' + fld + '><label for="tip-' + esc(r.id) + '">Tip $</label>' +
+      '<input id="tip-' + esc(r.id) + '" class="day-tip-in" data-event-id="' + esc(r.id) + '"' + moneyRegAttrs() + ' value="' + esc(v) + '" ' + inp + '></div>' +
+      '<button type="button" class="btn btn-gold btn-save-tip" data-event-id="' + esc(r.id) + '">Save</button>' +
+      '<p class="fine" style="flex-basis:100%;margin:0">Amount only; it shows as paid after Square confirms.</p>' +
+      (r.paidSquareCents != null ? '<span class="fine" id="paid-saved-' + esc(r.id) + '">Invoice total ' + esc(fmtCents(r.paidSquareCents)) + " (not proof of payment)</span>" : "") +
+      '<p class="fine day-paid-pre" id="paid-pre-' + esc(r.id) + '" style="flex-basis:100%;margin:0;font-weight:700">' + esc(paidSquareLine(pv !== "" && isFinite(+pv) ? Math.round(+pv * 100) : null, r.assignedDriverId ? ridePctFor(r) : null)) + "</p>" +
+      (Number(r.tipCents) > 0 ? '<span class="fine" id="tip-saved-' + esc(r.id) + '">Saved ' + esc(fmtCents(r.tipCents)) + " card tip</span>" : "") + "</div>";
+  }
+  /* ---- end v2.0d.4 label stacking ---- */
+  /* v2.0d.4 r2, pure (tested): Square's recorded figures for a Square-verified PAID ride, else null.
+     Grand total = subtotal + tax + tip. (invoice_sync stores totalCents WITHOUT the tip, the Worker /sq/invoice WITH it,
+     so the total is rebuilt from the parts, which both write the same way.) */
+  function sqPaidFigures(r) {
+    if (!paidSquare(r)) return null;
+    var q = r.sqInvoice, n = function (v) { return Math.max(0, Math.round(+v) || 0); };
+    var tip = n(q.tipCents), tax = n(q.taxCents), sub = n(q.subtotalCents);
+    if (!sub && n(q.totalCents)) sub = Math.max(0, n(q.totalCents) - tax - tip); /* old record with only a total */
+    return { subCents: sub, taxCents: tax, tipCents: tip, totalCents: sub + tax + tip };
+  }
+  /* v2.0d.4 r3, pure (tested): this ride's pre-tax + tax. A split/overridden invoice (prepaidAmountCents set and overridden or
+     different from Square's subtotal) uses the card's own amounts; missing prepaidTaxCents -> tax split pro rata. Else Square's. */
+  function sqRideShare(r, f) {
+    var q = (r && r.sqInvoice) || {}, pa = r && r.prepaidAmountCents != null && isFinite(+r.prepaidAmountCents) ? Math.round(+r.prepaidAmountCents) : null;
+    if (pa != null && (q.overridden === true || pa !== f.subCents)) {
+      var tx = r.prepaidTaxCents != null && isFinite(+r.prepaidTaxCents) ? Math.round(+r.prepaidTaxCents) : (f.subCents > 0 ? Math.round(f.taxCents * pa / f.subCents) : 0);
+      return { subCents: pa, taxCents: tx, split: true };
+    }
+    return { subCents: f.subCents, taxCents: f.taxCents, split: false };
+  }
+  function squarePaidText(f, sh) {
+    if (sh && sh.split) return "This ride " + fmtCents(sh.subCents + sh.taxCents) + " of invoice total " + fmtCents(f.totalCents) + " (incl. tip " + fmtCents(f.tipCents) + ") from Square";
+    return "Total " + fmtCents(f.totalCents) + " (incl. tip " + fmtCents(f.tipCents) + ") from Square";
+  }
+  /* ---- v2.0d.4 r4 (Matthew 10/23): invoice total + tip come from Square unless it is a cash ride. ----
+     Cash = the Cash tag (payMethod "cash"), paidVia "cash", cashCollected, or paid by cash (driver tap / God override). Pure (tested). */
+  function sqIsCashRide(r) {
+    if (!r) return false;
+    if (String(r.payMethod || "").toLowerCase() === "cash" || String(r.paidVia || "").toLowerCase() === "cash" || r.cashCollected === true) return true;
+    var k = paidSource(r).kind; return k === "cash" || k === "override";
+  }
+  function sqInvNo(r) { return String((r && r.prepaidInvoiceNo) || "").replace(/^\s*#/, "").trim(); }
+  function sqCardFromSquare(r) { return !!sqInvNo(r) && !sqIsCashRide(r); }
+  /* Square figures for the card's CURRENT invoice # (a stale sqInvoice for another number is ignored): the board's sqInvoice
+     (invoice_sync) when it has amounts, else this session's read-only Worker lookup. null = nothing from Square yet. */
+  function sqUnpaidFigures(r, live) {
+    var n = sqInvNo(r), num = function (q) { return String((q && (q.number || q.invoiceNumber)) || "").replace(/^#/, ""); };
+    var pick = [r && r.sqInvoice, live].filter(function (q) { return q && typeof q === "object" && (!num(q) || num(q) === n) && (+q.subtotalCents > 0 || +q.totalCents > 0); })[0];
+    if (!pick) return null;
+    var c = function (v) { return Math.max(0, Math.round(+v) || 0); }, tip = c(pick.tipCents), tax = c(pick.taxCents), sub = c(pick.subtotalCents);
+    if (!sub) sub = Math.max(0, c(pick.totalCents) - tax - tip);
+    return { subCents: sub, taxCents: tax, tipCents: tip, totalCents: sub + tax + tip, status: String(pick.status || (live === pick ? "" : (r.sqInvoice || {}).status) || "") };
+  }
+  function sqStatusWord(st) { var w = String(st || "UNPAID").replace(/_/g, " ").toLowerCase(); return w.charAt(0).toUpperCase() + w.slice(1); }
+  function squareUnpaidText(r, f) {
+    var head = "Invoice #" + sqInvNo(r) + " \u00b7 ";
+    if (!f) return head + (sqLiveAuth() ? "Waiting for Square\u2026" : "Sign in to God mode to load from Square"); /* r6: no login + nothing stored */
+    var sh = sqRideShare(r, f);
+    return head + (sh.split ? "This ride " + fmtCents(sh.subCents + sh.taxCents) + " of invoice total " + fmtCents(f.totalCents) : "Total " + fmtCents(f.totalCents)) + " from Square \u00b7 " + sqStatusWord(f.status);
+  }
+  /* read-only refresh on card open: the Worker's existing /sq/invoice. Kept in memory only (never written).
+     v2.0d.4 r5 (Harry): never prompts (saved God token / session password only), only for an OPEN card, one request per
+     invoice in flight, 10 s timeout; an error or timeout shows "tap to retry" and retries by itself after 60 s. Pure-ish (tested). */
+  var sqLive = {}, SQ_LIVE_TIMEOUT_MS = 10000, SQ_LIVE_RETRY_MS = 60000;
+  function sqLiveAuth() { var t = ""; try { t = gqTok(); } catch (e) {} if (t) return { godToken: t }; return typeof gq !== "undefined" && gq && gq.pw ? { godPassword: gq.pw } : null; }
+  function sqCardOpen(r) { try { return !dbBoardCollapsed() && !dbCardSet()[r.id]; } catch (e) { return false; } }
+  function sqLiveGet(r) { var x = sqLive[sqInvNo(r)]; return x && x.invoice ? x.invoice : null; }
+  function sqLiveErr(r) { var x = sqLive[sqInvNo(r)]; return !!(x && x.error); }
+  function sqLiveFetch(n, auth) {
+    var ac = typeof AbortController === "function" ? new AbortController() : null, tm = null;
+    var timeout = new Promise(function (res) { tm = setTimeout(function () { try { if (ac) ac.abort(); } catch (e) {} res({ ok: false, error: "timeout" }); }, SQ_LIVE_TIMEOUT_MS); });
+    var req = fetch(PAY_WORKER + "/sq/invoice", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(Object.assign({ invoiceNo: n }, auth)), signal: ac ? ac.signal : undefined })
+      .then(function (res) { return res.json().catch(function () { return {}; }).then(function (d) {
+        if (d && d.godToken) { try { gqSetTok(d.godToken); } catch (e) {} }
+        return res.ok && d && d.ok === true ? { ok: true, invoice: d.invoice } : { ok: false, error: (d && d.error) || "lookup failed" };
+      }); }, function () { return { ok: false, error: "connection" }; });
+    return Promise.race([req, timeout]).then(function (out) { clearTimeout(tm); return out; });
+  }
+  var sqRetryTm = {}; /* r6: 60 s auto-retry timer handle per invoice */
+  function sqLiveClearRetry(n) { if (n && sqRetryTm[n]) { try { clearTimeout(sqRetryTm[n]); } catch (e) {} delete sqRetryTm[n]; } }
+  function sqLiveKick(r, force) {
+    var n = sqInvNo(r); if (!n) return false;
+    var x = sqLive[n];
+    if (x && (x.pending || x.invoice)) return false; /* dedupe in flight; done */
+    if (x && x.error && !force && Date.now() - x.at < SQ_LIVE_RETRY_MS) return false;
+    var auth = sqLiveAuth(); if (!auth) return false; /* no saved God login: never prompt; stored figures / Waiting for Square */
+    sqLiveClearRetry(n); /* r6: a redraw that retries drops the old timer */
+    sqLive[n] = { pending: true };
+    sqLiveFetch(n, auth).then(function (out) {
+      sqLive[n] = out && out.ok ? { invoice: out.invoice, at: Date.now() } : { error: (out && out.error) || "lookup failed", at: Date.now() };
+      if (!(out && out.ok)) { sqLiveClearRetry(n); sqRetryTm[n] = setTimeout(function () { delete sqRetryTm[n]; try { renderBoardLists(); } catch (e) {} }, SQ_LIVE_RETRY_MS + 50); } /* auto-retry on that redraw */
+      try { renderBoardLists(); } catch (e) {}
+    });
+    return true;
+  }
+  function sqLiveRowFor(id) { var row = null; (state.calendar || []).forEach(function (c) { if (c && c.id === id) row = c; }); return row; }
+  if (typeof document !== "undefined" && document.addEventListener) document.addEventListener("click", function (ev) {
+    var t = ev.target && ev.target.closest ? ev.target.closest("[data-sq-retry],[data-day-card-toggle]") : null; if (!t) return;
+    if (t.hasAttribute("data-sq-retry")) { var n = t.getAttribute("data-sq-retry"); t.disabled = true; sqLiveKick({ prepaidInvoiceNo: n }, true); try { renderBoardLists(); } catch (e) {} return; }
+    setTimeout(function () { var row = sqLiveRowFor(t.getAttribute("data-day-card-toggle")); /* card just expanded */
+      if (row && !sqCardOpen(row)) { sqLiveClearRetry(sqInvNo(row)); return; } /* r6: card closed */
+      if (row && sqCardFromSquare(row) && !paidSquare(row) && !sqUnpaidFigures(row, sqLiveGet(row)) && sqCardOpen(row)) sqLiveKick(row); }, 0);
+  });
+  /* ---- end v2.0d.4 r4 ---- */
+  window.__pcsV20d4 = { dbTipHtml: function (r) { return dbTipHtml(r); }, squarePaidText: squarePaidText, sqPaidFigures: sqPaidFigures };
   function saveCalendarTip(eventId, val, paidVal) {
     var row = null; (state.calendar || []).forEach(function (r) { if (r && r.id === eventId) row = r; });
     if (!row) return Promise.reject(new Error("missing"));
@@ -7580,7 +7709,7 @@
                 "</select>" +
                 '<button type="button" class="btn btn-gold btn-assign-ride" data-event-id="' + esc(r.id) + '"' + assignDisabled + ">Assign</button>" +
                 '<div class="day-fare-row" style="display:flex;flex-wrap:wrap;gap:8px 12px;align-items:flex-end;flex-basis:100%">' + /* v77.6 (Matthew): Invoice # beside the fare; Save fare saves both */
-                  '<div style="display:flex;flex-direction:column;flex:1 1 140px;min-width:120px"><label class="fare-label fine" for="fare-' + esc(r.id) + '">Fare before tax $</label>' +
+                  '<div style="display:flex;flex-direction:column;flex:1 1 140px;min-width:120px"><label class="fare-label fine" for="fare-' + esc(r.id) + '">Subtotal $</label>' +
                   '<input id="fare-' + esc(r.id) + '" class="day-fare" data-event-id="' + esc(r.id) + '"' + moneyRegAttrs() + ' value="' + esc(moneyRegVal(fareVal)) + '"' + assignDisabled + "></div>" +
                   '<div style="display:flex;flex-direction:column;flex:1 1 140px;min-width:120px"><label class="inv-label fine" for="inv-' + esc(r.id) + '">Invoice #</label>' +
                   '<input id="inv-' + esc(r.id) + '" class="day-inv" data-event-id="' + esc(r.id) + '" type="text" inputmode="numeric" pattern="[0-9]*" autocomplete="off" placeholder="000519" value="' + esc(r.prepaidInvoiceNo || "") + '"' + assignDisabled + "></div>" +
