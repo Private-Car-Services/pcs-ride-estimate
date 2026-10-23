@@ -89,8 +89,10 @@
   function phaseOf(d) {
     if (!d) return "none";
     if (d.pay && d.pay.paid) return d.pay.other ? "settled" : "paid";
+    if (d.status === "running" && d.hideFare) return "run|hide|" + (d.prepaid ? 1 : 0) + "|" + (d.card && d.card.onFile ? 1 : 0); /* v2.0a */
     if (d.status === "running" && d.prepaid) return "run|inv";
     if (d.status === "running") return "run|" + (d.card && d.card.onFile ? 1 : 0);
+    if (d.hideFare) return "end|hide|" + (d.prepaid ? 1 : 0);
     return "end|" + (d.card && d.card.onFile ? 1 : 0) + "|" + (d.pay && d.pay.linkOpen ? 1 : 0);
   }
   function testTag(d) { return d && d.sandbox ? '<p class="rm-test" id="rm-test">TEST MODE · Square sandbox · no real money</p>' : ""; }
@@ -170,7 +172,23 @@
   function mphSlow(d, m) { return m !== null && m < (Number(d.rates && d.rates.slowMph) || 10); }
   function mphLabel(d, m) { return mphSlow(d, m) ? "MPH \u00b7 slow" : "MPH"; }
   function mphClass(d, m) { return "rm-mph" + (m === null ? " is-none" : mphSlow(d, m) ? " is-slow" : ""); }
+  /* v2.0a (Matthew 10/22): a ride not started as "Metered" never shows a running fare, estimate or rates here */
+  function invBoxHtml(d) {
+    var no = d.prepaid && d.prepaid.invoiceNo ? String(d.prepaid.invoiceNo).replace(/^#/, "") : "", paid = !!(d.pay && d.pay.paid);
+    return '<div class="card" id="rm-inv-box" style="text-align:center;background:#111;border:3px solid ' + (paid ? "#1b9e4b" : "#d32f2f") + '">' +
+      '<p id="rm-inv-no" style="margin:0;font-size:26px;font-weight:900;color:#fff">' + esc(no ? "Invoice #" + no : "No invoice") + "</p>" +
+      '<p id="rm-inv-paid" style="display:inline-block;margin:6px 0 0;padding:6px 20px;border-radius:999px;font-size:26px;font-weight:900;color:#fff;background:' + (paid ? "#1b9e4b" : "#d32f2f") + '">' + (paid ? "Paid" : "Unpaid") + "</p></div>";
+  }
+  function runningHiddenHtml(d) {
+    return testTag(d) + '<p class="tag">Your ride \u00b7 in progress</p>' + invBoxHtml(d) +
+      '<div class="rm-grid"><div><b id="rm-miles">' + Number(d.live.miles || 0).toFixed(2) + "</b><span>Miles</span></div>" +
+      '<div><b id="rm-time">0:00</b><span>Time</span></div>' +
+      '<div id="rm-mph-box" class="' + mphClass(d, mphNow(d)) + '"><b id="rm-mph">' + mphText(mphNow(d)) + '</b><span id="rm-mph-label">' + esc(mphLabel(d, mphNow(d))) + "</span></div></div>" +
+      '<p class="rm-eta" id="rm-eta"></p><p class="rm-updated" id="rm-updated"></p><p class="error" id="rm-net" role="status"></p>' +
+      (d.prepaid ? "" : formHtml(d));
+  }
   function runningHtml(d) {
+    if (d.hideFare) return runningHiddenHtml(d);
     var est0 = estText(d);
     return testTag(d) + /* v77.6 (Matthew 10/20): the estimate leads; the running number is clearly "Fare so far" */
       '<div class="rm-est-box" id="rm-est-box" style="background:#111;border:3px solid #f0d48a;border-radius:16px;padding:12px 14px;margin:4px 0 12px;text-align:center' + (est0 ? "" : ";display:none") + '">' +
@@ -313,12 +331,14 @@
   /* v75v: prepaid on a Square invoice: balance due $0, the pay buttons stay hidden */
   function invoiceHtml(d) {
     return '<div class="card" id="rm-invoice" style="background:#0b6b3a;color:#fff;border:2px solid #b8f0c8;text-align:center">' +
-      '<p class="rm-paid" id="rm-paid-invoice" style="color:#fff">\u2713 Paid by invoice</p>' +
-      '<p class="rm-sub" id="rm-balance" style="color:#e8fff0;font-weight:700">Balance due $0.00' + (d.prepaid && d.prepaid.invoiceNo ? " \u00b7 Square invoice #" + esc(d.prepaid.invoiceNo) : "") + "</p>" +
+      (d.pay && d.pay.paid ? '<p class="rm-paid" id="rm-paid-invoice" style="color:#fff">\u2713 Paid by invoice</p>' : '<p class="rm-paid" id="rm-paid-invoice" style="color:#fff">Billed by invoice</p>') + /* v2.0a: paid only when it really is */
+      '<p class="rm-sub" id="rm-balance" style="color:#e8fff0;font-weight:700">' + (d.pay && d.pay.paid ? "Balance due $0.00" : "Pay on your Square invoice") + (d.prepaid && d.prepaid.invoiceNo ? " \u00b7 Square invoice #" + esc(d.prepaid.invoiceNo) : "") + "</p>" +
       '<p class="fine" style="color:#e8fff0">You\u2019re all set. Thank you for riding with PCS!</p></div>';
   }
   function endedHtml(d) {
     if (d.prepaid) return testTag(d) + '<p class="tag">Ride ended</p>' + invoiceHtml(d);
+    if (d.hideFare || !d.final) return testTag(d) + '<p class="tag">Ride ended</p>' + invBoxHtml(d) + /* v2.0a r2: never a fare on a non-Metered ride */
+      '<p class="rm-sub" id="rm-hidden-end">Your driver will complete payment. Thank you for riding with PCS!</p>';
     return testTag(d) + '<p class="tag">Ride ended · your fare</p>' + modeHtml(d) +
       '<p class="rm-fare" id="rm-fare">' + money(d.final && d.final.total) + "</p>" +
       '<p class="rm-sub">Total incl. tax</p>' + breakdownHtml(d) + payHtml(d) +
@@ -362,7 +382,7 @@
     var d = S.d;
     if (!d) return;
     if (d.status === "running") {
-      setText("rm-fare", money(d.live.fareCents));
+      if (!d.hideFare) setText("rm-fare", money(d.live.fareCents));
       setText("rm-miles", Number(d.live.miles || 0).toFixed(2));
       setText("rm-wait", String(d.live.waitMin || 0));
       var mph = mphNow(d);
