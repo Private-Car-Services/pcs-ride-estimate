@@ -173,12 +173,7 @@
   function mphLabel(d, m) { return mphSlow(d, m) ? "MPH \u00b7 slow" : "MPH"; }
   function mphClass(d, m) { return "rm-mph" + (m === null ? " is-none" : mphSlow(d, m) ? " is-slow" : ""); }
   /* v2.0a (Matthew 10/22): a ride not started as "Metered" never shows a running fare, estimate or rates here */
-  function invBoxHtml(d) {
-    var no = d.prepaid && d.prepaid.invoiceNo ? String(d.prepaid.invoiceNo).replace(/^#/, "") : "", paid = !!(d.pay && d.pay.paid);
-    return '<div class="card" id="rm-inv-box" style="text-align:center;background:#111;border:3px solid ' + (paid ? "#1b9e4b" : "#d32f2f") + '">' +
-      '<p id="rm-inv-no" style="margin:0;font-size:26px;font-weight:900;color:#fff">' + esc(no ? "Invoice #" + no : "No invoice") + "</p>" +
-      '<p id="rm-inv-paid" style="display:inline-block;margin:6px 0 0;padding:6px 20px;border-radius:999px;font-size:26px;font-weight:900;color:#fff;background:' + (paid ? "#1b9e4b" : "#d32f2f") + '">' + (paid ? "Paid" : "Unpaid") + "</p></div>";
-  }
+  function invBoxHtml(d) { return ""; } /* v2.0d (Matthew 10/23): no invoice # / Paid-Unpaid box; a non-Metered ride just has no fare */
   function runningHiddenHtml(d) {
     return testTag(d) + '<p class="tag">Your ride \u00b7 in progress</p>' + invBoxHtml(d) +
       '<div class="rm-grid"><div><b id="rm-miles">' + Number(d.live.miles || 0).toFixed(2) + "</b><span>Miles</span></div>" +
@@ -331,12 +326,13 @@
   /* v75v: prepaid on a Square invoice: balance due $0, the pay buttons stay hidden */
   function invoiceHtml(d) {
     return '<div class="card" id="rm-invoice" style="background:#0b6b3a;color:#fff;border:2px solid #b8f0c8;text-align:center">' +
-      (d.pay && d.pay.paid ? '<p class="rm-paid" id="rm-paid-invoice" style="color:#fff">\u2713 Paid by invoice</p>' : '<p class="rm-paid" id="rm-paid-invoice" style="color:#fff">Billed by invoice</p>') + /* v2.0a: paid only when it really is */
-      '<p class="rm-sub" id="rm-balance" style="color:#e8fff0;font-weight:700">' + (d.pay && d.pay.paid ? "Balance due $0.00" : "Pay on your Square invoice") + (d.prepaid && d.prepaid.invoiceNo ? " \u00b7 Square invoice #" + esc(d.prepaid.invoiceNo) : "") + "</p>" +
+      '<p class="rm-paid" id="rm-paid-invoice" style="color:#fff">\u2713 Paid by invoice</p>' +
+      '<p class="rm-sub" id="rm-balance" style="color:#e8fff0;font-weight:700">Balance due $0.00' + (d.prepaid && d.prepaid.invoiceNo ? " \u00b7 Square invoice #" + esc(d.prepaid.invoiceNo) : "") + "</p>" +
       '<p class="fine" style="color:#e8fff0">You\u2019re all set. Thank you for riding with PCS!</p></div>';
   }
   function endedHtml(d) {
-    if (d.prepaid) return testTag(d) + '<p class="tag">Ride ended</p>' + invoiceHtml(d);
+    if (d.prepaid && d.pay && d.pay.paid) return testTag(d) + '<p class="tag">Ride ended</p>' + invoiceHtml(d); /* v2.0d: v77.25 box, only when Square really shows paid */
+    if (d.prepaid) return testTag(d) + '<p class="tag">Ride ended</p>' + '<p class="rm-sub" id="rm-hidden-end">Thank you for riding with PCS!</p>';
     if (d.hideFare || !d.final) return testTag(d) + '<p class="tag">Ride ended</p>' + invBoxHtml(d) + /* v2.0a r2: never a fare on a non-Metered ride */
       '<p class="rm-sub" id="rm-hidden-end">Your driver will complete payment. Thank you for riding with PCS!</p>';
     return testTag(d) + '<p class="tag">Ride ended · your fare</p>' + modeHtml(d) +
