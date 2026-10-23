@@ -151,9 +151,9 @@
             </div>
             <div class="field">
               <label for="contact-phone">Phone</label>
-              <input type="tel" id="contact-phone" name="contact-phone" inputmode="tel" autocomplete="tel" required maxlength="40" placeholder="(936) 555-0123" aria-describedby="contact-phone-error contact-phone-consent" />
+              <input type="tel" id="contact-phone" name="contact-phone" inputmode="tel" autocomplete="tel" required maxlength="40" placeholder="(936) 555-0123" aria-describedby="contact-phone-error" />
               <p class="field-error" id="contact-phone-error" aria-live="polite" hidden></p>
-              <p class="sms-consent" id="contact-phone-consent" style="font-size:12px;line-height:1.45;color:#6b7280;margin:6px 0 0">By providing your mobile number, you agree to receive ride update text messages from Private Car Services (Private Taxi Services LLC), such as booking confirmations, driver details, and live tracking links. Message frequency varies by ride. Msg &amp; data rates may apply. Reply STOP to opt out, HELP for help. Consent is not a condition of purchase. See our <a href="app/policies/#sms">SMS Terms</a> and <a href="app/policies/#privacy">Privacy Policy</a>.</p> <!-- v77.20 A2P opt-in disclosure -->
+              <label class="sms-optin" for="contact-sms-optin" style="display:flex;gap:10px;align-items:flex-start;margin:8px 0 0;font-size:13px;line-height:1.45;font-weight:400;text-transform:none;letter-spacing:normal"><input type="checkbox" id="contact-sms-optin" name="sms-optin" value="yes" style="width:22px;height:22px;flex:0 0 auto;margin:2px 0 0"><span id="contact-sms-optin-text">Text me ride updates from Private Car Services (driver on the way, arrival, receipts). Msg frequency varies, about 1-5 per ride. Msg &amp; data rates may apply. Reply STOP to opt out, HELP for help. Help: 936-261-7878. Consent is not a condition of booking. See <a href="app/policies/#sms" target="_blank" rel="noopener">SMS Terms</a> and <a href="app/policies/#privacy" target="_blank" rel="noopener">Privacy</a> at www.PCSrides.com.</span></label><p class="fine sms-optin-note" style="font-size:12px;margin:4px 0 0">Optional. Leave it unchecked and you can still book; your driver may still call this number about your ride.</p> <!-- v77.23 express opt-in (unchecked) -->
             </div>
           </div>
           <div class="field">
@@ -300,6 +300,6 @@
   <!-- Same Firebase hub + Square gating as the rider app (Book it writes the booking where God mode reads it). -->
   <script src="app/sync-config.js?v=16"></script>
   <script src="app/square-config.js?v=60"></script>
-  <script src="app.js?v=63"></script>
+  <script src="app.js?v=77.25"></script>
 </body>
 </html>
