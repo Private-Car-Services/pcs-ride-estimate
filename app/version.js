@@ -1,6 +1,9 @@
 /* PCS app version: the ONE place to change it each release (v72x). Loaded by rider, driver, God mode and meter. */
+/* v2.0b bridge for stale v77.x copies: their update check takes the FIRST var APP_VERSION match below and their old compare
+   ranks "v2.0b" below "v77.x", so they never offered the update. This decoy reads newer to them (banner + reload); the v2+
+   compare ranks every v7x/v9x below v2.x, so current copies ignore it. Not code, never runs: var APP_VERSION = "v99.0" */
 (function () {
-  var APP_VERSION = "v2.0a";
+  var APP_VERSION = "v2.0b";
   window.PCS_APP_VERSION = APP_VERSION;
   /* "v72r" -> [72, "r"]; returns <0 if a is older than b. Unknown/missing counts as oldest. */
   /* v2.0a (Harry r2): a first number < 70 is the NEW v2+ line, newer than every v77.x.
@@ -66,7 +69,7 @@
     if (!src || !window.fetch || Date.now() - lastCheck < 15000) { tryAuto(); return; }
     lastCheck = Date.now();
     fetch(src.replace(/\?.*$/, "") + "?nocache=" + Date.now(), { cache: "no-store" }).then(function (r) { return r.ok ? r.text() : ""; }).then(function (t) {
-      var m = /var APP_VERSION = "([^"]+)"/.exec(t || "");
+      var m = /^\s*var APP_VERSION = "([^"]+)"/m.exec(t || "");
       if (!m || m[1] === APP_VERSION) return;
       if (window.pcsVersionCmp(m[1], APP_VERSION) < 0) return; /* never "update" to an older copy from a stale CDN edge */
       newer = m[1];
