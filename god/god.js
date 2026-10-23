@@ -317,7 +317,7 @@
   window.__pcsV76dSqShared = sqInvoiceShared;
   function prepaidPatch(on, amount, invoiceNo, now, by, taxText) {
     now = now || Date.now();
-    if (!on) return { ok: true, patch: { prepaid: false, prepaidVia: null, prepaidAmountCents: null, prepaidTaxCents: null, prepaidInvoiceNo: "", prepaidEdited: true, prepaidBy: by || "god", prepaidAt: now, updatedAt: now } };
+    if (!on) return { ok: true, patch: { prepaid: false, prepaidVia: null, prepaidAmountCents: null, prepaidTaxCents: null, prepaidInvoiceNo: "", payState: null, prepaidEdited: true, prepaidBy: by || "god", prepaidAt: now, updatedAt: now } };
     var raw = String(amount == null ? "" : amount).replace(/[$,\s]/g, ""), cents = null;
     if (raw !== "") {
       var n = Number(raw);
@@ -325,7 +325,10 @@
       cents = Math.round(n * 100);
     }
     var inv = String(invoiceNo || "").replace(/^#/, "").trim().slice(0, 40);
-    var patch = { prepaid: true, prepaidVia: "square_invoice", prepaidAmountCents: cents, prepaidInvoiceNo: inv, prepaidEdited: true, prepaidBy: by || "god", prepaidAt: now, updatedAt: now };
+    /* v77.26 (Matthew 10/22): this marks the ride as BILLED on a Square invoice (driver collects nothing, End ride = $0 charge).
+       It never marks it paid: payState "invoice_pending" until Square shows a completed payment (invoice_sync / Square lookup). */
+    var patch = { prepaid: true, prepaidVia: "square_invoice", prepaidAmountCents: cents, prepaidInvoiceNo: inv, prepaidEdited: true, prepaidBy: by || "god", prepaidAt: now,
+      payState: "invoice_pending", updatedAt: now };
     if (taxText != null && String(taxText).trim() !== "") { /* v76d: invoice tax kept on the ride (never paid to the driver) */
       var tn = Number(String(taxText).replace(/[$,\s]/g, ""));
       if (!isFinite(tn) || tn < 0 || tn > 100000) return { ok: false, error: "Enter the tax as a number, like 4.67." };
@@ -335,39 +338,75 @@
   }
   function prepaidLabel(r) {
     if (!r || r.prepaid !== true) return "";
-    return "PAID, Square invoice" + (r.prepaidInvoiceNo ? " #" + r.prepaidInvoiceNo : "") + (r.prepaidAmountCents != null ? " \u00b7 " + fmtCents(r.prepaidAmountCents) : "");
+    return (paidSquare(r) ? "Paid: Square verified, invoice" : "Invoice sent, waiting on Square \u00b7 invoice") + (r.prepaidInvoiceNo ? " #" + r.prepaidInvoiceNo : "") + (r.prepaidAmountCents != null ? " \u00b7 " + fmtCents(r.prepaidAmountCents) : "");
   }
-  /* v77.15 (Matthew 10/21): Paid / Unpaid pill on each Scheduled ride card. Automatic PAID = prepaid, a Square invoice
-     marked PAID, or a charge record. A tap saves paidMark ("paid" | "unpaid") + who/when on the board row; it is a
-     display / bookkeeping flag only (never changes prepaid, so the driver app's End ride and pay are untouched).
-     The calendar sync keeps paidMark* (V76D_KEEP); the 5 s board rebuild re-reads it from the row. */
-  function paidAuto(r) {
-    if (!r) return false;
-    if (r.prepaid === true) return true;
-    var q = r.sqInvoice; if (q && (q.paid === true || String(q.status || "").toUpperCase() === "PAID")) return true;
+  /* v77.26 (Matthew 10/22): a ride is PAID only when
+       (a) Square verifies a completed payment: sqInvoice.paid / status PAID (written from Square by invoice_sync or the
+           Worker's Square lookup), or a Square card-charge record (state.payCharges), or
+       (b) the ASSIGNED driver recorded cash collected in the driver app (row.paidCash: by "driver", driverId = assignedDriverId;
+           Matthew counts when he is the assigned driver), or
+       (c) God mode recorded cash as a logged override WITH a reason (row.paidCashOverride).
+     Nothing else marks paid: the Prepaid (Square invoice) box, the old Paid pill tap (paidMark "paid"), a typed
+     "Paid in Square $" amount and Zelle / Venmo / other reports are pending or "unverified", never paid. */
+  function firstName(n) { return String(n || "").trim().split(/\s+/)[0] || "driver"; }
+  function paidSource(r) {
+    if (!r) return { paid: false, kind: "unpaid", text: "Unpaid" };
+    var q = r.sqInvoice;
+    if (q && (q.paid === true || String(q.status || "").toUpperCase() === "PAID")) return { paid: true, kind: "square", text: "Paid: Square verified" };
     var ch = (typeof state !== "undefined" && state.payCharges) || {}, c = r.code && ch[r.code];
-    return !!(c && typeof c === "object");
+    if (c && typeof c === "object") return { paid: true, kind: "square", text: "Paid: Square verified" };
+    var pc = r.paidCash;
+    if (pc && typeof pc === "object" && pc.by === "driver" && pc.driverId && pc.driverId === r.assignedDriverId)
+      return { paid: true, kind: "cash", text: "Paid: cash, collected by " + firstName(pc.driverName || r.assignedDriverName) };
+    var ov = r.paidCashOverride;
+    if (ov && typeof ov === "object" && String(ov.reason || "").trim()) return { paid: true, kind: "override", text: "Paid: cash (God override: " + String(ov.reason).trim().slice(0, 80) + ")" };
+    if (r.payUnverified && typeof r.payUnverified === "object") return { paid: false, kind: "unverified", text: "Unverified: " + String(r.payUnverified.method || "other").replace(/_/g, " ") + " (not paid until Square or cash confirms)" };
+    if (r.prepaid === true || r.payState === "invoice_pending") return { paid: false, kind: "pending", text: "Invoice sent, waiting on Square" };
+    return { paid: false, kind: "unpaid", text: "Unpaid" };
   }
-  function paidNow(r) { return r && r.paidMark === "paid" ? true : r && r.paidMark === "unpaid" ? false : paidAuto(r); }
+  function paidAuto(r) { return paidSource(r).paid; }
+  function paidNow(r) { return paidAuto(r); } /* v77.26: paidMark no longer changes paid */
   function paidSquare(r) { var q = r && r.sqInvoice; return !!(q && (q.paid === true || String(q.status || "").toUpperCase() === "PAID")); }
-  function paidPillHtml(r) {
-    var p = paidNow(r), by = r.paidMark ? " (set by " + (r.paidMarkBy || "God mode") + ")" : "";
-    return '<button type="button" class="badge pcs-paid-pill ' + (p ? "is-paid" : "is-unpaid") + '" data-paid-toggle="' + esc(r.id) + '" aria-pressed="' + (p ? "true" : "false") + '" aria-label="' + (p ? "Paid" : "Unpaid") + esc(by) + '. Tap to change.">' + (p ? "PAID" : "UNPAID") + "</button>";
+  /* pure (tested): God cash override; a reason is required and every override is logged on the row */
+  function cashOverridePatch(row, reason, cents, who, now) {
+    reason = String(reason || "").trim();
+    if (reason.length < 3) return { ok: false, error: "Type why you are recording cash (for example: driver handed me $20)." };
+    var log = (Array.isArray(row && row.paidOverrideLog) ? row.paidOverrideLog.slice(-20) : []).concat([{ at: now, action: "cash_override", reason: reason.slice(0, 200), cents: cents != null ? cents : null, by: who || "god" }]);
+    return { ok: true, patch: { paidCashOverride: { by: "god", who: who || "god", reason: reason.slice(0, 200), cents: cents != null ? cents : null, method: "cash", at: now }, paidOverrideLog: log, updatedAt: now } };
   }
-  function paidToggle(id, btn) {
+  function cashOverrideClearPatch(row, who, now) {
+    var log = (Array.isArray(row && row.paidOverrideLog) ? row.paidOverrideLog.slice(-20) : []).concat([{ at: now, action: "cash_override_removed", by: who || "god" }]);
+    return { paidCashOverride: null, paidOverrideLog: log, updatedAt: now };
+  }
+  function paidPillHtml(r) {
+    var src = paidSource(r), p = src.paid, by = " (" + src.text + ")";
+    return '<button type="button" class="badge pcs-paid-pill ' + (p ? "is-paid" : "is-unpaid") + '" data-paid-toggle="' + esc(r.id) + '" aria-pressed="' + (p ? "true" : "false") + '" aria-label="' + (p ? "Paid" : "Unpaid") + esc(by) + '. Tap to record a cash override.">' + (p ? "PAID" : src.kind === "pending" ? "WAITING ON SQUARE" : src.kind === "unverified" ? "UNVERIFIED" : "UNPAID") + "</button>" +
+      '<span class="fine pcs-paid-src" style="display:block;font-weight:700">' + esc(src.text) + "</span>";
+  }
+  function paidToggle(id, btn) { /* v77.26: the pill no longer marks paid; only a logged cash override with a reason */
     var r = dbDropRow(id); if (!r) return;
-    var to = paidNow(r) ? "unpaid" : "paid";
-    if (to === "unpaid" && paidSquare(r) && !window.confirm("Square shows invoice" + (r.sqInvoice && r.sqInvoice.number ? " #" + r.sqInvoice.number : "") + " as PAID for " + (r.rider || "this ride") + ". Mark it UNPAID anyway?")) return;
-    var now = Date.now(), patch = { paidMark: to, paidMarkBy: "god", paidMarkAt: now, updatedAt: now };
+    var src = paidSource(r), now = Date.now(), patch = null;
+    if (src.kind === "square") { window.alert("Square shows this ride as paid. Square is the record; change it in Square."); return; }
+    if (src.kind === "cash") { window.alert(src.text + " in the driver app. That record stays."); return; }
+    if (src.kind === "override") {
+      if (!window.confirm("Remove the God cash override on " + (r.rider || "this ride") + "?")) return;
+      patch = cashOverrideClearPatch(r, godWho(), now);
+    } else {
+      var why = window.prompt("Only Square or the driver's cash tap marks a ride paid.\nTo record CASH as a God override, type the reason (it is logged):", "");
+      if (why == null) return;
+      var out = cashOverridePatch(r, why, null, godWho(), now);
+      if (!out.ok) { window.alert(out.error); return; }
+      patch = out.patch;
+    }
     if (btn) btn.disabled = true;
     godFetch(calendarUrl(id), { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(patch) }).then(function (res) {
       if (!res.ok) throw new Error("save");
       Object.keys(patch).forEach(function (k) { r[k] = patch[k]; });
-      state.boardNotice = (to === "paid" ? "Marked PAID: " : "Marked UNPAID: ") + (r.rider || "ride") + ".";
+      state.boardNotice = paidSource(r).text + ": " + (r.rider || "ride") + ".";
       refresh();
     }).catch(function () { if (btn) btn.disabled = false; state.boardNotice = "Saving didn\u2019t finish. Check the connection and tap again."; try { renderBoardLists(); } catch (e) {} });
   }
-  window.__pcsGodPaid = { auto: paidAuto, now: paidNow, html: function (r) { return paidPillHtml(r); } }; /* test hook */
+  window.__pcsGodPaid = { auto: paidAuto, now: paidNow, source: paidSource, override: cashOverridePatch, html: function (r) { return paidPillHtml(r); } }; /* test hook */
   window.__pcsGodPrepaid = { patch: prepaidPatch, label: function (r) { return prepaidLabel(r); } }; /* test hook */
   function dbPrepaidClose() { var m = document.getElementById("db-prepaid-modal"); if (m) m.remove(); }
   function dbPrepaidOpen(id) {
@@ -380,7 +419,7 @@
     m.innerHTML = '<div style="background:#fff;color:#111;border:3px solid #0b6b3a;border-radius:16px;max-width:560px;width:100%;padding:16px">' +
       '<button type="button" id="db-prepaid-close" style="' + big + 'background:#0b3d23;color:#fff;border:0;margin-top:0">Close</button>' +
       '<h2 style="margin:4px 0 6px;color:#0b3d23">Prepaid (Square invoice) \u00b7 ' + esc(r.rider || "ride") + "</h2>" +
-      '<label style="display:flex;gap:10px;align-items:center;font-size:20px;font-weight:800;color:#111;margin:8px 0"><input type="checkbox" id="db-prepaid-on" style="width:28px;height:28px"' + (r.prepaid ? " checked" : "") + "> Paid on a Square invoice</label>" +
+      '<label style="display:flex;gap:10px;align-items:center;font-size:20px;font-weight:800;color:#111;margin:8px 0"><input type="checkbox" id="db-prepaid-on" style="width:28px;height:28px"' + (r.prepaid ? " checked" : "") + "> Billed on a Square invoice (shows paid only after Square confirms payment)</label>" +
       '<label for="db-prepaid-amt" style="display:block;font-weight:800;color:#111;margin:8px 0 4px">Amount for this ride before tax (optional)</label>' +
       '<input id="db-prepaid-amt" type="text" inputmode="decimal" pattern="[0-9.]*" autocomplete="off" data-money-reg="1" value="' + esc(r.prepaidAmountCents != null ? (r.prepaidAmountCents / 100).toFixed(2) : "") + '" style="width:100%;font-size:20px;padding:10px;border:2px solid #0b3d23;border-radius:10px;background:#fff;color:#111">' +
       '<label for="db-prepaid-inv" style="display:block;font-weight:800;color:#111;margin:8px 0 4px">Invoice # (optional)</label>' +
@@ -3999,7 +4038,7 @@
         scrollWheelZoom: true,
         attributionControl: true
       });
-      var layer = window.L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+      var layer = window.L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", { referrerPolicy: "strict-origin-when-cross-origin",
         maxZoom: 19,
         attribution: "&copy; OpenStreetMap"
       }).addTo(map);
@@ -5966,14 +6005,27 @@
     var m = (p && p.meter) || {};
     var ms = String(m.status || "").toLowerCase();
     if (payRecOk(p.final)) return "paid";
-    if (p.paidOther || ms === "paid_other") return "paid_other";
-    if (String(p.payMethod || "").toLowerCase() === "cash" || String(p.paidVia || "").toLowerCase() === "cash") return "paid_other"; /* v77.10: cash = collected by the driver */
+    if (ms === "invoice_pending") return "invoice_pending"; /* v77.26 */
+    if (p.paidOther || ms === "paid_other" || ms === "unverified") return payOtherVerdict(p); /* v77.26: cash by the driver / God override only */
     if (ms === "paid") return "paid";
     if (ms === "running") return "running";
     return "unpaid"; /* ended (waiting for the QR payment) or finished unpaid */
   }
+  /* v77.26 (pure, tested): a "paid another way" record counts as PAID only for cash collected by the driver
+     (paidOther.driverId set, not cleared in God) or a God cash clear WITH a reason; Square invoice records come from Square
+     (invoice_sync). Zelle / Venmo / card machine / other -> "unverified". Tests ($0 rate comparison) and waived stay as is. */
+  function payOtherVerdict(p) {
+    var o = (p && p.paidOther) || {}, m = String(o.method || p.paidVia || "").toLowerCase();
+    if (m === "test" || m === "waived") return "paid_other";
+    if (m === "square_invoice") return String(p.invoiceStatus || "PAID").toUpperCase() === "PAID" ? "paid_other" : "invoice_pending";
+    if (m === "cash" && o.clearedInGod) return String(o.reason || (p.godCleared && p.godCleared.reason) || "").trim() ? "paid_other" : "unverified";
+    if (m === "cash" && (o.driverId || p.paidOtherByDriverId)) return "paid_other";
+    return "unverified";
+  }
   function meterPayWord(ps, via) {
     ps = String(ps || "").toLowerCase();
+    if (ps === "invoice_pending") return "Invoice sent, waiting on Square";
+    if (ps === "unverified") return "Unverified" + (via ? " (" + String(via).replace("_", " ") + ")" : "") + ": not paid until Square or cash confirms";
     if (ps === "charged") return "Paid (Square)";
     if (ps === "paid_other" && String(via || "") === "test") return "Rate comparison ($0)"; /* v72x.1; v73 label */
     if (ps === "paid_other") return "Paid another way" + (via ? " (" + String(via).replace("_", " ") + ")" : "");
@@ -6002,7 +6054,7 @@
           '<span style="color:#ff8a8a">' + (finished ? "Driver finished without payment" : "Waiting for the rider to pay (QR)") + "</span><br>" +
           /* v75m: clear this ride */
           '<select class="meter-clear-sel" data-code="' + esc(p.code) + '" style="margin-top:6px;padding:8px;font-size:15px">' +
-            '<option value="">Clear this ride…</option><option value="cash">Paid in cash</option><option value="other">Paid another way</option>' +
+            '<option value="">Clear this ride…</option><option value="cash">Paid in cash</option><option value="other">Rider says paid another way (unverified)</option>' +
             '<option value="waived">Waive it (no charge)</option><option value="link">Send rider a pay link</option><option value="test">Dismiss as test ride</option></select> ' +
           '<button type="button" class="btn meter-clear-apply" data-code="' + esc(p.code) + '" style="margin-top:6px">Apply</button>' +
           '<span class="meter-clear-link" data-code="' + esc(p.code) + '"></span></p>';
@@ -6021,6 +6073,7 @@
     if (Number(m.tollCents) > 0) lines.push("<strong>" + esc(m.tollLabel || (m.tollKind === "road_fee" ? "Toll road fee" : "Tolls")) + "</strong> " + esc(fmtCents(m.tollCents)) +
       (m.tollKind === "road_fee" ? " (fare income, in the split)" : " (paid back 100% to the driver)") + " · in the fare above"); /* v76b */
     if (st === "running") lines.push('<span style="color:#f0d48a">Ride in progress</span>');
+    else if (st === "unverified" || st === "invoice_pending") lines.push('<span style="color:#ffc96b"><strong>' + esc(meterPayWord(st, (p.paidOther || {}).method || p.paidVia)) + "</strong></span>");
     else if (st === "paid_other") {
       var o = p.paidOther || {};
       lines.push('<span style="color:#ffc96b">Paid another way · ' + esc(String(o.method || "other").replace("_", " ")) + " · " + esc(fmtCents(o.amountCents)) +
@@ -6303,7 +6356,7 @@
   }
 
   /* v75m: clear an unpaid metered ride from God mode. Records who/how/when; never deletes. Writes only under /rides/. */
-  var METER_CLEAR_WORD = { cash: "Paid in cash", other: "Paid another way", waived: "Waive it (no charge)", test: "Dismiss as test ride" };
+  var METER_CLEAR_WORD = { cash: "Paid in cash (God override)", other: "Unverified (paid another way)", waived: "Waive it (no charge)", test: "Dismiss as test ride" };
   function meterClearLinkUrl(code) {
     var p = (state.payments || {})[code] || {};
     var rr = payRideOf(code) || {};
@@ -6335,12 +6388,16 @@
     var fare = Number(m.fareTotal) || 0;
     var now = Date.now(), who = godWho();
     var amount = how === "waived" || how === "test" ? 0 : fare;
-    var cleared = { at: now, how: how, label: METER_CLEAR_WORD[how], by: who, fareCents: fare };
-    var ridePatch = { paymentStatus: "paid_other", paidVia: how, paidOtherCents: amount, tipCents: 0, paidAt: now,
+    var reason = "";
+    if (how === "cash") { reason = String(window.prompt("Cash override: type the reason (it is logged). Cash normally comes from the driver's Cash collected tap.", "") || "").trim();
+      if (reason.length < 3) { setPayNotice(code + ": cash not recorded. A reason is required."); return Promise.resolve(); } }
+    var cleared = { at: now, how: how, label: METER_CLEAR_WORD[how], by: who, fareCents: fare, reason: reason || null };
+    var stV = how === "other" ? "unverified" : "paid_other"; /* v77.26 */
+    var ridePatch = { paymentStatus: stV, paidVia: how, paidOtherCents: amount, tipCents: 0, paidAt: now,
       paidOtherBy: who, godCleared: cleared, updatedAt: now };
     if (how === "test") ridePatch.isTest = true;
-    var idxPatch = { paymentStatus: "paid_other", updatedAt: now, godCleared: cleared,
-      paidOther: { at: now, method: how, amountCents: amount, tipCents: 0, by: who, clearedInGod: true, fareTotal: fare } };
+    var idxPatch = { paymentStatus: stV, updatedAt: now, godCleared: cleared,
+      paidOther: { at: now, method: how, amountCents: amount, tipCents: 0, by: who, clearedInGod: true, reason: reason || null, fareTotal: fare } };
     var j = function (o) { return { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(o) }; };
     return godFetch(rideUrl(code), j(ridePatch)).then(function (res) {
       if (!res.ok) throw new Error("ride " + res.status);
@@ -6348,7 +6405,7 @@
     }).then(function (res) {
       if (!res.ok) throw new Error("payments " + res.status);
       var cur = state.payments[code] || {};
-      state.payments[code] = Object.assign({}, cur, idxPatch, { meter: Object.assign({}, cur.meter || {}, { status: "paid_other" }) });
+      state.payments[code] = Object.assign({}, cur, idxPatch, { meter: Object.assign({}, cur.meter || {}, { status: stV }) });
       setPayNotice(code + ": " + METER_CLEAR_WORD[how] + " (cleared by " + who + ").");
     }).catch(function (err) {
       setPayNotice("Couldn't clear " + code + ": " + ((err && err.message) || "error") + ". Nothing changed; try again.");
@@ -6573,6 +6630,10 @@
         ".map-hint{max-width:min(240px,calc(100% - 24px))!important;font-size:10.5px!important;padding:4px 7px!important;opacity:.85;left:8px!important;bottom:22px!important}";
       document.head.appendChild(st);
     } catch (e) {}
+    document.addEventListener("click", function (ev) { /* v77.23 r1b Texts ON/OFF pill */
+      var sb = ev.target && ev.target.closest ? ev.target.closest("[data-sms-phone]") : null;
+      if (!sb || sb.disabled) return; ev.preventDefault(); ev.stopPropagation(); smscToggle(sb);
+    });
     document.addEventListener("click", function (ev) { /* v77.15 Paid/Unpaid pill */
       var pb = ev.target && ev.target.closest ? ev.target.closest("[data-paid-toggle]") : null;
       if (!pb || pb.disabled) return; ev.preventDefault(); ev.stopPropagation(); paidToggle(pb.getAttribute("data-paid-toggle"), pb);
@@ -6846,12 +6907,70 @@
     if (!n || !/[a-z]/.test(n)) return "";
     return n.split(" ").join("_").slice(0, 80);
   }
+  /* v77.21 (Matthew 10/21 "first AND last name always"): the client's FULL name for a card, in this order:
+     1) the Square invoice customer on the card (sqInvoice.customer), 2) the pickup contact ("Vincent Anzelone PTS's Home, ..."),
+     3) a "Name:" / "Client:" line in the notes, 4) the title only when it already holds a first and last name.
+     A short title name alone ("Pick up Vincent") never names a client. Pure (tested); same code in God mode and the Worker. */
+  function clientFull(s) { /* pure: "First Last" (2+ words, letters) or "" */
+    var n = String(s == null ? "" : s).replace(/[\u2018\u2019\u02bc`]/g, "'").replace(/\s+/g, " ").trim();
+    if (!/^[A-Za-z\u00c0-\u024f][A-Za-z\u00c0-\u024f.'-]*(?: [A-Za-z\u00c0-\u024f][A-Za-z\u00c0-\u024f.'-]*){1,3}$/.test(n)) return "";
+    return n;
+  }
+  function clientFullName(row) { /* pure (tested) */
+    if (!row || typeof row !== "object") return clientFull(clientNameOf(row));
+    var sq = row.sqInvoice && typeof row.sqInvoice === "object" ? row.sqInvoice : {};
+    var a = clientFull(sq.customer); if (a) return a;
+    var pm = /^\s*([^,]+?)\s+(?:PTS|PCS)?\s*['\u2018\u2019]s\s+(?:home|house|work|office)\b/i.exec(String(row.pickup || "").replace(/\u2019/g, "'"));
+    if (!pm) pm = /^\s*([^,]+?)\s+(?:PTS|PCS)['\u2018\u2019]s\b/i.exec(String(row.pickup || ""));
+    a = pm ? clientFull(pm[1].replace(/\s+(?:PTS|PCS)$/i, "")) : ""; if (a) return a;
+    var nm = /(?:^|\n)\s*(?:name|client|rider|passenger)\s*:\s*([^\n]+)/i.exec(String(row.description || row.notes || ""));
+    a = nm ? clientFull(nm[1]) : ""; if (a) return a;
+    return clientFull(clientNameOf(row.rider || row.title));
+  }
+  function clientRowKeys(row) { /* pure (tested): [full-name key, short title key (alias)] without repeats */
+    var out = [], add = function (k) { if (k && out.indexOf(k) < 0) out.push(k); };
+    add(clientKey(clientFullName(row)));
+    if (row && typeof row === "object") add(clientKey(row.rider || row.title)); else add(clientKey(row));
+    return out;
+  }
+  function clientDirFind(dir, keys) { /* pure (tested): entry by key, else an entry that lists the key as an alias (old short entries) */
+    if (!dir || typeof dir !== "object") return null;
+    var has = function (k) { return Object.prototype.hasOwnProperty.call(dir, k); }, i, k;
+    for (i = 0; i < keys.length; i++) if (has(keys[i]) && dir[keys[i]]) return { key: keys[i], c: dir[keys[i]] };
+    for (i = 0; i < keys.length; i++) { /* v77.21 r2 (Harry M2): an alias two entries share is ambiguous -> no match (no auto phone) */
+      var hits = [];
+      for (k in dir) if (has(k) && dir[k] && Array.isArray(dir[k].aliases) && dir[k].aliases.indexOf(keys[i]) >= 0) hits.push(k);
+      if (hits.length === 1) return { key: hits[0], c: dir[hits[0]] };
+      if (hits.length > 1) return null;
+    }
+    return null;
+  }
+  /* pure (tested): God-mode load migration. A one-word entry ("vincent") whose cards all give ONE full name starting with that
+     same first name ("Vincent Anzelone") is renamed; the old key stays as an alias so its phone keeps matching. "Ted" vs a
+     "Teddy Payz" pickup is not the same first name, so it is left for Matthew. */
+  function clientMigrations(dir, rows) {
+    var out = [];
+    var CONFIRMED = { ted: "Teddy Payz" }; /* v77.21 delta (Matthew 10/21): short entries whose full name Matthew confirmed */
+    Object.keys(dir || {}).forEach(function (k) {
+      var c = dir[k] || {}; if (k.indexOf("_") >= 0) return;
+      var fulls = {};
+      (rows || []).forEach(function (r) {
+        if (!r || clientKey(r.rider || r.title) !== k) return;
+        var f = clientFullName(r), fk = clientKey(f);
+        if (fk && fk !== k && fk.split("_")[0] === k) fulls[fk] = f;
+      });
+      if (Object.prototype.hasOwnProperty.call(CONFIRMED, k)) { fulls = {}; fulls[clientKey(CONFIRMED[k])] = CONFIRMED[k]; } /* Matthew confirmed */
+      var fk = Object.keys(fulls); if (fk.length !== 1 || (dir && Object.prototype.hasOwnProperty.call(dir, fk[0]))) return;
+      out.push({ name: fulls[fk[0]], phone: c.phone, src: c.src || "god", renameFrom: k });
+    });
+    return out.slice(0, 50);
+  }
   /* pure (tested): saved number for this name: the directory first, then an app booking (rider account) with the same name */
-  function clientPhoneFor(name, dir, appRides) {
-    var k = clientKey(name); if (!k) return null;
-    var c = dir && dir[k]; if (c && cphNorm(c.phone)) return { phone: cphNorm(c.phone), src: "saved" };
+  function clientPhoneFor(name, dir, appRides) { /* v77.21: name may be a card (full name first, short title key as alias) */
+    var keys = clientRowKeys(name); if (!keys.length) return null;
+    var f = clientDirFind(dir, keys), c = f && f.c; if (c && cphNorm(c.phone)) return { phone: cphNorm(c.phone), src: "saved" };
     var hit = null;
-    (appRides || []).forEach(function (r) { if (!hit && r && clientKey(r.name || r.riderName) === k && cphNorm(r.phone)) hit = cphNorm(r.phone); });
+    (appRides || []).forEach(function (r) { if (!hit && r && keys.indexOf(clientKey(r.name || r.riderName)) >= 0 && cphNorm(r.phone)) hit = cphNorm(r.phone); });
     return hit ? { phone: hit, src: "app" } : null;
   }
   /* pure (tested): God-typed card phones the directory doesn't have yet (newest per client); never replaces a saved number */
@@ -6859,22 +6978,30 @@
     var best = {};
     (rows || []).forEach(function (r) {
       if (!r || r.riderPhoneEdited !== true || r.riderPhoneSrc !== "god") return;
-      var p = cphNorm(r.riderPhone), k = clientKey(r.rider || r.title); if (!p || !k || (dir && dir[k])) return;
-      var at = Number(r.riderPhoneAt) || 0; if (!best[k] || at > best[k].at) best[k] = { name: r.rider || r.title, phone: p, at: at };
+      var full = clientFullName(r), p = cphNorm(r.riderPhone), k = clientKey(full); if (!p || !k || clientDirFind(dir, clientRowKeys(r))) return; /* v77.21: full name only */
+      var al = clientKey(r.rider || r.title), at = Number(r.riderPhoneAt) || 0;
+      if (!best[k] || at > best[k].at) best[k] = { name: full, phone: p, at: at, alias: al && al !== k ? al : "" };
     });
-    return Object.keys(best).slice(0, 50).map(function (k) { return { name: best[k].name, phone: best[k].phone, src: "card", onlyIfMissing: true }; });
+    return Object.keys(best).slice(0, 50).map(function (k) { var it = { name: best[k].name, phone: best[k].phone, src: "card", onlyIfMissing: true }; if (best[k].alias) it.alias = best[k].alias; return it; });
+  }
+  function clientWorkerOk(v) { /* pure (tested): Worker understands renameFrom / alias (v77.21+) */
+    var m = /^v?(\d+)\.(\d+)/.exec(String(v || "")); if (!m) return false;
+    var a = Number(m[1]), b = Number(m[2]); return a > 77 || (a === 77 && b >= 21);
   }
   function clientsLoad() {
     state.clients = state.clients || {};
     return atxPost("/god/clients/list", {}).then(function (d) {
       state.clients = d.clients || {}; state.clientsErr = "";
-      if (!state.clientsSeeded) { state.clientsSeeded = true; var items = clientSeedItems(state.calendar, state.clients);
+      if (!state.clientsSeeded) { state.clientsSeeded = true; var items = (clientWorkerOk(d.version) ? clientMigrations(state.clients, state.calendar) : []).concat(clientSeedItems(state.calendar, state.clients)).slice(0, 50); /* v77.21; r2 (Harry L1): migrations only to a v77.21+ Worker */
         if (items.length) return atxPost("/god/clients/put", { items: items }).then(function (d2) { state.clients = d2.clients || state.clients; }).catch(function () {}); }
-    }).catch(function (e) { state.clientsErr = String(e && e.message || e); }).then(function () { renderBoardLists(); });
+    }).catch(function (e) { state.clientsErr = String(e && e.message || e); }).then(function () { renderBoardLists(); return smscLoad(); }); /* v77.23 r1b */
   }
-  function clientRemember(name, phone) { /* after a phone is saved on a card / Add ride */
-    var p = cphNorm(phone); if (!p || !clientKey(name)) return Promise.resolve();
-    return atxPost("/god/clients/put", { name: name, phone: p, src: "god" }).then(function (d) { state.clients = d.clients || state.clients; }).catch(function () {});
+  function clientRemember(name, phone) { /* after a phone is saved on a card / Add ride; v77.21: name may be the card */
+    var full = clientFullName(name), p = cphNorm(phone), al = typeof name === "object" ? clientKey(name.rider || name.title) : "";
+    if (p && !clientKey(full)) { state.boardNotice = "Phone saved on this ride only. Client phones needs the client's first and last name."; return Promise.resolve(); } /* r2 (Harry L4) */
+    if (!p) return Promise.resolve(); /* never a short title name alone */
+    var it = { name: full, phone: p, src: "god" }; if (al && al !== clientKey(full)) it.alias = al;
+    return atxPost("/god/clients/put", it).then(function (d) { state.clients = d.clients || state.clients; }).catch(function () {});
   }
   function clientsPanelHtml() {
     var dir = state.clients || {}, keys = Object.keys(dir).sort(), big = ' style="font-size:18px;min-height:44px;width:200px"';
@@ -6882,12 +7009,13 @@
       '<p class="fine">Saved once, used on every future ride for that client. A phone already on a ride is never replaced.</p>' +
       (state.clientsErr ? '<p class="error" role="alert">' + esc(state.clientsErr) + "</p>" : "") +
       keys.map(function (k) { var c = dir[k] || {};
-        return '<div class="card" style="padding:6px 8px;margin:4px 0"><b>' + esc(c.name || k) + '</b> <span class="fine">' + esc(c.src === "card" ? "from a ride" : "saved in God mode") + "</span><br>" +
+        var cp = typeof smscPillHtml === "function" ? cphNorm(c.phone) : ""; /* v77.23 r1b */
+        return '<div class="card" style="padding:6px 8px;margin:4px 0"><b>' + esc(c.name || k) + '</b> ' + (cp ? smscPillHtml(cp, c.name || k) : "") + ' <span class="fine">' + esc(c.src === "card" ? "from a ride" : "saved in God mode") + "</span>" + (cp ? '<br><span class="fine">' + esc(smscWhy(state.smsc && state.smsc[cp])) + "</span>" : "") + "<br>" +
           '<input id="cl-' + esc(k) + '" type="tel" inputmode="tel" autocomplete="off" value="' + esc(cphShow(c.phone)) + '"' + big + "> " +
           '<button type="button" class="btn btn-gold btn-cl-save" data-cl-key="' + esc(k) + '" data-cl-name="' + esc(c.name || k) + '" style="min-height:44px">Save</button> ' +
           '<button type="button" class="btn btn-cl-del" data-cl-key="' + esc(k) + '" data-cl-name="' + esc(c.name || k) + '" style="min-height:44px">Remove</button></div>';
       }).join("") +
-      '<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px"><input id="cl-new-name" placeholder="Client name"' + big + '><input id="cl-new-phone" type="tel" inputmode="tel" placeholder="936-555-1212"' + big + '><button type="button" class="btn btn-gold btn-cl-add" style="min-height:44px">Add client</button></div></details>';
+      '<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px"><input id="cl-new-name" placeholder="First and last name"' + big + '><input id="cl-new-phone" type="tel" inputmode="tel" placeholder="936-555-1212"' + big + '><button type="button" class="btn btn-gold btn-cl-add" style="min-height:44px">Add client</button></div></details>';
   }
   function clientsWire() {
     if (clientsWire.done || typeof document === "undefined") return; clientsWire.done = true;
@@ -6895,24 +7023,62 @@
     document.addEventListener("click", function (e) {
       var t = e.target && e.target.closest ? e.target.closest(".btn-cl-save,.btn-cl-del,.btn-cl-add") : null; if (!t) return;
       var name, phone;
-      if (t.classList.contains("btn-cl-add")) { name = (document.getElementById("cl-new-name") || {}).value || ""; phone = (document.getElementById("cl-new-phone") || {}).value || ""; if (!clientKey(name)) { state.clientsErr = "Enter the client's name."; renderBoardLists(); return; } }
+      if (t.classList.contains("btn-cl-add")) { name = (document.getElementById("cl-new-name") || {}).value || ""; phone = (document.getElementById("cl-new-phone") || {}).value || ""; if (!clientFull(name)) { state.clientsErr = "Enter the client's first and last name."; renderBoardLists(); return; } }
       else { name = t.getAttribute("data-cl-name"); phone = t.classList.contains("btn-cl-del") ? "" : ((document.getElementById("cl-" + t.getAttribute("data-cl-key")) || {}).value || ""); }
       if (phone && cphNorm(phone) === null) { state.clientsErr = "Enter a 10-digit US phone, like 936-555-1212."; renderBoardLists(); return; }
       atxPost("/god/clients/put", { name: name, phone: phone ? cphNorm(phone) : "", src: "god" }).then(function (d) { state.clients = d.clients || {}; state.clientsErr = ""; state.boardNotice = phone ? "Saved " + clientNameOf(name) + "'s phone for future rides." : "Removed " + clientNameOf(name) + " from Client phones."; })
         .catch(function (er) { state.clientsErr = String(er && er.message || er); }).then(function () { renderBoardLists(); });
     });
   }
+  /* v77.23 r1b (Matthew 10/21): "Client agreed to texts" switch. The Worker's per-phone record is the truth; never stored on rides,
+     so calendar sync can't overwrite it. Same size as the Assigned pill. Never overrides an SMS STOP. */
+  function smscPhoneOf(r) { var p = cphNorm(r && r.riderPhone); if (p) return p; var f = r ? clientPhoneFor(r, state.clients, state.rides) : null; return f && f.phone ? f.phone : ""; }
+  function smscAsk(name) { return "Did " + String(name || "this client").replace(/\?/g, "").slice(0, 80) + " agree to receive ride update texts from Private Car Services? (Reply STOP to opt out, HELP for help, msg & data rates may apply)"; } /* pure (tested) */
+  function smscWhen(ms) { try { return new Date(ms).toLocaleDateString("en-US", { timeZone: "America/Chicago", month: "numeric", day: "numeric", year: "numeric" }); } catch (e) { return ""; } }
+  function smscWhy(v) { /* pure (tested): consent view line */
+    if (!v) return "Texts: checking\u2026";
+    if (v.optIn) return "Texts ON: " + (v.source === "god_verbal" ? (v.how === "written" ? "agreed in writing" : "agreed by phone") + ", recorded by " + (v.by || "God mode") : v.source === "sms-start" ? "client texted START" : "checked the box (" + (v.source || "web") + ")") + (v.at ? " on " + smscWhen(v.at) : "") + ".";
+    return "Texts OFF: " + (v.why || "No consent on file.");
+  }
+  function smscPillHtml(phone, name) {
+    if (!phone) return "";
+    var v = state.smsc && state.smsc[phone], on = !!(v && v.optIn);
+    return '<button type="button" class="badge pcs-paid-pill pcs-sms-pill ' + (on ? "is-paid" : "is-unpaid") + '" data-sms-phone="' + esc(phone) + '" data-sms-name="' + esc(name || "") + '" aria-pressed="' + (on ? "true" : "false") + '" title="' + esc(smscWhy(v)) + '" aria-label="' + esc(smscWhy(v)) + ' Tap to change.">' + (on ? "TEXTS ON" : "TEXTS OFF") + "</button>";
+  }
+  function smscLoad() {
+    var ph = {};
+    (state.calendar || []).forEach(function (r) { var p = smscPhoneOf(r); if (p) ph[p] = 1; });
+    Object.keys(state.clients || {}).forEach(function (k) { var p = cphNorm((state.clients[k] || {}).phone); if (p) ph[p] = 1; });
+    var list = Object.keys(ph); if (!list.length) return Promise.resolve();
+    return atxPost("/god/sms/consent/list", { phones: list.slice(0, 300) }).then(function (d) { state.smsc = Object.assign(state.smsc || {}, d.consent || {}); renderBoardLists(); }).catch(function () {});
+  }
+  function smscToggle(btn) {
+    var phone = btn.getAttribute("data-sms-phone"), name = btn.getAttribute("data-sms-name") || "this client", v = state.smsc && state.smsc[phone];
+    var on = !(v && v.optIn), body;
+    if (on) {
+      if (v && v.stop) { window.alert(name + " texted STOP. Only the client can turn texts back on by texting START to (936) 236-4050."); return; }
+      var ask = smscAsk(name); if (!window.confirm(ask)) return;
+      var written = window.confirm("How did " + name + " agree?\nOK = in writing (text or email)\nCancel = by phone (verbal)");
+      body = { phone: phone, optIn: true, how: written ? "written" : "verbal", by: godWho(), text: ask, name: name };
+    } else {
+      if (!window.confirm("Turn ride update texts OFF for " + name + "?")) return;
+      body = { phone: phone, optIn: false, how: "verbal", by: godWho(), name: name };
+    }
+    btn.disabled = true;
+    atxPost("/god/sms/consent/set", body).then(function (d) { state.smsc = state.smsc || {}; state.smsc[phone] = d.consent; state.boardNotice = smscWhy(d.consent).replace(/^Texts/, name + ": texts"); })
+      .catch(function (e) { state.boardNotice = String(e && e.message || e); }).then(function () { renderBoardLists(); });
+  }
   function autoTextPatch(on, now) { return { autoText: on !== false, updatedAt: now }; } /* pure (tested) */
   function cphHtml(r) {
     var id = esc(r.id), on = r.autoText !== false, big = ' style="font-size:18px;min-height:44px;width:220px"';
-    var cphSaved = r.riderPhone ? null : clientPhoneFor(r.rider || r.title, state.clients, state.rides); /* v77.10 */
+    var cphSaved = r.riderPhone ? null : clientPhoneFor(r, state.clients, state.rides); /* v77.10; v77.21 card */
     return cashBoxHtml(r) + godDiscHtml(r) + /* v77.10 */ '<div class="db-cph" style="border:2px solid #0b6b3a;background:#0b3d23;border-radius:10px;padding:8px;margin:6px 0">' +
       '<div style="font-weight:800;margin-bottom:4px">Client phone' + (r.riderPhone ? ' \u2713 <span class="fine">' + esc(cphShow(r.riderPhone)) + (r.riderPhoneSrc === "calendar" ? " \u00b7 from the calendar" : r.riderPhoneSrc === "client" ? " \u00b7 saved for this client" : "") + "</span>" : (cphSaved ? ' <span class="fine">\u00b7 saved for this client: ' + esc(cphShow(cphSaved.phone)) + " (tap Save phone)</span>" : "")) + "</div>" +
       '<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">' +
       '<input id="cph-' + id + '" class="ph-box"' + phAttrs() + 'placeholder="936-555-1212" value="' + esc(phDraftVal("cph-" + r.id, r.riderPhone ? cphShow(r.riderPhone) : cphSaved ? cphShow(cphSaved.phone) : "")) + '"' + big + ">" +
       '<button type="button" class="btn btn-gold btn-cph-save" data-event-id="' + id + '" style="min-height:44px">Save phone</button>' + phPadHtml("cph-" + r.id) +
       '<label style="font-weight:700;font-size:17px;min-height:44px;display:flex;align-items:center;gap:6px"><input type="checkbox" class="cph-auto" data-event-id="' + id + '"' + (on ? " checked" : "") + ' style="width:26px;height:26px"> Auto text the tracking link</label>' +
-      "</div>" + teenHtml(r) + "</div>";
+      "</div>" + teenHtml(r) + (typeof smscPhoneOf === "function" && smscPhoneOf(r) ? '<p class="fine db-smsc-why" style="margin:4px 0 0">' + esc(smscWhy(state.smsc && state.smsc[smscPhoneOf(r)])) + "</p>" : "") + "</div>"; /* v77.23 r1b (L4) */
   }
   function teenHtml(r) { /* v77.5 */
     var id = esc(r.id), teen = r.teenRider === true, big = ' style="font-size:18px;min-height:44px;width:220px"';
@@ -6937,7 +7103,7 @@
     return godFetch(calendarUrl(id), { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(patch) }).then(function (res) {
       if (!res.ok) throw new Error("save"); Object.keys(patch).forEach(function (k) { row[k] = patch[k]; });
       if (msg) state.boardNotice = msg; boardForceRebuild(["cph-", "teenph-", "xph-"].map(function (p) { return p + id; })); /* v77.12 */
-      return (patch.riderPhone ? clientRemember(row.rider || row.title, patch.riderPhone) : Promise.resolve()).then(refresh); /* v77.10 */
+      return (patch.riderPhone ? clientRemember(row, patch.riderPhone) : Promise.resolve()).then(refresh); /* v77.10 */
     }).catch(function () { state.boardNotice = "NOT SAVED: try again."; renderBoardLists(); return false; });
   }
   if (typeof document !== "undefined") { /* v77.12 phone drafts + keypad */
@@ -6952,7 +7118,7 @@
     }, true);
   }
   function atxPost(path, body) {
-    if (!/^\/(?:god\/(?:discounts|payout\/records|ridepct\/list|invoices|roster|charge\/claims|dvir\/reviewed|clients\/list)|disc\/list)$/.test(String(path))) slowKick(); /* v77.15: a Worker write reloads the 60 s lists next refresh */
+    if (!/^\/(?:god\/(?:discounts|payout\/records|ridepct\/list|invoices|roster|charge\/claims|dvir\/reviewed|clients\/list|sms\/consent\/list)|disc\/list)$/.test(String(path))) slowKick(); /* v77.15: a Worker write reloads the 60 s lists next refresh */
     var auth = godWriteAuth(); if (!auth) return Promise.reject(new Error("The God password is needed once on this device."));
     return fetch(PAY_WORKER + path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(Object.assign({}, body || {}, auth)) })
       .then(function (res) { return res.json().catch(function () { return {}; }).then(function (d) { if (!res.ok || !d.ok) throw new Error(d.error || "Server error " + res.status); return d; }); });
@@ -7127,12 +7293,12 @@
     var v = state.tipDrafts && state.tipDrafts[r.id] != null ? state.tipDrafts[r.id] : (Number(r.tipCents) > 0 ? (Number(r.tipCents) / 100).toFixed(2) : "");
     var pv = state.paidDrafts && state.paidDrafts[r.id] != null ? state.paidDrafts[r.id] : (r.paidSquareCents != null ? (r.paidSquareCents / 100).toFixed(2) : "");
     return '<div class="day-tip" style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin:4px 0">' +
-      '<label for="paid-' + esc(r.id) + '">Paid in Square $</label>' +
+      '<label for="paid-' + esc(r.id) + '">Invoice total $ (amount only; paid shows after Square confirms)</label>' +
       '<input id="paid-' + esc(r.id) + '" class="day-paid-in" data-event-id="' + esc(r.id) + '"' + moneyRegAttrs() + ' value="' + esc(pv) + '" style="width:110px">' +
       '<label for="tip-' + esc(r.id) + '">Tip (paid in Square) $</label>' +
       '<input id="tip-' + esc(r.id) + '" class="day-tip-in" data-event-id="' + esc(r.id) + '"' + moneyRegAttrs() + ' value="' + esc(v) + '" style="width:110px">' +
       '<button type="button" class="btn btn-gold btn-save-tip" data-event-id="' + esc(r.id) + '">Save</button>' +
-      (r.paidSquareCents != null ? '<span class="fine" id="paid-saved-' + esc(r.id) + '">Paid ' + esc(fmtCents(r.paidSquareCents)) + " in Square</span>" : "") +
+      (r.paidSquareCents != null ? '<span class="fine" id="paid-saved-' + esc(r.id) + '">Invoice total ' + esc(fmtCents(r.paidSquareCents)) + " (not proof of payment)</span>" : "") +
       '<p class="fine day-paid-pre" id="paid-pre-' + esc(r.id) + '" style="flex-basis:100%;margin:0;font-weight:700">' + esc(paidSquareLine(pv !== "" && isFinite(+pv) ? Math.round(+pv * 100) : null, r.assignedDriverId ? ridePctFor(r) : null)) + "</p>" +
       (Number(r.tipCents) > 0 ? '<span class="fine" id="tip-saved-' + esc(r.id) + '">Saved ' + esc(fmtCents(r.tipCents)) + " card tip</span>" : "") + "</div>";
   }
@@ -7158,7 +7324,7 @@
       }
     }).then(function () {
       if (state.tipDrafts) delete state.tipDrafts[eventId]; if (state.paidDrafts) delete state.paidDrafts[eventId];
-      state.boardNotice = (m.paidCents != null ? "Paid in Square " + fmtCents(m.paidCents) + " (" + paidSquareLine(m.paidCents, pct) + ")" + (row.status === "completed" ? " · commission " + fmtCents(m.commissionCents) : "") + " · " : "") + "Card tip " + fmtCents(cents) + " saved (100% to the driver)";
+      state.boardNotice = (m.paidCents != null ? "Invoice total " + fmtCents(m.paidCents) + " (" + paidSquareLine(m.paidCents, pct) + ")" + (row.status === "completed" ? " · commission " + fmtCents(m.commissionCents) : "") + " · " : "") + "Card tip " + fmtCents(cents) + " saved (100% to the driver)";
       return refresh();
     });
   }
@@ -7328,7 +7494,7 @@
           '<div class="day-card-top">' +
             '<button type="button" class="btn btn-ghost db-card-toggle" data-day-card-toggle="' + esc(r.id) + '" aria-expanded="' + (dbCards[r.id] ? "false" : "true") + '" aria-label="Collapse or expand this ride" style="padding:2px 8px;min-height:0">' + (dbCards[r.id] ? "\u25B6" : "\u25BC") + "</button>" +
             '<p class="day-time">' + esc(fmtBoardWhen(r.start)) + "</p>" +
-            '<span class="pcs-pill-row">' + (st === "canceled" || st === "cancelled" ? "" : paidPillHtml(r)) + badge + "</span>" + /* v77.15 */
+            '<span class="pcs-pill-row">' + (st === "canceled" || st === "cancelled" ? "" : paidPillHtml(r) + (typeof smscPillHtml === "function" ? smscPillHtml(smscPhoneOf(r), clientFullName(r)) : "")) + badge + "</span>" + /* v77.15; v77.23 r1b texts pill */
           "</div>" +
           '<h3 class="day-rider">' + esc(r.rider) + "</h3>" + driverLineHtml(r) + /* v77.10 */
           '<div class="day-card-body"' + (dbCards[r.id] ? ' style="display:none"' : "") + ">" +
@@ -7341,7 +7507,7 @@
           (st !== "completed" && st !== "cancelled" ? '<button type="button" class="btn btn-gold btn-edit-drop" data-event-id="' + esc(r.id) + '" data-field="pick" style="margin:4px 6px 4px 0">' + (r.pickup ? "Change pickup" : "Add pickup") + "</button>" + /* v75t */
             '<button type="button" class="btn btn-gold btn-edit-drop" data-event-id="' + esc(r.id) + '" data-field="drop" style="margin:4px 6px 4px 0">' + (r.dropoff ? "Change drop-off" : "Add drop-off") + "</button>" +
             '<button type="button" class="btn btn-ghost btn-edit-drop" data-event-id="' + esc(r.id) + '" data-field="stop" style="margin:4px 0">Stop…</button>' : "") +
-          (r.prepaid ? '<p class="day-line db-prepaid" style="background:#0b6b3a;color:#fff;font-weight:800;border-radius:8px;padding:4px 8px">\u2713 ' + esc(prepaidLabel(r)) + "</p>" : "") + /* v75v */
+          (r.prepaid ? '<p class="day-line db-prepaid" style="background:' + (paidSquare(r) ? "#0b6b3a" : "#7c4a03") + ';color:#fff;font-weight:800;border-radius:8px;padding:4px 8px">' + (paidSquare(r) ? "\u2713 " : "\u23f3 ") + esc(prepaidLabel(r)) + "</p>" : "") + /* v75v */
           (st !== "cancelled" ? '<button type="button" class="btn btn-ghost btn-prepaid" data-event-id="' + esc(r.id) + '" style="margin:4px 0">' + (r.prepaid ? "Prepaid (Square invoice) \u2713" : "Prepaid (Square invoice)") + "</button>" : "") +
           (r.assignedDriverName
             ? '<p class="day-line"><span>Driver</span> ' + esc(r.assignedDriverName) + "</p>"
@@ -8136,7 +8302,7 @@
         body: JSON.stringify({ kind: "past ride added", at: now, grantedAt: now, by: godWho(), code: row.code, day: f.date, time: f.time, payWeek: past, payMethod: row.payMethod, fare: row.fare,
           reason: "Past ride " + row.code + " on " + f.date + " " + f.time + " (" + row.payMethod + ")" + (owes ? ", driver owes PCS " + fmtCents(owes) : "") }) }).catch(function () {});
     }).then(function () {
-      if (row.riderPhone) clientRemember(row.rider, row.riderPhone); /* v77.10: saved for this client's future rides */
+      if (row.riderPhone) clientRemember(row, row.riderPhone); /* v77.10: saved for this client's future rides; r2 (Harry L4): the card */
       state.addRidePast = "";
       state.addRideDraft = null; state.addRideTouched = {}; state.addRideOpen = false; state.addRideEditId = "";
       var cash = arCollects(row.payMethod);

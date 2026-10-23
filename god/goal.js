@@ -486,7 +486,7 @@
     h += REST(c);
     paint.daysShown = String(c.dLeft == null ? "" : c.dLeft); /* v76j: the Days left box only counts as typed when it really changed */
     app.innerHTML = h; bind(); bindAdj(); updGoalTags(c); numPad(app); syncLine();
-    var qa = document.getElementById("gl-q-amt"); if (qa && paint.focusQ) { qa.focus(); paint.focusQ = false; }
+    paint.focusQ = false; /* v77.25 (Matthew): never refocus the amount box after a repaint; keyboard stays closed after Save */
   }
   /* v75l: everything above the Goals form; re-rendered on each goal keystroke without touching the Goals inputs (keeps the keyboard up) */
   function paintTop() { var top = document.getElementById("gl-top"); if (!top || !D) return; if (snapToday()) save(); var c = calc(); top.innerHTML = topHtml(c); syncLine(); bindTop(); numPad(top); updGoalTags(c); updYtd(c); }
@@ -657,7 +657,7 @@
       var nb = document.getElementById("gl-q-note"), nt = noteClean(nb ? nb.value : ""); /* v77.19: note goes on the ride line (or the tip if no ride) */
       if (a > 0) D.entries[newId(at)] = { date: today(), line: l, amount: Math.round(a * 100) / 100, note: nt, at: at, source: "quick" };
       if (tp > 0 && l !== "exp") D.entries[newId(at + 1)] = { date: today(), line: l, amount: Math.round(tp * 100) / 100, note: a > 0 ? "" : nt, at: at + 1, source: "quick", tip: true };
-      D.lastLine = l; paint.focusQ = true; paint(); save(); };
+      D.lastLine = l; /* v77.25: close the keyboard/9-key pad on Save */ try { kpClose(); if (document.activeElement && document.activeElement.blur) document.activeElement.blur(); } catch (x) {} paint.focusQ = true; paint(); save(); };
     Array.prototype.forEach.call(document.querySelectorAll("#gl-top [data-note]"), function (b) { b.onclick = function () { var k = b.getAttribute("data-note"), e = D.entries[k]; if (!e) return; /* v77.19 */
       var v = typeof prompt === "function" ? prompt("Note for this entry (up to " + NOTE_MAX + " characters):", e.note || "") : null; if (v == null) return; noteSet(D.entries, k, v); paint(); save(); }; });
     Array.prototype.forEach.call(document.querySelectorAll("#gl-top [data-del]"), function (b) { b.onclick = function () { if (confirm("Undo this entry?")) { delete D.entries[b.getAttribute("data-del")]; paint(); save(); } }; });
