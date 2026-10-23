@@ -140,6 +140,26 @@
                                               of the fare without tax. 0 = no tax. (Separate constant from TAX_RATE used by booked rides.) */
   var METER_HOLIDAY_RATE = true;           /* v72x: all 11 federal holidays (pcsHolidayName) = night rate */
   var METER_WORKER = "https://pcs-pay.pcsrides.workers.dev";
+  /* v77.23 (Twilio A2P 30909): express SMS opt-in. The exact wording the rider saw next to the unchecked box. */
+  var SMS_OPTIN_TEXT = "Text me ride updates from Private Car Services (driver on the way, arrival, receipts). Msg frequency varies, about 1-5 per ride. Msg & data rates may apply. Reply STOP to opt out, HELP for help. Help: 936-261-7878. Consent is not a condition of booking. See SMS Terms and Privacy at www.PCSrides.com.";
+  function smsRideOptin(ride, code) {
+    if (!ride || ride.isTest) return;
+    if (state.smsOptIn === true) { smsOptinPost(ride.phone || state.phone, "rider-app-booking", code, ride.smsOptInAt); return; }
+    var a = {}; try { a = JSON.parse(localStorage.getItem("pcs-rider-account") || "null") || {}; } catch (e) { a = {}; }
+    var same = String(a.phone || "").replace(/\D/g, "").slice(-10) === String(ride.phone || "").replace(/\D/g, "").slice(-10);
+    if (a.smsOptIn === true && a.smsOptInText === SMS_OPTIN_TEXT && same) smsOptinPost(ride.phone, "rider-signup", code, a.smsOptInAt); /* the sign-up box, applied to this rider's own first ride */
+  }
+  function smsOptinRecord(optIn, source) { return { smsOptIn: optIn === true, smsOptInAt: Date.now(), smsOptInText: optIn === true ? SMS_OPTIN_TEXT : null, smsOptInSource: source }; }
+  function smsOptinPost(phone, source, code, at) { /* v77.23 r1b: a CHECKED box only (an unchecked box changes nothing); needs the ride code */
+    var d = String(phone || "").replace(/\D/g, ""); if (d.length < 10 || !code) return Promise.resolve(null);
+    try {
+      return fetch(METER_WORKER + "/sms/optin", { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ phone: d, optIn: true, text: SMS_OPTIN_TEXT, source: source, code: code, at: at || Date.now() }) })
+        .then(function (r) { return r.json().catch(function () { return null; }); })
+        .then(function (o) { if (o && o.needsStart) { state.notice = "You texted STOP earlier, so texts stay off. Text START to (936) 236-4050 to turn ride texts back on."; render(); } return o; })
+        .catch(function () { return null; });
+    } catch (e) { return Promise.resolve(null); }
+  }
   var METER_POLL_MS = 5000;                /* "Waiting for payment" check */
   var METER_MAX_ACCURACY_M = 65;           /* GPS fixes worse than this are ignored */
   var METER_JITTER_MI = 0.006;             /* ~10 m: GPS wobble while stopped is not counted */
@@ -3544,9 +3564,9 @@
      where the position jumped is counted as driving time (conservative).
      Records: on-duty segments {s,e} at rides/DRVRHSLG/{driver}/{shiftStart}, driving intervals at .../drive/{start},
      alert events at .../events/{at}, overrides at .../overrides/{at}, rest periods at .../rest/{at}. */
-  var HOS_DEFAULTS = { maxDriveHours: 12, shiftWindowHours: 14, breakAfterDriveHours: 8, breakMinutes: 30, cycleHours: 70, cycleDays: 8, resetHours: 6, restartHours: 34, breakAfterMin: 150, breakMinOnDutyHours: 3 }; /* v76d-pretrip: 6 h off resets Drive + Shift */
+  var HOS_DEFAULTS = { maxDriveHours: 12, shiftWindowHours: 14, breakAfterDriveHours: 8, breakMinutes: 30, cycleHours: 70, cycleDays: 8, resetHours: 6, restartHours: 34, breakAfterMin: 150, breakMinOnDutyHours: 0 }; /* v77.24: 3 h spacing dropped; v76d-pretrip: 6 h off resets Drive + Shift */
   var HOS_BREAK_GAP_MS = 15 * 60000; /* a stop of 15 min+ counts as a break */
-  var HOS_MOVING_MPH = 3;
+  var HOS_MOVING_MPH = 3, HOS_GAP_MPH = 30; /* v77.24 */
   var hosCfg = Object.assign({}, HOS_DEFAULTS);
   var hosWarned = {};
   var hosLastPush = 0, hosDrvPushAt = 0;
@@ -4096,6 +4116,11 @@
     (hosReadHist().brk || []).forEach(add);
     return hosMerge(Object.keys(out).map(function (k) { return out[k]; }).filter(function (x) { return x[1] > x[0]; }));
   }
+  function hosSubtract(a, b) { /* v77.24: intervals in a minus intervals in b */
+    var out = [];
+    a.forEach(function (x) { var segs = [[Number(x[0]), Number(x[1])]]; b.forEach(function (y) { var ys = Number(y[0]), ye = Number(y[1]), nx = []; segs.forEach(function (g) { if (ye <= g[0] || ys >= g[1]) nx.push(g); else { if (ys > g[0]) nx.push([g[0], ys]); if (ye < g[1]) nx.push([ye, g[1]]); } }); segs = nx; }); segs.forEach(function (g) { if (g[1] > g[0]) out.push(g); }); });
+    return out;
+  }
   function hosOverlap2(a, b, from, to) { /* time inside both lists, within [from, to] */
     var t = 0;
     a.forEach(function (x) { b.forEach(function (y) { t += Math.max(0, Math.min(Number(x[1]), Number(y[1]), to) - Math.max(Number(x[0]), Number(y[0]), from)); }); });
@@ -4284,10 +4309,18 @@
     var gap = hosDrvPrev.at ? now - hosDrvPrev.at : 0;
     /* GPS gap (app in background / no fixes): conservative. If the position jumped far enough that the car must have been
        moving (> 0.25 mi and > 3 mph average), the WHOLE gap counts as driving time. */
-    var jumped = false;
+    var jumped = false, dist = 0;
     if (gap > 60000 && isCoord(hosDrvPrev.lat) && isCoord(lat)) {
-      var dist = haversine({ lat: hosDrvPrev.lat, lng: hosDrvPrev.lng }, { lat: lat, lng: lng });
+      dist = haversine({ lat: hosDrvPrev.lat, lng: hosDrvPrev.lng }, { lat: lat, lng: lng });
       jumped = dist > 0.25 && dist / (gap / 3600000) > HOS_MOVING_MPH;
+    }
+    if (jumped && gap > 10 * 60000) { /* v77.24 (Matthew 10/22): long background gap: count only the plausible drive time
+         (straight-line miles at HOS_GAP_MPH, at the start of the gap); the rest is a break the driver confirms */
+      var dms = Math.min(gap, Math.ceil(dist / HOS_GAP_MPH * 3600000)), ds = hosDrvPrev.at, de = ds + dms;
+      a.push([ds, de, 1]); hosWriteDrv(a); if (syncOn()) hosPushDrive([ds, de]);
+      if (now - de >= 60000) { var bl = hosReadBrk(), br = { s: de, e: now, open: false, auto: true, gap: true }; bl[String(de)] = br; hosWriteBrk(bl); try { hosBrkPush(br); } catch (e) {} qd.gapConfirm = { s: de, e: now, ds: ds }; }
+      hosDrvPrev = { at: now, moving: moving, lat: isCoord(lat) ? +lat : null, lng: isCoord(lng) ? +lng : null };
+      return;
     }
     if (jumped || (moving && hosDrvPrev.moving && hosDrvPrev.at && gap <= 60000)) {
       if (last && Math.abs(Number(last[1]) - hosDrvPrev.at) < 1500) last[1] = now; else a.push([hosDrvPrev.at, now]);
@@ -4411,7 +4444,10 @@
       var ms = Math.min(g[1] - g[0], g[2] / HOS_EST_MPH * 3600000);
       if (ms > 0) all.push([g[0], g[0] + ms]);
     });
-    return hosMerge(all.filter(function (x) { return x[0] < now; }));
+    all = hosMerge(all.filter(function (x) { return x[0] < now; }));
+    /* v77.24 (Matthew 10/22): stationary/break time is never driving: cut break intervals out of driving */
+    try { all = hosSubtract(all, hosBreaks(now)); } catch (e) {}
+    return all;
   }
   function hosDutySegs(now) {
     var st = hosShiftStart();
@@ -4519,7 +4555,7 @@
     brkCands.sort(function (a, b) { return a[0] - b[0]; });
     var brkQualEnds = [];
     var brkLastQualBefore = function (t) { var a = dutyStart || 0; brkQualEnds.forEach(function (e) { if (e <= t && e > a) a = e; }); return a; };
-    var brkQual = function (t) { if (!brkNeedOn || !dutyStart) return true; return Number(t) - brkLastQualBefore(Number(t)) >= brkNeedOn; };
+    var brkQual = function (t) { return true; /* v77.24 (Matthew 10/22): any 30+ min break clears the timer; no 3 h spacing */ if (!brkNeedOn || !dutyStart) return true; return Number(t) - brkLastQualBefore(Number(t)) >= brkNeedOn; };
     var qEnd = 0;
     brkCands.forEach(function (cd) {
       if (dutyStart && cd[1] <= dutyStart) return;
@@ -4635,6 +4671,7 @@
         "You've been driving " + hosFmt(h.contMs) + " without a break. Take a 15-minute break when it's safe.</p>" + banner;
     }
     var gpsBad = hosGpsStale();
+    if (qd.gapConfirm) banner = '<div id="hos-gap-confirm" role="alert" style="background:#fef3c7;color:#92400e;font-weight:700;padding:8px 10px;border-radius:8px;margin:6px 0">App was closed ' + esc(fmtClockCt(qd.gapConfirm.ds)) + "\u2013" + esc(fmtClockCt(qd.gapConfirm.e)) + ". Logged " + esc(hosFmt(qd.gapConfirm.s - qd.gapConfirm.ds)) + " driving and a " + esc(hosFmt(qd.gapConfirm.e - qd.gapConfirm.s)) + " break from " + esc(fmtClockCt(qd.gapConfirm.s)) + '. Correct?<br><button class="btn" type="button" id="hos-gap-ok">Yes, break</button> <button class="btn ghost" type="button" id="hos-gap-drove">No, I was driving</button></div>' + banner;
     return '<div id="hos-box">' + hosClocksHtml(h) + '<p class="fine" id="hos-counter" style="background:#20371d;color:#cdeccd;border-radius:8px;padding:3px 8px;margin:0 0 4px">Driving ' + esc(hosFmt(h.driveMs)) + " · on duty " + esc(hosFmt(h.shiftMs)) + " · cycle " + esc(hosFmt(h.cycleMs)) + " used</p>" + banner +
       (gpsBad ? '<p id="gps-health-banner" role="alert" style="background:#b91c1c;color:#fff;font-weight:700;padding:8px 10px;border-radius:8px;margin:6px 0">GPS not reporting for ' +
         esc(String(Math.floor(gpsBad / 60000))) + " min. Set Location for this app to \u201cAlways\u201d (Settings \u203a Privacy \u203a Location Services) and keep the app open, so your driving time and miles are counted.</p>" : "") + "</div>";
@@ -9141,13 +9178,15 @@
   function prepaidOf(r) {
     if (!r || r.prepaid !== true) return null;
     return { invoiceNo: String(r.prepaidInvoiceNo || r.invoiceNo || ""), amountCents: r.prepaidAmountCents != null && isFinite(+r.prepaidAmountCents) ? Math.round(+r.prepaidAmountCents) : (r.amountCents != null ? Math.round(+r.amountCents) : null),
-      taxCents: r.prepaidTaxCents != null && isFinite(+r.prepaidTaxCents) ? Math.round(+r.prepaidTaxCents) : (r.taxCents != null ? Math.round(+r.taxCents) : null) };
+      taxCents: r.prepaidTaxCents != null && isFinite(+r.prepaidTaxCents) ? Math.round(+r.prepaidTaxCents) : (r.taxCents != null ? Math.round(+r.taxCents) : null),
+      squarePaid: !!(r.sqInvoice && (r.sqInvoice.paid === true || String(r.sqInvoice.status || "").toUpperCase() === "PAID")) }; /* v77.26 */
   }
-  function prepaidBadgeText(pp) { return "PAID, Square invoice" + (pp && pp.invoiceNo ? " #" + pp.invoiceNo : ""); }
+  /* v77.26 (Matthew 10/22): an invoice ride is PAID only when Square shows the payment; otherwise "waiting on Square" */
+  function prepaidBadgeText(pp) { return (pp && pp.squarePaid ? "Paid: Square verified, invoice" : "Invoice sent, waiting on Square \u00b7 invoice") + (pp && pp.invoiceNo ? " #" + pp.invoiceNo : ""); }
   function prepaidBadgeHtml(pp, id) {
     if (!pp) return "";
     return '<p class="pcs-prepaid-badge"' + (id ? ' id="' + id + '"' : "") + ' style="margin:6px 0;background:#0b6b3a;color:#fff;border:2px solid #b8f0c8;border-radius:10px;padding:8px 10px;font-size:18px;font-weight:800;text-align:center">\u2713 ' +
-      esc(prepaidBadgeText(pp)) + '<br><span style="font-size:14px;font-weight:700;color:#e8fff0">Balance due $0.00. End ride finishes with zero charge.</span></p>';
+      esc(prepaidBadgeText(pp)) + '<br><span style="font-size:14px;font-weight:700;color:#e8fff0">Nothing to collect from the rider. End ride finishes with zero charge.</span></p>';
   }
   /* fare numbers for the pay week: the invoice amount when PCS typed one, otherwise the meter fare */
   function prepaidWeekNumbers(pp, f, pct) {
@@ -10549,7 +10588,7 @@
         "<p><strong>Pickup:</strong> " + esc(r.pickup || "") + "</p>" +
         (st ? "<p><strong>Stop:</strong> " + esc(st.address) + "</p>" : "") +
         "<p><strong>Drop-off:</strong> " + esc(r.dropoff || "Add it in the ride card") + "</p>" +
-        (r.prepaid ? "<p><strong>Paid:</strong> Square invoice</p>" : r.payMethod === "cash" ? "<p><strong>Cash ride: collect payment at drop-off</strong>" + (r.fareBeforeTax != null ? " ($" + (Number(r.fareBeforeTax) + (Number(r.taxFees) || 0)).toFixed(2) + ")" : "") + "</p>" : "") /* v77.10 */ +
+        (r.prepaid ? "<p><strong>" + esc(prepaidBadgeText(prepaidOf(r))) + "</strong></p>" : r.payMethod === "cash" ? "<p><strong>Cash ride: collect payment at drop-off</strong>" + (r.fareBeforeTax != null ? " ($" + (Number(r.fareBeforeTax) + (Number(r.taxFees) || 0)).toFixed(2) + ")" : "") + "</p>" : "") /* v77.10 */ +
         (r.notes ? "<p><strong>Notes:</strong> " + esc(r.notes) + "</p>" : "") + "</div>" : "") +
       (state.schedMsg && state.schedMsgId === t.id ? '<p class="na-msg" role="status">' + esc(state.schedMsg) + "</p>" : "") +
       '<button type="button" class="na-start" id="sched-arr-start" data-arr="start">Start ride</button>' +
@@ -11121,6 +11160,7 @@
       email: String(account.email || firebaseEmail() || "").toLowerCase(),
       updatedAt: Date.now()
     };
+    if (typeof account.smsOptIn === "boolean") { row.smsOptIn = account.smsOptIn; row.smsOptInAt = account.smsOptInAt || null; row.smsOptInText = account.smsOptInText || null; row.smsOptInSource = account.smsOptInSource || "rider-signup"; } /* v77.23 */
     return authFetch(accountsHubUrl(uid), {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
@@ -11788,6 +11828,7 @@
     var uid = firebaseUid();
     if (uid) remote.riderUid = uid;
     if (firebaseEmail()) remote.riderEmail = firebaseEmail();
+    Object.assign(remote, smsOptinRecord(state.smsOptIn === true, "rider-app-booking")); /* v77.23 express opt-in (false = not opted in) */
     delete remote.pin; /* plaintext PIN stays on the rider device only */
     delete remote.pinHash;
     var pin = state.pin || makeRidePin();
@@ -11807,6 +11848,7 @@
         });
     return pinPromise.then(function (payload) {
       return putRide(code, payload).then(function () {
+        smsRideOptin(payload, code); /* v77.23 r1b: after the ride exists (the Worker checks code + phone) */
         /* TEST rides go on REQUESTS with isTest so owner driver session can see them; listOpenRides hides them from everyone else. */
         var openPromise = putOpenRide(code, Object.assign({}, payload, { status: "pending_owner", isTest: !!payload.isTest }));
         return openPromise.then(function () {
@@ -12527,8 +12569,8 @@
       "</div>" +
       '<div class="group"><p class="group-title">Rider</p>' +
       field("rider-name", "Name", state.name, "required") +
-      field("rider-phone", "Phone", state.phone, 'type="tel" inputmode="tel" required aria-describedby="rider-phone-consent"') +
-      '<p class="sms-consent" id="rider-phone-consent" style="font-size:12px;line-height:1.45;color:#6b7280;margin:6px 0 0">By providing your mobile number, you agree to receive ride update text messages from Private Car Services (Private Taxi Services LLC), such as booking confirmations, driver details, and live tracking links. Message frequency varies by ride. Msg &amp; data rates may apply. Reply STOP to opt out, HELP for help. Consent is not a condition of purchase. See our <a href="policies/#sms" target="_blank" rel="noopener">SMS Terms</a> and <a href="policies/#privacy" target="_blank" rel="noopener">Privacy Policy</a>.</p>' + /* v77.20 A2P opt-in disclosure */
+      field("rider-phone", "Phone", state.phone, 'type="tel" inputmode="tel" required') +
+      '<label class="sms-optin" for="rider-sms-optin" style="display:flex;gap:10px;align-items:flex-start;margin:8px 0 0;font-size:13px;line-height:1.45;font-weight:400;text-transform:none;letter-spacing:normal"><input type="checkbox" id="rider-sms-optin" name="sms-optin" value="yes"' + (state.smsOptIn === true ? " checked" : "") + ' style="width:22px;height:22px;flex:0 0 auto;margin:2px 0 0"><span id="rider-sms-optin-text">Text me ride updates from Private Car Services (driver on the way, arrival, receipts). Msg frequency varies, about 1-5 per ride. Msg &amp; data rates may apply. Reply STOP to opt out, HELP for help. Help: 936-261-7878. Consent is not a condition of booking. See <a href="policies/#sms" target="_blank" rel="noopener">SMS Terms</a> and <a href="policies/#privacy" target="_blank" rel="noopener">Privacy</a> at www.PCSrides.com.</span></label><p class="fine sms-optin-note" style="font-size:12px;margin:4px 0 0">Optional. Leave it unchecked and you can still book; your driver may still call this number about your ride.</p>' + /* v77.23 express opt-in: unchecked by default (only this booking's own tap checks it) */
       "</div>" +
       '<p class="note">Miles round up to the next whole mile. Texas tax is 8.25% and is estimate-only, not a charge.</p>' +
       paymentInfoCopy() +
@@ -12845,6 +12887,7 @@
     if (!ride) return;
     state.name = ride.name || "";
     state.phone = ride.phone || "";
+    state.smsOptIn = ride.smsOptIn === true; /* v77.23: this ride's own recorded choice */
     state.pickupStreet = ride.pickupStreet || "";
     state.pickupCity = ride.pickupCity || "";
     state.pickupState = ride.pickupState || "TX";
@@ -13062,6 +13105,7 @@
     }
     if (ROLE === "customer") {
       rideOut.hasCardOnFile = !!state.hasCardOnFile;
+      rideOut.smsOptIn = state.smsOptIn === true; /* v77.23 */
       if (state.estimateCents) rideOut.estimateCents = state.estimateCents;
       if (state.finalFareCents) {
         rideOut.fareTotal = state.finalFareCents;
@@ -13095,6 +13139,7 @@
   function clearRideFields() {
     state.name = "";
     state.phone = "";
+    state.smsOptIn = false; /* v77.23: every new booking starts unchecked */
     state.pickupStreet = "";
     state.pickupCity = "";
     state.dropStreet = "";
@@ -13457,7 +13502,7 @@
     var landed = t.landedAt && t.landedAt <= (startedAt || Date.now()) ? t.landedAt : (startedAt || Date.now());
     return Math.max(0, mins * 60 - Math.floor(((startedAt || Date.now()) - landed) / 1000));
   }
-  function meterTripEditable(M) { return !M || (!rateOvLocked(M) && M.status !== "paid" && !(M.pay && (M.pay.status === "link_open" || M.pay.status === "paid_other"))); }
+  function meterTripEditable(M) { return !M || (!rateOvLocked(M) && M.status !== "paid" && !(M.pay && (M.pay.status === "link_open" || M.pay.status === "paid_other" || M.pay.status === "unverified" || M.pay.status === "invoice_pending"))); }
   /* v72t (Matthew): ONE Airport toggle on the metered ride: red = No (default), green = Yes (to-airport pricing). */
   function meterTripHtml(M) {
     var t = M ? meterTripOf(M) : meterTripOf({ trip: state.meterTripPending });
@@ -14063,6 +14108,7 @@
     var ps = M.pay && M.pay.status;
     if (ps === "charged") return "paid";
     if (ps === "paid_other") return "paid_other";
+    if (ps === "unverified" || ps === "invoice_pending") return ps; /* v77.26 */
     if (ps === "unpaid_finished") return "unpaid";
     return M.status === "running" ? "running" : "ended";
   }
@@ -14118,6 +14164,7 @@
     state.meterStopPending = null; state.meterEst = null; state.meterDestTarget = "";
     state.meterDestPending = null; state.meterDestEdit = false; state.meterDestQ = ""; state.meterDestList = [];
     state.meter = M;
+    state.meterNoteDraft = null; state.meterNoteMsg = ""; /* v77.22: never carry an old ride's note onto a new ride */
     state.meterOpen = false; /* v70: the meter runs in a compact panel above the map */
     state.meterQrUntil = Date.now() + METER_RIDER_QR_SEC * 1000; /* "Watch your meter" QR for 30 s */
     state.meterConfirmEnd = false;
@@ -14284,13 +14331,15 @@
   function meterFinishPrepaid(M, now) {
     var pp = M.prepaid, inv = pp.invoiceNo || "";
     var wk = prepaidWeekNumbers(pp, M.fare, meterPct(M)); /* v76d */
-    M.pay = { status: "paid_other", method: "square_invoice", amountCents: 0, tipCents: 0, paidAt: now, via: "square_invoice", prepaid: true, invoiceNo: inv, invoiceAmountCents: pp.amountCents };
+    var srP = M.schedId ? prepaidOf(schedFind(M.schedId)) : null, sqPaid = !!((srP && srP.squarePaid) || pp.squarePaid); /* v77.26 */
+    var psP = sqPaid ? "paid_other" : "invoice_pending";
+    M.pay = { status: psP, method: "square_invoice", amountCents: 0, tipCents: 0, paidAt: now, via: "square_invoice", prepaid: true, invoiceNo: inv, invoiceAmountCents: pp.amountCents };
     M.status = "paid";
     meterStopTimers();
-    meterWrite(rideUrl(M.code), "PATCH", { paymentStatus: "paid_other", paidVia: "square_invoice", prepaid: true, prepaidInvoiceNo: inv,
+    meterWrite(rideUrl(M.code), "PATCH", { paymentStatus: psP, paidVia: "square_invoice", prepaid: true, prepaidInvoiceNo: inv, invoiceStatus: sqPaid ? "PAID" : "UNPAID",
       prepaidAmountCents: pp.amountCents, balanceDueCents: 0, paidOtherCents: 0, tipCents: 0, paidAt: now, updatedAt: now });
-    meterIndexPatch(M, "paid_other", { paymentStatus: "paid_other", paidVia: "square_invoice", prepaid: true, prepaidInvoiceNo: inv });
-    meterUpdatePayWeek(M, { paymentStatus: "paid_other", paidVia: "square_invoice", prepaid: true, prepaidInvoiceNo: inv, payMethod: "invoice",
+    meterIndexPatch(M, psP, { paymentStatus: psP, paidVia: "square_invoice", prepaid: true, prepaidInvoiceNo: inv, invoiceStatus: sqPaid ? "PAID" : "UNPAID" });
+    meterUpdatePayWeek(M, { paymentStatus: psP, paidVia: "square_invoice", invoiceStatus: sqPaid ? "PAID" : "UNPAID", prepaid: true, prepaidInvoiceNo: inv, payMethod: "invoice",
       fareSub: wk.fareSub, fareTax: wk.fareTax, fareTotal: wk.fareTotal, commissionCents: wk.commissionCents, meterFareCents: M.fare.total, riderName: M.schedRider || "Prepaid ride" });
     if (M.logDay) { /* day stats follow the invoice numbers */
       var st = readDayStats(M.logDay), old = meterCommissionCents(M.fare, meterPct(M));
@@ -14477,16 +14526,20 @@
   }
   function meterNoteWrite(M, text) { /* the same note on all three records */
     var p = rideNotePatch(text, M.driverName, Date.now());
-    M.rideNote = p.rideNote; meterSave();
     return Promise.all([meterWrite(rideUrl(M.code), "PATCH", p), meterWrite(meterPayUrl(M.code), "PATCH", p), meterWrite(historyUrl(driverPresenceId(), M.code), "PATCH", p)])
-      .then(function (r) { return r.every(Boolean); });
+      .then(function (r) { var ok = r.every(Boolean); if (ok) { M.rideNote = p.rideNote; if (state.meter === M) meterSave(); } return ok; }); /* v77.22 H1: only after all writes succeed */
   }
   function meterNoteFlush(M) { /* at checkout: save a typed note with the payment */
     var d = state.meterNoteDraft;
     if (!M || d == null || rideNoteClean(d) === rideNoteClean(M.rideNote)) return Promise.resolve(true);
     state.meterNoteDraft = null;
-    return meterNoteWrite(M, d);
+    return meterNoteWrite(M, d).then(function (ok) { /* v77.22: a failed save keeps the text and says so */
+      if (!ok && state.meter === M && state.meterNoteDraft == null) { state.meterNoteDraft = d; state.meterNoteMsg = METER_NOTE_FAIL; render(); }
+      return ok;
+    });
   }
+  var METER_NOTE_FAIL = "NOT SAVED. Check the connection and tap Save note again.";
+  function meterNoteUnsaved(M) { var d = state.meterNoteDraft; return !!M && d != null && rideNoteClean(d) !== rideNoteClean(M.rideNote); }
   function meterRegFmt(v) { var dg = String(v == null ? "" : v).replace(/\D/g, "").replace(/^0+/, ""); if (!dg) return ""; if (dg.length > 7) dg = dg.slice(0, 7); return (Number(dg) / 100).toFixed(2); }
   function meterRegKey(cur, k) { var dg = String(cur == null ? "" : cur).replace(/\D/g, "").replace(/^0+/, "");
     if (k === "00") { if (!dg) return meterRegFmt(dg); dg = (dg + "00").slice(0, 7); return meterRegFmt(dg); }
@@ -14520,6 +14573,13 @@
     if (method === "test") amount = 0;
     return { fare: fare, method: method, cash: cash, choice: choice, received: received, amount: amount, tip: tip, change: change };
   }
+  /* v77.26 (pure, tested): only cash collected by the driver marks paid here; card machine / other wait as "unverified"
+     until Square shows the payment (Matthew 10/22). "test" (rate comparison, $0) keeps its old accounting. */
+  function payOtherStatus(method) { return method === "cash" || method === "test" ? "paid_other" : "unverified"; }
+  function paidCashRecord(M, amount, tip, now) {
+    return { paidCash: { by: "driver", driverId: M.driverId || "", driverName: M.driverName || "", method: "cash", cents: amount, tipCents: tip || 0, at: now, rideCode: M.code } };
+  }
+  if (typeof window !== "undefined") window.__pcsPaidRule = { status: payOtherStatus, cash: paidCashRecord, badge: prepaidBadgeText };
   function meterMarkOther() {
     var M = state.meter;
     if (!M || M.status !== "ended" || state.meterBusy) return;
@@ -14541,7 +14601,8 @@
     var received = r.cash ? r.received : null, changeC = r.cash ? r.change : null;
     var save = function () {
       var now = Date.now();
-      M.pay = { status: "paid_other", method: method, amountCents: amount, tipCents: tip, paidAt: now, via: "other",
+      var psO = payOtherStatus(method); /* v77.26 */
+      M.pay = { status: psO, method: method, amountCents: amount, tipCents: tip, paidAt: now, via: "other",
         cashReceivedCents: received, changeCents: changeC };
       state.meterOtherReview = ""; state.meterHighTipOk = false; state.meterTipChoice = "0";
       M.status = "paid";
@@ -14551,13 +14612,14 @@
       meterSave();
       meterStopTimers();
       var cashLines = r.cash ? { fareCashCents: amount, cashTipCents: tip, tipKind: tip > 0 ? "cash" : null } : {}; /* v76d: fare and tip as separate lines */
-      meterWrite(rideUrl(M.code), "PATCH", Object.assign(M.endSaved === false ? meterEndFields(M) : {}, { paymentStatus: "paid_other", paidVia: method, paidOtherCents: amount, tipCents: tip, paidAt: now, /* v76i */
+      meterWrite(rideUrl(M.code), "PATCH", Object.assign(M.endSaved === false ? meterEndFields(M) : {}, { paymentStatus: psO, paidVia: method, paidBy: method === "cash" ? "driver" : null, paidOtherCents: amount, tipCents: tip, paidAt: now, /* v76i */
         cashReceivedCents: received, changeCents: changeC, highTipConfirmed: highTip || null,
         paidOtherBy: M.driverName, paidOtherByDriverId: M.driverId, updatedAt: now }, cashLines));
-      meterIndexPatch(M, "paid_other", { paymentStatus: "paid_other",
-        paidOther: Object.assign({ at: now, method: method, amountCents: amount, tipCents: tip, cashReceivedCents: received, changeCents: changeC, by: M.driverName, driverId: M.driverId, fareTotal: M.fare.total }, cashLines) });
+      meterIndexPatch(M, psO, { paymentStatus: psO,
+        paidOther: Object.assign({ at: now, method: method, paidBy: "driver", amountCents: amount, tipCents: tip, cashReceivedCents: received, changeCents: changeC, by: M.driverName, driverId: M.driverId, fareTotal: M.fare.total }, cashLines) });
       if (method === "test") meterMarkTest(M, now); else
-      meterUpdatePayWeek(M, Object.assign({ tipCents: tip, paymentStatus: "paid_other", paidVia: method, cashReceivedCents: received, changeCents: changeC }, cashLines));
+      if (method === "cash" && M.schedId) schedPatch(M.schedId, paidCashRecord(M, amount, tip, now)); /* v77.26: shows "Paid: cash, collected by <first name>" on the God card */
+      meterUpdatePayWeek(M, Object.assign({ tipCents: tip, paymentStatus: psO, paidVia: method, paidBy: method === "cash" ? "driver" : null, cashReceivedCents: received, changeCents: changeC }, cashLines));
       meterNoteFlush(M); /* v76d */
       render();
     };
@@ -14586,6 +14648,11 @@
     meterWrite(rideUrl(M.code), "PATCH", { paymentStatus: "unpaid", meterUnpaidFinishedAt: now, updatedAt: now });
     meterIndexPatch(M, "unpaid", { paymentStatus: "unpaid", unpaidFinishedAt: now });
     state.driverNotice = "Metered ride " + M.code + " was saved as NOT PAID (" + money(M.fare.total) + "). It shows in red in God mode.";
+    if (meterNoteUnsaved(M)) { /* v77.22: save a typed note before the screen closes */
+      var nd = state.meterNoteDraft, notice = state.driverNotice;
+      meterNoteWrite(M, nd).then(function (ok) { if (!ok) { state.driverNotice = notice + " Your note was NOT SAVED: \"" + rideNoteClean(nd) + "\". Add it in God mode."; render(); } });
+    }
+    state.meterNoteDraft = null; state.meterNoteMsg = "";
     meterClear();
   }
   function meterClear() {
@@ -15050,12 +15117,12 @@
     if (M.status === "running") { state.meterOpen = false; return driverHome(); } /* v70: a running meter lives above the map */
     var P = M.pay || {};
     if (M.status === "paid") {
-      var paidOther = P.status === "paid_other";
+      var paidOther = P.status === "paid_other" || P.status === "unverified", unver = P.status === "unverified"; /* v77.26 */
       if (P.prepaid) return ( /* v75v */
         '<section id="meter-paid">' + meterTestTag(M) +
         '<p class="tag">Ride ' + esc(M.code) + "</p>" +
         prepaidBadgeHtml(M.prepaid, "meter-paid-prepaid") +
-        '<p class="meter-paid" id="meter-paid-amount">Paid by invoice</p>' +
+        '<p class="meter-paid" id="meter-paid-amount">' + (P.status === "invoice_pending" ? "Invoice sent, waiting on Square" : "Paid: Square verified") + "</p>" +
         '<p class="meter-sub" id="meter-paid-detail">Balance due $0.00' + (P.invoiceAmountCents != null ? " \u00b7 your week is credited from " + money(P.invoiceAmountCents) : "") + "</p>" +
         '<p class="fine">Miles and time were kept for the record. A tip from the rider is welcome and stays yours.</p>' +
         '<button class="btn meter-big" type="button" id="meter-done">Done</button>' +
@@ -15063,10 +15130,10 @@
       return (
         '<section id="meter-paid">' + meterTestTag(M) +
         '<p class="tag">Metered ride ' + esc(M.code) + "</p>" +
-        '<p class="meter-paid" id="meter-paid-amount">Paid ' + money(paidOther ? (P.amountCents || 0) + (P.tipCents || 0) : (P.totalCents || 0)) + "</p>" +
+        '<p class="meter-paid" id="meter-paid-amount">' + (unver ? "Recorded, NOT verified: " : P.method === "cash" ? "Paid: cash, collected by you · " : "Paid ") + money(paidOther ? (P.amountCents || 0) + (P.tipCents || 0) : (P.totalCents || 0)) + "</p>" +
         '<p class="meter-sub" id="meter-paid-detail">' +
         (paidOther
-          ? "Paid another way · " + esc(P.method === "card_machine" ? "card machine" : P.method || "other") + " · fare " + money(P.amountCents || 0) + " · tip " + money(P.tipCents || 0) +
+          ? (unver ? "Not paid until Square shows it · " : "Paid another way · ") + esc(P.method === "card_machine" ? "card machine" : P.method || "other") + " · fare " + money(P.amountCents || 0) + " · tip " + money(P.tipCents || 0) +
             (P.cashReceivedCents != null ? " · cash received " + money(P.cashReceivedCents) + " · change " + money(P.changeCents || 0) : "")
           : "Fare " + money(P.fareCents || 0) + (P.tipCents ? " + tip " + money(P.tipCents) : " · no tip")) + "</p>" +
         (P.receiptUrl ? '<p class="fine"><a href="' + esc(P.receiptUrl) + '" target="_blank" rel="noopener" style="color:#f0d48a">Square receipt</a></p>' : "") +
@@ -15654,7 +15721,7 @@
         if (meterPrevMap) { try { meterPrevMap.remove(); } catch (e) {} }
         meterPrevEl = el;
         meterPrevMap = window.L.map(el, { zoomControl: true, scrollWheelZoom: false, attributionControl: true });
-        window.L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom: 19, attribution: "&copy; OpenStreetMap" }).addTo(meterPrevMap);
+        window.L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", { referrerPolicy: "strict-origin-when-cross-origin", maxZoom: 19, attribution: "&copy; OpenStreetMap" }).addTo(meterPrevMap);
         meterPrevLayer = window.L.layerGroup().addTo(meterPrevMap);
       }
       meterPrevLayer.clearLayers();
@@ -15807,7 +15874,7 @@
     on("meter-note-save", function () {
       var M = state.meter, el = document.getElementById("meter-note-paid"); if (!M || !el) return;
       state.meterNoteDraft = null; state.meterNoteMsg = "Saving\u2026"; render();
-      meterNoteWrite(M, el.value).then(function (ok) { state.meterNoteMsg = ok ? "Note saved." : "NOT SAVED. Check the connection and tap Save note again."; if (!ok) state.meterNoteDraft = el.value; render(); });
+      meterNoteWrite(M, el.value).then(function (ok) { state.meterNoteMsg = ok ? "Note saved." : METER_NOTE_FAIL; if (!ok) state.meterNoteDraft = el.value; render(); });
     });
     var hiOk = document.getElementById("meter-hightip-ok");
     if (hiOk) hiOk.addEventListener("change", function () { state.meterHighTipOk = !!hiOk.checked; state.meterError = ""; });
@@ -15852,7 +15919,22 @@
     on("meter-unpaid", function () { state.meterUnpaidAsk = true; render(); });
     on("meter-unpaid-no", function () { state.meterUnpaidAsk = false; render(); });
     on("meter-unpaid-yes", function () { state.meterUnpaidAsk = false; meterFinishUnpaid(); });
-    on("meter-done", function () { state.meterNoteDraft = null; state.meterNoteMsg = ""; meterClear(); }); /* v76d */
+    on("meter-done", function () { /* v76d; v77.22: save an unsaved typed note first; on failure keep it and stay */
+      var M = state.meter, el = document.getElementById("meter-note-paid");
+      if (M && el && el.value !== state.meterNoteDraft && rideNoteClean(el.value) !== rideNoteClean(M.rideNote)) state.meterNoteDraft = el.value;
+      if (!meterNoteUnsaved(M)) { state.meterNoteDraft = null; state.meterNoteMsg = ""; meterClear(); return; }
+      if (state.meterNoteBusy) return;
+      var d = state.meterNoteDraft, gen = state.meterNoteGen = (state.meterNoteGen || 0) + 1; state.meterNoteBusy = true; state.meterNoteMsg = "Saving\u2026"; render();
+      var busyT = setTimeout(function () { if (state.meterNoteBusy && state.meterNoteGen === gen) { state.meterNoteGen = gen + 1; state.meterNoteBusy = false; if (state.meter === M) { state.meterNoteDraft = d; state.meterNoteMsg = METER_NOTE_FAIL; render(); } } }, 20000); /* v77.22 L2: a hung save never locks Done */
+      meterNoteWrite(M, d).then(function (ok) {
+        clearTimeout(busyT);
+        if (state.meterNoteGen !== gen) { if (state.meter === M) render(); return; } /* timed out or superseded: the newer attempt owns the screen */
+        state.meterNoteBusy = false;
+        if (state.meter !== M) return;
+        if (!ok) { state.meterNoteDraft = d; state.meterNoteMsg = METER_NOTE_FAIL; render(); return; }
+        state.meterNoteDraft = null; state.meterNoteMsg = ""; meterClear();
+      });
+    });
     bindMeterDest(); /* v71 */
     if (state.meterRefocus) {
       var el = document.getElementById(state.meterRefocus);
@@ -16450,6 +16532,8 @@
     }
     state.name = val("rider-name");
     state.phone = val("rider-phone");
+    var smsEl = document.getElementById("rider-sms-optin"); /* v77.23 */
+    if (smsEl) state.smsOptIn = !!smsEl.checked;
     var tripEl = document.getElementById("trip-type");
     if (tripEl) state.tripType = tripEl.value || "auto";
     var intlEl = document.getElementById("intl-arrival");
@@ -16465,6 +16549,8 @@
   }
 
   function bind() {
+    var smsOpt = document.getElementById("rider-sms-optin"); /* v77.23: keep the rider's own tap across re-renders */
+    if (smsOpt) smsOpt.addEventListener("change", function () { state.smsOptIn = !!smsOpt.checked; });
     var showLogin = document.getElementById("show-login");
     if (showLogin) {
       showLogin.addEventListener("click", function () {
@@ -18709,7 +18795,7 @@
         scrollWheelZoom: false,
         attributionControl: true
       });
-      var layer = window.L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+      var layer = window.L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", { referrerPolicy: "strict-origin-when-cross-origin",
         maxZoom: 19,
         attribution: "&copy; OpenStreetMap"
       }).addTo(liveMap);
@@ -18756,7 +18842,7 @@
         scrollWheelZoom: false,
         attributionControl: true
       });
-      var layer = window.L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+      var layer = window.L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", { referrerPolicy: "strict-origin-when-cross-origin",
         maxZoom: 19,
         attribution: "&copy; OpenStreetMap"
       }).addTo(liveMap);
@@ -18866,7 +18952,7 @@
         scrollWheelZoom: false,
         attributionControl: true
       });
-      var layer = window.L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+      var layer = window.L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", { referrerPolicy: "strict-origin-when-cross-origin",
         maxZoom: 19,
         attribution: "&copy; OpenStreetMap"
       }).addTo(liveMap);
@@ -19436,7 +19522,7 @@
     try {
       if (qOnBreak() && isFinite(state.hereLat) && isFinite(state.hereLng)) {
         if (!brkMotion.at0) brkMotion.at0 = { lat: +state.hereLat, lng: +state.hereLng };
-        else if (haversine(brkMotion.at0, { lat: +state.hereLat, lng: +state.hereLng }) > 0.093) {
+        else if ((function (dd) { var fr = state.speedAt && Date.now() - state.speedAt <= 20000; return dd > 0.25 || (dd > 0.093 && fr && Number(state.speedMph) > BRK_MOVE_MPH); })(haversine(brkMotion.at0, { lat: +state.hereLat, lng: +state.hereLng }))) { /* v77.24: indoor GPS drift no longer ends Break */
           var prev0 = ""; try { prev0 = localStorage.getItem(qBusyKey() + "-prev") || ""; } catch (e) {}
           brkMotion.at0 = null; qd.brkMsg = "Break ended: you started driving.";
           qSetBreak(false); if (prev0 === "1" && brkLiveRide()) qSetManualBusy(true); /* v73: Available unless a real ride/meter */
@@ -19466,7 +19552,7 @@
   }
   function brkStoppedOk(now) {
     /* no GPS speed at all yet: allow (can't tell); otherwise need 10+ s under 3 mph and a recent fix */
-    if (!brkMotion.lastAt) return true;
+    if (!brkMotion.lastAt || now - brkMotion.lastAt >= 60000) return true; /* v77.24: no fresh GPS (app was in background) = can't tell: allow the tap */
     return !!brkMotion.stillSince && now - brkMotion.stillSince >= BRK_HOLD_MS && now - brkMotion.lastAt < 60000;
   }
   function qSetBreak(on) {
@@ -19478,6 +19564,7 @@
     } catch (e) {}
     qd.lastPub = null;
     try { hosBrkSync(Date.now()); } catch (e) {} /* v72x */
+    if (on) try { var tl = hosReadBrk(); Object.keys(tl).forEach(function (k) { if (tl[k] && tl[k].open) { tl[k].tapped = Date.now(); tl[k].auto = false; hosWriteBrk(tl); hosBrkPush(tl[k]); } }); } catch (e) {} /* v77.24: a tap during an auto-break was merged silently; mark + push it */
     try { publishDriverPresence(); } catch (e) {}
     render();
     try { syncOpenRideAlert(); } catch (e) {}
@@ -19493,7 +19580,7 @@
   function autoBrkKey() { return qBusyKey() + "-autob"; }
   function autoBrkEligible() {
     if (ROLE !== "driver" || !signedIn()) return false;
-    try { if (qOffline() || qOnBreak() || qManualBusy() || qAutoBusy() || !hosShiftStart()) return false; } catch (e) { return false; }
+    try { if (qOffline() || qOnBreak() || qAutoBusy() || !hosShiftStart()) return false; /* v77.24: stationary counts as break even on manual "On a ride" */ } catch (e) { return false; }
     return true;
   }
   function qAutoBreak() {
@@ -19804,6 +19891,8 @@
     }
     if (t.id === "q-set-available") { if (qOffline()) { qSetOffline(false); return; } if (qManualBusy() || qOnBreak()) qSetManualBusy(false); return; }
     if (t.id === "q-set-onride") { if (!qManualBusy() || qOnBreak()) qSetManualBusy(true); return; }
+    if (t.id === "hos-gap-ok") { qd.gapConfirm = null; render(); return; }
+    if (t.id === "hos-gap-drove") { try { var gc = qd.gapConfirm, gl = hosReadBrk(); delete gl[String(gc.s)]; hosWriteBrk(gl); authFetch(databaseURL() + "/rides/DRVRHSLG/" + encodeURIComponent(driverPresenceId()) + "/breaks/" + gc.s + ".json", { method: "DELETE" }).catch(function () {}); var ga = hosReadDrv(); ga.push([gc.s, gc.e, 1]); hosWriteDrv(ga); hosPushDrive([gc.ds, gc.e]); } catch (e) {} qd.gapConfirm = null; render(); return; }
     if (t.id === "q-set-break") { if (!qOnBreak()) { if (brkStoppedOk(Date.now())) { qd.brkMsg = ""; qSetBreak(true); } else { qd.brkMsg = "Pull over and stop to start a break"; render(); } } return; }
     if (t.id === "q-join") {
       qr.join = true;
