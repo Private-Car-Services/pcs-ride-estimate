@@ -304,7 +304,7 @@
   /* v76d: what the card keeps from a Square lookup; "overridden" when Matthew changed the amounts */
   function sqInvoiceRecord(q, patch) {
     var rec = { number: String(q.number || patch.prepaidInvoiceNo || ""), subtotalCents: Math.round(+q.subtotalCents) || 0, taxCents: Math.round(+q.taxCents) || 0, totalCents: Math.round(+q.totalCents) || 0,
-      status: String(q.status || ""), paid: q.paid === true, serviceDate: String(q.serviceDate || ""), source: String(q.source || "square"), fetchedAt: q.fetchedAt || Date.now() };
+      status: String(q.status || ""), paid: q.paid === true, amountDueCents: q.amountDueCents != null && isFinite(+q.amountDueCents) ? Math.max(0, Math.round(+q.amountDueCents)) : null, /* v2.0d.3 r3c: Square amount_due_money */ serviceDate: String(q.serviceDate || ""), source: String(q.source || "square"), fetchedAt: q.fetchedAt || Date.now() };
     rec.overridden = (patch.prepaidAmountCents != null && patch.prepaidAmountCents !== rec.subtotalCents) || (patch.prepaidTaxCents != null && patch.prepaidTaxCents !== rec.taxCents);
     return rec;
   }
@@ -7053,7 +7053,10 @@
     if (p && !clientKey(full)) { state.boardNotice = "Phone saved on this ride only. Client phones needs the client's first and last name."; return Promise.resolve(); } /* r2 (Harry L4) */
     if (!p) return Promise.resolve(); /* never a short title name alone */
     var it = { name: full, phone: p, src: "god" }; if (al && al !== clientKey(full)) it.alias = al;
-    return atxPost("/god/clients/put", it).then(function (d) { state.clients = d.clients || state.clients; }).catch(function () {});
+    return atxPost("/god/clients/put", it).then(function (d) { state.clients = d.clients || state.clients; }).catch(function () { /* v2.0d (Harry): never fail silently */
+      state.boardNotice = "Phone saved on this ride, but saving it to Client phones for " + full + " didn\u2019t finish. Open Client phones and save it again.";
+      try { renderBoardLists(); } catch (e) {}
+    });
   }
   function clientsPanelHtml() {
     var dir = state.clients || {}, keys = Object.keys(dir).sort(), big = ' style="font-size:18px;min-height:44px;width:200px"';
@@ -7527,7 +7530,7 @@
     var dbCards = dbCardSet();
     var cards = rows.map(function (r) {
       var st = r.status || "open";
-      var badge = st === "completed" ? '<span class="db-tag">Done</span>' : st === "assigned" ? "" : '<span class="db-tag db-tag-open">Open</span>'; /* v2.0c: ASSIGNED dropped ("Assigned to" says it) */
+      var badge = st === "completed" ? '<span class="db-tag">Done</span>' : st === "assigned" ? "" : ""; /* v2.0d (Matthew 10/23): no OPEN tag on unassigned rides, "Unassigned" says it; v2.0c: ASSIGNED dropped ("Assigned to" says it) */
       var options = ['<option value="">' + (r.assignedDriverId ? "Unassign (open)" : "Assign driver\u2026") + "</option>"].concat(drivers.map(function (d) {
         var sel = d.id === (state.assignDrafts[r.id] != null ? state.assignDrafts[r.id] : r.assignedDriverId) ? " selected" : ""; /* v73: keep the picked name */
         return '<option value="' + esc(d.id) + '"' + sel + ">" + esc(d.name || d.id) + "</option>";
