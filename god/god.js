@@ -348,6 +348,22 @@
        (c) God mode recorded cash as a logged override WITH a reason (row.paidCashOverride).
      Nothing else marks paid: the Prepaid (Square invoice) box, the old Paid pill tap (paidMark "paid"), a typed
      "Paid in Square $" amount and Zelle / Venmo / other reports are pending or "unverified", never paid. */
+  /* v2.0a (Matthew 10/22): the running meter shows only on rides started as "Metered"; every other ride shows
+     Invoice # (or No invoice) + Paid (green) / Unpaid (red), using paidSource (paid-truth). Pure (tested). */
+  function godMeterShown(p) { var m = (p && p.meter) || {}; return !!(p && (p.meterVisible === true || m.meterVisible === true) && !(p.scheduleId || m.scheduleId)); }
+  function godInvInfo(p) {
+    var m = (p && p.meter) || {}, sid = (p && p.scheduleId) || m.scheduleId || "", row = null;
+    if (sid) (state.calendar || []).forEach(function (r) { if (r && r.id === sid) row = r; });
+    var src = row || p || {}, q = src.sqInvoice && typeof src.sqInvoice === "object" ? src.sqInvoice : null;
+    var no = String(src.prepaidInvoiceNo || src.invoiceNo || (q && (q.invoiceNumber || q.number)) || "").replace(/^#/, "").trim();
+    var paid = paidSource(src).paid;
+    return { label: no ? "Invoice #" + no : "No invoice", paid: paid, word: paid ? "Paid" : "Unpaid" };
+  }
+  function godInvBadgeHtml(i) {
+    return ' <span class="god-inv-badge" style="display:inline-block;font-size:18px;font-weight:900;color:#fff;margin-left:6px">' + esc(i.label) +
+      ' <span class="badge" style="font-size:18px;padding:3px 12px;border-radius:999px;color:#fff;background:' + (i.paid ? "#1b9e4b" : "#d32f2f") + '">' + i.word + "</span></span>";
+  }
+  if (typeof window !== "undefined") window.__pcsGodV20a = { shown: godMeterShown, info: godInvInfo, badge: godInvBadgeHtml };
   function firstName(n) { return String(n || "").trim().split(/\s+/)[0] || "driver"; }
   function paidSource(r) {
     if (!r) return { paid: false, kind: "unpaid", text: "Unpaid" };
@@ -6072,7 +6088,7 @@
     if (m.fareTotal != null) lines.push("<strong>Fare</strong> " + esc(fmtCents(m.fareTotal)));
     if (Number(m.tollCents) > 0) lines.push("<strong>" + esc(m.tollLabel || (m.tollKind === "road_fee" ? "Toll road fee" : "Tolls")) + "</strong> " + esc(fmtCents(m.tollCents)) +
       (m.tollKind === "road_fee" ? " (fare income, in the split)" : " (paid back 100% to the driver)") + " · in the fare above"); /* v76b */
-    if (st === "running") lines.push('<span style="color:#f0d48a">Ride in progress</span>');
+    if (st === "running") lines.push('<span style="color:#f0d48a">Ride in progress</span>' + (godMeterShown(p) ? "" : godInvBadgeHtml(godInvInfo(p)))); /* v2.0a */
     else if (st === "unverified" || st === "invoice_pending") lines.push('<span style="color:#ffc96b"><strong>' + esc(meterPayWord(st, (p.paidOther || {}).method || p.paidVia)) + "</strong></span>");
     else if (st === "paid_other") {
       var o = p.paidOther || {};
@@ -6986,7 +7002,7 @@
   }
   function clientWorkerOk(v) { /* pure (tested): Worker understands renameFrom / alias (v77.21+) */
     var m = /^v?(\d+)\.(\d+)/.exec(String(v || "")); if (!m) return false;
-    var a = Number(m[1]), b = Number(m[2]); return a > 77 || (a === 77 && b >= 21);
+    var a = Number(m[1]), b = Number(m[2]); return (a >= 2 && a < 70) || a > 77 || (a === 77 && b >= 21); /* v2.0a: the v2.x line follows v77.25 */
   }
   function clientsLoad() {
     state.clients = state.clients || {};
