@@ -9183,6 +9183,32 @@
   }
   /* v77.26 (Matthew 10/22): an invoice ride is PAID only when Square shows the payment; otherwise "waiting on Square" */
   function prepaidBadgeText(pp) { return (pp && pp.squarePaid ? "Paid: Square verified, invoice" : "Invoice sent, waiting on Square \u00b7 invoice") + (pp && pp.invoiceNo ? " #" + pp.invoiceNo : ""); }
+  /* v2.0a (Matthew 10/22): the running meter (fare so far / estimate) shows ONLY on a ride started as "Metered" (the v70
+     Metered ride button; real or rate comparison). Every other ride (scheduled / calendar, set fare, invoice, unknown)
+     hides it everywhere and shows the invoice # + Paid (green) / Unpaid (red). Explicit flag; unknown = hidden. Pure (tested). */
+  function meterShown(M) { return !!(M && M.metered === true && !M.schedId); }
+  function rideInvoiceInfo(r, M) {
+    r = r || {}; var pp = M && M.prepaid ? M.prepaid : null, q = r.sqInvoice && typeof r.sqInvoice === "object" ? r.sqInvoice : null;
+    var no = String(r.prepaidInvoiceNo || r.invoiceNo || (q && (q.invoiceNumber || q.number)) || (pp && pp.invoiceNo) || "").replace(/^#/, "").trim();
+    var paid = false, how = "";
+    if (q && (q.paid === true || String(q.status || "").toUpperCase() === "PAID")) { paid = true; how = "square"; }
+    else if (pp && pp.squarePaid) { paid = true; how = "square"; }
+    else { var pc = r.paidCash; if (pc && typeof pc === "object" && pc.by === "driver" && pc.driverId && pc.driverId === r.assignedDriverId) { paid = true; how = "cash"; } }
+    return { invoiceNo: no, label: no ? "Invoice #" + no : "No invoice", paid: paid, how: how, word: paid ? "Paid" : "Unpaid" };
+  }
+  function rideInvoiceSig(i) { return i.label + "|" + i.word; }
+  function rideInvoiceBadgeHtml(i, id) {
+    return '<div class="pcs-inv-badge" id="' + (id || "ride-inv-badge") + '" data-sig="' + esc(rideInvoiceSig(i)) + '" role="status" aria-live="polite" style="text-align:center;margin:8px 0;padding:10px 12px;border-radius:14px;background:#111;border:3px solid ' + (i.paid ? "#1b9e4b" : "#d32f2f") + '">' +
+      '<div class="pcs-inv-no" style="font-size:28px;font-weight:900;color:#fff;line-height:1.15">' + esc(i.label) + "</div>" +
+      '<div class="pcs-inv-paid ' + (i.paid ? "is-paid" : "is-unpaid") + '" style="display:inline-block;margin-top:6px;padding:6px 22px;border-radius:999px;font-size:30px;font-weight:900;letter-spacing:.04em;color:#fff;background:' + (i.paid ? "#1b9e4b" : "#d32f2f") + '">' + i.word + "</div></div>";
+  }
+  function meterInvInfo(M) { return rideInvoiceInfo(M && M.schedId ? schedFind(M.schedId) : null, M); }
+  function meterInvRefresh(M) { /* live: the 15-min Square sync / refreshScheduledRides flips the badge without a re-render */
+    if (typeof document === "undefined" || meterShown(M)) return;
+    var i = meterInvInfo(M);
+    ["meter-inv-badge", "rfs-inv-badge"].forEach(function (id) { var el = document.getElementById(id); if (el && el.getAttribute("data-sig") !== rideInvoiceSig(i)) el.outerHTML = rideInvoiceBadgeHtml(i, id); });
+  }
+  if (typeof window !== "undefined") window.__pcsV20a = { shown: meterShown, info: rideInvoiceInfo, badge: rideInvoiceBadgeHtml };
   function prepaidBadgeHtml(pp, id) {
     if (!pp) return "";
     return '<p class="pcs-prepaid-badge"' + (id ? ' id="' + id + '"' : "") + ' style="margin:6px 0;background:#0b6b3a;color:#fff;border:2px solid #b8f0c8;border-radius:10px;padding:8px 10px;font-size:18px;font-weight:800;text-align:center">\u2713 ' +
@@ -9814,21 +9840,22 @@
   }
   function rfsSig(M) {
     var t = meterTollInfo(M), ed = meterTollEditable(M) && t.on;
-    return [state.meterConfirmEnd ? 1 : 0, ed ? 1 : 0, t.count, t.cents, t.kind, M.prepaid ? 1 : 0, M.tierLabel || "", state.meterBusy ? 1 : 0].join("|");
+    return [state.meterConfirmEnd ? 1 : 0, ed ? 1 : 0, t.count, t.cents, t.kind, M.prepaid ? 1 : 0, M.tierLabel || "", meterShown(M) ? "m" : rideInvoiceSig(meterInvInfo(M)), state.meterBusy ? 1 : 0].join("|");
   }
   function rfsBarHtml(M) {
     var f = meterFare(M), t = meterTollInfo(M), pp = M.prepaid;
-    var html = '<div class="rfs-row"><div class="rfs-fare" id="rfs-fare" aria-label="Meter fare">' + meterMoneyShown(M, f.sub) + "</div>" +
+    var shown = meterShown(M);
+    var html = (shown ? "" : rideInvoiceBadgeHtml(meterInvInfo(M), "rfs-inv-badge")) + '<div class="rfs-row">' + (shown ? '<div class="rfs-fare" id="rfs-fare" aria-label="Meter fare">' + meterMoneyShown(M, f.sub) + "</div>" : "") +
       '<div class="rfs-stats"><span><b id="rfs-miles">' + f.miles.toFixed(2) + "</b> mi</span><span><b id=\"rfs-time\">" + meterClock(Date.now() - M.startedAt) + "</b></span>" +
-      '<span class="rfs-tier" id="rfs-tier">' + esc(M.tierLabel || "Meter") + (M.taxRate ? " \u00b7 tax at the end" : "") + "</span></div></div>";
-    if (pp) html += '<p class="rfs-paid" id="rfs-paid">\u2713 ' + esc(prepaidBadgeText(pp)) + " \u00b7 balance $0.00</p>";
+      (shown ? '<span class="rfs-tier" id="rfs-tier">' + esc(M.tierLabel || "Meter") + (M.taxRate ? " \u00b7 tax at the end" : "") + "</span>" : "") + "</div></div>";
+    if (pp && shown) html += '<p class="rfs-paid" id="rfs-paid">\u2713 ' + esc(prepaidBadgeText(pp)) + " \u00b7 balance $0.00</p>";
     if (meterTollEditable(M) && t.on) {
       html += '<div class="rfs-toll"><button type="button" class="rfs-toll-add" id="rfs-toll-add" data-rfs="toll">+ ' + (t.kind === "road_fee" ? "Toll road fee" : "Toll") + " " + money(METER_TOLL_CENTS) + "</button>" +
         (t.count ? '<button type="button" class="rfs-toll-line" id="rfs-toll-line" data-rfs="tollline" aria-label="' + esc(t.label + " " + money(t.cents) + ". Tap to change the amount") + '">' + esc(t.label) + " <b>" + money(t.cents) + "</b></button>" +
           '<button type="button" class="rfs-toll-undo" id="rfs-toll-undo" data-rfs="tollundo">Undo</button>' : "") + "</div>";
     }
     if (state.meterConfirmEnd) {
-      html += '<p class="rfs-ask" id="rfs-ask">End this ride? ' + (M.prepaid ? invoiceFareText(M.prepaid) : "Meter " + money(f.sub)) + ".</p>" +
+      html += '<p class="rfs-ask" id="rfs-ask">End this ride?' + (M.prepaid ? " " + invoiceFareText(M.prepaid) + "." : shown ? " Meter " + money(f.sub) + "." : "") + "</p>" +
         '<div class="rfs-actions"><button type="button" class="rfs-end" id="rfs-end-yes" data-rfs="endyes">Yes, end ride</button>' +
         '<button type="button" class="rfs-keep" id="rfs-end-keep" data-rfs="endkeep">Keep the meter running</button></div>';
     } else {
@@ -9854,7 +9881,7 @@
     var bar = document.getElementById("rfs-bar"), M = state.meter;
     if (!bar || !M || M.status !== "running") return;
     var f = meterFare(M), set = function (id, v) { var el = document.getElementById(id); if (el && el.textContent !== v) el.textContent = v; };
-    set("rfs-fare", meterMoneyShown(M, f.sub)); set("rfs-miles", f.miles.toFixed(2)); set("rfs-time", meterClock(Date.now() - M.startedAt));
+    if (meterShown(M)) set("rfs-fare", meterMoneyShown(M, f.sub)); else meterInvRefresh(M); set("rfs-miles", f.miles.toFixed(2)); set("rfs-time", meterClock(Date.now() - M.startedAt));
     var h = bar.offsetHeight, stage = rfsStage();
     if (stage && h && stage.__rfsBarH !== h) { stage.__rfsBarH = h; stage.style.setProperty("--rfs-bar", h + "px"); var mp = document.getElementById("fs-mph"); if (mp) mp.style.bottom = (h + 12) + "px"; }
   }
@@ -13508,7 +13535,7 @@
     var t = M ? meterTripOf(M) : meterTripOf({ trip: state.meterTripPending });
     var on = t.kind === "airport-drop";
     if (!meterTripEditable(M)) return '<p class="fine" id="meter-trip-fixed">' + esc(meterTripLabel(t)) + "</p>";
-    var fee = on ? meterAirportLines({ trip: t, tier: M ? M.tier : meterBand(new Date()).key }).lines.map(function (l) { return l.label + " " + money(l.cents); }).join(" \u00b7 ") : "";
+    var fee = on && (!M || meterShown(M)) ? meterAirportLines({ trip: t, tier: M ? M.tier : meterBand(new Date()).key }).lines.map(function (l) { return l.label + " " + money(l.cents); }).join(" \u00b7 ") : "";
     return '<div class="meter-trip" id="meter-trip" style="display:flex;align-items:center;gap:10px;margin:6px 0">' +
       '<span class="meter-route-lbl">Airport</span>' +
       '<button type="button" id="meter-airport-toggle" role="switch" aria-checked="' + on + '" aria-label="Airport trip" style="width:auto;min-height:0;margin:0;padding:8px 18px;border-radius:999px;border:0;font-weight:800;font-size:16px;color:#fff;background:' + (on ? "#2e9d4f" : "#b91c1c") + '">' + (on ? "Yes" : "No") + "</button>" +
@@ -13823,7 +13850,7 @@
     var f = meterFare(M);
     var set = function (id, txt) { var el = document.getElementById(id); if (el && el.textContent !== txt) el.textContent = txt; };
     try { meterEstDomRefresh(); } catch (e) {} /* v72x: never frozen (v72u skipped it forever once "About this estimate" was opened) */
-    set("meter-fare", meterMoneyShown(M, f.sub));
+    if (meterShown(M)) set("meter-fare", meterMoneyShown(M, f.sub)); else meterInvRefresh(M);
     set("meter-miles", f.miles.toFixed(2));
     set("meter-time", meterClock(Date.now() - M.startedAt));
     set("meter-wait", String(f.waitMin));
@@ -13866,8 +13893,8 @@
     var f = meterFare(M);
     var mph = meterMphNow(M);
     var eta = meterEtaInfo(M);
-    var est = null; try { est = meterLiveEst(M); } catch (e) { est = null; }
-    return { miles: f.miles, waitMin: f.waitMin, freeUsed: Number(M.freeUsed) || 0, moved: !!M.moved, fareCents: f.sub, at: Date.now(),
+    var est = null, shown = meterShown(M); try { est = shown ? meterLiveEst(M) : null; } catch (e) { est = null; }
+    return { miles: f.miles, waitMin: f.waitMin, freeUsed: Number(M.freeUsed) || 0, moved: !!M.moved, fareCents: shown ? f.sub : null, meterVisible: shown, at: Date.now(), /* v2.0a */
       gpsOk: !!(M.gpsAt && Date.now() - M.gpsAt <= 30000), mph: mph, mphAt: mph === null ? 0 : Number(M.mphAt) || 0, /* v71: live MPH (null = no fresh GPS) */
       etaMin: eta && !eta.pending ? eta.min : null, etaMiles: eta && !eta.pending ? eta.miles : null, /* v71: ETA numbers */
       /* v73 Share this ride: car + destination for the read-only follow page (the Worker whitelists + rounds them; the
@@ -14069,7 +14096,7 @@
   }
   function meterPutRide(M) {
     var body = {
-      code: M.code, rideType: "metered", metered: true, name: "Metered ride", status: "started",
+      code: M.code, rideType: "metered", metered: true, meterVisible: meterShown(M), scheduleId: M.schedId || null, name: "Metered ride", status: "started", /* v2.0a: the rider page hides the fare unless meterVisible */
       requestedAt: M.startedAt, startedAt: M.startedAt, acceptedAt: M.startedAt, updatedAt: Date.now(),
       driverId: M.driverId, driverUid: firebaseUid() || "", driverName: M.driverName, driverEmail: String(readSession() || "").slice(0, 120),
       meterTrip: meterTripOf(M), tripType: meterTripOf(M).kind, airportCode: meterTripOf(M).kind === "local" ? null : meterTripOf(M).code, internationalArrival: meterTripOf(M).intl,
@@ -14145,6 +14172,7 @@
     var pend = state.meterDestPending; /* v71: optional destination picked on the Start screen */
     if (pend && isCoord(pend.lat) && isCoord(pend.lng)) M.dest = { label: String(pend.label || ""), sub: String(pend.sub || ""), lat: +pend.lat, lng: +pend.lng };
     var sr = meterSetFareRide(state.meterSchedPending); state.meterSchedPending = null; /* v73: set-fare scheduled ride */
+    M.metered = !(sr || state.schedStartId); /* v2.0a: only the Metered ride button shows the meter */
     if (sr) { M.schedId = sr.id; M.setFareCents = Math.round(Number(sr.fareBeforeTax) * 100); M.schedRider = String(sr.rider || ""); }
     else if (state.schedStartId) { var srx = schedFind(state.schedStartId); if (srx) { M.schedId = srx.id; M.schedRider = String(srx.rider || ""); M.pickupAddress = String(srx.pickup || "").slice(0, 160); } } /* v75r: metered scheduled ride */
     state.schedStartId = "";
@@ -14166,7 +14194,7 @@
     state.meter = M;
     state.meterNoteDraft = null; state.meterNoteMsg = ""; /* v77.22: never carry an old ride's note onto a new ride */
     state.meterOpen = false; /* v70: the meter runs in a compact panel above the map */
-    state.meterQrUntil = Date.now() + METER_RIDER_QR_SEC * 1000; /* "Watch your meter" QR for 30 s */
+    state.meterQrUntil = meterShown(M) ? Date.now() + METER_RIDER_QR_SEC * 1000 : 0; /* "Watch your meter" QR for 30 s; v2.0a: metered rides only */
     state.meterConfirmEnd = false;
     state.meterError = "";
     meterSave();
@@ -15201,11 +15229,12 @@
     return (
       '<section id="meter-running" class="meter-panel">' + meterTestTag(M) +
       meterModeHtml(M.tier, M.tierLabel, "meter-mode") +
-      (rateOvLocked(M) ? rateOvBadgeHtml("meter-contract-badge") : '<p class="meter-rates" id="meter-profile">' + esc(M.tierLabel) + " · starts " + money(M.baseCents) + (Number(M.includedMiles) > 0 ? " incl. " + (Number(M.includedMiles) === 1 ? "1st mile" : esc(String(M.includedMiles)) + " mi") : "") +
+      (!meterShown(M) ? "" : rateOvLocked(M) ? rateOvBadgeHtml("meter-contract-badge") : '<p class="meter-rates" id="meter-profile">' + esc(M.tierLabel) + " · starts " + money(M.baseCents) + (Number(M.includedMiles) > 0 ? " incl. " + (Number(M.includedMiles) === 1 ? "1st mile" : esc(String(M.includedMiles)) + " mi") : "") +
         " · " + money(M.perMileCents) + "/mi after · " + money(M.waitCentsPerMin) + "/min under " + esc(String(M.slowMph)) + " mph</p>") +
-      prepaidBadgeHtml(M.prepaid, "meter-prepaid-badge") + /* v75v */
+      (meterShown(M) ? prepaidBadgeHtml(M.prepaid, "meter-prepaid-badge") + /* v75v */
       '<p class="meter-fare" id="meter-fare" aria-live="off">' + meterMoneyShown(M, f.sub) + "</p>" +
-      '<p class="meter-sub">Meter' + (M.minCents > M.baseCents ? " · " + money(M.minCents) + " minimum" : "") + (M.taxRate ? " · tax added at the end" : "") + "</p>" +
+      '<p class="meter-sub">Meter' + (M.minCents > M.baseCents ? " · " + money(M.minCents) + " minimum" : "") + (M.taxRate ? " · tax added at the end" : "") + "</p>"
+        : rideInvoiceBadgeHtml(meterInvInfo(M), "meter-inv-badge")) + /* v2.0a: no fare on a non-metered ride */
       '<div class="meter-grid"><div><b id="meter-miles">' + f.miles.toFixed(2) + "</b><span>Miles</span></div>" +
       '<div><b id="meter-time">' + meterClock(Date.now() - M.startedAt) + "</b><span>Time</span></div>" +
       '<div><b id="meter-wait">' + f.waitMin + "</b><span>Slow min</span></div>" +
@@ -15218,10 +15247,10 @@
       meterTollHtml(M) + /* v76b: + Toll $1.75 */
       (M.schedId ? folDriverBtnHtml("c_" + M.schedId, (schedFind(M.schedId) || {}).riderPhone) : "") + /* v76b: tracking link during the ride */
       (state.meterConfirmEnd
-        ? '<div id="meter-confirm-end"><p class="lede" style="margin:6px 0">End this ride? ' + (M.prepaid ? invoiceFareText(M.prepaid) : "Meter " + money(f.sub)) + ".</p>" +
+        ? '<div id="meter-confirm-end"><p class="lede" style="margin:6px 0">End this ride?' + (M.prepaid ? " " + invoiceFareText(M.prepaid) + "." : meterShown(M) ? " Meter " + money(f.sub) + "." : "") + "</p>" +
           '<button class="btn meter-big meter-end" type="button" id="meter-end-yes">Yes, end ride</button>' +
           '<button class="btn ghost" type="button" id="meter-end-no">Keep the meter running</button></div>'
-        : '<div class="meter-actions' + (meterQrShowing() ? " meter-actions-qr" : "") + '">' + (meterQrShowing() ? "" : '<button class="btn ghost meter-showrider" type="button" id="meter-show-rider">Show rider meter</button>') +
+        : '<div class="meter-actions' + (meterQrShowing() ? " meter-actions-qr" : "") + '">' + (meterQrShowing() || !meterShown(M) ? "" : '<button class="btn ghost meter-showrider" type="button" id="meter-show-rider">Show rider meter</button>') +
           '<button class="btn meter-big meter-end" type="button" id="meter-end"' + (state.meterBusy ? " disabled" : "") + ">End ride</button></div>") +
       "</section>"
     );
@@ -15600,6 +15629,7 @@
     var key = meterEstKey();
     var est = "";
     var M = state.meter, run = !!(M && M.status === "running");
+    if (run && !meterShown(M)) return d ? '<div class="meter-est-line meter-est-block" id="meter-est-line"><div class="meter-est-to" id="meter-est-to">To: ' + esc(d.label) + "</div></div>" : '<div class="meter-est-line meter-est-block meter-est-empty" id="meter-est-line"></div>'; /* v2.0a: no estimate on a non-metered ride */
     if (run && d) { /* v72u: during the ride = fare so far + the rest of the road route */
       var eta = meterEtaInfo(M);
       var le = rateOvLocked(M) || Number(M.setFareCents) > 0 ? null : meterLiveEst(M); /* v77.6: one number, same as the rider sees */

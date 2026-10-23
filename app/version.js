@@ -1,15 +1,26 @@
 /* PCS app version: the ONE place to change it each release (v72x). Loaded by rider, driver, God mode and meter. */
 (function () {
-  var APP_VERSION = "v77.25";
+  var APP_VERSION = "v2.0a";
   window.PCS_APP_VERSION = APP_VERSION;
   /* "v72r" -> [72, "r"]; returns <0 if a is older than b. Unknown/missing counts as oldest. */
+  /* v2.0a (Harry r2): a first number < 70 is the NEW v2+ line, newer than every v77.x.
+     v2+: major, then minor, then letter (v2.0z < v2.1a < v3.0). v77-line: unchanged ("v72r" -> 72,"r", ".1" hotfix). */
   window.pcsVersionCmp = function (a, b) {
-    function p(v) { var m = /^v?(\d+)([a-z]*)(?:\.(\d+))?/i.exec(String(v || "")); return m ? [Number(m[1]), m[2].toLowerCase(), Number(m[3] || 0)] : [-1, "", 0]; }
+    function p(v) {
+      var s = String(v || ""), n = /^v?(\d+)\.(\d+)([a-z]*)/i.exec(s);
+      if (n && Number(n[1]) < 70) return [1, Number(n[1]), Number(n[2]), n[3].toLowerCase()];
+      var m = /^v?(\d+)([a-z]*)(?:\.(\d+))?/i.exec(s); if (!m) return [-1, 0, 0, ""];
+      if (Number(m[1]) < 70) return [1, Number(m[1]), Number(m[3] || 0), m[2].toLowerCase()];
+      return [0, Number(m[1]), m[2].toLowerCase(), Number(m[3] || 0)];
+    }
     var x = p(a), y = p(b);
     if (x[0] !== y[0]) return x[0] - y[0];
-    if (x[1].length !== y[1].length) return x[1].length - y[1].length;
-    if (x[1] !== y[1]) return x[1] < y[1] ? -1 : 1;
-    return x[2] - y[2]; /* v72x.1: hotfix number */
+    if (x[0] < 0) return 0;
+    if (x[1] !== y[1]) return x[1] - y[1];
+    if (x[0] === 1) { if (x[2] !== y[2]) return x[2] - y[2]; return x[3] === y[3] ? 0 : (x[3] < y[3] ? -1 : 1); }
+    if (x[2].length !== y[2].length) return x[2].length - y[2].length;
+    if (x[2] !== y[2]) return x[2] < y[2] ? -1 : 1;
+    return x[3] - y[3]; /* v72x.1: hotfix number */
   };
   function addFooter() {
     if (!document.body || document.getElementById("pcs-app-version")) return;
