@@ -399,6 +399,18 @@
     return '<button type="button" class="badge pcs-paid-pill ' + (p ? "is-paid" : "is-unpaid") + '" data-paid-toggle="' + esc(r.id) + '" aria-pressed="' + (p ? "true" : "false") + '" aria-label="' + (p ? "Paid" : "Unpaid") + esc(by) + '. Tap to record a cash override.">' + (p ? "PAID" : src.kind === "pending" ? "WAITING ON SQUARE" : src.kind === "unverified" ? "UNVERIFIED" : "UNPAID") + "</button>" +
       '<span class="fine pcs-paid-src" style="display:block;font-weight:700">' + esc(src.text) + "</span>";
   }
+  /* v2.0c (Matthew 10/23): ONE payment pill on the board card (no duplicate text). Same paid-truth (paidSource); pure (tested). */
+  function dbInvNo(r) { var q = r && r.sqInvoice && typeof r.sqInvoice === "object" ? r.sqInvoice : null; return String((r && (r.prepaidInvoiceNo || r.invoiceNo)) || (q && (q.invoiceNumber || q.number)) || "").replace(/^#/, "").trim(); }
+  function dbPayInfo(r) {
+    var src = paidSource(r), k = src.kind;
+    var word = k === "square" ? "Paid \u00b7 Square" : k === "cash" ? "Paid \u00b7 Cash" : k === "override" ? "Paid \u00b7 Cash override" : k === "pending" ? "Invoice sent \u00b7 waiting" : k === "unverified" ? "Unverified" : "Unpaid";
+    var tone = src.paid ? "paid" : (k === "pending" || k === "unverified") ? "wait" : "unpaid", no = dbInvNo(r);
+    return { text: (no ? "#" + no + " " : "") + word, tone: tone, paid: src.paid, why: src.text };
+  }
+  function dbPayPillHtml(r) {
+    var i = dbPayInfo(r);
+    return '<button type="button" class="db-pay db-pay-' + i.tone + '" data-paid-toggle="' + esc(r.id) + '" aria-pressed="' + (i.paid ? "true" : "false") + '" title="' + esc(i.why) + '" aria-label="' + esc(i.text) + " (" + esc(i.why) + '). Tap to record a cash override.">' + esc(i.text) + "</button>";
+  }
   function paidToggle(id, btn) { /* v77.26: the pill no longer marks paid; only a logged cash override with a reason */
     var r = dbDropRow(id); if (!r) return;
     var src = paidSource(r), now = Date.now(), patch = null;
@@ -422,7 +434,7 @@
       refresh();
     }).catch(function () { if (btn) btn.disabled = false; state.boardNotice = "Saving didn\u2019t finish. Check the connection and tap again."; try { renderBoardLists(); } catch (e) {} });
   }
-  window.__pcsGodPaid = { auto: paidAuto, now: paidNow, source: paidSource, override: cashOverridePatch, html: function (r) { return paidPillHtml(r); } }; /* test hook */
+  window.__pcsGodPayPill = { info: function (r) { return dbPayInfo(r); }, html: function (r) { return dbPayPillHtml(r); } }; window.__pcsGodPaid = { auto: paidAuto, now: paidNow, source: paidSource, override: cashOverridePatch, html: function (r) { return paidPillHtml(r); } }; /* test hook */
   window.__pcsGodPrepaid = { patch: prepaidPatch, label: function (r) { return prepaidLabel(r); } }; /* test hook */
   function dbPrepaidClose() { var m = document.getElementById("db-prepaid-modal"); if (m) m.remove(); }
   function dbPrepaidOpen(id) {
@@ -552,6 +564,14 @@
     });
   }
 
+  function fmtBoardWhenLine(iso) { /* v2.0c: "Fri, Oct 23 \u00b7 7:15 AM" (pure, tested) */
+    if (!iso) return "\u2014";
+    try { var d = new Date(iso); if (!isFinite(d.getTime())) return String(iso);
+      var o = { timeZone: "America/Chicago" };
+      return d.toLocaleDateString("en-US", Object.assign({ weekday: "short", month: "short", day: "numeric" }, o)) + " \u00b7 " + d.toLocaleTimeString("en-US", Object.assign({ hour: "numeric", minute: "2-digit" }, o));
+    } catch (e) { return String(iso); }
+  }
+  if (typeof window !== "undefined") window.__pcsBoardWhen = fmtBoardWhenLine;
   function fmtBoardWhen(iso) {
     if (!iso) return "—";
     try {
@@ -6643,6 +6663,22 @@
         ".pcs-paid-pill.is-paid{background:rgba(46,160,90,0.22);color:#7ee08f;border:1px solid rgba(126,224,143,0.65)}" +
         ".pcs-paid-pill.is-unpaid{background:rgba(240,212,138,0.2);color:#f0d48a;border:1px solid rgba(240,212,138,0.55)}" +
         ".pcs-paid-pill:disabled{opacity:.6}" +
+        /* v2.0c (Matthew 10/23): Scheduled-ride card header: play + one-line date, title, Assigned to, one wrapping badge row */
+        ".day-grid>*{min-width:0}.day-card{padding:16px 18px 14px;min-width:0;height:auto;overflow-wrap:anywhere;word-break:normal}.day-card .day-driver,.day-card .day-line{overflow-wrap:anywhere;min-width:0}.day-card .day-driver{display:block}" +
+        ".day-card-top.db-head{display:flex;align-items:center;justify-content:flex-start;gap:10px;margin:0 0 8px;min-width:0}" +
+        ".db-head .db-card-toggle{flex:0 0 32px;width:32px;height:32px;min-height:0;padding:0;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;font-size:11px;line-height:1;border:1px solid rgba(212,177,90,.45);color:var(--gold,#d4b15a);background:rgba(212,177,90,.08)}" +
+        ".db-when{flex:1 1 auto;min-width:0;margin:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:clamp(17px,1.9vw,22px);letter-spacing:.01em;font-variant-numeric:tabular-nums}" +
+        ".day-card .day-rider{margin:0 0 4px;overflow-wrap:anywhere}" +
+        ".db-badges{display:flex;flex-wrap:wrap;align-items:center;gap:6px 8px;margin:8px 0 10px;min-width:0}" +
+        ".db-badges>*{margin:0!important;max-width:100%}" +
+        ".db-pay{position:relative;font:inherit;font-size:13px;font-weight:700;line-height:1.2;letter-spacing:.02em;text-transform:none;padding:5px 12px;border-radius:999px;min-height:0;cursor:pointer;-webkit-appearance:none;appearance:none;-webkit-tap-highlight-color:transparent;touch-action:manipulation;white-space:normal;overflow-wrap:anywhere;text-align:left;max-width:100%}" +
+        ".db-pay-paid{background:rgba(46,160,90,.2);color:#8be59a;border:1px solid rgba(126,224,143,.6)}" +
+        ".db-pay-unpaid{background:rgba(211,47,47,.18);color:#ff8a80;border:1px solid rgba(255,138,128,.6)}" +
+        ".db-pay-wait{background:rgba(240,180,60,.16);color:#f5c76a;border:1px solid rgba(245,199,106,.6)}" +
+        ".db-badges .pcs-sms-pill,.db-tag{font-size:10px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;padding:3px 8px;border-radius:999px;line-height:1.2;white-space:nowrap}" +
+        ".db-tag{display:inline-block;border:1px solid rgba(212,177,90,.4);color:var(--muted,#b7c3b0);background:transparent}" +
+        ".db-tag-open{color:var(--gold,#d4b15a)}.db-tag-cancel{color:#ff8a80;border-color:rgba(255,138,128,.5)}" +
+
         ".map-hint{max-width:min(240px,calc(100% - 24px))!important;font-size:10.5px!important;padding:4px 7px!important;opacity:.85;left:8px!important;bottom:22px!important}";
       document.head.appendChild(st);
     } catch (e) {}
@@ -7491,11 +7527,7 @@
     var dbCards = dbCardSet();
     var cards = rows.map(function (r) {
       var st = r.status || "open";
-      var badge = st === "completed"
-        ? '<span class="badge">Done</span>'
-        : (st === "assigned"
-          ? '<span class="badge online">Assigned</span>'
-          : '<span class="badge pending">Open</span>');
+      var badge = st === "completed" ? '<span class="db-tag">Done</span>' : st === "assigned" ? "" : '<span class="db-tag db-tag-open">Open</span>'; /* v2.0c: ASSIGNED dropped ("Assigned to" says it) */
       var options = ['<option value="">' + (r.assignedDriverId ? "Unassign (open)" : "Assign driver\u2026") + "</option>"].concat(drivers.map(function (d) {
         var sel = d.id === (state.assignDrafts[r.id] != null ? state.assignDrafts[r.id] : r.assignedDriverId) ? " selected" : ""; /* v73: keep the picked name */
         return '<option value="' + esc(d.id) + '"' + sel + ">" + esc(d.name || d.id) + "</option>";
@@ -7507,12 +7539,12 @@
       var completeDisabled = (st === "completed" || !r.assignedDriverId) ? " disabled" : "";
       return (
         '<article class="day-card status-' + esc(st) + '">' +
-          '<div class="day-card-top">' +
-            '<button type="button" class="btn btn-ghost db-card-toggle" data-day-card-toggle="' + esc(r.id) + '" aria-expanded="' + (dbCards[r.id] ? "false" : "true") + '" aria-label="Collapse or expand this ride" style="padding:2px 8px;min-height:0">' + (dbCards[r.id] ? "\u25B6" : "\u25BC") + "</button>" +
-            '<p class="day-time">' + esc(fmtBoardWhen(r.start)) + "</p>" +
-            '<span class="pcs-pill-row">' + (st === "canceled" || st === "cancelled" ? "" : paidPillHtml(r) + (typeof smscPillHtml === "function" ? smscPillHtml(smscPhoneOf(r), clientFullName(r)) : "")) + badge + "</span>" + /* v77.15; v77.23 r1b texts pill */
+          '<div class="day-card-top db-head">' +
+            '<button type="button" class="btn btn-ghost db-card-toggle" data-day-card-toggle="' + esc(r.id) + '" aria-expanded="' + (dbCards[r.id] ? "false" : "true") + '" aria-label="Collapse or expand this ride">' + (dbCards[r.id] ? "\u25B6" : "\u25BC") + "</button>" +
+            '<p class="day-time db-when">' + esc(fmtBoardWhenLine(r.start)) + "</p>" + /* v2.0c: one line, never wraps mid-date */
           "</div>" +
           '<h3 class="day-rider">' + esc(r.rider) + "</h3>" + driverLineHtml(r) + /* v77.10 */
+          '<div class="db-badges">' + (st === "canceled" || st === "cancelled" ? '<span class="db-tag db-tag-cancel">Cancelled</span>' : dbPayPillHtml(r) + (typeof smscPillHtml === "function" ? smscPillHtml(smscPhoneOf(r), clientFullName(r)) : "") + badge) + "</div>" + /* v2.0c: one tidy wrapping row */
           '<div class="day-card-body"' + (dbCards[r.id] ? ' style="display:none"' : "") + ">" +
           '<p class="day-line"><span>Pickup</span> ' + esc(r.pickup || "—") + "</p>" +
           ((r.stopsGeo && r.stopsGeo[0] && r.stopsGeo[0].address) || (r.stops && r.stops[0]) ? '<p class="day-line"><span>Stop</span> ' + esc((r.stopsGeo && r.stopsGeo[0] && r.stopsGeo[0].address) || r.stops[0]) + "</p>" : "") +
