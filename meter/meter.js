@@ -117,8 +117,9 @@
       '<p class="fine">Nothing here is required. Skip it and pay at the end on Square\u2019s secure page.</p>' +
       '<label for="rm-name">Name</label><input id="rm-name" autocomplete="name" maxlength="80">' +
       '<label for="rm-phone">Phone</label><input id="rm-phone" type="tel" autocomplete="tel" inputmode="tel" maxlength="30">' +
+      '<label class="sms-optin" for="rm-sms-optin" style="display:flex;gap:10px;align-items:flex-start;margin:8px 0 0;font-size:13px;line-height:1.45;font-weight:400;text-transform:none;letter-spacing:normal"><input type="checkbox" id="rm-sms-optin" name="sms-optin" value="yes" style="width:22px;height:22px;flex:0 0 auto;margin:2px 0 0"><span id="rm-sms-optin-text">Text me ride updates from Private Car Services (driver on the way, arrival, receipts). Msg frequency varies, about 1-5 per ride. Msg &amp; data rates may apply. Reply STOP to opt out, HELP for help. Help: 936-261-7878. Consent is not a condition of booking. See <a href="../app/policies/#sms" target="_blank" rel="noopener">SMS Terms</a> and <a href="../app/policies/#privacy" target="_blank" rel="noopener">Privacy</a> at www.PCSrides.com.</span></label><p class="fine sms-optin-note" style="font-size:12px;margin:4px 0 0">Optional. Leave it unchecked and nothing changes for this ride.</p>' + /* v77.23 express opt-in (unchecked) */
       '<label for="rm-email">Email (for your receipt)</label><input id="rm-email" type="email" autocomplete="email" inputmode="email" maxlength="160">' +
-      '<p class="fine" id="rm-invite-note">We\u2019ll also send you a one-time welcome note from Private Car Services with a link to book your next ride. Texts: reply STOP to opt out.</p>' + /* v71 */
+      '<p class="fine" id="rm-invite-note">We\u2019ll also email you a one-time welcome note from Private Car Services with a link to book your next ride.</p>' + /* v71; v77.23 email only (texts need the box above) */
       '<p class="fine rm-ok" id="rm-info-msg">' + esc(S.infoMsg || (d.contactSaved ? "\u2713 Your info is saved for the receipt." : "")) + "</p>" +
       '<p class="error" id="rm-info-err" role="alert">' + esc(S.infoErr) + "</p>" +
       '<button class="btn secondary" type="button" id="rm-save-info">Save my info</button>' +
@@ -354,8 +355,9 @@
     tick();
   }
   function redrawEnded() { if (S.d && S.d.status === "ended") draw(true); }
-  function readForm() { var g = function (id) { var el = $(id); return el ? el.value : ""; }; return { name: g("rm-name"), phone: g("rm-phone"), email: g("rm-email") }; }
-  function writeForm(v) { ["name", "phone", "email"].forEach(function (k) { var el = $("rm-" + k); if (el && v[k]) el.value = v[k]; }); }
+  var SMS_OPTIN_TEXT = "Text me ride updates from Private Car Services (driver on the way, arrival, receipts). Msg frequency varies, about 1-5 per ride. Msg & data rates may apply. Reply STOP to opt out, HELP for help. Help: 936-261-7878. Consent is not a condition of booking. See SMS Terms and Privacy at www.PCSrides.com."; /* v77.23 */
+  function readForm() { var g = function (id) { var el = $(id); return el ? el.value : ""; }; var c = $("rm-sms-optin"); return { name: g("rm-name"), phone: g("rm-phone"), email: g("rm-email"), smsOptIn: !!(c && c.checked) }; }
+  function writeForm(v) { ["name", "phone", "email"].forEach(function (k) { var el = $("rm-" + k); if (el && v[k]) el.value = v[k]; }); var c = $("rm-sms-optin"); if (c && v.smsOptIn) c.checked = true; /* v77.23: keep the rider's own tap */ }
   function tick() {
     var d = S.d;
     if (!d) return;
@@ -421,10 +423,11 @@
     if (!v.name.trim() && !v.phone.trim() && !v.email.trim()) { S.infoErr = "Type your name, phone or email first (all optional)."; setText("rm-info-err", S.infoErr); return; }
     var btn = $("rm-save-info");
     if (btn) { btn.disabled = true; btn.textContent = "Saving…"; }
-    post("/meter/rider", { t: token, name: v.name.trim(), phone: v.phone.trim(), email: v.email.trim() }).then(function (data) {
+    post("/meter/rider", { t: token, name: v.name.trim(), phone: v.phone.trim(), email: v.email.trim(), smsOptIn: v.smsOptIn ? true : null, smsOptInText: v.smsOptIn ? SMS_OPTIN_TEXT : "" }).then(function (data) {
       var inv = (data && data.invited) || {};
       S.infoMsg = "\u2713 Saved. Your receipt goes to " + (v.email.trim() || "your phone number if Square has it") + "." +
-        (inv.email ? " We sent a welcome note to your email." : inv.sms ? " We sent a welcome text." : ""); /* v71 */
+        (inv.email ? " We sent a welcome note to your email." : inv.sms ? " We sent a welcome text." : "") + /* v71 */
+        (data && data.smsOptIn && data.smsOptIn.needsStart ? " You texted STOP earlier, so texts stay off. Text START to (936) 236-4050 to turn ride texts back on." : data && data.smsOptIn && (data.smsOptIn.changed || data.smsOptIn.why === "already") ? " Ride update texts are on." : ""); /* v77.23 r1b */
       if (S.d) S.d.contactSaved = true;
       setText("rm-info-msg", S.infoMsg); setText("rm-info-err", "");
       if (btn) { btn.disabled = false; btn.textContent = "Save my info"; }
