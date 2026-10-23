@@ -3686,7 +3686,7 @@
     if (syncOn()) authFetch(databaseURL() + "/rides/DRVRHSLG/" + encodeURIComponent(driverPresenceId()) + "/" + k + "/" + d + ".json", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(rec) }).catch(function () {});
   }
   /* an inspection with a defect marked NOT safe to operate blocks Available until God mode clears it (logged) */
-  function dvirSoftBlock(b) { return !!b && (b.k === "carwash" || /days since last wash|^not checked in|never checked/.test(String(b.why || ""))); } /* v77.15 */
+  function dvirSoftBlock(b) { return !!b && (b.k === "carwash" || b.k === "fluids" || /^(never checked|not checked in \d+ days)$/.test(String(b.why || ""))); } /* v77.15 */
   function dvirBlock() {
     var loc = dlRec("dvir"), srv = hosReadHist().dvir || {}, hit = null, cleanPre = 0;
     /* v77.15 (Anson 10/20): a newer CLEAN pre-trip supersedes older inspection / Available blocks (previous shifts) */
@@ -3695,6 +3695,7 @@
       var r = m[d] && m[d][k]; if (!r || !r.unsafe) return;
       var sup = cleanPre && Number(r.at) > 0 && Number(r.at) < cleanPre; /* v77.15 (Harry): a newer clean pre-trip supersedes ONLY wash / stale blocks (add2: never photo/Cracks) */
       if (sup && (r.blocks || []).length && (r.blocks || []).every(dvirSoftBlock)) return;
+      if (k === "avail" && (r.blocks || []).length && (r.blocks || []).every(dvirSoftBlock)) return; /* hotfix-online (10/23): an Available-tap record of soft items (fluids / wash) never blocks */
       /* v76d-pretrip: a car-wash block follows the current wash date (calendar days). v76g: a POST-trip never blocks for the car wash (end of shift). */
       var bl = (r.blocks || []).filter(function (b) { return !(b && b.k === "carwash" && (k === "post" || !washBlockNow())); });
       if ((r.blocks || []).length && !bl.length) return;
@@ -3823,12 +3824,13 @@
     var cfg = null; try { cfg = JSON.parse(localStorage.getItem("pcs-dvir-cfg") || "null"); } catch (e) {}
     var its = L.items({ dvirItems: cfg }), out = [];
     var cw = its.filter(function (i) { return i.k === "carwash"; })[0];
+    try { var lw0 = JSON.parse(localStorage.getItem("pcs-last-wash") || "null"); if (lw0 && lw0.date && (!lw0.plate || lw0.plate === pl)) vd = Object.assign({}, vd, { carwash: L.newerWash ? L.newerWash(vd.carwash || "", lw0.date) : (vd.carwash || lw0.date) }); } catch (e) {} /* hotfix-online: server lastWash counts */
     if (cw && (cw.maxAgeHours || cw.maxAgeDays) && vd.carwash && L.washState) { var ws = L.washState(vd.carwash, now, cw); /* v76d-pretrip: calendar days (America/Chicago), reminder first */
       if (ws && ws.block) out.push({ k: "carwash", label: cw.label, why: "more than " + ws.grace + " days since last wash" });
       else if (ws && (ws.remind || ws.overdue)) qd.washMsg = (ws.remind ? "Car wash reminder: last wash " + ws.last + ", please wash by " + ws.washBy + "." : "Car wash due: last wash " + ws.last + ". Please wash the car.") + (cw.block && ws.remind ? " Going online pauses starting " + ws.blockFrom + "." : ""); } /* v76g wording */
     if (cw && cw.washQ && !vd.carwash && L.WASH_WARN) qd.washMsg = "Car wash: last wash not recorded yet. Answer \u201cDid you get your car washed today?\u201d on your post-trip. " + L.WASH_WARN; /* v77.9: never recorded = reminder only (existing drivers aren't locked out) */
     if (its.some(function (i) { return i.group === "Fluids" && i.block; })) { var days = Number(localStorage.getItem("pcs-dvir-fluids-days")) || 7, fd = L.fluidsDue(vd.fluids, now, days);
-      if (fd.due && fd.why !== "weekend") out.push({ k: "fluids", label: "Fluids check", why: fd.why === "never" ? "never checked" : "not checked in " + fd.days + " days" }); }
+      if (fd.due && fd.why !== "weekend") qd.washMsg = (qd.washMsg ? qd.washMsg + " " : "") + "Fluids check due" + (fd.why === "never" ? " (not recorded yet)" : " (" + fd.days + " days)") + ": please check on your next pre-trip."; } /* hotfix-online (10/23): fluids are a reminder, never a block (a wiped phone read as "never checked" and locked drivers out) */
     var av = dlDvirRec(dlToday(), "avail"); /* God already cleared these exact blocks today */
     if (av && av.cleared && out.every(function (b) { return (av.blocks || []).some(function (x) { return x.k === b.k; }); })) return [];
     return out;
@@ -4066,6 +4068,8 @@
       try { if (o && Number(o.fluidsDays) > 0) localStorage.setItem("pcs-dvir-fluids-days", String(Math.round(Number(o.fluidsDays)))); else localStorage.removeItem("pcs-dvir-fluids-days"); } catch (e) {}
     }).catch(function () {});
     var pl = normalizePlate((readDriverAccount() || {}).carPlate || ""); /* this car's remembered registration / insurance / car-wash dates */
+    if (signedIn()) authFetch(databaseURL() + "/rides/DRVRHSLG/" + encodeURIComponent(driverPresenceId()) + "/lastWash.json").then(function (r) { return r.ok ? r.json() : null; }).then(function (w) { /* hotfix-online: restore the last wash after a storage wipe */
+      if (!w || !w.date) return; try { var cur = JSON.parse(localStorage.getItem("pcs-last-wash") || "null"); if (!cur || Number(w.at) > Number(cur.at || 0)) localStorage.setItem("pcs-last-wash", JSON.stringify(w)); } catch (e) {} }).catch(function () {});
     if (pl) authFetch(databaseURL() + "/rides/DVIRVEH/" + encodeURIComponent(pl) + ".json").then(function (r) { return r.ok ? r.json() : null; }).then(function (v) {
       if (!v || typeof v !== "object") return; try { var vm = JSON.parse(localStorage.getItem("pcs-dvir-veh") || "{}") || {}; if (!vm[pl] || Number(v.updatedAt) > Number(vm[pl].updatedAt || 0)) { vm[pl] = v; localStorage.setItem("pcs-dvir-veh", JSON.stringify(vm)); } } catch (e) {}
     }).catch(function () {});
@@ -9226,7 +9230,8 @@
     return { invoiceNo: no, label: no ? "Invoice #" + no : "No invoice", paid: paid, how: how, word: paid ? "Paid" : "Unpaid" };
   }
   function rideInvoiceSig(i) { return i.label + "|" + i.word; }
-  function rideInvoiceBadgeHtml(i, id) {
+  function rideInvoiceBadgeHtml(i, id) { return ""; } /* v2.0d (Matthew 10/23): no Invoice #/Paid badge; a non-Metered ride just hides the meter */
+  function rideInvoiceBadgeHtmlV20a(i, id) {
     return '<div class="pcs-inv-badge" id="' + (id || "ride-inv-badge") + '" data-sig="' + esc(rideInvoiceSig(i)) + '" role="status" aria-live="polite" style="text-align:center;margin:8px 0;padding:10px 12px;border-radius:14px;background:#111;border:3px solid ' + (i.paid ? "#1b9e4b" : "#d32f2f") + '">' +
       '<div class="pcs-inv-no" style="font-size:28px;font-weight:900;color:#fff;line-height:1.15">' + esc(i.label) + "</div>" +
       '<div class="pcs-inv-paid ' + (i.paid ? "is-paid" : "is-unpaid") + '" style="display:inline-block;margin-top:6px;padding:6px 22px;border-radius:999px;font-size:30px;font-weight:900;letter-spacing:.04em;color:#fff;background:' + (i.paid ? "#1b9e4b" : "#d32f2f") + '">' + i.word + "</div></div>";
@@ -9259,7 +9264,11 @@
     var n = pp.invoiceNo ? "Invoice #" + String(pp.invoiceNo).replace(/^#/, "") : "Square invoice";
     return pp.amountCents != null ? n + " \u00b7 " + money(pp.amountCents) : n;
   }
-  function meterMoneyShown(M, cents) { return M && M.prepaid ? invoiceFareText(M.prepaid) : money(cents); }
+  function meterMoneyShown(M, cents) { return M && M.prepaid ? invoiceFareText(M.prepaid) : (typeof meterNumHidden === "function" && meterNumHidden(M)) ? "" : money(cents); }
+  /* v2.0d (Matthew 10/23): a ride NOT started as Metered never shows a meter-computed number on any screen the rider can see.
+     Quoted (set) fare and invoice amounts still show; with neither, the amount is simply left off. Miles/time still logged. */
+  function meterNumHidden(M) { if (!M || meterShown(M) || M.prepaid) return false; var f = null; try { f = M.fare || meterFare(M); } catch (e) {} return !(f && f.setFare); }
+  if (typeof window !== "undefined") window.__pcsV20d = { hidden: function (M) { return meterNumHidden(M); } };
   /* v77.11: the invoice before-tax amount is the fare of record; the meter stays as a record only (pure, tested) */
   function invoiceWins(entry, pp, pct) {
     if (!entry || !pp || pp.amountCents == null) return entry;
@@ -10644,7 +10653,7 @@
         "<p><strong>Pickup:</strong> " + esc(r.pickup || "") + "</p>" +
         (st ? "<p><strong>Stop:</strong> " + esc(st.address) + "</p>" : "") +
         "<p><strong>Drop-off:</strong> " + esc(r.dropoff || "Add it in the ride card") + "</p>" +
-        (r.prepaid ? "<p><strong>" + esc(prepaidBadgeText(prepaidOf(r))) + "</strong></p>" : r.payMethod === "cash" ? "<p><strong>Cash ride: collect payment at drop-off</strong>" + (r.fareBeforeTax != null ? " ($" + (Number(r.fareBeforeTax) + (Number(r.taxFees) || 0)).toFixed(2) + ")" : "") + "</p>" : "") /* v77.10 */ +
+        (r.prepaid ? "<p><strong>" + esc(prepaidBadgeText(prepaidOf(r))) + "</strong></p>" : r.payMethod === "cash" && meterCashAllowed() ? /* v2.0d r3b: owner only */  "<p><strong>Cash ride: collect payment at drop-off</strong>" + (r.fareBeforeTax != null ? " ($" + (Number(r.fareBeforeTax) + (Number(r.taxFees) || 0)).toFixed(2) + ")" : "") + "</p>" : "") /* v77.10 */ +
         (r.notes ? "<p><strong>Notes:</strong> " + esc(r.notes) + "</p>" : "") + "</div>" : "") +
       (state.schedMsg && state.schedMsgId === t.id ? '<p class="na-msg" role="status">' + esc(state.schedMsg) + "</p>" : "") +
       '<button type="button" class="na-start" id="sched-arr-start" data-arr="start">Start ride</button>' +
@@ -10782,7 +10791,7 @@
         '<p style="margin:0 0 6px;color:#1a1a1a"><strong style="' + SCHED_LBL + '">Drop-off:</strong> ' + (r.dropoff ? esc(r.dropoff) : '<span style="color:#7c2d12;font-weight:700">Add the drop-off</span>') + "</p>" +
         (est ? '<p style="margin:0 0 6px;color:#1a1a1a"><strong style="' + SCHED_LBL + '">Estimate:</strong> <span id="sched-est-' + esc(r.id) + '">' + esc(est) + "</span></p>" : "") +
         (notes ? '<p style="margin:0 0 6px;color:#1a1a1a"><strong style="' + SCHED_LBL + '">Calendar note:</strong> ' + esc(notes) + "</p>" : "") +
-        (r.payMethod === "cash" ? '<p style="color:#7c2d12;background:#ffedd5;padding:6px 8px;border-radius:8px"><strong style="color:#7c2d12 !important">Cash ride: collect payment at drop-off</strong>' + (r.fareBeforeTax != null ? " ($" + (Number(r.fareBeforeTax) + (Number(r.taxFees) || 0)).toFixed(2) + ")" : "") + "; the PCS share is taken from your weekly balance.</p>" : "") +
+        (r.payMethod === "cash" && meterCashAllowed() ? /* v2.0d r3b */  '<p style="color:#7c2d12;background:#ffedd5;padding:6px 8px;border-radius:8px"><strong style="color:#7c2d12 !important">Cash ride: collect payment at drop-off</strong>' + (r.fareBeforeTax != null ? " ($" + (Number(r.fareBeforeTax) + (Number(r.taxFees) || 0)).toFixed(2) + ")" : "") + "; the PCS share is taken from your weekly balance.</p>" : "") +
         (r.notes ? '<p style="margin:0 0 6px;color:#374151;font-size:14px">' + esc(r.notes) + "</p>" : "") +
         (onMeter || inTrip ? "" : '<button type="button" data-sched-edit="pick" data-sched-id="' + esc(r.id) + '" style="' + SCHED_BTN_2 + '">' + (r.pickup ? "Change pickup" : "Add pickup") + "</button>") + /* v75t: before the ride starts */
         (onMeter ? "" : '<div style="display:flex;gap:8px"><button type="button" data-sched-edit="drop" data-sched-id="' + esc(r.id) + '" style="' + SCHED_BTN_2 + ';flex:1">' + (r.dropoff ? "Change drop-off" : "Add drop-off") + "</button>" +
@@ -14610,10 +14619,47 @@
     var base = Number(M && M.fare && M.fare.sub) || 0;
     return isFinite(p) && p > 0 && p <= 100 ? Math.round(base * p / 100) : 0;
   }
+  /* v2.0d r3 (Matthew 10/23): "If it is unpaid and being collected by the driver and they collect cash, just display the amount
+     to be collected." Pure (tested). Metered ride -> the meter total (as before). Any other ride -> the unpaid invoice amount
+     (outstanding), else the quoted/set fare, else null (driver must type it; never the meter fare). */
+  function cashCollectCents(M, r) {
+    if (!M) return null;
+    if (meterShown(M)) return Number(M.fare && M.fare.total) || 0;
+    var c = function (v) { return v != null && v !== "" && isFinite(+v) && +v > 0 ? Math.round(+v) : null; };
+    var q = r && r.sqInvoice && typeof r.sqInvoice === "object" ? r.sqInvoice : null;
+    var qPaid = q && (q.paid === true || String(q.status || "").toUpperCase() === "PAID");
+    if (q && !qPaid) { var due = c(q.amountDueCents) != null ? c(q.amountDueCents) : c(q.totalCents); if (due != null) return due; }
+    var pp = M.prepaid;
+    if (pp && !pp.squarePaid && c(pp.amountCents) != null) return c(pp.amountCents) + (c(pp.taxCents) || 0);
+    var f = M.fare; if (f && f.setFare && c(f.total) != null) return c(f.total);
+    return null;
+  }
+  /* v2.0d r3c (Harry, pure, tested): tip limit base = X on a non-Metered ride (the meter on Metered / when X unknown) */
+  function meterTipBase(M, r) { if (!M) return 0; if (meterShown(M)) return Number(M.fare && M.fare.total) || 0; var x = r && r.collect != null && r.collect > 0 ? r.collect : (r && r.method && r.fare > 0 ? r.fare : null); return x != null ? x : Number(M.fare && M.fare.total) || 0; }
+  /* v2.0d r3c (Harry, pure, tested): pay week on a non-Metered ride = what was actually paid (X / typed), tax split like the meter's,
+     driver's % on the pre-tax part (same rule as a prepaid invoice). Metered -> null (End ride numbers stand). */
+  function paidWeekNumbers(M, paidCents, pct) {
+    if (!M || meterShown(M) || !(Number(paidCents) >= 0) || !isFinite(Number(paidCents))) return null;
+    var f = M.fare || {}, paid = Math.round(Number(paidCents)), ft = Number(f.total) || 0;
+    var tax = ft > 0 ? Math.round(paid * (Number(f.tax) || 0) / ft) : 0, sub = paid - tax;
+    return { fareSub: sub, fareTax: tax, fareTotal: paid, commissionCents: Math.round(sub * (Number(pct) || 0) / 100), meterFareCents: ft };
+  }
+  /* v2.0d.3 r2 (Harry, pure, tested): card machine / other with NO amount on file and a typed amount > 2x the meter or > $300 -> confirm step */
+  function meterBigAmount(M, r) { if (!M || !r || r.cash || !r.method || r.method === "test" || r.collect != null || !isFinite(r.received)) return false; var m = Number(M.fare && M.fare.total) || 0; return r.received > 30000 || (m > 0 && r.received > 2 * m); }
+  function meterCashTarget(M) { return cashCollectCents(M, M && M.schedId && typeof schedFind === "function" ? schedFind(M.schedId) : null); }
+  if (typeof window !== "undefined") window.__pcsCashCollect = cashCollectCents;
+  if (typeof window !== "undefined") window.__pcsR3c = { tipBase: meterTipBase, week: paidWeekNumbers, big: meterBigAmount };
+  /* v2.0d r3 (Matthew 10/23): "outside of me I really don't want my drivers taking cash." Cash (collect or mark paid in cash)
+     only for the owner sign-in (meterOwnerDriver: Firebase Auth owner / owner emails, never a name match). God mode unchanged. */
+  function meterCashAllowed() { try { return meterOwnerDriver() === true; } catch (e) { return false; } }
+  if (typeof window !== "undefined") window.__pcsCashAllowed = meterCashAllowed;
   function meterOtherRead(fromDraft) {
     var M = state.meter;
     var fare = M ? Number(M.fare.total) || 0 : 0;
     var method = state.meterOtherMethod || "";
+    if (method === "cash" && !meterCashAllowed()) method = ""; /* v2.0d r3 */
+    var X = method && method !== "test" ? meterCashTarget(M) : 0; /* v2.0d r3; r3c (Harry): X for every method on a non-Metered ride (Metered: X = the meter) */
+    if (method && method !== "test" && X != null) fare = X;
     var amtEl = fromDraft ? null : document.getElementById("meter-other-amount");
     var tipEl = fromDraft ? null : document.getElementById("meter-other-tip");
     var old = state.meterOtherDraft || {};
@@ -14622,13 +14668,15 @@
     var tip = meterTipFromChoice(M, choice, d.tip);
     var cash = method === "cash";
     var received = meterCentsOf(d.amount);
-    if (cash && !String(d.amount || "").trim()) received = fare + tip; /* v76d: cash box left blank = exact cash, fare paid in cash */
+    if (cash && !String(d.amount || "").trim()) received = X == null ? NaN : fare + tip; /* v76d: blank = exact cash; v2.0d r3: exact = X, never the meter on a non-Metered ride; no X -> must type */
+    if (cash && X == null) fare = isFinite(received) ? Math.max(0, received - tip) : 0; /* v2.0d r3: no amount known -> the typed cash is the fare */
+    if (!cash && method && method !== "test" && X == null) fare = isFinite(received) ? Math.max(0, received) : 0; /* r3c: no amount known -> the typed amount is the fare, never capped at the meter */
     if (method === "test") { choice = "0"; tip = 0; received = fare; } /* v72x.1 Test ride: nothing collected */
     /* fare part: cash -> the fare (extra cash is change, never a tip); other -> the amount collected, max the fare */
     var amount = cash ? (isFinite(received) ? fare : NaN) : (isFinite(received) ? Math.min(received, fare) : NaN);
     var change = cash && isFinite(received) ? received - fare - tip : 0;
     if (method === "test") amount = 0;
-    return { fare: fare, method: method, cash: cash, choice: choice, received: received, amount: amount, tip: tip, change: change };
+    return { collect: X, fare: fare, method: method, cash: cash, choice: choice, received: received, amount: amount, tip: tip, change: change };
   }
   /* v77.26 (pure, tested): only cash collected by the driver marks paid here; card machine / other wait as "unverified"
      until Square shows the payment (Matthew 10/22). "test" (rate comparison, $0) keeps its old accounting. */
@@ -14642,18 +14690,21 @@
     if (!M || M.status !== "ended" || state.meterBusy) return;
     var method = state.meterOtherMethod || "";
     if (!method) { state.meterError = "Pick how the rider paid."; render(); return; }
+    if (method === "cash" && !meterCashAllowed()) { state.meterOtherMethod = ""; state.meterError = "Cash isn't taken on PCS rides. Use card or the Square invoice."; render(); return; } /* v2.0d r3 */
     if (method === "test" && M.schedId) { state.meterError = "Rate comparison is off for a scheduled ride. Pick how the rider paid."; render(); return; } /* v76d */
     var r = meterOtherRead();
     var amount = r.amount, tip = r.tip;
     if (!isFinite(r.received) || r.received < 0) { state.meterError = r.cash ? "Enter the cash received (or tap Exact change)." : "Enter the amount you collected."; render(); return; }
     if (r.choice === "custom" && !(tip > 0)) { state.meterError = "Enter the custom tip, or pick No tip."; render(); return; }
     if (r.cash && r.change < 0) { state.meterError = "Cash received (" + money(r.received) + ") is less than fare + tip (" + money(r.fare + tip) + "). Change can't be negative."; render(); return; }
-    var highTip = tip > 0 && (tip >= M.fare.total || tip === r.received);
-    if (tip > meterTipCapCents(M.fare.total) && !highTip) { state.meterError = "That tip is over the limit (" + money(meterTipCapCents(M.fare.total)) + ")."; render(); return; }
-    if (tip > Math.max(M.fare.total, 5000)) { state.meterError = "That tip is over the limit."; render(); return; }
+    var tb = meterTipBase(M, r); /* v2.0d r3c (Harry): tip limits on X, not the meter, on a non-Metered ride */
+    var highTip = tip > 0 && (tip >= tb || tip === r.received);
+    if (tip > meterTipCapCents(tb) && !highTip) { state.meterError = "That tip is over the limit (" + money(meterTipCapCents(tb)) + ")."; render(); return; }
+    if (tip > Math.max(tb, 5000)) { state.meterError = "That tip is over the limit."; render(); return; }
     /* step 1: confirm screen; step 2 (Confirm) saves */
     var sig = [r.method, r.received, tip].join("|");
     if (state.meterOtherReview !== sig) { state.meterOtherReview = sig; state.meterHighTipOk = false; state.meterError = ""; render(); return; }
+    if (meterBigAmount(M, r) && state.meterBigOk !== sig) { state.meterBigOk = sig; state.meterError = ""; render(); return; } /* v2.0d.3 r2 (Harry); r3: the warning shows inside the Confirm card (meterBigWarnHtml) */
     if (highTip && !state.meterHighTipOk) { state.meterError = "Check the box to confirm the rider really gave a " + money(tip) + " tip."; render(); return; }
     var received = r.cash ? r.received : null, changeC = r.cash ? r.change : null;
     var save = function () {
@@ -14676,7 +14727,9 @@
         paidOther: Object.assign({ at: now, method: method, paidBy: "driver", amountCents: amount, tipCents: tip, cashReceivedCents: received, changeCents: changeC, by: M.driverName, driverId: M.driverId, fareTotal: M.fare.total }, cashLines) });
       if (method === "test") meterMarkTest(M, now); else
       if (method === "cash" && M.schedId) schedPatch(M.schedId, paidCashRecord(M, amount, tip, now)); /* v77.26: shows "Paid: cash, collected by <first name>" on the God card */
-      meterUpdatePayWeek(M, Object.assign({ tipCents: tip, paymentStatus: psO, paidVia: method, paidBy: method === "cash" ? "driver" : null, cashReceivedCents: received, changeCents: changeC }, cashLines));
+      var pw = method === "test" ? null : paidWeekNumbers(M, amount, meterPct(M)); /* v2.0d r3c (Harry): non-Metered -> driver's % of what was actually paid */
+      if (pw && M.logDay) { var stP = readDayStats(M.logDay), oldC = meterCommissionCents(M.fare, meterPct(M)); stP.commissionCents += pw.commissionCents - oldC; stP.rideTotalCents += pw.fareTotal - (Number(M.fare.total) || 0); writeDayStats(M.logDay, stP); }
+      meterUpdatePayWeek(M, Object.assign({ tipCents: tip, paymentStatus: psO, paidVia: method, paidBy: method === "cash" ? "driver" : null, cashReceivedCents: received, changeCents: changeC }, cashLines, pw || {}));
       meterNoteFlush(M); /* v76d */
       render();
     };
@@ -14985,6 +15038,7 @@
   }
   function meterBreakdownHtml(M) {
     if (M && M.prepaid) return '<div class="money-row" id="meter-invoice-row"><span>Fare</span><span>' + esc(invoiceFareText(M.prepaid)) + "</span></div>"; /* v77.11: never a meter price */
+    if (meterNumHidden(M)) return ""; /* v2.0d */
     var f = M.fare || meterFare(M);
     if (f.setFare) return ( /* v73: fare set before the ride; meter reading shown for testing only */
       '<div class="card" id="meter-breakdown">' +
@@ -14992,7 +15046,7 @@
       meterTollRowHtml(f) + /* v76b */
       (M.taxRate ? '<div class="money-row" id="meter-tax"><span>Tax (' + meterPct(M.taxRate) + ")</span><span>" + money(f.tax) + "</span></div>" : "") +
       '<div class="total-row"><span>Total</span><span id="meter-total">' + money(f.total) + "</span></div>" +
-      '<p class="fine" id="meter-reading-test">Meter reading (test only, not charged): ' + money(f.meterReadingCents) + " · " + esc(f.miles.toFixed(2)) + " mi · " + esc(String(f.waitMin)) + " min stopped/slow</p>" +
+      (meterShown(M) ? '<p class="fine" id="meter-reading-test">Meter reading (test only, not charged): ' + money(f.meterReadingCents) + " · " + esc(f.miles.toFixed(2)) + " mi · " + esc(String(f.waitMin)) + " min stopped/slow</p>" : "") + /* v2.0d: test reading only on Metered rides */
       '<p class="fine">' + esc(M.tierLabel) + " · " + esc(String(M.minutes || "")) + " min ride · ride " + esc(M.code) + "</p>" +
       "</div>"
     );
@@ -15084,15 +15138,20 @@
       }
     });
   }
+  function meterBigWarnText(M, r) { return "Check the amount: " + money(r.received) + " is " + (r.received > 30000 ? "over $300" : "more than twice the meter (" + money(M.fare.total) + ")") + ". Tap Confirm again if the rider really paid that."; }
+  function meterBigWarnHtml(M, r) { /* v2.0d.3 r3 (Harry): big-amount warning lives inside the Confirm card */
+    if (!meterBigAmount(M, r)) return "";
+    return '<p id="meter-bigamt" role="alert" style="color:#b91c1c;font-weight:800;margin:8px 0">' + esc(meterBigWarnText(M, r)) + "</p>";
+  }
   function meterOtherHtml(M) {
     var draft = state.meterOtherDraft || {};
-    var methods = [["cash", "Cash"], ["card_machine", "Card machine"], ["other", "Other"]].concat(M && M.schedId ? [] : [["test", "Rate comparison"]]); /* v76d: never on a scheduled ride */ /* v72x.1 test ride; v73 label "Rate comparison" (same $0 accounting, paidVia stays "test") */
+    var methods = (meterCashAllowed() ? [["cash", "Cash"]] : []).concat([["card_machine", "Card machine"], ["other", "Other"]]).concat(M && M.schedId ? [] : [["test", "Rate comparison"]]); /* v76d: never on a scheduled ride */ /* v72x.1 test ride; v73 label "Rate comparison" (same $0 accounting, paidVia stays "test") */
     var r = meterOtherRead(true);
     var cash = r.cash;
     var sig = [r.method, r.received, r.tip].join("|");
     var review = !!r.method && state.meterOtherReview === sig && isFinite(r.received);
-    var highTip = r.tip > 0 && (r.tip >= M.fare.total || r.tip === r.received);
-    var amtVal = draft.amount != null && draft.amount !== "" ? draft.amount : (cash || !r.method ? "" : (M.fare.total / 100).toFixed(2));
+    var highTip = r.tip > 0 && (r.tip >= meterTipBase(M, r) || r.tip === r.received); /* r3c: X */
+    var amtVal = draft.amount != null && draft.amount !== "" ? draft.amount : (cash ? (r.collect != null ? ((r.collect + r.tip) / 100).toFixed(2) : "") : !r.method ? "" : r.method === "test" ? (M.fare.total / 100).toFixed(2) : r.collect != null ? (r.collect / 100).toFixed(2) : ""); /* v2.0d r3: cash prefilled with X; r3c: card machine / other too */
     var chip = function (c, label) {
       var on = r.choice === c;
       return '<button type="button" class="btn ' + (on ? "" : "ghost ") + 'meter-tip-chip" data-tip="' + c + '" aria-pressed="' + on + '">' + (on ? "\u2713 " : "") + label + "</button>";
@@ -15102,6 +15161,7 @@
         '<p id="meter-other-review" role="status" style="font-weight:800;font-size:1.1em;margin:8px 0">Fare ' + esc(money(r.fare)) + " + tip " + esc(money(r.tip)) + " = " + esc(money(r.fare + r.tip)) +
         (cash ? ", change " + esc(money(r.change)) : "") + "</p>" +
         (cash ? '<p class="fine" id="meter-review-cash">Cash received ' + esc(money(r.received)) + " · give back " + esc(money(r.change)) + " in change</p>" : '<p class="fine">' + esc(r.method === "card_machine" ? "Card machine" : "Other") + " · collected " + esc(money(r.amount)) + "</p>") +
+        meterBigWarnHtml(M, r) +
         (highTip ? '<label id="meter-hightip" style="display:flex;gap:8px;color:#b91c1c;font-weight:700"><input type="checkbox" id="meter-hightip-ok"' + (state.meterHighTipOk ? " checked" : "") + "> The rider really gave a " + esc(money(r.tip)) + " tip (as much as the fare or the cash received).</label>" : "") +
         (rideNoteClean(state.meterNoteDraft) ? '<p id="meter-review-note" style="background:#fff;color:#111;font-size:18px;font-weight:600;padding:8px;border-radius:8px;white-space:pre-wrap"><strong>Notes:</strong> ' + esc(rideNoteClean(state.meterNoteDraft)) + "</p>" : "") + /* v76d */
         '<button class="btn" type="button" id="meter-other-yes"' + (state.meterBusy ? " disabled" : "") + ">Confirm</button>" +
@@ -15120,18 +15180,19 @@
         ? '<p class="fine" id="meter-test-note" style="font-weight:700;color:#f0d48a">Rate comparison ride: $0 collected. Kept out of earnings, weekly reports, the PCS share and finance data. Miles and hours log normally.</p>' +
           '<button class="btn" type="button" id="meter-other-yes">Review</button>'
         : r.method
-        ? (cash ? '<p class="fine" id="meter-cash-fare" style="font-weight:700">Fare ' + esc(money(r.fare)) + " \u2014 recorded as paid in cash</p>" : "") +
+        ? (cash ? (r.collect != null ? '<p id="meter-collect" role="status" style="font-weight:900;font-size:1.3em;margin:6px 0">Amount to collect: ' + esc(money(r.collect)) + "</p>" /* v2.0d r3 */
+            : '<p id="meter-collect" role="status" style="font-weight:800;margin:6px 0;color:#f0d48a">No amount on file. Type the cash collected.</p>') : "") +
           '<div class="meter-tip-box" id="meter-tip-box"><p class="fine" id="meter-tip-summary" style="margin:4px 0 2px"><strong>' + (cash ? "Cash tip" : "Tip") + ":</strong> " + /* v72t: presets always visible */
             esc(r.choice === "0" ? "$0.00" : r.choice === "custom" ? "Custom " + money(r.tip) : /^c/.test(r.choice) ? money(r.tip) : r.choice + "% \u00b7 " + money(r.tip)) + "</p>" +
           '<div class="meter-tips" role="group" aria-label="' + (cash ? "Cash tip" : "Tip") + '">' + chip("0", cash ? "$0" : "$0 tip") +
             (cash ? METER_CASH_TIPS.map(function (c) { return chip("c" + c, money(c)); }).join("") /* v76d */
               : METER_TIP_PCTS.map(function (p) { return chip(p, p + "% · " + money(Math.round((Number(M.fare.sub) || 0) * Number(p) / 100))); }).join("")) + chip("custom", "Custom") + "</div>" +
           (r.choice === "custom" ? '<label for="meter-other-tip">' + (cash ? "Cash tip" : "Custom tip") + '</label><input id="meter-other-tip" type="text" readonly data-pad="tip" class="meter-pad-input' + (meterPadTarget() === "tip" ? " pad-on" : "") + '" inputmode="none" autocomplete="off" autocorrect="off" spellcheck="false" name="pcs-meter-tip-' + esc(M.code) + '" placeholder="0.00" value="' + esc(draft.tip || "") + '">' : "") + "</div>" +
-          '<label for="meter-other-amount">' + (cash ? "Cash received (optional, for change)" : "Amount collected (fare)") + "</label>" +
-          '<input id="meter-other-amount" type="text" readonly data-pad="amount" class="meter-pad-input' + (meterPadTarget() === "amount" ? " pad-on" : "") + '" inputmode="none" autocomplete="off" autocorrect="off" spellcheck="false" name="pcs-meter-collected-' + esc(M.code) + '" placeholder="' + esc(((M.fare.total + (cash ? r.tip : 0)) / 100).toFixed(2)) + '" value="' + esc(amtVal) + '">' +
+          '<label for="meter-other-amount">' + (cash ? (r.collect == null ? "Cash collected (required)" : "Cash received (optional, for change)") : "Amount collected (fare)") + "</label>" +
+          '<input id="meter-other-amount" type="text" readonly data-pad="amount" class="meter-pad-input' + (meterPadTarget() === "amount" ? " pad-on" : "") + '" inputmode="none" autocomplete="off" autocorrect="off" spellcheck="false" name="pcs-meter-collected-' + esc(M.code) + '" placeholder="' + esc(cash ? (r.collect != null ? ((r.collect + r.tip) / 100).toFixed(2) : "0.00") : meterNumHidden(M) ? "0.00" : (M.fare.total / 100).toFixed(2)) + '" value="' + esc(amtVal) + '">' +
           meterPadHtml() + /* v72t: on-screen number pad (iPad ignores inputmode); the system keyboard never opens */
-          (cash ? '<button class="btn ghost" type="button" id="meter-exact">Exact change</button>' +
-            '<div id="meter-cash-sum" class="fine" style="font-weight:700">Fare ' + esc(money(r.fare)) + " · Tip " + esc(money(r.tip)) + ' · <span id="meter-change"' + (r.change < 0 ? ' style="color:#b91c1c"' : "") + ">Change due: " + (isFinite(r.received) ? esc(money(r.change)) : "\u2014") + "</span></div>" : "") +
+          (cash ? (r.collect != null ? '<button class="btn ghost" type="button" id="meter-exact">Exact change</button>' : "") +
+            '<div id="meter-cash-sum" class="fine" style="font-weight:700">' + (r.collect == null ? "" : "Collect " + esc(money(r.collect)) + " · ") + "Tip " + esc(money(r.tip)) + ' · <span id="meter-change"' + (r.change < 0 ? ' style="color:#b91c1c"' : "") + ">Change due: " + (isFinite(r.received) ? esc(money(r.change)) : "\u2014") + "</span></div>" : "") +
           '<p class="fine">Extra cash is change, never a tip. Flagged for Matthew in God mode (not checked by Square).</p>' +
           rideNoteBoxHtml("meter-note", state.meterNoteDraft != null ? state.meterNoteDraft : M.rideNote) + /* v76d */
           '<button class="btn" type="button" id="meter-other-yes"' + (state.meterBusy ? " disabled" : "") + ">Review</button>"
@@ -15186,13 +15247,13 @@
         "</section>");
       return (
         '<section id="meter-paid">' + meterTestTag(M) +
-        '<p class="tag">Metered ride ' + esc(M.code) + "</p>" +
-        '<p class="meter-paid" id="meter-paid-amount">' + (unver ? "Recorded, NOT verified: " : P.method === "cash" ? "Paid: cash, collected by you · " : "Paid ") + money(paidOther ? (P.amountCents || 0) + (P.tipCents || 0) : (P.totalCents || 0)) + "</p>" +
+        '<p class="tag">' + (meterNumHidden(M) ? "Ride " : "Metered ride ") + esc(M.code) + "</p>" + /* v2.0d r2 */
+        '<p class="meter-paid" id="meter-paid-amount">' + (unver ? "Recorded, NOT verified: " : P.method === "cash" ? "Paid: cash, collected by you · " : "Paid ") + (meterNumHidden(M) ? (P.tipCents ? "tip " + money(P.tipCents) : "") : money(paidOther ? (P.amountCents || 0) + (P.tipCents || 0) : (P.totalCents || 0))) + "</p>" + /* v2.0d r2: no meter-derived amount on a non-Metered ride */
         '<p class="meter-sub" id="meter-paid-detail">' +
         (paidOther
-          ? (unver ? "Not paid until Square shows it · " : "Paid another way · ") + esc(P.method === "card_machine" ? "card machine" : P.method || "other") + " · fare " + money(P.amountCents || 0) + " · tip " + money(P.tipCents || 0) +
+          ? (unver ? "Not paid until Square shows it · " : "Paid another way · ") + esc(P.method === "card_machine" ? "card machine" : P.method || "other") + (meterNumHidden(M) ? "" : " · fare " + money(P.amountCents || 0)) + " · tip " + money(P.tipCents || 0) + /* v2.0d r2: the fare part defaults to the meter, so it is not shown on a non-Metered ride */
             (P.cashReceivedCents != null ? " · cash received " + money(P.cashReceivedCents) + " · change " + money(P.changeCents || 0) : "")
-          : "Fare " + money(P.fareCents || 0) + (P.tipCents ? " + tip " + money(P.tipCents) : " · no tip")) + "</p>" +
+          : (meterNumHidden(M) ? (P.tipCents ? "Tip " + money(P.tipCents) : "No tip") : "Fare " + money(P.fareCents || 0) + (P.tipCents ? " + tip " + money(P.tipCents) : " · no tip"))) + "</p>" + /* v2.0d: no meter fare on a non-Metered ride */
         (P.receiptUrl ? '<p class="fine"><a href="' + esc(P.receiptUrl) + '" target="_blank" rel="noopener" style="color:#f0d48a">Square receipt</a></p>' : "") +
         meterBreakdownHtml(M) +
         rideNoteBoxHtml("meter-note-paid", state.meterNoteDraft != null ? state.meterNoteDraft : M.rideNote) + /* v76d */
@@ -15212,17 +15273,17 @@
       meterDiscountHtml(M) + /* v73 */
       meterTollHtml(M) + /* v76b: tolls still editable until the pay link opens */
       (state.meterOtherOpen /* v72s: one screen, no scrolling: the breakdown folds up while marking paid */
-        ? '<details class="card meter-bd-box" id="meter-breakdown-box"><summary>Total <strong id="meter-total-sum">' + meterMoneyShown(M, f.total) + "</strong> \u00b7 breakdown</summary>" + meterBreakdownHtml(M) + "</details>"
+        ? (meterNumHidden(M) ? "" : '<details class="card meter-bd-box" id="meter-breakdown-box"><summary>Total <strong id="meter-total-sum">' + meterMoneyShown(M, f.total) + "</strong> \u00b7 breakdown</summary>" + meterBreakdownHtml(M) + "</details>") /* v2.0d r2: no empty "Total · breakdown" on a non-Metered ride */
         : meterBreakdownHtml(M)) + busy + err +
       (M.riderCard && !linkOpen
         ? '<div class="card" id="meter-rider-pay" style="border:2px solid #8fd0a8"><p class="tag" style="color:#8fd0a8">Rider saved a card</p>' +
-          '<p class="lede">The rider can pay ' + money(f.total) + ' on their phone (meter page, tip optional). This screen flips to Paid by itself.</p>' +
+          '<p class="lede">The rider can pay ' + (meterNumHidden(M) ? "" : money(f.total) + " ") + 'on their phone (meter page, tip optional). This screen flips to Paid by itself.</p>' +
           '<p class="lede" id="meter-pay-status">Waiting for payment…</p></div>'
         : "") +
       (linkOpen
         ? '<div class="card" id="meter-pay-card" style="text-align:center">' +
           '<p class="tag">Private Car Services · scan to pay</p>' +
-          '<p class="meter-fare" style="font-size:40px">' + money(M.link.cents || f.total) + "</p>" +
+          (meterNumHidden(M) ? "" : '<p class="meter-fare" style="font-size:40px">' + money(M.link.cents || f.total) + "</p>") + /* v2.0d */
           (qr ? '<div class="meter-qr" id="meter-qr">' + qr + "</div>" : '<p class="fine" id="meter-qr-missing">The QR code can\u2019t be drawn right now. Tap Show link.</p>') +
           '<p class="fine">Point your phone camera at the code. Tip is optional on the next screen.</p>' +
           '<p class="lede" id="meter-pay-status">Waiting for payment…</p>' +
@@ -15303,7 +15364,8 @@
     ensureMeterStyle();
     var f = M.fare || meterFare(M);
     return '<button class="meter-bar" type="button" id="meter-reopen">' +
-      (M.status === "running" ? 'Metered ride running · <span id="meter-bar-fare">' + meterMoneyShown(M, f.sub) + "</span> · Open" :
+      (meterNumHidden(M) ? (M.status === "running" ? "Ride running · Open" : M.status === "paid" ? "Ride paid · Open" : "Ride ended · Open to get paid") : /* v2.0d r2: not a Metered ride, so never "Metered ride ..." */
+      M.status === "running" ? 'Metered ride running · <span id="meter-bar-fare">' + meterMoneyShown(M, f.sub) + "</span> · Open" :
         M.status === "paid" ? "Metered ride paid · Open" : "Metered ride ended · " + meterMoneyShown(M, f.total) + " · Open to get paid") + "</button>";
   }
   /* ---------- v71: optional DESTINATION + road route on the map + ETA (metered ride) ----------
@@ -15960,7 +16022,7 @@
         var ch = document.getElementById("meter-change");
         if (ch) { ch.textContent = "Change due: " + (isFinite(r.received) ? money(r.change) : "\u2014"); ch.style.color = r.change < 0 ? "#b91c1c" : ""; }
         var sum = document.getElementById("meter-cash-sum");
-        if (sum && sum.firstChild && sum.firstChild.nodeType === 3) sum.firstChild.nodeValue = "Fare " + money(r.fare) + " \u00b7 Tip " + money(r.tip) + " \u00b7 ";
+        if (sum && sum.firstChild && sum.firstChild.nodeType === 3) sum.firstChild.nodeValue = (r.collect == null ? "" : "Collect " + money(r.collect) + " \u00b7 ") + "Tip " + money(r.tip) + " \u00b7 "; /* v2.0d r2 */
       });
     });
     Array.prototype.forEach.call(document.querySelectorAll(".meter-method"), function (b) {
