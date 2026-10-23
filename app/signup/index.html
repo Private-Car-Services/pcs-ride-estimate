@@ -39,8 +39,8 @@
         <label for="full-name">Full name</label>
         <input id="full-name" name="name" type="text" autocomplete="name" required>
         <label for="mobile">Mobile phone</label>
-        <input id="mobile" name="phone" type="tel" inputmode="tel" autocomplete="tel" required aria-describedby="mobile-consent">
-        <p class="sms-consent" id="mobile-consent" style="font-size:12px;line-height:1.45;color:#6b7280;margin:6px 0 0">By providing your mobile number, you agree to receive ride update text messages from Private Car Services (Private Taxi Services LLC), such as booking confirmations, driver details, and live tracking links. Message frequency varies by ride. Msg &amp; data rates may apply. Reply STOP to opt out, HELP for help. Consent is not a condition of purchase. See our <a href="../policies/#sms">SMS Terms</a> and <a href="../policies/#privacy">Privacy Policy</a>.</p> <!-- v77.20 -->
+        <input id="mobile" name="phone" type="tel" inputmode="tel" autocomplete="tel" required>
+        <label class="sms-optin" for="mobile-sms-optin" style="display:flex;gap:10px;align-items:flex-start;margin:8px 0 0;font-size:13px;line-height:1.45;font-weight:400;text-transform:none;letter-spacing:normal"><input type="checkbox" id="mobile-sms-optin" name="sms-optin" value="yes" style="width:22px;height:22px;flex:0 0 auto;margin:2px 0 0"><span id="mobile-sms-optin-text">Text me ride updates from Private Car Services (driver on the way, arrival, receipts). Msg frequency varies, about 1-5 per ride. Msg &amp; data rates may apply. Reply STOP to opt out, HELP for help. Help: 936-261-7878. Consent is not a condition of booking. See <a href="../policies/#sms" target="_blank" rel="noopener">SMS Terms</a> and <a href="../policies/#privacy" target="_blank" rel="noopener">Privacy</a> at www.PCSrides.com.</span></label><p class="fine sms-optin-note" style="font-size:12px;margin:4px 0 0">Optional. Leave it unchecked and you can still book; your driver may still call this number about your ride.</p> <!-- v77.23 express opt-in (unchecked) -->
         <label for="email">Email</label>
         <input id="email" name="email" type="email" autocomplete="email" required>
         <label for="password">Password</label>
@@ -59,6 +59,9 @@
       </form>
     </main>
   </div>
+  <script>
+    var SMS_OPTIN_TEXT = "Text me ride updates from Private Car Services (driver on the way, arrival, receipts). Msg frequency varies, about 1-5 per ride. Msg & data rates may apply. Reply STOP to opt out, HELP for help. Help: 936-261-7878. Consent is not a condition of booking. See SMS Terms and Privacy at www.PCSrides.com."; /* v77.23: exact wording next to the box */
+  </script>
   <script>
     (function () {
       var form = document.getElementById("signup-form");
@@ -273,6 +276,10 @@
             policyVersion: POLICY_VERSION,
             agreedVia: "signup"
           };
+          var smsBox = document.getElementById("mobile-sms-optin"); /* v77.23 express opt-in (unchecked by default) */
+          var smsYes = !!(smsBox && smsBox.checked);
+          profile.smsOptIn = smsYes; profile.smsOptInAt = Date.now(); profile.smsOptInText = smsYes ? SMS_OPTIN_TEXT : null; profile.smsOptInSource = "rider-signup";
+          /* v77.23 r1b: no Worker call here (no ride yet). The app sends it with the first ride (Worker checks code + phone). */
           localStorage.setItem("pcs-rider-account", JSON.stringify(profile));
           localStorage.setItem("pcs-rider-session", email);
           try {
