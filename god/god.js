@@ -274,14 +274,16 @@
       fareBeforeTax: raw.fareBeforeTax != null ? Number(raw.fareBeforeTax) : null,
       commissionCents: raw.commissionCents != null ? Number(raw.commissionCents) : null,
       completedAt: raw.completedAt || null,
+      headedToPickupAt: Number(raw.headedToPickupAt) || null, pickedUpAt: Number(raw.pickedUpAt) || null, rowUpdatedAt: Number(raw.updatedAt) || null, /* v2.0d.5 board route */
       source: String(raw.source || ""), sessionFlags: Array.isArray(raw.sessionFlags) ? raw.sessionFlags.map(String).slice(0, 8) : [], discountReview: "", /* r4 M4: from the Worker only (discOverlay) */ payMethod: String(raw.payMethod || ""), stops: Array.isArray(raw.stops) ? raw.stops : [], /* v72d */
       riderPhone: String(raw.riderPhone || ""), riderPhoneEdited: raw.riderPhoneEdited === true, riderPhoneSrc: String(raw.riderPhoneSrc || ""), autoText: raw.autoText !== false, /* v77.3 */ teenRider: raw.teenRider === true, teenPhone: String(raw.teenPhone || ""), extraPhoneOnce: String(raw.extraPhoneOnce || ""), /* v77.5 */ balance: raw.balance != null ? Number(raw.balance) : null,
       paidSquareCents: raw.paidSquareCents != null && isFinite(+raw.paidSquareCents) ? Math.round(+raw.paidSquareCents) : null, paidEdits: Array.isArray(raw.paidEdits) ? raw.paidEdits : [], /* v75w */
       tipCents: Number(raw.tipCents) || 0, tipVia: raw.tipVia ? String(raw.tipVia) : null, tipEdits: Array.isArray(raw.tipEdits) ? raw.tipEdits : [], /* v73 */
-      cancelledAt: Number(raw.cancelledAt) || null, cancelledBy: raw.cancelledBy ? String(raw.cancelledBy) : null, cancelReason: raw.cancelReason ? String(raw.cancelReason) : null,
+      cancelledAt: Number(raw.cancelledAt) || null, cancelledBy: raw.cancelledBy ? String(raw.cancelledBy) : null, cancelReason: raw.cancelReason ? String(raw.cancelReason) : null, cancelNote: raw.cancelNote ? String(raw.cancelNote).slice(0, 500) : "", /* r13 */
+      cancelledByDriver: raw.cancelledByDriver && typeof raw.cancelledByDriver === "object" ? { id: String(raw.cancelledByDriver.id || ""), name: String(raw.cancelledByDriver.name || "") } : null,
       cancelFee: raw.cancelFee ? String(raw.cancelFee) : null, cancelFeeStatus: raw.cancelFeeStatus ? String(raw.cancelFeeStatus) : null,
       fixedFare: raw.fixedFare === true, completedEarly: raw.completedEarly === true, /* v73 fare-save fix */
-      meterReadingCents: raw.meterReadingCents != null ? Number(raw.meterReadingCents) : null, meterCode: raw.meterCode ? String(raw.meterCode) : "",
+      meterReadingCents: raw.meterReadingCents != null ? Number(raw.meterReadingCents) : raw.meterFareReadingCents != null ? Number(raw.meterFareReadingCents) : null, /* r7: record only (no screen shows it); non-Metered rides send it as meterFareReadingCents */ pricePending: raw.pricePending === true, meterCode: raw.meterCode ? String(raw.meterCode) : "",
       stopsGeo: Array.isArray(raw.stopsGeo) ? raw.stopsGeo : [], dropoffEdited: raw.dropoffEdited === true, dropoffEditedBy: raw.dropoffEditedBy ? String(raw.dropoffEditedBy) : "", /* v75r */
       pickupLat: isFinite(+raw.pickupLat) && raw.pickupLat != null && raw.pickupLat !== "" ? +raw.pickupLat : null, pickupLng: isFinite(+raw.pickupLng) && raw.pickupLng != null && raw.pickupLng !== "" ? +raw.pickupLng : null,
       dropoffLat: isFinite(+raw.dropoffLat) && raw.dropoffLat != null && raw.dropoffLat !== "" ? +raw.dropoffLat : null, dropoffLng: isFinite(+raw.dropoffLng) && raw.dropoffLng != null && raw.dropoffLng !== "" ? +raw.dropoffLng : null,
@@ -656,7 +658,7 @@
      Pure (tested): "write" | "skip" | "rekey" */
   function historyDecision(existing, entry) {
     if (!existing || typeof existing !== "object" || !Object.keys(existing).length) return "write";
-    var finished = function (e) { return !e.canceled && String(e.status || "") !== "canceled" && ((Number(e.fareTotal) || 0) > 0 || (Number(e.commissionCents) || 0) > 0 || (Number(e.fareSub) || 0) > 0); };
+    var finished = function (e) { return !e.canceled && String(e.status || "") !== "canceled" && (godPricePending(e) /* r7 */ || (Number(e.fareTotal) || 0) > 0 || (Number(e.commissionCents) || 0) > 0 || (Number(e.fareSub) || 0) > 0); };
     var same = (existing.scheduleId && entry.scheduleId) ? existing.scheduleId === entry.scheduleId
       : (String(existing.riderName || "") === String(entry.riderName || "") && String(existing.day || "") === String(entry.day || ""));
     if (entry.canceled && finished(existing)) return "skip";
@@ -1503,7 +1505,7 @@
       try { var e = addRideHistoryEntry(r, r.completedAt); e.fromCalendar = true; list.push(e); have[r.code] = true; } catch (x) {}
     });
     list = godDedupeEntries(list, chicagoToday()); /* v77.11: one row per real ride, no future rides */
-    list.forEach(function (e) { invApply(e, state.invKV || {}, { driverId: driverId, card: e && e.scheduleId ? (state.calendarRaw || {})[e.scheduleId] : null, pctFor: commissionPctFor, kvPct: state.ridePctKV || {} }); }); /* r3: God-side % + one entry per card; r4 KV % */
+    list.forEach(function (e) { invApply(e, state.invKV || {}, { driverId: driverId, card: e && e.scheduleId ? (state.calendarRaw || {})[e.scheduleId] : null, pctFor: commissionPctFor, kvPct: state.ridePctKV || {} }); try { if (typeof godAutoSettle === "function") godAutoSettle(driverId, e); } catch (x) {} }); /* r3: God-side % + one entry per card; r4 KV % */
     payBalance(list, { driverId: driverId, pctFor: commissionPctFor, kvPct: state.ridePctKV || {}, cards: state.calendarRaw || {}, charges: state.payCharges || {}, holds: state.payHolds || {}, kvDisc: state.discKV || {}, discPresets: state.discPresets || {} }); /* r5: normalize every entry (N1-N3) */
     return list.sort(function (a, b) {
       return Number(b.completedAt || 0) - Number(a.completedAt || 0);
@@ -1516,7 +1518,7 @@
   function godDedupeEntries(list, today) {
     var metered = {}, codes = {}, gone = {};
     list.forEach(function (e) { if (!e) return; codes[e.code] = e; if (e.rideType === "metered" && e.scheduleId) metered[e.scheduleId] = e; });
-    var zero = function (e) { return !(Number(e.fareSub) || 0) && !(Number(e.fareTotal) || 0) && !(Number(e.tipCents) || 0); };
+    var zero = function (e) { return !(typeof godPricePending === "function" && godPricePending(e)) /* r7: a Price-pending ride is a real ride, not a $0 stub */ && !(Number(e.fareSub) || 0) && !(Number(e.fareTotal) || 0) && !(Number(e.tipCents) || 0); };
     var same = function (a, b) { return (Number(a.fareSub) || 0) === (Number(b.fareSub) || 0) && (Number(a.fareTax) || 0) === (Number(b.fareTax) || 0) && (Number(a.tipCents) || 0) === (Number(b.tipCents) || 0); };
     list.forEach(function (e) {
       if (!e || e.rideType === "metered") return;
@@ -1538,7 +1540,11 @@
     opts = opts || {};
     var k = kv && e.scheduleId && Object.prototype.hasOwnProperty.call(kv, e.scheduleId) ? kv[e.scheduleId] : null;
     var claims = !!(e.prepaidInvoiceNo || e.fareSource === "square_invoice" || e.paidVia === "square_invoice");
-    if (!k) { if (claims) e.invoiceUnverified = true; return e; }
+    var wasPending = typeof godPricePending === "function" && godPricePending(e); /* r8 */
+    if (k && wasPending && !(Math.round(Number(k.amountCents) || 0) > 0)) { e.commissionCents = null; e.invoiceZero = true; return e; } /* r8: a $0 invoice never settles a ride */
+    var fb = wasPending && e.code && state.autoSettled ? state.autoSettled[e.code] : null;
+    if (fb && fb !== true && !fb.busy && fb.tries > 0 && (fb.tries >= GOD_AUTOSETTLE_MAX || Date.now() < fb.next)) { e.commissionCents = null; e.autoSettleFailed = fb.tries; return e; } /* r9: the last save failed: stays Price pending (no unsaved price shown) until the back-off retry */
+    if (!k) { if (claims) e.invoiceUnverified = true; if (typeof godPricePending === "function" && godPricePending(e)) { e.commissionCents = null; } return e; } /* r7: no price -> no commission */
     var card = opts.card || null;
     if (card && opts.driverId && String(card.assignedDriverId || "") !== String(opts.driverId)) { e.invoiceUnverified = true; e.invoiceWrongDriver = true; return e; }
     if (!Object.prototype.hasOwnProperty.call(kv, "__claims")) Object.defineProperty(kv, "__claims", { value: {}, enumerable: false });
@@ -1557,15 +1563,18 @@
       if (pct > 80) { e.pctCapped = { asked: pct }; pct = 80; }
       pct = Math.max(0, pct);
     }
-    if ((Number(e.fareSub) || 0) !== sub || (Number(e.fareTax) || 0) !== tax) {
+    if (wasPending) { e.fareSub = sub; e.fareTax = tax; e.fareTotal = sub + tax; } /* r8: pending had no price to disagree with: no mismatch flag */
+    else if ((Number(e.fareSub) || 0) !== sub || (Number(e.fareTax) || 0) !== tax) {
       e.invoiceMismatch = { appFareSub: Number(e.fareSub) || 0, appFareTax: Number(e.fareTax) || 0, appCommission: Number(e.commissionCents) || 0, invoiceNo: k.invoiceNo };
       e.fareSub = sub; e.fareTax = tax; e.fareTotal = sub + tax;
     }
     var com = Math.round(sub * pct / 100);
-    if ((Number(e.commissionCents) || 0) !== com && !e.invoiceMismatch) e.invoiceMismatch = { appFareSub: sub, appFareTax: tax, appCommission: Number(e.commissionCents) || 0, invoiceNo: k.invoiceNo, commissionOnly: true };
+    if (!wasPending && (Number(e.commissionCents) || 0) !== com && !e.invoiceMismatch) e.invoiceMismatch = { appFareSub: sub, appFareTax: tax, appCommission: Number(e.commissionCents) || 0, invoiceNo: k.invoiceNo, commissionOnly: true };
     e.commissionCents = com; e.commissionPct = pct;
+    if (e.pricePending) { e.pricePending = null; e.fareSource = "square_invoice"; } /* r7: the verified invoice is the price of record */
     if (e.invoiceUnverified) { delete e.invoiceVerified; return e; }
     if (typeof Symbol === "function") e[Symbol.for("pcsInvPct")] = pct; /* r5: trusted this load only (JSON can't forge a Symbol key) */
+    if (wasPending && typeof Symbol === "function") e[Symbol.for("pcsAutoSettle")] = { sub: sub, tax: tax, pct: pct, invoiceNo: String(k.invoiceNo || "") }; /* r8: saved by godAutoSettle */
     e.invoiceVerified = String(k.invoiceNo || ""); return e;
   }
   function invFlagHtml(e) { /* r5: payout flags first, then the invoice flag */
@@ -1648,13 +1657,15 @@
     var commissionTotal = 0;
     var tipTotal = 0, tollTotal = 0, tollFeeTotal = 0;
     entries = entries.filter(function (e) { return !isTestRide(e); }); /* v76d: test rides count for nothing */
+    var pendingCount = 0;
     entries.forEach(function (e) {
+      if (godPricePending(e)) { pendingCount += 1; return; } /* r7: out of the totals until priced */
       rideTotal += Number(e.fareTotal) || 0;
       commissionTotal += Number(e.commissionCents) || 0;
       tipTotal += Number(e.tipCents) || 0; /* v70: tips go 100% to the driver */
       tollTotal += tollReimbCents(e); tollFeeTotal += tollFeeCents(e); /* v76b */
     });
-    return { rideTotal: rideTotal, commissionTotal: commissionTotal, tipTotal: tipTotal, tollTotal: tollTotal, tollFeeTotal: tollFeeTotal, count: entries.length };
+    return { rideTotal: rideTotal, commissionTotal: commissionTotal, tipTotal: tipTotal, tollTotal: tollTotal, tollFeeTotal: tollFeeTotal, count: entries.length, pricePending: pendingCount };
   }
 
   function mondayOfWeek(ymd) {
@@ -1769,6 +1780,115 @@
     if (cents === null || cents === undefined || cents === "" || !isFinite(+cents)) return "$0.00";
     return "$" + (Number(cents) / 100).toFixed(2);
   }
+  /* v2.0d.5 r7 (Harry): a non-Metered ride with no invoice and no quote ends "Price pending" (app r6: fares null, pricePending).
+     It stays visible, flagged, and counts for nothing (totals, commission, owed, charges) until God sets the price. Never the meter. (pure, tested) */
+  var GOD_PRICE_PENDING = "Price pending";
+  var METER_TAX_RATE = 0.0825; /* r8 (Harry): the app's Texas 8.25% (app.js METER_TAX_RATE); one rate for every God settle */
+  function godPricePending(e) {
+    if (!e || typeof e !== "object") return false;
+    if (e.isTest === true || e.testRide === true || e.canceled || String(e.status || "") === "canceled") return false;
+    if (e.pricePending === true) return !(Number(e.fareTotal) > 0) && !(Number(e.fareSub) > 0);
+    return e.fareTotal === null && e.fareSub === null; /* explicit nulls from the app = no price of record */
+  }
+  function fmtFare(e, cents) { return godPricePending(e) ? GOD_PRICE_PENDING : fmtCents(cents); }
+  function pricePendingBadge(e) { return godPricePending(e) ? '<strong class="god-price-pending" style="background:#b45309;color:#fff;padding:2px 6px;border-radius:6px">Price pending: set the price before payout</strong> ' : ""; }
+  /* r7: the % God would pay on this ride (same order as invApply / payBalance): KV override, God-set card %, driver's saved rate (cap 80), 70.
+     Read only: the driver's saved % is never written. */
+  function godRidePct(e, driverId, card, pctFor, kvPct) {
+    var kvp = kvPct && e && e.scheduleId && Object.prototype.hasOwnProperty.call(kvPct, e.scheduleId) ? kvPct[e.scheduleId] : null;
+    if (kvp && isFinite(+kvp.pct)) return Math.min(100, Math.max(0, Math.round(+kvp.pct)));
+    var pct = null;
+    if (card && card.rideCommissionPct != null && card.rideCommissionPctBy === "god" && isFinite(+card.rideCommissionPct)) pct = Math.round(+card.rideCommissionPct);
+    else if (typeof pctFor === "function" && driverId) pct = Number(pctFor(driverId));
+    if (pct == null || !isFinite(pct)) pct = typeof DEFAULT_COMMISSION_PCT !== "undefined" ? DEFAULT_COMMISSION_PCT : 70;
+    return Math.max(0, Math.min(80, pct));
+  }
+  /* r7: God settles a Price-pending ride: Subtotal (before tax) -> fare, tax, commission; pricePending cleared on the pay-week entry,
+     the ride record (customer receipt) and PAYMENTS. (pure, tested) */
+  function godSettlePatches(subCents, pct, by, now) {
+    var sub = Math.round(Number(subCents)); if (!(sub > 0)) return null;
+    var tax = Math.round(sub * METER_TAX_RATE), tot = sub + tax, com = Math.round(sub * (Number(pct) || 0) / 100);
+    var src = { pricePending: null, fareSource: "god", priceSetBy: by || "god", priceSetAt: now };
+    return {
+      hist: Object.assign({ fareSub: sub, fareGrossSub: sub, fareTax: tax, fareTotal: tot, commissionCents: com, commissionPct: Number(pct) || 0 }, src),
+      ride: Object.assign({ fareSub: sub, fareTax: tax, fareTotal: tot, estimateCents: tot, fareGrossSub: sub, fareBase: sub, updatedAt: now }, src),
+      cal: { pricePending: null, commissionCents: com, commissionPct: Number(pct) || 0, updatedAt: now }, /* r8: the board card row too */
+      pay: { "meter/fareSub": sub, "meter/fareTax": tax, "meter/fareTotal": tot, "meter/pricePending": null, "meter/fareSource": "god", "meter/priceSetBy": by || "god", "meter/priceSetAt": now }
+    };
+  }
+  function godPriceSetHtml(driverId, e) {
+    if (!godPricePending(e)) return "";
+    var id = "god-price-" + String(e.code || "").replace(/[^A-Za-z0-9_-]/g, "");
+    return '<span class="god-price-set" style="display:inline-flex;gap:6px;align-items:end;flex-wrap:wrap;margin:4px 0"><label for="' + id + '">Subtotal ($)</label>' +
+      '<input id="' + id + '" type="text" inputmode="decimal" autocomplete="off" style="width:110px"> <button type="button" class="btn btn-gold" data-price-set="' + esc(e.code || "") + '" data-driver="' + esc(driverId) + '" data-price-box="' + id + '">Set price</button></span><br>';
+  }
+  function godPriceSet(driverId, code, dollars) {
+    var e = ((state.history && state.history[driverId]) || {})[code];
+    var sub = Math.round(Number(String(dollars || "").replace(/[^0-9.]/g, "")) * 100);
+    var card = e && e.scheduleId ? (state.calendarRaw || {})[e.scheduleId] : null;
+    var pct = godRidePct(e, driverId, card, commissionPctFor, state.ridePctKV || {});
+    var P = godSettlePatches(sub, pct, state.sessionEmail || "god", Date.now());
+    if (!e || !P) { state.boardNotice = code + ": type the Subtotal first."; render(); return Promise.resolve(); }
+    if (!window.confirm("Set " + code + " to Subtotal " + fmtCents(P.hist.fareSub) + " (total " + fmtCents(P.hist.fareTotal) + ", commission " + pct + "% = " + fmtCents(P.hist.commissionCents) + ")?")) return Promise.resolve();
+    return godSettleWrite(driverId, code, e, P).then(function () { state.boardNotice = code + ": price set, " + fmtCents(P.hist.fareTotal) + "."; return refresh(); })
+      .catch(function () { state.boardNotice = "NOT SAVED: price for " + code + " (check the connection and tap Set price again)."; render(); });
+  }
+  /* r8: one write path for Set price and the verified-invoice auto-settle: DRVRHSTY, then the ride record, PAYMENTS and the
+     calendar row (each only when it exists; never created). The driver's saved % is never written. */
+  function godSettleWrite(driverId, code, e, P) {
+    var J = { "Content-Type": "application/json" };
+    var patchIfThere = function (url, body) { return godFetch(url, { method: "GET" }).then(function (r) { return r.text(); }).then(function (t) { if (!t || t === "null") return null; return godFetch(url, { method: "PATCH", headers: J, body: JSON.stringify(body) }); }); };
+    return godFetch(historyUrl(driverId, code), { method: "PATCH", headers: J, body: JSON.stringify(P.hist) }).then(function (res) {
+      if (!res.ok) throw new Error("x");
+      return Promise.all([patchIfThere(rideUrl(code), P.ride), patchIfThere(baseUrl() + "/rides/PAYMENTS/" + encodeURIComponent(code) + ".json", P.pay),
+        e && e.scheduleId ? patchIfThere(calendarUrl(e.scheduleId), P.cal) : null]);
+    }).then(function () { if (e) Object.assign(e, P.hist); var row = e && e.scheduleId && (state.calendarRaw || {})[e.scheduleId]; if (row) Object.assign(row, P.cal); return true; });
+  }
+  /* r8 (Harry): a verified Square invoice on a Price-pending ride is saved (not only shown): same writes as Set price, once per
+     ride per God session, no confirm (the invoice is the price of record). $0 invoices are refused upstream (invApply). */
+  var GOD_AUTOSETTLE_BASE_MS = 30000, GOD_AUTOSETTLE_MAX_MS = 600000, GOD_AUTOSETTLE_MAX = 6; /* r9: 30 s, 60 s, 2 min, 4 min, 8 min, then stop (r10: 6 tries so the 8 min wait happens) */
+  function godPendingBack(e) { e.fareSub = e.fareTax = e.fareTotal = e.commissionCents = null; e.pricePending = true; e.invoiceVerified = false; }
+  function godAutoSettle(driverId, e) {
+    var a = e && typeof Symbol === "function" ? e[Symbol.for("pcsAutoSettle")] : null; if (!a || !e.code) return null;
+    state.autoSettled = state.autoSettled || {};
+    var now = Date.now(), b = state.autoSettled[e.code];
+    if (b === true || (b && (b.busy || b.tries >= GOD_AUTOSETTLE_MAX || now < b.next))) return null; /* r9: saved, in flight, or backing off */
+    b = state.autoSettled[e.code] = { busy: true, tries: b ? b.tries : 0, next: 0 };
+    var P = godSettlePatches(a.sub, a.pct, "square_invoice", now); if (!P) { delete state.autoSettled[e.code]; return null; }
+    P.hist.fareTax = P.ride.fareTax = a.tax; P.hist.fareTotal = P.ride.fareTotal = P.ride.estimateCents = a.sub + a.tax; P.pay["meter/fareTax"] = a.tax; P.pay["meter/fareTotal"] = a.sub + a.tax; /* the invoice's own tax */
+    P.hist.fareSource = P.ride.fareSource = P.pay["meter/fareSource"] = "square_invoice"; P.hist.invoiceNo = a.invoiceNo;
+    return godSettleWrite(driverId, e.code, e, P).then(function () { state.boardNotice = e.code + ": price saved from Square invoice " + a.invoiceNo + "."; }).then(function () { state.autoSettled[e.code] = true; })
+      .catch(function () { /* r9 (Harry): not saved -> back to Price pending in memory, say so, exponential back-off with a per-ride cap */
+        b.busy = false; b.tries += 1; b.next = Date.now() + Math.min(GOD_AUTOSETTLE_MAX_MS, GOD_AUTOSETTLE_BASE_MS * Math.pow(2, b.tries - 1));
+        godPendingBack(e);
+        state.boardNotice = "NOT SAVED: Square invoice " + a.invoiceNo + " price for " + e.code + (b.tries >= GOD_AUTOSETTLE_MAX ? " (stopped retrying; use Set price)." : " (will retry).");
+        try { render(); } catch (x) {}
+      });
+  }
+  /* r7 (Harry: Patti #000543 card showed COMMISSION $0.00): the board card's commission comes from the source of truth.
+     1) the driver's pay-week entry (DRVRHSTY, scheduleId == card id) when it has a commission; 2) else subtotal x the effective %
+     (invoice / Subtotal on the card / entry fareSub); 3) the row's own commissionCents only when it is a real number above 0.
+     No number -> "Price pending" (no price) or "\u2014". Never $0.00 / NaN for a priced ride. Read only. (pure, tested) */
+  function godCardCommission(r) {
+    if (!r) return { text: "\u2014", cents: null };
+    var drv = String(r.assignedDriverId || ""), hist = (state.history && state.history[drv]) || {}, e = null;
+    Object.keys(hist).forEach(function (k) { var x = hist[k]; if (x && !e && String(x.scheduleId || "") === String(r.id) && !x.canceled && x.isTest !== true && x.testRide !== true) e = x; });
+    if (e && godPricePending(e)) return { text: GOD_PRICE_PENDING, cents: null, from: "pending" };
+    if (e && Number(e.commissionCents) > 0) return { text: fmtCents(e.commissionCents), cents: Math.round(+e.commissionCents), from: "history" };
+    var card = (state.calendarRaw || {})[r.id] || r;
+    var pct = godRidePct(e || { scheduleId: r.id }, drv, card, commissionPctFor, state.ridePctKV || {});
+    var kv = state.invKV && state.invKV[r.id];
+    var sub = kv && Number(kv.amountCents) > 0 ? Math.round(+kv.amountCents)
+      : Number(r.prepaidAmountCents) > 0 ? Math.round(+r.prepaidAmountCents)
+      : r.sqInvoice && Number(r.sqInvoice.subtotalCents) > 0 ? Math.round(+r.sqInvoice.subtotalCents)
+      : e && Number(e.fareSub) > 0 ? Math.round(+e.fareSub)
+      : Number(r.fareBeforeTax) > 0 ? Math.round(+r.fareBeforeTax * 100) : 0;
+    if (sub > 0 && isFinite(pct)) { var c = Math.round(sub * pct / 100); return { text: fmtCents(c), cents: c, from: "subtotal", pct: pct }; }
+    if (Number(r.commissionCents) > 0) return { text: fmtCents(r.commissionCents), cents: Math.round(+r.commissionCents), from: "row" };
+    if (r.pricePending === true) return { text: GOD_PRICE_PENDING, cents: null, from: "pending" };
+    return { text: "\u2014", cents: null };
+  }
+  if (typeof window !== "undefined") window.__pcsGodR7 = { pending: godPricePending, fmtFare: fmtFare, settle: godSettlePatches, pct: godRidePct };
 
   /* v59: "cancel fee $X" / "free cancel (driver X.X mi away)" for a cancelled ride. Server (Worker) answer wins:
      ride.cancelPolicy / PAYMENTS cancelPolicy|cancel; the rider app's own reading (cancelDriverMiles) is the fallback. */
@@ -3869,6 +3989,7 @@
     /* Commission of fare before tax when known. Never invent a fare. v57: fareSub may include confirmed wait ($0.40/min). */
     var ride = matchDriverToRide(driver, rides);
     if (!ride) return { label: "No trip revenue recorded yet", amount: null };
+    if (godPricePending(ride)) return { label: GOD_PRICE_PENDING, amount: null }; /* r7 */
     var fare = ride.fareSub != null ? ride.fareSub : ride.fareBeforeTax;
     if (fare === null || fare === undefined || fare === "" || !isFinite(+fare)) {
       var totalOnly = fmtMoney(ride.estimatedTotal || ride.fareTotal);
@@ -4237,6 +4358,122 @@
     renderBoardLists();
   }
 
+  /* ===== v2.0d.5 (Matthew): the WHOLE route of every driver on a ride on the dispatch board map =====
+     App / meter rides (state.rides accepted|started) and calendar rides (PCSCALND rows with headedToPickupAt or pickedUpAt, not
+     completed / cancelled). Driver -> pickup (until picked up) -> stops -> drop-off. Road shape from the Worker /route (Google
+     Routes, the same endpoint the driver app uses); until it answers / when it can't: straight segments. Followed driver's route
+     thick gold, the others thin. Calendar addresses without lat/lng: Worker /places/geocode, cached in memory. */
+  var GBR = { geo: {}, route: {}, ROUTE_TTL_MS: 60000, CAL_MAX_AGE_MS: 12 * 3600 * 1000 };
+  function gbrPt(lat, lng) { return isCoord(lat) && isCoord(lng) ? { lat: +lat, lng: +lng } : null; }
+  function gbrGeo(text) { /* cached geocode; null until known (kicks one lookup) */
+    var k = String(text || "").trim().toLowerCase(); if (k.length < 5) return null;
+    var c = GBR.geo[k]; if (c) return c.pt || null;
+    GBR.geo[k] = { pending: true };
+    if (typeof fetch !== "function") return null;
+    arPlacesPost("/geocode", { address: String(text).trim().slice(0, 200) }).then(function (d) {
+      var p = d && d.place; GBR.geo[k] = { pt: p ? gbrPt(p.lat, p.lng) : null, at: Date.now() };
+      if (GBR.geo[k].pt) gbrRedraw();
+    });
+    return null;
+  }
+  function gbrRedraw() { try { if (map) syncMap(); } catch (e) {} }
+  function gbrDriverPt(d, ride) { return (d && gbrPt(d.lat, d.lng)) || (ride && gbrPt(ride.driverLat, ride.driverLng)) || null; }
+  function gbrCalActive(r) {
+    var st = String((r && r.status) || "").toLowerCase();
+    return !!r && !!(r.headedToPickupAt || r.pickedUpAt) && !r.completedAt && !r.cancelledAt && st !== "completed" && st !== "cancelled" && st !== "canceled" && !gbrCalStale(r);
+  }
+  /* v2.0d.5 r2: a ride left "headed / picked up" by mistake stops drawing ~12h after its LAST activity;
+     r4: measured from the latest of start, headedToPickupAt, pickedUpAt and updatedAt (recent activity always draws) */
+  function gbrCalStale(r, now) {
+    var t = Math.max(Date.parse(r.start || "") || 0, Number(r.headedToPickupAt) || 0, Number(r.pickedUpAt) || 0, Number(r.rowUpdatedAt || r.updatedAt) || 0);
+    return !!t && (now || Date.now()) - t > GBR.CAL_MAX_AGE_MS;
+  }
+  function gbrTrips() {
+    var drivers = state.drivers || [], out = [], busy = {};
+    var byId = function (id) { for (var i = 0; i < drivers.length; i += 1) if (String(drivers[i].id) === String(id)) return drivers[i]; return null; };
+    (state.rides || []).forEach(function (ride) {
+      if (!isActiveTrip(ride)) return;
+      var d = null; for (var i = 0; i < drivers.length; i += 1) if (matchDriverToRide(drivers[i], [ride])) { d = drivers[i]; break; }
+      var picked = String(ride.status || "").toLowerCase() === "started";
+      var stops = (Array.isArray(ride.stopsGeo) ? ride.stopsGeo : []).map(function (x) { return x && gbrPt(x.lat, x.lng); }).filter(Boolean);
+      var t = { key: "app:" + (ride.id || ride.code || ""), driverId: d ? String(d.id) : driverOnTripId(ride), name: shortName((d && d.name) || ride.driverName, "Driver"),
+        rider: shortName(ride.name, "Rider"), picked: picked, from: gbrDriverPt(d, ride),
+        pickup: gbrPt(ride.pickupLat, ride.pickupLng), stops: stops, drop: gbrPt(ride.dropLat, ride.dropLng) || gbrPt(ride.dropoffLat, ride.dropoffLng) };
+      if (t.driverId) busy[t.driverId] = true; out.push(t);
+    });
+    (state.calendar || []).forEach(function (r) {
+      if (!gbrCalActive(r)) return;
+      var d = byId(r.assignedDriverId); if (!d && !r.assignedDriverId) return;
+      if (busy[String(r.assignedDriverId)]) return; /* the app/meter ride already shows this driver */
+      var stops = (r.stopsGeo && r.stopsGeo.length ? r.stopsGeo : (r.stops || []).map(function (x) { return { address: typeof x === "string" ? x : (x && (x.address || x.text)) || "" }; }))
+        .map(function (x) { return x && (gbrPt(x.lat, x.lng) || gbrGeo(x.address)); }).filter(Boolean);
+      out.push({ key: "cal:" + r.id, driverId: String(r.assignedDriverId), name: shortName((d && d.name) || r.assignedDriverName, "Driver"), rider: shortName(r.rider || r.title, "Rider"),
+        picked: !!r.pickedUpAt, from: gbrDriverPt(d, null),
+        pickup: gbrPt(r.pickupLat, r.pickupLng) || gbrGeo(r.pickup), stops: stops, drop: gbrPt(r.dropoffLat, r.dropoffLng) || gbrGeo(r.dropoff) });
+    });
+    return out;
+  }
+  /* the points left to drive, in order, each tagged pickup / stop / drop */
+  function gbrLegs(t) {
+    var pts = [];
+    if (!t.picked && t.pickup) pts.push({ lat: t.pickup.lat, lng: t.pickup.lng, kind: "pickup" });
+    (t.stops || []).forEach(function (p, i) { pts.push({ lat: p.lat, lng: p.lng, kind: "stop", n: i + 1 }); });
+    if (t.drop) pts.push({ lat: t.drop.lat, lng: t.drop.lng, kind: "drop" });
+    return pts;
+  }
+  function gbrSig(pts) { return pts.map(function (p) { return p.lat.toFixed(5) + "," + p.lng.toFixed(5); }).join(";"); }
+  /* road shape [[lat,lng]...] for this trip, or null (straight segments) while unknown; refreshed at most once a minute */
+  /* v2.0d.5 r2: the cache key is the stops only (pickup/stops/drop), never the car, whether or not the car dot is known:
+     the car coming and going no longer skips the 60s limit. fromIsCar says whether line[0] is the car. */
+  function gbrRoad(t, line, fromIsCar) {
+    if (line.length < 2 || line.length > 7) return null;
+    var sig = gbrSig(fromIsCar ? line.slice(1) : line), c = GBR.route[t.key], now = Date.now();
+    if (c && c.sig === sig && (c.pending || now - c.at < GBR.ROUTE_TTL_MS)) return c.coords || null;
+    var keep = c && c.sig === sig ? c.coords : null;
+    var req = (GBR.reqSeq = (GBR.reqSeq || 0) + 1);
+    GBR.route[t.key] = { sig: sig, at: now, pending: true, coords: keep, req: req };
+    if (typeof fetch !== "function") return keep;
+    var done = function (coords) {
+      var cur = GBR.route[t.key];
+      if (!cur || cur.sig !== sig || cur.req !== req) return; /* stale reply: ride gone or stops changed since */
+      GBR.route[t.key] = { sig: sig, at: Date.now(), coords: coords || keep, req: req }; if (coords) gbrRedraw();
+    };
+    Promise.race([fetch(PAY_WORKER + "/route", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ points: line.map(function (p) { return { lat: p.lat, lng: p.lng }; }) }) })
+      .then(function (x) { return x.json(); }), new Promise(function (res) { setTimeout(function () { res(null); }, 8000); })])
+      .then(function (d) { var g = d && d.ok && !d.fallback && d.routes && d.routes[0] && d.routes[0].geometry; return g && Array.isArray(g.coordinates) && g.coordinates.length > 1 ? g.coordinates.map(function (c) { return [+c[1], +c[0]]; }) : null; })
+      .catch(function () { return null; }).then(done);
+    return keep;
+  }
+  function gbrPin(kind, label, n) {
+    var col = kind === "pickup" ? "#3fb950" : kind === "drop" ? "#e5534b" : "#d4b15a", ch = kind === "pickup" ? "P" : kind === "drop" ? "D" : String(n || "S");
+    /* v2.0d.5 r2: the drop-off pin stands on a short stem above its point, so it is not hidden under a car marker parked there */
+    var drop = kind === "drop";
+    return window.L.divIcon({ className: "gbr-pin gbr-" + kind, iconSize: drop ? [24, 36] : [24, 24], iconAnchor: drop ? [12, 36] : [12, 12],
+      html: (drop ? '<div style="position:absolute;left:11px;top:22px;width:2px;height:14px;background:#e5534b"></div>' : "") + '<div title="' + esc(label) + '" style="width:22px;height:22px;border-radius:50%;background:' + col + ';border:2px solid #0b1a10;color:#0b1a10;font:700 12px/22px system-ui;text-align:center;box-shadow:0 1px 4px rgba(0,0,0,.5)">' + ch + "</div>" });
+  }
+  function gbrDraw(trips, layer, bounds) {
+    var focus = state.focusDriverId ? String(state.focusDriverId) : "", live = {};
+    GBR.focusPts = [];
+    trips.forEach(function (t) {
+      var legs = gbrLegs(t); if (!legs.length) return;
+      live[t.key] = true;
+      var line = (t.from ? [{ lat: t.from.lat, lng: t.from.lng, kind: "car" }] : []).concat(legs);
+      var road = gbrRoad(t, line, !!t.from);
+      var latlngs = road || line.map(function (p) { return [p.lat, p.lng]; });
+      var mine = !!focus && t.driverId === focus;
+      var style = mine ? { color: "#f2c94c", weight: 7, opacity: 1 } : focus ? { color: "#c9a24a", weight: 3, opacity: 0.85 } : { color: "#d4b15a", weight: 5, opacity: 0.9 };
+      if (latlngs.length >= 2) { var pl = window.L.polyline(latlngs, Object.assign({ className: "gbr-route" + (mine ? " gbr-route-focus" : "") }, style)).addTo(layer); if (mine && pl.bringToFront) pl.bringToFront(); }
+      legs.forEach(function (p) {
+        var lbl = t.name + " · " + t.rider + " · " + (p.kind === "pickup" ? "pickup" : p.kind === "drop" ? "drop-off" : "stop " + p.n);
+        window.L.marker([p.lat, p.lng], { icon: gbrPin(p.kind, lbl, p.n), zIndexOffset: mine ? 900 : 200, opacity: !focus || mine ? 1 : 0.7, title: lbl }).addTo(layer);
+        if (bounds) bounds.push([p.lat, p.lng]);
+        if (mine) GBR.focusPts.push([p.lat, p.lng]);
+      });
+    });
+    Object.keys(GBR.route).forEach(function (k) { if (!live[k]) delete GBR.route[k]; }); /* ride done: forget its route */
+    return live;
+  }
+  /* ===== end v2.0d.5 board route ===== */
   function syncMap() {
     if (!ensureMap()) return;
     markerLayer.clearLayers();
@@ -4292,17 +4529,9 @@
         bounds.push([lat, lng]);
       }
 
-      if (isCoord(ride.pickupLat) && isCoord(ride.pickupLng) && isCoord(ride.dropLat) && isCoord(ride.dropLng)) {
-        var pts = [[+ride.pickupLat, +ride.pickupLng], [+ride.dropLat, +ride.dropLng]];
-        if (lat != null) pts.unshift([lat, lng]);
-        window.L.polyline(pts, {
-          color: "#d4b15a",
-          weight: 5,
-          opacity: 0.95
-        }).addTo(routeLayer);
-        pts.forEach(function (p) { bounds.push(p); });
-      }
+      /* v2.0d.5: the trip's route is drawn by gbrDraw below (whole route, stops, markers) */
     });
+    gbrDraw(gbrTrips(), routeLayer, bounds); /* v2.0d.5: every driver on a ride (app, meter or calendar) */
 
     /* v77.10: signal gone >60 min: gray pin at the last known spot, with the last-seen time */
     (state.lostDrivers || []).forEach(function (driver) {
@@ -4350,7 +4579,10 @@
     if (state.focusDriverId && focused && focused.latlng) {
       /* Follow the tapped driver; do not snap back to the whole-board view on each 5s poll. */
       var z = Math.max(map.getZoom() || 0, FOCUS_ZOOM);
-      if (focusFlyPending && map.flyTo) {
+      if (focusFlyPending && GBR.focusPts && GBR.focusPts.length) { /* v2.0d.5: tapping a driver on a ride shows the whole route once */
+        focusFlyPending = false;
+        map.fitBounds(window.L.latLngBounds(GBR.focusPts.concat([[focused.latlng.lat != null ? focused.latlng.lat : focused.latlng[0], focused.latlng.lng != null ? focused.latlng.lng : focused.latlng[1]]])), { padding: [50, 50], maxZoom: 15 });
+      } else if (focusFlyPending && map.flyTo) {
         focusFlyPending = false;
         map.flyTo(focused.latlng, z, { duration: 0.8 });
       } else {
@@ -4867,6 +5099,7 @@
     var dayTips = 0, dayTolls = 0, dayTollFees = 0;
     entries.forEach(function (e) {
       if (isTestRide(e)) return; /* v76d */
+      if (godPricePending(e)) return; /* r7 */
       dayRide += Number(e.fareTotal) || 0;
       dayComm += Number(e.commissionCents) || 0;
       dayTips += Number(e.tipCents) || 0;
@@ -4893,9 +5126,10 @@
           (Number(e.discountCents) > 0 ? '<strong style="color:#8fd0a8">' + (isCashEntry(e) && e.discountType !== "other" ? "Cash discount" : "Discount") + "</strong> " + /* v74b */ esc(({ senior: "Senior 65+ 10%", military: "Military 10%", other: "Other" })[e.discountType] || "Discount") + " \u2212" + esc(fmtCents(e.discountCents)) +
             (e.discountPaidBy ? discPaidByText(e.discountPaidBy) : /* v77.10; older entries keep the rule they were paid under */ e.discountType === "other" ? " (from the driver\u2019s portion; PCS share on the full fare" + (e.discountReason ? "; reason: " + esc(e.discountReason) : "") + (e.discountApprovedBy ? "; approved by " + esc(e.discountApprovedBy) : "") + ")" : isCashEntry(e) ? "" : " (PCS share reduced in proportion)") + "<br>" : "") +
           invFlagHtml(e) + (entryNeedsReview(e, state.discRev) ? '<strong style="background:#b91c1c;color:#fff;padding:2px 6px;border-radius:6px">Discount: review before payout</strong> ' + discReviewBtn("ride:" + String(e.code || "")) + presetAuditText(e, state.discPresets) + "<br>" : "") + /* r4 M4: Worker review state; Firebase discountReview ignored */
+          (godPricePending(e) ? pricePendingBadge(e) + "<br><strong>Ride total</strong> " + GOD_PRICE_PENDING + "<br>" + godPriceSetHtml(driverId, e) + "<strong>Commission</strong> none until the price is set" : /* r7 */
           "<strong>Ride total</strong> " + esc(fmtCents(e.fareTotal)) + "<br>" +
           "<strong>Commission</strong> " + esc(fmtCents(e.commissionCents)) +
-          " (" + esc(String(e.commissionPct || "")) + "%)" +
+          " (" + esc(String(e.commissionPct || "")) + "%)") +
           (isCashEntry(e) ? '<br><strong style="color:#ffb35c">' + (isCardFailedCollect(e) ? "Card failed - collect - driver owes " : "cash - driver owes ") + esc(fmtCents(cashDriverOwesCents(e))) + "</strong>" : "") + /* v72d */
           (String(e.payMethod || "") !== "cash" && String(e.paidVia || "") !== "cash" && e.cashCollected !== true
             ? '<br><button type="button" class="btn btn-ghost" data-cardfail-toggle="' + esc(e.code || "") + '" data-driver="' + esc(driverId) + '" data-on="' + (isCardFailedCollect(e) ? "1" : "0") + '">' +
@@ -4940,8 +5174,8 @@
       cal +
       '<button type="button" class="btn btn-ghost" id="detail-week-next">→</button>' +
       "</div>" +
-      '<p class="meta"><strong>' + esc(day) + "</strong> · ride " + esc(fmtCents(dayRide)) +
-      " · commission " + esc(fmtCents(dayComm)) + (dayTips ? " · tips " + esc(fmtCents(dayTips)) : "") +
+      '<p class="meta"><strong>' + esc(day) + "</strong>" + (entries.length && entries.every(godPricePending) ? " · " + GOD_PRICE_PENDING : " · ride " + esc(fmtCents(dayRide)) + /* r8: no $0.00 header on a pending-only day */
+      " · commission " + esc(fmtCents(dayComm))) + (dayTips ? " · tips " + esc(fmtCents(dayTips)) : "") +
       (dayTolls ? " · tolls " + esc(fmtCents(dayTolls)) : "") + (dayTollFees ? " · toll road fees " + esc(fmtCents(dayTollFees)) : "") + "</p>" + /* v76b */
       list
     );
@@ -5035,11 +5269,11 @@
       row("Fare (before discount)", esc(fmtCents(fare))) +
       (Number(e.discountCents) > 0 ? row((cash && e.discountType !== "other" ? "Cash discount" : "Discount") + (e.discountType ? " (" + esc(({ senior: "Senior", military: "Military", other: "Other" })[e.discountType] || e.discountType) + ")" : ""), "\u2212" + esc(fmtCents(e.discountCents))) : "") +
       row("Tax / fees", esc(fmtCents(e.fareTax || 0))) +
-      row("Ride total", esc(fmtCents(e.fareTotal || 0))) +
+      row("Ride total", godPricePending(e) ? pricePendingBadge(e) : esc(fmtCents(e.fareTotal || 0))) + /* r7 */
       (tip ? row(cash ? "Cash tip (driver keeps)" : "Card tip (100% driver)", esc(fmtCents(tip))) : "") +
       (tollReimbCents(e) ? row(esc(e.tollLabel || "Tolls") + (cash ? " (driver keeps, outside commission)" : " (paid back 100% driver)"), esc(fmtCents(tollReimbCents(e))), "earn-toll") : "") + /* v76b */
       (tollFeeCents(e) ? row(esc(e.tollLabel || "Toll road fee") + " (fare, in the split)", esc(fmtCents(tollFeeCents(e))), "earn-tollfee") : "") +
-      row("Driver commission" + (e.commissionPct ? " (" + esc(String(e.commissionPct)) + "%)" : ""), esc(fmtCents(e.commissionCents || 0))) +
+      row("Driver commission" + (e.commissionPct && !godPricePending(e) ? " (" + esc(String(e.commissionPct)) + "%)" : ""), godPricePending(e) ? "none until priced" : esc(fmtCents(e.commissionCents || 0))) +
       row("Owed to PCS", esc(fmtCents(cashDriverOwesCents(e))), "earn-owed") +
       row("Payment", esc(earnPayWord(e))) + "</article>";
   }
@@ -5051,7 +5285,7 @@
     var wk = { ride: 0, comm: 0, cashTips: 0, cardTips: 0, owed: 0, tests: 0, tolls: 0, tollFees: 0 };
     var cards = days.map(function (d) {
       var rides = all.filter(function (e) { return e.day === d; });
-      var counted = rides.filter(function (e) { return !earnIsTest(e); });
+      var counted = rides.filter(function (e) { return !earnIsTest(e) && !godPricePending(e); }); /* r7: Price pending counts for nothing until set */
       var dc = 0;
       counted.forEach(function (e) {
         var tip = Number(e.tipCents) || 0;
@@ -5060,10 +5294,11 @@
         wk.tolls += tollReimbCents(e); wk.tollFees += tollFeeCents(e); /* v76b */
         wk.owed += cashDriverOwesCents(e);
       });
-      wk.tests += rides.length - counted.length;
+      var pendN = rides.filter(function (e) { return !earnIsTest(e) && godPricePending(e); }).length; /* r7 */
+      wk.tests += rides.length - counted.length - pendN; wk.pending = (wk.pending || 0) + pendN;
       var key = driverId + "|" + d, open = !!state.earnDayOpen[key];
       return '<button type="button" class="btn btn-ghost earn-day-btn" data-earn-day="' + esc(d) + '" data-driver-id="' + esc(driverId) + '" aria-expanded="' + open + '" style="display:block;width:100%;text-align:left;margin:4px 0;font-weight:700">' +
-        esc(d === today ? d + " · today" : d) + " · " + counted.length + " rides · " + esc(fmtCents(dc)) + (rides.length > counted.length ? " (+" + (rides.length - counted.length) + " test)" : "") + "</button>" +
+        esc(d === today ? d + " · today" : d) + " · " + counted.length + " rides · " + esc(fmtCents(dc)) + (rides.length - counted.length - pendN > 0 ? " (+" + (rides.length - counted.length - pendN) + " test)" : "") + (pendN ? " (+" + pendN + " Price pending)" : "") + "</button>" +
         (open ? '<div class="earn-day-body">' + (rides.length ? rides.map(earnRideHtml).join("") : '<p class="fine">No completed rides logged this day.</p>') + "</div>" : "");
     }).join("");
     var weeks = []; var m0 = mondayOfWeek(today); for (var w = 0; w < 12; w += 1) weeks.push(addDaysYmd(m0, -7 * w));
@@ -5505,7 +5740,7 @@
         : (pending
           ? '<span class="badge pending">Needs your OK</span>' + conflictBadgeHtml(r)
           : (cancelled
-            ? '<span class="badge">Cancelled' + (r.cancelledBy === "rider" ? " by rider" : (r.cancelledBy === "owner" ? " by PCS" : "")) + "</span>"
+            ? '<span class="badge">Cancelled' + (r.cancelledBy === "rider" ? " by rider" : (r.cancelledBy === "owner" ? " by PCS" : (r.cancelledBy === "driver" ? drvCancelTag(r).slice(9) : ""))) + "</span>"
             : (denied
               ? '<span class="badge">Denied</span>'
               : '<span class="badge">Open to drivers</span>')));
@@ -5524,7 +5759,7 @@
       actions += conflictToolsHtml(r); /* v75p */
       var cancelTxt = cancelled ? cancelFeeText(r, (state.payments || {})[r.code] || null) : "";
       var cancelLine = cancelled
-        ? "<br><strong>Cancelled</strong> " + esc(fmtClock(r.cancelledAt || r.updatedAt)) +
+        ? "<br><strong>" + esc(drvCancelTag(r)) + "</strong> " + esc(fmtClock(r.cancelledAt || r.updatedAt)) +
           (cancelTxt ? ' · <span class="cancel-fee-line">' + esc(cancelTxt) + "</span>" : "")
         : "";
       return (
@@ -5660,7 +5895,7 @@
     el.style.cssText = "position:fixed;inset:0;z-index:2147482500;background:rgba(0,0,0,.6);display:flex;align-items:center;justify-content:center;padding:14px";
     el.innerHTML = '<div role="dialog" aria-modal="true" aria-labelledby="gd-title" style="background:#141414;color:#fff;border:2px solid #f0d48a;border-radius:16px;max-width:460px;width:100%;padding:16px">' +
       '<h2 id="gd-title" style="margin:0 0 6px">Discount request \u00b7 ' + esc(q.code) + "</h2>" +
-      '<p class="meta" id="gd-who">' + esc(q.driverName || q.driverId || "Driver") + " \u00b7 fare " + esc(fmtCents(q.fareSubCents)) + " subtotal" + (pend.length > 1 ? " \u00b7 " + (pend.length - 1) + " more waiting" : "") + "</p>" +
+      '<p class="meta" id="gd-who">' + esc(q.driverName || q.driverId || "Driver") + (q.fareSubCents == null || q.pricePending ? " \u00b7 " + GOD_PRICE_PENDING + " (no fare yet: use percent off)" : " \u00b7 fare " + esc(fmtCents(q.fareSubCents)) + " subtotal") /* r7 */ + (pend.length > 1 ? " \u00b7 " + (pend.length - 1) + " more waiting" : "") + "</p>" +
       '<p id="gd-reason" style="font-weight:700">Reason: ' + esc(q.reason || "") + "</p>" +
       (q.preset ? '<p style="font-weight:800;color:#9be7b0">' + (q.preset === "military" ? "Military discount (10%): check the military ID" : "Senior discount, 65+ (10%): check ID showing age 65+") + '</p><input id="gd-pct" type="hidden" value="10">' : /* r4 M5 */
       '<div style="display:flex;gap:8px;align-items:end;flex-wrap:wrap"><div><label for="gd-amount">Amount off ($)</label><input id="gd-amount"' + moneyRegAttrs() + ' style="width:120px"></div>' +
@@ -6018,6 +6253,7 @@
 
   /* Same math as the Worker: driver's final fare minus a quote-page deposit already paid. */
   function fareDueOf(ride) {
+    if (godPricePending(ride)) return 0; /* r7: nothing to charge until God sets the price */
     var fare = Number(ride && ride.fareTotal) || 0;
     var dep = String(ride && ride.paymentStatus || "").toLowerCase() === "deposit_paid" ? Number(ride.paidCents) || 0 : 0;
     return Math.max(0, fare - dep);
@@ -6087,7 +6323,7 @@
         var m = p.meter || {};
         var finished = String(m.status || "").toLowerCase() === "unpaid" || !!p.unpaidFinishedAt;
         return '<p class="meta meter-unpaid-row" data-code="' + esc(p.code) + '" style="margin:6px 0;border-top:1px solid rgba(255,138,138,.35);padding-top:6px">' +
-          "<strong>" + esc(p.code) + "</strong> · " + esc(fmtCents(m.fareTotal)) + " · ended " + esc(m.endedAt ? fmtClock(m.endedAt) : "—") +
+          "<strong>" + esc(p.code) + "</strong> · " + esc(fmtFare(m, m.fareTotal)) + " · ended " + esc(m.endedAt ? fmtClock(m.endedAt) : "—") +
           " · " + esc(m.driverName || "driver") + "<br>" +
           "<strong>Pickup</strong> " + meterSpotHtml(m, "pickup") + "<br>" +
           '<span style="color:#ff8a8a">' + (finished ? "Driver finished without payment" : "Waiting for the rider to pay (QR)") + "</span><br>" +
@@ -6108,7 +6344,7 @@
       " · " + esc(m.tierLabel || "") + " · driver " + esc(m.driverName || "—"));
     lines.push("<strong>Pickup</strong> " + meterSpotHtml(m, "pickup") + (m.startedAt ? " · " + esc(fmtClock(m.startedAt)) : ""));
     if (m.endedAt) lines.push("<strong>Drop-off</strong> " + meterSpotHtml(m, "drop") + " · " + esc(fmtClock(m.endedAt)));
-    if (m.fareTotal != null) lines.push("<strong>Fare</strong> " + esc(fmtCents(m.fareTotal)));
+    if (m.fareTotal != null || godPricePending(m)) lines.push("<strong>Fare</strong> " + esc(fmtFare(m, m.fareTotal))); /* r7 */
     if (Number(m.tollCents) > 0) lines.push("<strong>" + esc(m.tollLabel || (m.tollKind === "road_fee" ? "Toll road fee" : "Tolls")) + "</strong> " + esc(fmtCents(m.tollCents)) +
       (m.tollKind === "road_fee" ? " (fare income, in the split)" : " (paid back 100% to the driver)") + " · in the fare above"); /* v76b */
     if (st === "running") lines.push('<span style="color:#f0d48a">Ride in progress</span>' + (godMeterShown(p) ? "" : godInvBadgeHtml(godInvInfo(p)))); /* v2.0a */
@@ -6193,7 +6429,7 @@
       var ride = payRideOf(code);
       if (ride && !payRecOk(f)) {
         var st = String(ride.status || "").toLowerCase();
-        if (st === "completed") lines.push("<strong>Ride</strong> Completed · fare " + esc(fmtCents(ride.fareTotal)) + ' · <span style="color:#ffc96b">rider has not paid yet</span>');
+        if (st === "completed") lines.push("<strong>Ride</strong> Completed · fare " + esc(fmtFare(ride, ride.fareTotal)) + ' · <span style="color:#ffc96b">rider has not paid yet</span>');
         else if (st) lines.push("<strong>Ride</strong> " + esc(st));
       }
 
@@ -6425,6 +6661,7 @@
     var p = (state.payments || {})[code] || {};
     var m = p.meter || {};
     var fare = Number(m.fareTotal) || 0;
+    if (godPricePending(m) && (how === "cash" || how === "other")) { setPayNotice(code + ": Price pending. Set the price on the ride card first."); return Promise.resolve(); } /* r7 */
     var now = Date.now(), who = godWho();
     var amount = how === "waived" || how === "test" ? 0 : fare;
     var reason = "";
@@ -6462,7 +6699,7 @@
         if (!how) { window.alert("Pick an option first."); return; }
         if (how === "link") { meterClearShowLink(root, code); return; }
         var p = (state.payments || {})[code] || {};
-        if (!window.confirm("Clear " + code + " (" + fmtCents((p.meter || {}).fareTotal) + ") as \"" + METER_CLEAR_WORD[how] + "\"? It leaves the unpaid alert and is recorded as cleared by you now.")) return;
+        if (!window.confirm("Clear " + code + " (" + fmtFare(p.meter || {}, (p.meter || {}).fareTotal) + ") as \"" + METER_CLEAR_WORD[how] + "\"? It leaves the unpaid alert and is recorded as cleared by you now.")) return;
         btn.disabled = true;
         meterClearApply(code, how);
       });
@@ -7676,7 +7913,7 @@
             '<p class="day-time db-when">' + esc(fmtBoardWhenLine(r.start)) + "</p>" + /* v2.0c: one line, never wraps mid-date */
           "</div>" +
           '<h3 class="day-rider">' + esc(r.rider) + "</h3>" + driverLineHtml(r) + /* v77.10 */
-          '<div class="db-badges">' + (st === "canceled" || st === "cancelled" ? '<span class="db-tag db-tag-cancel">Cancelled</span>' : dbPayPillHtml(r) + (typeof smscPillHtml === "function" ? smscPillHtml(smscPhoneOf(r), clientFullName(r)) : "") + badge) + "</div>" + /* v2.0c: one tidy wrapping row */
+          '<div class="db-badges">' + (st === "canceled" || st === "cancelled" ? '<span class="db-tag db-tag-cancel">' + esc(drvCancelTag(r)) + '</span>' : dbPayPillHtml(r) + (typeof smscPillHtml === "function" ? smscPillHtml(smscPhoneOf(r), clientFullName(r)) : "") + badge) + "</div>" + /* v2.0c: one tidy wrapping row */
           '<div class="day-card-body"' + (dbCards[r.id] ? ' style="display:none"' : "") + ">" +
           '<p class="day-line"><span>Pickup</span> ' + esc(r.pickup || "—") + "</p>" +
           ((r.stopsGeo && r.stopsGeo[0] && r.stopsGeo[0].address) || (r.stops && r.stops[0]) ? '<p class="day-line"><span>Stop</span> ' + esc((r.stopsGeo && r.stopsGeo[0] && r.stopsGeo[0].address) || r.stops[0]) + "</p>" : "") +
@@ -7699,7 +7936,8 @@
           (r.sqInvoice ? '<p class="day-line db-sqinv"><span>Invoice</span> #' + esc(r.prepaidInvoiceNo || r.sqInvoice.number || "") + " \u00b7 " + esc(sqInvoiceLine(r.sqInvoice)) + "</p>" : "") +
           gfolHtml(r) + /* v76b: Text my client a tracking link */
           (st === "completed"
-            ? '<p class="day-line"><span>Commission</span> ' + esc(fmtCents(r.commissionCents)) + "</p>" +
+            ? (godCardCommission(r).from === "pending" ? '<p class="day-line db-pend">' + pricePendingBadge({ pricePending: true }) + "</p>" : "") + /* r8: orange badge on the board card */
+              '<p class="day-line db-comm"><span>Commission</span> ' + esc(godCardCommission(r).text) + "</p>" + /* r7: source of truth, never $0.00 */
               (completedEarly(r) ? '<p class="day-line db-early" style="color:#ffb35c;font-weight:700">Completed early – <button type="button" class="btn btn-ghost btn-undo-complete" data-event-id="' + esc(r.id) + '" style="min-height:0;padding:2px 10px">Undo</button></p>' : "")
             : (
               '<div class="day-actions">' +
@@ -8118,6 +8356,14 @@
      Delete is a soft delete (status "deleted", kept for the audit trail; pay-week entry removed). */
   var ADD_RIDE_PAY = [["square", "Card (Square)"], ["cash", "Cash (driver collects)"], ["card_failed", "Card failed - collect"], ["prepaid", "Prepaid"], ["invoice", "Invoice"], ["account", "Account (billed to account)"]]; /* v74b: Account */
   function arCollects(pm) { return pm === "cash" || pm === "card_failed"; }
+  /* v2.0d.5 r13: a driver cancel shows who and why: "Cancelled by <driver>: <reason>" */
+  function drvCancelTag(r) {
+    if (!r || r.cancelledBy !== "driver") return "Cancelled";
+    var d = r.cancelledByDriver && typeof r.cancelledByDriver === "object" ? r.cancelledByDriver : {};
+    var who = String(d.name || r.assignedDriverName || r.driverName || "driver").slice(0, 40);
+    var why = [r.cancelReason, r.cancelNote].filter(Boolean).join(" \u2013 ").slice(0, 160);
+    return "Cancelled by " + who + (why ? ": " + why : "");
+  }
   var ADD_RIDE_STATUS = [["assigned", "Assigned (upcoming)"], ["completed", "Completed"], ["cancelled", "Cancelled"]];
   var AR_DERIVED = ["total", "commission", "balance"];
 
@@ -8170,6 +8416,7 @@
     var ORIG = payBalance.__orig || (payBalance.__orig = new WeakMap()), used = {};
     function payNormalize(e) {
       if (!e || e.isTest === true || e.testRide === true || String(e.paidVia || "") === "test" || e.testKind) return e;
+      if (typeof godPricePending === "function" && godPricePending(e)) { e.commissionCents = null; return e; } /* r7: nothing to pay until God sets the price */
       var o = ORIG.get(e); if (!o) { o = Object.assign({}, e); ORIG.set(e, o); }
       var card = opts.cards && e.scheduleId ? opts.cards[e.scheduleId] : null;
       var key = String(opts.driverId || "") + "|" + String(o.code || e.code || ""); e[HKEY] = key;
@@ -8810,10 +9057,11 @@
     if (!window.__pcsArBound) {
       window.__pcsArBound = true;
       document.addEventListener("click", function (ev) {
-        var t = ev.target && ev.target.closest ? ev.target.closest("[data-add-ride-driver],[data-add-past-ride],[data-ar-edit],[data-ar-delete],[data-cardfail-toggle],[data-test-toggle],[data-note-save]") : null;
+        var t = ev.target && ev.target.closest ? ev.target.closest("[data-add-ride-driver],[data-add-past-ride],[data-ar-edit],[data-ar-delete],[data-cardfail-toggle],[data-test-toggle],[data-note-save],[data-price-set]") : null;
         if (!t) return;
         ev.preventDefault();
         if (t.hasAttribute("data-test-toggle")) { godTestToggle(t.getAttribute("data-driver"), t.getAttribute("data-test-toggle"), t.getAttribute("data-on") !== "1"); return; } /* v76d */
+        if (t.hasAttribute("data-price-set")) { var pb = document.getElementById(t.getAttribute("data-price-box")); godPriceSet(t.getAttribute("data-driver"), t.getAttribute("data-price-set"), pb ? pb.value : ""); return; } /* r7 */
         if (t.hasAttribute("data-note-save")) { var nb = document.getElementById(t.getAttribute("data-note-box")); godRideNoteSave(t.getAttribute("data-driver"), t.getAttribute("data-note-save"), nb ? nb.value : ""); return; } /* v76d */
         if (t.hasAttribute("data-cardfail-toggle")) { cardFailToggle(t.getAttribute("data-driver"), t.getAttribute("data-cardfail-toggle"), t.getAttribute("data-on") !== "1"); return; }
         if (t.hasAttribute("data-add-ride-driver")) { addRideOpenFor(t.getAttribute("data-add-ride-driver") || ""); return; }
