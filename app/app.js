@@ -168,7 +168,8 @@
   var METER_QR_VERSION = 70;
   var METER_LIVE_PUSH_MS = 5000;           /* rider live meter: the driver's phone saves the meter numbers every 5 s (v71: was 10 s, so the MPH is fresher) */
   var METER_SPEED_WINDOW_MS = 12000;       /* v71 live MPH: when the phone gives no GPS speed, MPH = straight-line distance over the last ~12 s of fixes */
-  var METER_ROUTE_REFRESH_MS = 60000;      /* v71 destination: road route + ETA refreshed every 60 s while the meter runs */
+  var METER_ROUTE_REFRESH_MS = 180000;     /* v71 destination: road route + ETA refreshed while the meter runs; r9: 60 s -> 180 s on route (off-route reroutes at once), saves the Worker's shared 300/day route quota */
+  var NAV_ROUTE_REFRESH_MS = 180000;       /* r9: pickup leg, same (was 60 s) */
   var METER_DEST_ARRIVED_MI = 0.1;         /* v71: within ~160 m of the destination = "At destination" */
   var METER_SPEED_MAX_GAP_MS = 40000;      /* v71: fixes further apart than this are not averaged (tunnel, background) */
   var METER_SPEED_STALE_MS = 25000;        /* v71: no fresh GPS speed for this long -> MPH shows "--" (never a made-up number) */
@@ -1213,7 +1214,7 @@
      Worker not set up / capped / down -> the public OSRM server as before (no traffic). Same OSRM-shaped answer either way. */
   function pcsRouteData(pts, osrmUrl) {
     var viaW = typeof fetch === "function" && typeof METER_WORKER === "string" && METER_WORKER
-      ? withTimeout(fetch(METER_WORKER + "/route", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ points: pts.map(function (p) { return { lat: +p.lat, lng: +p.lng }; }) }) })
+      ? withTimeout(fetch(METER_WORKER + "/route", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ points: pts.map(navRoutePt) }) })
         .then(function (r) { return r.json(); }), 6000).then(function (d) { return d && d.ok && !d.fallback && d.routes && d.routes.length ? d : null; }).catch(function () { return null; })
       : Promise.resolve(null);
     return viaW.then(function (d) { return d || fetch(osrmUrl).then(function (res) { return res.json(); }); });
@@ -3066,6 +3067,102 @@
     return ROLE === "driver" && state.screen === "trip" &&
       (state.rideStatus === "accepted" || state.rideStatus === "started");
   }
+  /* r13 (Matthew 10/23: "I should not be able to go off-line while I'm in the middle of a ride"): a ride is active while he
+     navigates to a pickup, waits at it, carries the rider, or runs a meter (on-demand: accepted/started trip screen; PCS
+     scheduled: a saved sched trip; any running/unpaid meter). While active, status is forced to On a ride, and Offline /
+     Break / auto-break can't be set (UI and logic). Unlocks when the ride ends or is cancelled (incl. driver Cancel ride). */
+  var rideLockTest = null; /* test hook */
+  function driverRideLocked() {
+    if (ROLE !== "driver") return false;
+    if (rideLockTest !== null) return !!rideLockTest;
+    try { if (driverMidRide()) { var dc = String(state.driverCode || readDriverCode() || ""); if (dc) rideLockMark("ride", dc); return true; } } catch (e) {}
+    try { if (rideLockRec()) return true; } catch (e) {} /* r13b: persisted, survives Back to the list / Requests */
+    try { if (meterActive()) return true; } catch (e) {}
+    try { var t = schedTripNow(); if (t && t.id && t.phase !== "done") return true; } catch (e) {}
+    return false;
+  }
+  var RIDE_LOCK_MSG = "Finish or cancel the ride first";
+  /* r13b (Matthew 10/23): the lock is persisted per driver once he heads to the pickup ({k:"sched"|"ride", id, at}), so leaving
+     the trip screen (Back to the list / Requests) never releases it. Only complete or cancel (by him, the rider or PCS) does. */
+  var RIDE_LOCK_MAX_MS = 16 * 3600000;
+  function rideLockKey() { return "pcs-ride-lock-" + driverPresenceId(); }
+  function rideLockMark(k, id, arr) {
+    if (!id) return;
+    try { var o = rideLockRaw(); if (o && o.k === k && o.id === String(id) && (o.arr || !arr)) return; localStorage.setItem(rideLockKey(), JSON.stringify({ k: k, id: String(id), at: (o && o.k === k && o.id === String(id) && o.at) || Date.now(), arr: !!(arr || (o && o.k === k && o.id === String(id) && o.arr)) })); } catch (e) {} /* r13e: arr = reached the pickup */
+  }
+  function rideLockRaw() { try { return JSON.parse(localStorage.getItem(rideLockKey()) || "null"); } catch (e) { return null; } }
+  function rideLockRelease(k, id) {
+    var o = rideLockRaw();
+    if (!o || (k && o.k !== k) || (id != null && o.id !== String(id))) return false;
+    try { localStorage.removeItem(rideLockKey()); } catch (e) {}
+    return true;
+  }
+  function rideLockDone(st) { st = String(st || "").toLowerCase(); return st === "completed" || st === "cancelled" || st === "canceled" || st === "denied" || st === "deleted"; }
+  function rideLockRec() {
+    var o = rideLockRaw();
+    if (!o || !o.id || (o.k !== "sched" && o.k !== "ride")) return null;
+    if (Date.now() - (Number(o.at) || 0) > RIDE_LOCK_MAX_MS) { rideLockRelease(); return null; }
+    if (o.k === "sched") {
+      var r = null; try { r = schedFind(o.id); } catch (e) {}
+      if ((r && (rideLockDone(r.status) || r.appPaid === true || schedNotMine(r))) || /* r13h/r13i: normalized ids */ (!r && schedListLoaded())) { rideLockRelease(); return null; }
+      if (r && !o.arr && schedTooEarly(r) && !(state.meter && state.meter.schedId === o.id)) { var tt = schedTripNow(); if (!tt || tt.id !== o.id || tt.phase === "pickup") { rideLockRelease(); return null; } } /* r13e: not arrived, > 2 h out */ /* r13c: reassigned / gone from a loaded list (even an empty one) */
+    } else if (String(state.driverCode || "") === o.id && rideLockDone(state.rideStatus)) { rideLockRelease(); return null; }
+    return o;
+  }
+  /* an on-demand ride left on the Requests list: re-read it now and then so a rider / PCS cancel releases the lock */
+  var rideLockPollAt = 0, rideLockMiss = 0, RIDE_LOCK_MISS_MAX = 3; /* r13c */
+  function rideLockPoll(now) {
+    var o = rideLockRaw();
+    if (!o || o.k !== "ride" || state.screen === "trip" || !syncOn() || typeof fetch !== "function" || now - rideLockPollAt < 60000) return;
+    rideLockPollAt = now;
+    authFetch(rideUrl(o.id)).then(function (r) {
+      if (r.ok) { rideLockMiss = 0; return r.json(); }
+      if (r.status === 404 || r.status === 401 || r.status === 403) { if (++rideLockMiss >= RIDE_LOCK_MISS_MAX) { rideLockMiss = 0; if (rideLockRelease("ride", o.id)) render(); } } /* r13c: gone / no access N times in a row */
+      return undefined;
+    }).then(function (d) {
+      if (d === undefined) return;
+      var me = String(driverPresenceId() || ""), drv = d && String(d.driverId || d.assignedDriverId || "");
+      if (!d || rideLockDone(d.status) || d.status === "requested" || d.status === "pending_owner" || (drv && me && schedIdNorm(drv) !== schedIdNorm(me))) { /* r13h */ if (rideLockRelease("ride", o.id)) render(); }
+    }).catch(function () {});
+  }
+  function rideLockBackHtml() {
+    var o = rideLockRaw();
+    if (!o || o.k !== "ride" || state.screen === "trip") return "";
+    return '<button type="button" class="btn" id="q-ride-back" style="margin:6px 0">Back to my ride</button>';
+  }
+  /* r13b: a ride that begins with no duty shift started starts the shift (HOS + online clock) at that moment */
+  function rideShiftEnsure(now) {
+    if (ROLE !== "driver" || !signedIn()) return false;
+    var row = todayMilesRow();
+    if (row && !shiftClosed(row) && Number(row.shiftStartAt) > 0) return false;
+    if (shiftOpen(row)) { ensureOnlineClock(); return true; }
+    now = now || Date.now();
+    var prev = row || {};
+    var odo = prev.endOdometer != null && isFinite(Number(prev.endOdometer)) ? Number(prev.endOdometer) : null;
+    var next = Object.assign({}, prev, { gpsMiles: Number(prev.gpsMiles) || 0, startedAt: prev.startedAt || now, lastUpdate: now, shiftClosed: false,
+      onlineMs: Number(closeOnlineSegment(Object.assign({}, prev), now).onlineMs) || 0, shiftStartAt: now, rideAutoShift: now });
+    delete next.endOdometer;
+    if (odo != null) { next.startOdometer = odo; next.priorEndOdometer = odo; next.odoFromLastEnd = true; } else delete next.startOdometer;
+    persistMilesRow(next);
+    return true;
+  }
+  /* a ride that starts while he is Offline / on Break: switch to On a ride (auto) and resume the duty clocks */
+  function rideLockSync(now) {
+    if (ROLE !== "driver") return false;
+    try { rideLockPoll(now || Date.now()); } catch (e) {}
+    if (!driverRideLocked()) return false;
+    var ch = false;
+    try { if (rideShiftEnsure(now)) ch = true; } catch (e) {} /* r13b */
+    try { if (localStorage.getItem(qOffKey()) === "1") { localStorage.removeItem(qOffKey()); ch = true; } } catch (e) {}
+    try { if (localStorage.getItem(qBusyKey()) === "b") { localStorage.removeItem(qBusyKey()); localStorage.removeItem(qBusyKey() + "-prev"); ch = true; } } catch (e) {}
+    try { if (localStorage.getItem(autoBrkKey()) === "1") { autoBrkClear(); ch = true; } } catch (e) {}
+    if (!ch) return false;
+    now = now || Date.now(); qd.lastPub = null;
+    try { hosBrkSync(now); } catch (e) {}
+    try { hosTick(now); } catch (e) {}
+    try { publishDriverPresence(); } catch (e) {}
+    return true;
+  }
 
   function chicagoToday() {
     return chicagoParts(new Date()).date;
@@ -3298,7 +3395,7 @@
       from a closed shift wiping the day total.
     */
     if (shiftClosed(row)) {
-      if (driverMidRide()) {
+      if (driverRideLocked()) { /* r13b: was driverMidRide */
         state.milesNeedStart = false;
         state.milesToday = Number(row && row.gpsMiles) || 0;
         state.milesStartOdo = row && row.startOdometer != null ? Number(row.startOdometer) : null;
@@ -3917,6 +4014,7 @@
   /* v74b (Matthew): Offline asks "Are you logging out for the day?" Yes -> post-trip inspection -> ending odometer -> log out. No -> just Offline. */
   function goOfflineNow() { qSetOffline(true); /* v74c: Break -> Offline keeps the same break interval running (qSetOffline clears Break status) */ }
   function offlineAsk() {
+    if (driverRideLocked()) { qd.brkMsg = RIDE_LOCK_MSG; try { render(); } catch (e) {} return; } /* r13 */
     var old = document.getElementById("q-off-ask"); if (old) old.remove();
     var m = document.createElement("div"); m.id = "q-off-ask"; m.setAttribute("role", "dialog"); m.setAttribute("aria-modal", "true");
     m.style.cssText = "position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;padding:20px";
@@ -4331,7 +4429,7 @@
   var HOS_MIN_PIECE_MS = 2 * 60000; /* v75 (Matthew): Online toggles under ~2 min never start or add to Drive/Shift clocks */
   function hosShiftStart() {
     var row = todayMilesRow();
-    return shiftOpen(row) ? Number(row.shiftStartAt) || 0 : 0;
+    return shiftOpen(row) || (row && row.rideAutoShift && !shiftClosed(row)) ? Number(row.shiftStartAt) || 0 : 0; /* r13b */
   }
   /* GPS speed fix -> driving intervals [s, e] (only while the shift is open; gaps > 60 s between fixes are not counted) */
   function hosDriveNote(now, mph, lat, lng) {
@@ -6647,6 +6745,7 @@
       driving.line = null;
     }
     state.rideStatus = "completed";
+    try { rideLockRelease("ride"); } catch (e) {} /* r13b */
     syncActiveTripFare({ status: "completed", completedAt: Date.now(), fareFinal: true });
     try { appendCompletedRideLog(); } catch (logErr) {}
     var code = state.driverCode || state.code || readDriverCode();
@@ -8878,7 +8977,8 @@
       fareBeforeTax: ride.fareSub != null && isFinite(+ride.fareSub) ? Math.round(+ride.fareSub)
         : (ride.fareBeforeTax != null && isFinite(+ride.fareBeforeTax) ? Math.round(+ride.fareBeforeTax) : null),
       when: ride.when || [ride.date, ride.time].filter(Boolean).join(" "),
-      name: ride.name || ""
+      name: ride.name || "",
+      pricePending: ride.pricePending === true && !(Number(ride.chargedCents) > 0) && !(Number(ride.paidOtherCents) > 0) ? true : null /* v2.0d.5 r6 */
     };
     /* v58: payment + Square receipt (only fields that exist, so a later write never blanks an earlier one) */
     var payKeys = { fareTotal: "fareTotal", fareTax: "fareTax", chargedCents: "chargedCents", tipCents: "tipCents", paymentStatus: "paymentStatus",
@@ -9031,8 +9131,8 @@
 
   function customerHistoryReceipt() {
     var r = state.historyReceipt || {};
-    var amt = r.amountCents != null ? money(r.amountCents) : "—";
-    var fare = r.fareBeforeTax != null ? money(r.fareBeforeTax) : "";
+    var amt = r.pricePending ? PRICE_PENDING_TEXT : r.amountCents != null ? money(r.amountCents) : "—"; /* v2.0d.5 r6 */
+    var fare = !r.pricePending && r.fareBeforeTax != null ? money(r.fareBeforeTax) : "";
     var payLine = historyPayLine(r);
     var sqUrl = /^https:\/\//i.test(r.receiptUrl || "") ? r.receiptUrl : (/^https:\/\//i.test(r.cancelFeeReceiptUrl || "") ? r.cancelFeeReceiptUrl : "");
     return (
@@ -9296,24 +9396,28 @@
         if (!text || text === "null") return [];
         try {
           var data = JSON.parse(text);
-          if (!data || typeof data !== "object") return [];
+          if (data === null) return [];
+          if (typeof data !== "object") throw new Error("calendar-body"); /* r13h: a bad body is an error, not an empty list */
           return Object.keys(data).map(function (id) {
             return normalizeScheduleRow(id, data[id]);
           }).filter(Boolean);
         } catch (e) {
-          return [];
+          throw new Error("calendar-parse"); /* r13h: truncated / bad JSON must not count as loaded */
         }
       });
     });
   }
 
+  function schedIdNorm(v) { return String(v || "").toLowerCase().replace(/[^a-z0-9]/g, "_").replace(/^_+|_+$/g, "").slice(0, 48); } /* r13h: shared with the reassign checks */
+  function schedNotMine(r) { return !!r && schedIdNorm(r.assignedDriverId) !== schedIdNorm(driverPresenceId()); } /* r13i: unassigned ('' / null / missing) is not mine either */
+  function schedIsOtherDriver(r) { return schedNotMine(r); }
   function myAssignedScheduled() {
     var me = driverPresenceId();
     if (!me) return [];
     return (state.scheduledRides || []).filter(function (r) {
       if (!r || r.status === "completed" || r.status === "cancelled" || r.status === "deleted") return false;
       /* v75h: same id normalization as driverPresenceId so God's roster id always matches */
-      return String(r.assignedDriverId || "").toLowerCase().replace(/[^a-z0-9]/g, "_").replace(/^_+|_+$/g, "").slice(0, 48) === me;
+      return schedIdNorm(r.assignedDriverId) === me;
     }).sort(function (a, b) { /* v75h: true time order (past-due first, then today, then future days); no start = last */
       var ta = Date.parse(a.start || ""), tb = Date.parse(b.start || "");
       if (!isFinite(ta)) ta = 8.64e15; if (!isFinite(tb)) tb = 8.64e15;
@@ -9330,12 +9434,13 @@
       });
       state.scheduledRides = rows || [];
       state.scheduledError = "";
-      try { var meD = driverPresenceId(); verDiscFetch((rows || []).filter(function (r) { return r && r.assignedDriverId === meD && r.status !== "completed"; }).map(function (r) { return r.id; })); } catch (e) {} /* r3 D1 */
-      try { var meI = driverPresenceId(); verInvFetch((rows || []).filter(function (r) { return r && r.assignedDriverId === meI && r.prepaid === true && r.status !== "completed"; }).map(function (r) { return r.id; })); } catch (e) {} /* v77.11 r2 */
+      state.scheduledLoadedAt = Date.now(); /* r13c */
+      try { var meD = driverPresenceId(); verDiscFetch((rows || []).filter(function (r) { return r && schedIdNorm(r.assignedDriverId) === meD && r.status !== "completed"; }).map(function (r) { return r.id; })); } catch (e) {} /* r3 D1 */
+      try { var meI = driverPresenceId(); verInvFetch((rows || []).filter(function (r) { return r && schedIdNorm(r.assignedDriverId) === meI && r.prepaid === true && r.status !== "completed"; }).map(function (r) { return r.id; })); } catch (e) {} /* v77.11 r2 */
       try { /* v73: PCS (God mode) canceled a scheduled ride assigned to me -> tell the driver once */
         var me = driverPresenceId();
         (rows || []).forEach(function (r) {
-          if (!r || r.status !== "cancelled" || r.cancelledBy !== "owner" || String(r.assignedDriverId || "") !== me || !(Date.now() - r.cancelledAt < 86400000)) return;
+          if (!r || r.status !== "cancelled" || r.cancelledBy !== "owner" || schedIdNorm(r.assignedDriverId) !== me || !(Date.now() - r.cancelledAt < 86400000)) return;
           var k = "pcs-sched-cancel-seen-" + r.id + "-" + r.cancelledAt;
           if (localStorage.getItem(k)) return;
           localStorage.setItem(k, "1");
@@ -9358,7 +9463,7 @@
 
   function schedSig() {
     return myAssignedScheduled().map(function (r) {
-      return [r.id, r.start, r.pickup, r.dropoff, r.rider, r.status, r.payMethod, r.fareBeforeTax, r.notes].join("|");
+      return [r.id, r.start, r.pickup, r.dropoff, r.rider, r.status, r.payMethod, r.fareBeforeTax, r.notes, schedTooEarly(r) ? "early" : "open"].join("|"); /* r13f: T-2h changes the sig */
     }).join("~");
   }
 
@@ -9368,6 +9473,7 @@
     if (state.meter || state.meterOpen || state.hubOpen || state.screen !== "home") return false;
     try { if (driverMidRide()) return false; } catch (e) {}
     if (state.payConfirm || state.payBusy || state.meterBusy) return false;
+    if (typeof document !== "undefined" && document.getElementById("drv-cancel-sheet")) return false; /* r13g: cancel sheet open */
     return true;
   }
 
@@ -9476,7 +9582,7 @@
     var straight = function () { var mi = 0, i; for (i = 1; i < pts.length; i += 1) mi += schedEstHav(pts[i - 1], pts[i]) * 1.3; return { miles: mi, minutes: mi * 2, approx: true }; };
     var pick = function (d) { var r = d && d.routes && d.routes[0]; return r && isFinite(+r.distance) && isFinite(+r.duration) ? { miles: +r.distance / 1609.344, minutes: +r.duration / 60, approx: false } : null; };
     if (typeof fetch !== "function") return Promise.resolve(straight());
-    return to(fetch(SCHED_EST_WORKER + "/route", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ points: pts.map(function (p) { return { lat: +p.lat, lng: +p.lng }; }) }) })
+    return to(fetch(SCHED_EST_WORKER + "/route", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ points: pts.map(navRoutePt) }) })
       .then(function (x) { return x.json(); }), 6000).then(function (d) { return d && d.ok && !d.fallback ? pick(d) : null; }).catch(function () { return null; })
       .then(function (r) {
         if (r) return r;
@@ -9514,11 +9620,50 @@
   function schedTripNow() {
     if (state.schedTrip === undefined) { try { state.schedTrip = JSON.parse(localStorage.getItem(schedTripKey()) || "null"); } catch (e) { state.schedTrip = null; } }
     var t = state.schedTrip;
-    if (t && !schedFind(t.id) && (state.scheduledRides || []).length) return null;
+    if (t && !schedFind(t.id) && schedListLoaded()) { schedTripDrop(t, false); return null; } /* r13c: an empty list that loaded fine counts; r13g: clear route + box, no patch */
+    if (t && schedNotMine(schedFind(t.id))) { schedTripDrop(t, false); return null; } /* r13h: normalized ids */ /* r13g: ownership first, no patch on someone else's ride */
+    if (t && t.phase === "pickup" && schedTooEarly(schedFind(t.id))) { schedTripDrop(t, true); return null; } /* r13e: never navigating to a ride > 2 h out, even after a reload */
     return t || null;
   }
+  /* r13e (Matthew 10/23 10:55 PM): nav to a pickup was running the night before an 11:15 AM ride. Head to pick up opens
+     2 h before the pickup time; a "pickup" trip or a lock for a ride further out than that is dropped (also on reload). */
+  var SCHED_HEAD_EARLY_MS = 2 * 60 * 60 * 1000;
+  function schedTooEarly(r, now) { var t = Date.parse(r && r.start); return isFinite(t) && t - (now || Date.now()) > SCHED_HEAD_EARLY_MS; }
+  function schedHeadOpensAt(r) { var t = Date.parse(r && r.start); if (!isFinite(t)) return ""; try { return new Date(t - SCHED_HEAD_EARLY_MS).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", timeZone: "America/Chicago" }); } catch (e) { return ""; } }
+  function schedStopHeading(id) { /* before arrival only: nav off, lock off, the ride stays scheduled + assigned to me */
+    var lk = rideLockRaw(); if (lk && lk.k === "sched" && lk.id === String(id) && lk.arr) return false; /* r13f: arrived per the lock, even with no trip in memory */
+    var t = schedTripNow();
+    if (t && t.id === id && t.phase !== "pickup") return false;
+    try { schedFullClear(t); } catch (e) {}
+    schedTripSave(null); schedNavRoute = null;
+    rideLockRelease("sched", id);
+    var r = schedFind(id); if (r) r.headedToPickupAt = null;
+    try { schedPatch(id, { headedToPickupAt: null, headingStoppedAt: Date.now() }); } catch (e) {}
+    try { rideLockSync(Date.now()); } catch (e) {}
+    return true;
+  }
+  /* r13f: a pickup trip dropped because the ride is > 2 h out gets the same cleanup as Stop (route, box, row field) */
+  function schedTripDrop(t, mine) { /* r13g: mine = still assigned to me (only then patch the row) */
+    state.schedTrip = null; try { localStorage.removeItem(schedTripKey()); } catch (e) {}
+    try { schedFullClear(t); } catch (e) {}
+    schedNavRoute = null;
+    if (mine) { var r = schedFind(t && t.id); if (r) r.headedToPickupAt = null; try { schedPatch(t.id, { headedToPickupAt: null }); } catch (e) {} }
+    if (typeof setTimeout !== "undefined") setTimeout(function () { try { render(); } catch (e) {} try { schedEtaPaint(); } catch (e) {} }, 0);
+  }
+  /* r13f: re-render when a ride crosses T-2h (the list refresh only redraws when the sig changes) */
+  var schedEarlyLast = "";
+  function schedEarlyTick() {
+    var sig = ""; try { sig = (myAssignedScheduled() || []).map(function (r) { return r && r.id + ":" + (schedTooEarly(r) ? 1 : 0); }).join(","); } catch (e) { return false; }
+    if (sig === schedEarlyLast) return false;
+    var first = !schedEarlyLast; schedEarlyLast = sig;
+    if (!first) { if (schedRedrawSafe()) { try { render(); } catch (e) {} } else state.scheduledDirty = true; } /* r13g: never under an open sheet / dropdown */
+    return !first;
+  }
+  if (typeof window !== "undefined") setInterval(schedEarlyTick, 30000);
+  function schedListLoaded() { return !!state.scheduledLoadedAt && !state.scheduledError; } /* r13c */
   function schedTripSave(t) {
     state.schedTrip = t || null;
+    if (t && t.id && t.phase !== "done") rideLockMark("sched", t.id, t.phase !== "pickup"); /* r13b: Back to the list (null) keeps the lock */
     try { if (t) localStorage.setItem(schedTripKey(), JSON.stringify(t)); else localStorage.removeItem(schedTripKey()); } catch (e) {}
   }
   function schedPatch(id, body) {
@@ -9590,19 +9735,128 @@
      Route from the driver's GPS to the pickup (Worker/Google route -> OSRM, same as the meter), blue line + pickup pin on the
      Home map, next-turn box and ETA in the trip card, re-routed every 60 s. After "Rider is in" the meter takes over with its
      own in-app turn-by-turn to the drop-off. Apple Maps stays as a small optional link. */
+  /* v2.0d.5 r13 (Matthew 10/23): the driver can cancel an assigned or active ride, with a reason. Writes status cancelled +
+     cancelledBy "driver" on the PCSCALND row (scheduled) or the live ride (on demand), stops nav + the meter, marks the
+     tracking link cancelled and tells the Worker so God gets a push. Never charges a fee and never touches Square. */
+  var DRV_CANCEL_REASONS = [["no_show", "Rider no-show"], ["rider_asked", "Rider asked to cancel"], ["vehicle", "Vehicle problem"],
+    ["unsafe", "Unsafe situation"], ["emergency", "Emergency"], ["other", "Other"]];
+  function drvCancelLabel(code) { for (var i = 0; i < DRV_CANCEL_REASONS.length; i++) if (DRV_CANCEL_REASONS[i][0] === code) return DRV_CANCEL_REASONS[i][1]; return ""; }
+  function drvCancelBtnHtml(kind, id) {
+    return '<button type="button" class="btn danger" data-driver-cancel="' + esc(kind) + '" data-cancel-id="' + esc(id) + '" style="display:block;width:100%;min-height:46px;margin:8px 0 0;background:#b91c1c;color:#fff;border:0;border-radius:12px;font-weight:800">Cancel ride</button>';
+  }
+  function drvCancelBody(code, note) {
+    var now = Date.now(), body = { status: "cancelled", cancelledBy: "driver",
+      cancelledByDriver: { id: String(driverPresenceId() || ""), name: String(state.driverName || state.name || "Driver").slice(0, 80) },
+      cancelReason: drvCancelLabel(code), cancelReasonCode: code, cancelNote: String(note || "").trim().slice(0, 500), cancelledAt: now, updatedAt: now };
+    return body; /* cancelFeeCents is never set */
+  }
+  function drvCancelValid(code, note) {
+    if (!drvCancelLabel(code)) return "Pick a reason.";
+    if (code === "other" && !String(note || "").trim()) return "Tell PCS what happened.";
+    return "";
+  }
+  function driverCancelRide(kind, id, code, note) {
+    var bad = drvCancelValid(code, note);
+    if (bad) return Promise.reject(new Error(bad));
+    var body = drvCancelBody(code, note), p;
+    if (kind === "sched") {
+      p = schedPatch(id, body);
+    } else {
+      p = syncOn() ? saveWrite(rideUrl(id), "PATCH", body) : Promise.resolve(true);
+    }
+    return Promise.resolve(p).then(function () {
+      drvCancelStopLocal(kind, id);
+      try {
+        fetch(METER_WORKER + (kind === "sched" ? "/notify/sched-cancel" : "/notify/ride-watch"), { method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(kind === "sched" ? { eventId: id } : { rideCode: id }), keepalive: true }).catch(function () {});
+      } catch (e) {}
+      return body;
+    });
+  }
+  /* r13c: a cancel ends the meter on this phone AND on the Worker (/meter/void, driver auth, cancel:true) so no stale
+     meter session or pay link can show or charge. Best effort: a non-metered ride answers 409 and nothing changes. */
+  function drvCancelMeter(M) {
+    var code = M && M.code;
+    if (code) { try { meterPost("/meter/void", { rideCode: code, cancel: true }).catch(function () {}); } catch (e) {} }
+    try { M.pay = { status: "cancelled", at: Date.now() }; } catch (e) {}
+    meterStopTimers(); meterClear();
+  }
+  function drvCancelStopLocal(kind, id) {
+    if (kind === "sched") {
+      var t = schedTripNow();
+      if (t && t.id === id) { try { schedFullClear(t); } catch (e) {} schedTripSave(null); }
+      schedNavRoute = null;
+      var r = schedFind(id); if (r) Object.assign(r, { status: "cancelled", cancelledBy: "driver" });
+      if (state.meter && state.meter.schedId === id) drvCancelMeter(state.meter);
+      folStop("c_" + id, "cancelled");
+      rideLockRelease("sched", id);
+    } else {
+      rideLockRelease("ride", id);
+      if (state.meter && !state.meter.schedId && state.meter.code === id) drvCancelMeter(state.meter); /* r13c */
+      folStop("r_" + id, "cancelled");
+      state.rideStatus = "cancelled";
+      state.mode = "driver"; state.screen = "home"; state.selectedOpenCode = "";
+      try { clearRideFields(); } catch (e) {}
+      writeDriverCode(""); state.driverCode = "";
+    }
+    try { rideLockSync(Date.now()); } catch (e) {}
+    render();
+  }
+  function drvCancelSheet(kind, id) {
+    var old = document.getElementById("drv-cancel-sheet"); if (old) old.remove();
+    var d = document.createElement("div");
+    d.id = "drv-cancel-sheet"; d.setAttribute("role", "dialog"); d.setAttribute("aria-modal", "true");
+    d.style.cssText = "position:fixed;inset:0;z-index:99999;background:rgba(0,0,0,.55);display:flex;align-items:flex-end;justify-content:center";
+    d.innerHTML = '<div class="drv-cancel-card" style="background:#0f1a14;color:#f3f4f6;width:100%;max-width:520px;max-height:92vh;overflow:auto;box-sizing:border-box;border:1px solid #1f3a2b;border-bottom:0;border-radius:16px 16px 0 0;padding:16px">' +
+      '<p style="margin:0 0 6px;font-size:20px;font-weight:800;color:#fff">Cancel this ride?</p>' +
+      '<p style="margin:0 0 12px;color:#cbd5e1;font-size:15px">Pick a reason. PCS is told right away. The rider is not charged.</p>' +
+      '<label for="drv-cancel-r" style="display:block;margin:0 0 6px;color:#e5e7eb;font-size:15px;font-weight:700;text-transform:none;letter-spacing:0">Reason</label>' +
+      '<select id="drv-cancel-r" aria-label="Reason" style="display:block;width:100%;min-height:50px;box-sizing:border-box;margin:0 0 8px;padding:10px 12px;background:#16251c;color:#f3f4f6;border:1px solid #29473a;border-radius:12px;font-size:17px;font-weight:700;color-scheme:dark">' +
+      '<option value="" selected>Choose a reason</option>' +
+      DRV_CANCEL_REASONS.map(function (x) { return '<option value="' + x[0] + '">' + esc(x[1]) + "</option>"; }).join("") + "</select>" + /* r13c (Matthew): a drop-down, not radios */
+      '<textarea id="drv-cancel-note" maxlength="500" rows="3" placeholder="What happened? (required for Other)" style="width:100%;box-sizing:border-box;margin:6px 0;background:#16251c;color:#f3f4f6;border:1px solid #29473a;border-radius:12px;padding:10px;font-size:16px;font-family:inherit"></textarea>' +
+      '<p id="drv-cancel-err" role="alert" style="color:#fca5a5;font-weight:700;margin:4px 0"></p>' +
+      '<button type="button" id="drv-cancel-yes" disabled style="display:block;width:100%;min-height:48px;background:#b91c1c;color:#fff;border:0;border-radius:12px;font-weight:800">Cancel the ride</button>' +
+      '<button type="button" id="drv-cancel-no" style="display:block;width:100%;min-height:44px;margin-top:8px;background:#1f2937;color:#f3f4f6;border:1px solid #374151;border-radius:12px;font-weight:700">Keep the ride</button></div>';
+    document.body.appendChild(d);
+    d.querySelector("#drv-cancel-no").addEventListener("click", function () { d.remove(); });
+    var yes = d.querySelector("#drv-cancel-yes"), err = d.querySelector("#drv-cancel-err"), sel = d.querySelector("#drv-cancel-r");
+    var yesSync = function () { yes.disabled = !sel.value; yes.style.opacity = sel.value ? "1" : ".45"; }; /* r13c: off until a reason is picked */
+    sel.addEventListener("change", function () { err.textContent = ""; yesSync(); }); yesSync();
+    yes.addEventListener("click", function () {
+      var code = d.querySelector("#drv-cancel-r").value, note = d.querySelector("#drv-cancel-note").value;
+      var bad = drvCancelValid(code, note);
+      if (bad) { err.textContent = bad; return; }
+      yes.disabled = true; yes.textContent = "Cancelling\u2026";
+      driverCancelRide(kind, id, code, note).then(function () { d.remove(); }).catch(function (e) {
+        yes.disabled = false; yes.textContent = "Cancel the ride"; err.textContent = "Could not cancel. Check signal and try again.";
+      });
+    });
+  }
+  if (typeof document !== "undefined") document.addEventListener("click", function (ev) {
+    var b = ev.target && ev.target.closest && ev.target.closest("[data-driver-cancel]");
+    if (!b || ROLE !== "driver") return;
+    ev.preventDefault();
+    drvCancelSheet(b.getAttribute("data-driver-cancel"), b.getAttribute("data-cancel-id"));
+  });
   var schedNavRoute = null, schedNavBusy = "", schedNavAt = 0;
   function schedNavTrip() { var t = schedTripNow(); return t && t.phase === "pickup" && !state.meter ? t : null; }
   function schedNavPickup(r) { return r && isCoord(r.pickupLat) && isCoord(r.pickupLng) ? Promise.resolve({ lat: +r.pickupLat, lng: +r.pickupLng }) : schedGeocode(r && r.pickup); }
-  function schedNavFetch(force) {
+  var schedNavSeq = 0, schedNavOff = { since: 0, fixes: 0, lastFix: 0, lastReroute: 0, dist: 0, reroutes: 0 };
+  function schedNavFetch(force, reroute) {
     var t = schedNavTrip(); if (!t) return;
     var r = schedFind(t.id), here = meterHerePt();
     if (!r || !here) return;
-    if (!force && schedNavRoute && schedNavRoute.id === r.id && Date.now() - schedNavAt < 60000) return;
-    if (schedNavBusy === r.id) return;
-    schedNavBusy = r.id; schedNavAt = Date.now();
+    if (!force && schedNavRoute && schedNavRoute.id === r.id && Date.now() - schedNavAt < NAV_ROUTE_REFRESH_MS) return;
+    if (schedNavBusy === r.id && !reroute) return; /* r8: a reroute doesn't wait on an older request */
+    schedNavBusy = r.id; schedNavAt = Date.now(); var seq = ++schedNavSeq;
     schedNavPickup(r).then(function (pk) {
+      if (seq !== schedNavSeq) return null;
       if (!pk) { schedNavBusy = ""; return null; }
+      var h0 = reroute ? navTrackHdg(schedNavOff, Date.now()) : null; if (h0 != null) here = { lat: here.lat, lng: here.lng, hdg: h0 };
       return meterOsrm([here, pk]).then(function (rt) {
+        if (seq !== schedNavSeq) return; /* r8: stale reply (a newer reroute is out) */
+        var t2 = schedNavTrip(); if (!t2 || t2.id !== r.id) { schedNavBusy = ""; return; }
         schedNavBusy = "";
         rt.id = r.id; rt.to = pk; schedNavRoute = rt;
         if (navTestOn()) navLimitFetch(r.id, here, pk); /* v75y test flag: speed limit (OSM maxspeed) */
@@ -9611,6 +9865,13 @@
       });
     }).catch(function () { schedNavBusy = ""; });
   }
+  /* r8: the pickup leg had no off-route check at all (only the 60 s refresh): same fast detector as the meter */
+  function schedNavOffCheck(now) {
+    var t = schedNavTrip(), R = schedNavRoute;
+    if (!t || !R || R.id !== t.id || R.approx || !R.line) { schedNavOff.cnt = 0; return; }
+    if (navOffStep(schedNavOff, R.line, meterHerePt(), navHeadingNow(), Number(state.gpsAt) || 0, now, navFixQ())) schedNavFetch(true, true);
+  }
+  if (typeof window !== "undefined") window.__pcsNavOff = function () { return { pickup: schedNavOff, meter: meterOff }; }; /* test/debug */
   function schedNextTurn() {
     var R = schedNavRoute, t = schedNavTrip(), here = meterHerePt();
     if (!R || !t || R.id !== t.id || !here) return null;
@@ -9895,7 +10156,7 @@
     if (state.meterConfirmEnd) {
       html += '<p class="rfs-ask" id="rfs-ask">End this ride?' + (M.prepaid ? " " + invoiceFareText(M.prepaid) + "." : shown ? " Meter " + money(f.sub) + "." : "") + "</p>" +
         '<div class="rfs-actions"><button type="button" class="rfs-end" id="rfs-end-yes" data-rfs="endyes">Yes, end ride</button>' +
-        '<button type="button" class="rfs-keep" id="rfs-end-keep" data-rfs="endkeep">Keep the meter running</button></div>';
+        '<button type="button" class="rfs-keep" id="rfs-end-keep" data-rfs="endkeep">' + (shown ? "Keep the meter running" : "Keep driving") + "</button></div>"; /* v2.0d.5 r5 */
     } else {
       html += '<div class="rfs-actions"><button type="button" class="rfs-end" id="rfs-end" data-rfs="end"' + (state.meterBusy ? " disabled" : "") + ">End ride</button>" +
         '<button type="button" class="rfs-close" id="rfs-close" data-rfs="close">Close map</button></div>';
@@ -10106,7 +10367,7 @@
   }
   function folWipe(t, why) {
     var now = Date.now();
-    return folWrite(folNodeUrl(t), "PUT", { v: 1, status: why === "stopped" ? "stopped" : "ended", endedAt: now, updatedAt: now });
+    return folWrite(folNodeUrl(t), "PUT", { v: 1, status: why === "stopped" || why === "cancelled" ? why : "ended", endedAt: now, updatedAt: now });
   }
   function folMapLoad(k, force) {
     if (!FOL_KEY_RE.test(k || "") || !syncOn() || fol.off || typeof fetch !== "function") return;
@@ -10150,10 +10411,10 @@
     fol.lastSig[t] = folSig(c);
     return folWrite(folNodeUrl(t), "PUT", c);
   }
-  function folStop(k) {
+  function folStop(k, why) {
     var t = folTokenFor(k);
     fol.map[k] = { t: "" }; fol.mapAt[k] = Date.now();
-    if (t) { folWipe(t, "stopped"); folMineNote(t, k, { endedAt: Date.now(), wiped: true }); }
+    if (t) { folWipe(t, why === "cancelled" ? "cancelled" : "stopped"); folMineNote(t, k, { endedAt: Date.now(), wiped: true }); }
     folWrite(folMapUrl(k), "DELETE");
     folRedraw();
   }
@@ -10453,7 +10714,7 @@
   }
   if (typeof window !== "undefined" && typeof location !== "undefined") try { var ntq = /[?&]navtest=([01])\b/.exec(location.search || ""); if (ntq) { if (ntq[1] === "1") localStorage.setItem(NAVTEST_KEY, "1"); else localStorage.removeItem(NAVTEST_KEY); } } catch (e) {} /* v75y */
   if (typeof window !== "undefined") window.__pcsSchedFull = { key: schedFullKey, on: function () { return schedFullOn(); }, set: function (v) { schedFullSet(v); }, apply: function () { schedFullApply(); } }; /* test hook */
-  if (typeof window !== "undefined") setInterval(function () { try { if (schedNavTrip()) { schedNavPaint(); schedNavFetch(false); } } catch (e) {} }, 2000);
+  if (typeof window !== "undefined") setInterval(function () { try { if (schedNavTrip()) { schedNavPaint(); schedNavOffCheck(Date.now()); schedNavFetch(false); } } catch (e) {} }, 2000);
   /* ---------- v75y TEST FLAG ONLY (Matthew 10/16, Uber reference screenshots): every function below runs only when
      navTestOn() is true (see NAVTEST_KEY). Pickup leg: big black turn card (arrow, distance, street, "toward" the next street),
      heading-up map with the arrow marker, speed-limit badge on the left (only when the road's limit is known), slim bottom bar
@@ -10754,7 +11015,7 @@
       var est = schedEstSetFare(r) ? schedEstCalc(r, 0, 0).text + " (PCS set this fare)" : (r.dropoff ? (schedEstSaved(r) || (state.schedEst || {})[r.id] || {}).text || "Estimating\u2026" : ""); /* v75s shared estimate */
       var notes = r.description && r.description !== r.dropoff && r.description !== r.notes ? r.description : "";
       var actions;
-      if (onMeter) actions = '<p style="margin:8px 0;color:#0b3d23;font-weight:800">Ride in progress on the meter above. Change the drop-off there any time.</p>';
+      if (onMeter) actions = '<p style="margin:8px 0;color:#0b3d23;font-weight:800">' + (meterShown(M) ? "Ride in progress on the meter above. Change the drop-off there any time." : "Ride in progress above. Change the drop-off there any time.") + '</p>' + drvCancelBtnHtml("sched", r.id); /* r13 */
       else if (inTrip) {
         var nav = schedNavUrl(r.pickup, r.pickupLat, r.pickupLng);
         actions = '<div class="sched-trip" id="sched-trip" style="background:#ecfdf5;border:2px solid #0b6b3a;border-radius:12px;padding:10px;margin:8px 0">' +
@@ -10765,7 +11026,9 @@
               (navTestOn() ? '<button type="button" id="sched-arr-open" style="' + SCHED_BTN_2 + '">Show the arrival screen</button>' : "") /* v75y test flag */
             : '<button type="button" id="sched-arrived" data-sched-id="' + esc(r.id) + '" style="' + SCHED_BTN_BIG + '">I\u2019m at the pickup</button>') +
           (nav ? '<p style="margin:6px 0 0;text-align:right"><a id="sched-nav-pickup" href="' + esc(nav) + '"' + (/^maps:/.test(nav) ? "" : ' target="_blank" rel="noopener"') + ' style="color:#0b3d23;font-size:14px;font-weight:700;text-decoration:underline">Open in Apple Maps (optional)</a></p>' : "") +
+          (trip.phase === "arrived" ? "" : '<button type="button" id="sched-trip-stop" data-sched-id="' + esc(r.id) + '" style="' + SCHED_BTN_2 + '">Stop heading to pickup</button>') + /* r13e */
           '<button type="button" id="sched-trip-back" style="' + SCHED_BTN_2 + '">Back to the list (ride stays scheduled)</button>' +
+          drvCancelBtnHtml("sched", r.id) + /* v2.0d.5 r13 */
           "</div>";
       } else if (schedAppPaid(r)) { /* v75w: already paid in the app: show the numbers, close without asking for payment */
         actions = schedPaidHtml(r) +
@@ -10776,6 +11039,7 @@
           '<button class="btn" type="button" data-complete-schedule="' + esc(r.id) + '" style="' + SCHED_BTN_2 + ';min-height:40px;font-size:14px">It was a separate ride: Mark complete</button>';
       } else {
         actions = (M ? '<p style="margin:8px 0;color:#374151">Finish the current metered ride, then start this one.</p>'
+            : schedTooEarly(r) ? '<button type="button" class="sched-start" disabled aria-disabled="true" style="' + SCHED_BTN_BIG + ';opacity:.5">Head to pick up</button><p class="sched-early" style="margin:4px 0 8px;color:#374151;font-size:14px">Opens 2 h before the pickup' + (schedHeadOpensAt(r) ? " (" + esc(schedHeadOpensAt(r)) + ")" : "") + ".</p>" /* r13e */
             : '<button type="button" class="sched-start" data-sched-start="' + esc(r.id) + '" style="' + SCHED_BTN_BIG + '">Head to pick up</button>') +
           '<button class="btn" type="button" data-complete-schedule="' + esc(r.id) + '" style="' + SCHED_BTN_2 + ';min-height:40px;font-size:14px">Mark complete (ride already done)</button>';
       }
@@ -10800,7 +11064,7 @@
         (state.schedMsg && state.schedMsgId === r.id ? '<p role="status" style="margin:6px 0;color:#7c2d12;font-weight:700">' + esc(state.schedMsg) + "</p>" : "") +
         folDriverBtnHtml("c_" + r.id, r.riderPhone) + /* v76b: Text my client a tracking link */
         '<div class="row-actions" style="display:block">' + actions + "</div>" +
-        '<p style="margin:6px 0 0;color:#374151;font-size:13px">Assigned by PCS. ' + (r.prepaid ? "This ride is paid on a Square invoice." : meterSetFareOk(r) ? "This ride charges the PCS set fare." : "The meter charges for where the rider actually gets out.") + " Completing credits your Mon\u2013Sun commission week" + (r.prepaid ? (r.prepaidAmountCents != null ? " from the invoice amount " + money(r.prepaidAmountCents) : " from the meter fare") : "") + ".</p>" +
+        '<p style="margin:6px 0 0;color:#374151;font-size:13px">Assigned by PCS. ' + (r.prepaid ? "This ride is paid on a Square invoice." : meterSetFareOk(r) ? "This ride charges the PCS set fare." : "PCS sets the final fare for this ride.") + " Completing credits your Mon\u2013Sun commission week" + (r.prepaid ? (r.prepaidAmountCents != null ? " from the invoice amount " + money(r.prepaidAmountCents) : " from the invoice amount") : "") + ".</p>" +
         "</article>"
       );
     }).join("");
@@ -10894,6 +11158,7 @@
       b.addEventListener("click", function () {
         var id = b.getAttribute("data-sched-start");
         if (state.meter) return schedMsgFor(id, "Finish the current metered ride first.");
+        if (schedTooEarly(schedFind(id))) return schedMsgFor(id, "Head to pick up opens 2 h before the pickup time."); /* r13e */
         schedTripSave({ id: id, phase: "pickup", at: Date.now() });
         state.schedMsg = "";
         schedPatch(id, { headedToPickupAt: Date.now() });
@@ -10908,8 +11173,10 @@
     if (arr) arr.addEventListener("click", schedArrivedNow); /* v75x: shared with the full screen map */
     var beg = document.getElementById("sched-begin");
     if (beg) beg.addEventListener("click", function () { beg.disabled = true; schedBegin(beg.getAttribute("data-sched-id")); });
+    var stopH = document.getElementById("sched-trip-stop"); /* r13e */
+    if (stopH) stopH.addEventListener("click", function () { schedStopHeading(stopH.getAttribute("data-sched-id")); render(); try { schedEtaPaint(); } catch (e) {} });
     var back = document.getElementById("sched-trip-back");
-    if (back) back.addEventListener("click", function () { schedFullClear(schedTripNow()); schedTripSave(null); render(); });
+    if (back) back.addEventListener("click", function () { schedFullClear(schedTripNow()); schedTripSave(null); render(); try { schedEtaPaint(); } catch (e) {} /* r13e: d.4 left the "to pickup" box on the kept map */ });
     var arrOpen = document.getElementById("sched-arr-open"); /* v75y test flag */
     if (arrOpen) arrOpen.addEventListener("click", function () { navArrShow(true); });
     try { schedFullApply(); } catch (e) {} /* v75x */
@@ -14116,11 +14383,13 @@
   }
   function meterPayUrl(code) { return databaseURL() + "/rides/PAYMENTS/" + encodeURIComponent(code) + ".json"; }
   function meterIndexMeter(M, status) {
-    var f = M.fare || meterFare(M);
+    var f = M.fare || meterFare(M), rec = meterFareRec(M); /* r6 */
     return {
       status: status, startedAt: M.startedAt, endedAt: M.endedAt || null, driverId: M.driverId, driverName: M.driverName,
       tierLabel: rateOvLocked(M) ? "Contract rate" : M.tierLabel, perMileCents: rateOvLocked(M) ? null : M.perMileCents, miles: f.miles, minutes: M.minutes || null, waitMinutes: f.waitMin,
-      fareSub: f.sub, fareTotal: f.total,
+      fareSub: rec ? rec.sub : f.sub, fareTotal: rec ? rec.total : f.total, /* v2.0d.5 r6 */
+      pricePending: rec ? (rec.pending || null) : undefined, fareSource: rec ? rec.source : undefined, /* undefined = not sent: Metered unchanged */
+      meterFareSub: rec ? f.sub : undefined, meterFareTotal: rec ? f.total : undefined, /* raw reading, internal only */
       tollCount: f.tollCount || 0, tollCents: f.tollCents || 0, tollKind: f.tollKind || "toll", tollLabel: f.tollLabel || "", /* v76b */
       pickupLat: M.startPt ? M.startPt.lat : null, pickupLng: M.startPt ? M.startPt.lng : null,
       dropLat: M.endPt ? M.endPt.lat : null, dropLng: M.endPt ? M.endPt.lng : null,
@@ -14128,13 +14397,13 @@
     };
   }
   function meterIndexPatch(M, status, extra) {
-    var body = Object.assign({ code: M.code, name: "Metered ride", rideType: "metered", updatedAt: Date.now(),
+    var body = Object.assign({ code: M.code, name: meterShown(M) ? "Metered ride" : "Scheduled ride", rideType: "metered", /* v2.0d.5 r4 */ updatedAt: Date.now(),
       env: M.sandbox ? "sandbox" : "production", meter: meterIndexMeter(M, status) }, extra || {});
     return meterWrite(meterPayUrl(M.code), "PATCH", body);
   }
   function meterPutRide(M) {
     var body = {
-      code: M.code, rideType: "metered", metered: true, meterVisible: meterShown(M), scheduleId: M.schedId || null, name: "Metered ride", status: "started", /* v2.0a: the rider page hides the fare unless meterVisible */
+      code: M.code, rideType: "metered", metered: meterShown(M), meterVisible: meterShown(M), scheduleId: M.schedId || null, name: meterShown(M) ? "Metered ride" : "Scheduled ride", status: "started", /* v2.0d.5 r3: rideType stays "metered" (= trip session, pay/dedupe keys on it); metered/name now true only for a ride started as Metered */ /* v2.0a: the rider page hides the fare unless meterVisible */
       requestedAt: M.startedAt, startedAt: M.startedAt, acceptedAt: M.startedAt, updatedAt: Date.now(),
       driverId: M.driverId, driverUid: firebaseUid() || "", driverName: M.driverName, driverEmail: String(readSession() || "").slice(0, 120),
       meterTrip: meterTripOf(M), tripType: meterTripOf(M).kind, airportCode: meterTripOf(M).kind === "local" ? null : meterTripOf(M).code, internationalArrival: meterTripOf(M).intl,
@@ -14247,7 +14516,7 @@
     if (M.dest) meterRouteFetch(true); /* v71 */
   }
 
-  function meterPct(M) { return M && M.ridePct != null && isFinite(+M.ridePct) ? Math.round(+M.ridePct) : driverCommissionPct(); } /* v76d */
+  function meterRidePct(M) { return M && M.ridePct != null && isFinite(+M.ridePct) ? Math.round(+M.ridePct) : driverCommissionPct(); } /* v76d; r6: renamed - the later meterPct(rate) tax-label helper shadowed it (hoisting), so prepaid / paid-other commission came out 0 */
   function meterLogPayWeek(M) {
     var f = M.fare;
     var pct = driverCommissionPct();
@@ -14255,10 +14524,10 @@
     var base = Math.max(0, f.sub - EXTRA_FEE);
     var day = chicagoParts(new Date(M.endedAt)).date;
     var entry = {
-      code: M.code, day: day, completedAt: M.endedAt, when: "Metered ride", rideType: "metered",
-      pickup: M.pickupAddress || "Metered ride start", drop: M.dropAddress || "Metered ride end",
+      code: M.code, day: day, completedAt: M.endedAt, metered: meterShown(M), /* r5 */ when: meterShown(M) ? "Metered ride" : "Scheduled ride", rideType: "metered", /* v2.0d.5 r4: label only */
+      pickup: M.pickupAddress || (meterShown(M) ? "Metered ride start" : "Ride start"), drop: M.dropAddress || (meterShown(M) ? "Metered ride end" : "Ride end"), /* r5 */
       rawMiles: f.miles, billedMiles: f.miles, waitMinutes: f.waitMin, fareSub: f.sub, fareTax: f.tax, fareTotal: f.total,
-      commissionPct: pct, commissionCents: meterCommissionCents(f, pct), tipCents: 0, paymentStatus: "unpaid", riderName: M.schedRider || "Metered ride", scheduleId: M.schedId || null, rideCommissionPct: M.ridePct != null ? M.ridePct : null, /* v76d */
+      commissionPct: pct, commissionCents: meterCommissionCents(f, pct), tipCents: 0, paymentStatus: "unpaid", riderName: M.schedRider || (meterShown(M) ? "Metered ride" : "Scheduled ride"), scheduleId: M.schedId || null, rideCommissionPct: M.ridePct != null ? M.ridePct : null, /* v76d */
       tollCount: f.tollCount || 0, tollKind: f.tollKind || "toll", tollLabel: f.tollLabel || "", /* v76b */
       tollCents: f.tollReimburseCents || 0, /* real tolls: 100% to the driver (reimbursement), not in commissionCents */
       tollRoadFeeCents: f.tollRoadFeeCents || 0, /* DV-plate cars: fare income, already inside the commission split */
@@ -14269,7 +14538,15 @@
       discountApprovedBy: M.discount && M.discount.type === "other" && M.discount.status === "approved" ? String(M.discount.approvedBy || "Matthew") : null
     };
     void base;
+    var recW = meterFareRec(M); /* v2.0d.5 r6: non-Metered -> invoice / quote / Price pending, never the meter */
+    if (recW) {
+      entry.meterFareSub = f.sub; entry.meterFareTax = f.tax; entry.meterFareCents = f.total;
+      entry.fareSub = recW.sub; entry.fareGrossSub = recW.sub; entry.fareTax = recW.tax; entry.fareTotal = recW.total;
+      entry.commissionCents = recCommissionCents(recW, pct); entry.fareSource = recW.source; entry.pricePending = recW.pending || null;
+      if (recW.pending) { entry.discountCents = 0; entry.discountReview = null; }
+    }
     if (M.prepaid) entry = invoiceWins(entry, M.prepaid, pct); /* v77.11: invoice amount = fare of record */
+    M.logFare = { fareTotal: Number(entry.fareTotal) || 0, commissionCents: Number(entry.commissionCents) || 0 }; /* r6: what the day stats hold for this ride */
     var prev = null; /* v73: re-logging (fare edited before payment) replaces the old numbers instead of counting the ride twice */
     var list = readRideLog().filter(function (e) { if (e && e.code === M.code) prev = e; return !e || e.code !== M.code; });
     list.unshift(entry);
@@ -14277,8 +14554,8 @@
     var stats = readDayStats(day);
     if (prev && (prev.day || day) === day) { stats.commissionCents -= Number(prev.commissionCents) || 0; stats.rideTotalCents -= Number(prev.fareTotal) || 0; stats.tollCents = (Number(stats.tollCents) || 0) - (Number(prev.tollCents) || 0); }
     else stats.completed += 1;
-    stats.commissionCents += entry.commissionCents;
-    stats.rideTotalCents += entry.fareTotal;
+    stats.commissionCents += Number(entry.commissionCents) || 0; /* r6: Price pending counts $0 until God settles */
+    stats.rideTotalCents += Number(entry.fareTotal) || 0;
     stats.tollCents = Math.max(0, (Number(stats.tollCents) || 0) + entry.tollCents); /* v76b */
     writeDayStats(day, stats);
     meterWrite(historyUrl(driverPresenceId(), M.code), "PUT", entry);
@@ -14292,6 +14569,8 @@
       tollCount: f.tollCount || 0, tollCents: f.tollCents || 0, tollKind: f.tollKind || "toll",
       dropLat: M.endPt ? M.endPt.lat : null, dropLng: M.endPt ? M.endPt.lng : null };
   }
+  var meterEndFieldsV76i = meterEndFields;
+  meterEndFields = function (M) { return Object.assign(meterEndFieldsV76i(M), rideRecFields(M, M.fare)); }; /* v2.0d.5 r6 */
   function meterUpdatePayWeek(M, patch) {
     var list = readRideLog();
     var tipAdd = 0, fullV76i = null;
@@ -14353,9 +14632,10 @@
     state.meterBusy = "";
     state.meterOpen = true;
     state.meterQrUntil = 0;
+    if (M.schedId) { var ppEnd = prepaidOf(schedFind(M.schedId)); if (ppEnd) M.prepaid = verifiedPrepaid(ppEnd, verInv[M.schedId]); } /* v76d: marked prepaid after the meter started -> still credited from the invoice (r6: before the record is written) */
     meterSave();
     var f = M.fare;
-    meterEndWrite = meterWrite(rideUrl(M.code), "PATCH", {
+    meterEndWrite = meterWrite(rideUrl(M.code), "PATCH", Object.assign({
       status: "completed", completedAt: now, endedAt: now, updatedAt: now,
       dropLat: M.endPt ? M.endPt.lat : null, dropLng: M.endPt ? M.endPt.lng : null,
       pickupLat: M.startPt ? M.startPt.lat : null, pickupLng: M.startPt ? M.startPt.lng : null,
@@ -14368,25 +14648,26 @@
       tollReimburseCents: f.tollReimburseCents || 0, tollRoadFeeCents: f.tollRoadFeeCents || 0, /* v76b */
       estimateCents: f.total, paymentStatus: "unpaid",
       setFare: !!f.setFare, meterReadingCents: f.meterReadingCents, scheduleId: M.schedId || null, /* v73 set fare: charged f.sub; meter reading kept for testing */
-      meterLive: { miles: f.miles, waitMin: f.waitMin, freeUsed: Number(M.freeUsed) || 0, moved: !!M.moved, fareCents: f.sub, at: now, gpsOk: true }
-    });
+      meterLive: { miles: f.miles, waitMin: f.waitMin, freeUsed: Number(M.freeUsed) || 0, moved: !!M.moved, fareCents: meterShown(M) ? f.sub : 0, at: now, gpsOk: true }
+    }, rideRecFields(M, f))); /* v2.0d.5 r6: non-Metered -> fare of record; raw reading only in meterFare* */
     M.endSaved = false; /* v76i */
     meterEndWrite.then(function (ok) { if (ok && state.meter && state.meter.code === M.code) { state.meter.endSaved = true; meterSave(); } });
-    if (f.setFare) { /* v73: rider meter page shows one Fare line (base = set fare, no mile / wait parts) */
+    if (f.setFare && meterShown(M)) { /* v73: rider meter page shows one Fare line (base = set fare, no mile / wait parts) */
       meterWrite(rideUrl(M.code), "PATCH", { fareBase: Math.max(0, f.sub - (f.tollCents || 0)), fareMileCents: 0, fareWaitCents: 0, feeLines: f.tollLine ? [f.tollLine] : [], updatedAt: now }); /* v76b: tolls stay their own line */
     }
     if (M.schedId && syncOn()) { /* v73: the scheduled ride is done (the metered ride carries the earnings; no second entry) */
       try { /* v76i: through the outbox, so a weak signal at the curb can't leave the card open */
-        saveWrite(calendarHubUrl(M.schedId), "PATCH", { status: "completed", completedAt: now, meterCode: M.code, meterReadingCents: f.meterReadingCents, updatedAt: now,
+        var pctC = meterRidePct(M), recC = meterFareRec(M), comC = recC ? recCommissionCents(recC, pctC) : meterCommissionCents(f, pctC); /* r7: God's board card reads the commission from this row */
+        saveWrite(calendarHubUrl(M.schedId), "PATCH", { status: "completed", completedAt: now, meterCode: M.code, commissionCents: comC, commissionPct: pctC, pricePending: recC && recC.pending ? true : null, /* r7 */ meterReadingCents: meterShown(M) ? f.meterReadingCents : null, meterFareReadingCents: meterShown(M) ? null : f.meterReadingCents, /* r6 */ updatedAt: now,
           sessionFlags: (M.sessionFlags || []).length ? M.sessionFlags.slice() : null, discountReview: (f.discountCents || 0) > 0 ? "pending" : null }); /* v77.10 / r3 */
       } catch (e) {}
       (state.scheduledRides || []).forEach(function (r) { if (r && r.id === M.schedId) r.status = "completed"; });
     }
     meterIndexPatch(M, "ended", { paymentStatus: "unpaid" });
-    if (M.schedId) { var ppEnd = prepaidOf(schedFind(M.schedId)); if (ppEnd) M.prepaid = verifiedPrepaid(ppEnd, verInv[M.schedId]); } /* v76d: marked prepaid after the meter started -> still credited from the invoice */
     meterLogPayWeek(M);
     if (M.prepaid) meterFinishPrepaid(M, now); /* v75v: paid on a Square invoice, balance $0 */
-    if (M.ridePct == null) { var pctUsedEnd = meterPct(M); rateRecheckAfterEnd(M.code, pctUsedEnd, function (p) { /* v76d: re-read the driver's % */
+    if (M.ridePct == null) { var pctUsedEnd = meterRidePct(M); rateRecheckAfterEnd(M.code, pctUsedEnd, function (p) { /* v76d: re-read the driver's % */
+      var recR = meterFareRec(M); if (recR) return { commissionCents: recCommissionCents(recR, p) }; /* r6 */
       return { commissionCents: M.prepaid ? prepaidWeekNumbers(M.prepaid, M.fare, p).commissionCents : meterCommissionCents(M.fare, p) }; }); }
     meterSave();
     meterGeocodeEnds(M);
@@ -14396,7 +14677,8 @@
   /* v75v: Prepaid (Square invoice) ride: straight to Paid, zero charge, no QR / card prompt. */
   function meterFinishPrepaid(M, now) {
     var pp = M.prepaid, inv = pp.invoiceNo || "";
-    var wk = prepaidWeekNumbers(pp, M.fare, meterPct(M)); /* v76d */
+    var wk = prepaidWeekNumbers(pp, M.fare, meterRidePct(M)); /* v76d */
+    var recP = meterFareRec(M); if (recP) wk = { fareSub: recP.sub, fareTax: recP.tax, fareTotal: recP.total, commissionCents: recCommissionCents(recP, meterRidePct(M)) }; /* r6: never the meter */
     var srP = M.schedId ? prepaidOf(schedFind(M.schedId)) : null, sqPaid = !!((srP && srP.squarePaid) || pp.squarePaid); /* v77.26 */
     var psP = sqPaid ? "paid_other" : "invoice_pending";
     M.pay = { status: psP, method: "square_invoice", amountCents: 0, tipCents: 0, paidAt: now, via: "square_invoice", prepaid: true, invoiceNo: inv, invoiceAmountCents: pp.amountCents };
@@ -14408,8 +14690,9 @@
     meterUpdatePayWeek(M, { paymentStatus: psP, paidVia: "square_invoice", invoiceStatus: sqPaid ? "PAID" : "UNPAID", prepaid: true, prepaidInvoiceNo: inv, payMethod: "invoice",
       fareSub: wk.fareSub, fareTax: wk.fareTax, fareTotal: wk.fareTotal, commissionCents: wk.commissionCents, meterFareCents: M.fare.total, riderName: M.schedRider || "Prepaid ride" });
     if (M.logDay) { /* day stats follow the invoice numbers */
-      var st = readDayStats(M.logDay), old = meterCommissionCents(M.fare, meterPct(M));
-      st.commissionCents += wk.commissionCents - old; st.rideTotalCents += wk.fareTotal - (Number(M.fare.total) || 0);
+      var st = readDayStats(M.logDay), lf = M.logFare || { fareTotal: Number(M.fare.total) || 0, commissionCents: meterCommissionCents(M.fare, meterRidePct(M)) }; /* r6: delta vs what was logged */
+      st.commissionCents += (Number(wk.commissionCents) || 0) - lf.commissionCents; st.rideTotalCents += (Number(wk.fareTotal) || 0) - lf.fareTotal;
+      M.logFare = { fareTotal: Number(wk.fareTotal) || 0, commissionCents: Number(wk.commissionCents) || 0 };
       writeDayStats(M.logDay, st);
     }
   }
@@ -14431,7 +14714,7 @@
       if (state.meter && state.meter.code === code) meterSave();
       meterWrite(rideUrl(code), "PATCH", patch);
       meterIndexPatch(cur, meterIndexStatus(cur));
-      meterUpdatePayWeek(cur, { pickup: cur.pickupAddress || "Metered ride start", drop: cur.dropAddress || "Metered ride end" });
+      meterUpdatePayWeek(cur, { pickup: cur.pickupAddress || (meterShown(cur) ? "Metered ride start" : "Ride start"), drop: cur.dropAddress || (meterShown(cur) ? "Metered ride end" : "Ride end") } /* r5 */);
     });
   }
   function meterEnd() {
@@ -14622,6 +14905,39 @@
   /* v2.0d r3 (Matthew 10/23): "If it is unpaid and being collected by the driver and they collect cash, just display the amount
      to be collected." Pure (tested). Metered ride -> the meter total (as before). Any other ride -> the unpaid invoice amount
      (outstanding), else the quoted/set fare, else null (driver must type it; never the meter fare). */
+  /* v2.0d.5 r5: history " · Metered" only for a ride started as Metered (history rows have no metered flag before r5: no scheduleId = Metered) */
+  function histMetered(r) { return !!r && r.rideType === "metered" && (r.metered != null ? r.metered === true : !r.scheduleId); }
+  /* v2.0d.5 r6 (Harry 10/23): the fare of record on a non-Metered ride = the invoice price, else the quoted price, else "Price pending"
+     (no amount, no commission; God settles). NEVER the meter. null on a Metered ride (the meter IS the fare). Pure (tested). */
+  function rideFareRec(M, row) {
+    if (!M || meterShown(M)) return null;
+    var c = function (v) { return v != null && v !== "" && isFinite(+v) && +v > 0 ? Math.round(+v) : null; };
+    var out = function (src, sub, tax) { sub = Math.round(sub); tax = Math.max(0, Math.round(Number(tax) || 0)); return { source: src, pending: false, sub: sub, tax: tax, total: sub + tax }; };
+    var pp = M.prepaid;
+    if (pp && c(pp.amountCents) != null) return out("square_invoice", c(pp.amountCents), pp.taxCents);
+    var q = row && row.sqInvoice && typeof row.sqInvoice === "object" ? row.sqInvoice : null;
+    if (q && c(q.subtotalCents) != null) return out("square_invoice", c(q.subtotalCents), q.taxCents);
+    if (q && c(q.totalCents) != null) { var sb = Math.round(c(q.totalCents) / (1 + METER_TAX_RATE)); return out("square_invoice", sb, c(q.totalCents) - sb); } /* r8 (Harry): total only -> back the 8.25% tax out, so commission is never taken on tax */
+    var f = M.fare;
+    if (f && f.setFare && !f.contractRate && c(f.sub) != null) return out("quote", c(f.sub), f.tax);
+    if (M.setFareCents != null && c(M.setFareCents) != null) { var s0 = c(M.setFareCents); return out("quote", s0, Math.round(s0 * (Number(M.taxRate) || 0))); }
+    if (row && c(row.fareBeforeTax) != null) { var s1 = Math.round(+row.fareBeforeTax * 100); return out("quote", s1, Math.round(s1 * (Number(M.taxRate) || 0))); }
+    return { source: "pending", pending: true, sub: null, tax: null, total: null };
+  }
+  function meterFareRec(M) { if (!M || meterShown(M)) return null; return rideFareRec(M, M.schedId ? schedFind(M.schedId) : null); }
+  var PRICE_PENDING_TEXT = "Price pending";
+  /* r6: the ride-record / PAYMENTS fare fields for a non-Metered ride: fare of record (null when pending) + the raw meter reading
+     kept ONLY in meterFare* fields (no driver or rider screen reads them). {} on a Metered ride (unchanged). Pure (tested). */
+  function rideRecFields(M, f) {
+    var rec = meterFareRec(M); if (!rec) return {};
+    f = f || M.fare || {};
+    return { fareSub: rec.sub, fareTax: rec.tax, fareTotal: rec.total, estimateCents: rec.total, fareGrossSub: rec.sub,
+      fareBase: rec.sub, fareMileCents: 0, fareWaitCents: 0, meterReadingCents: null, pricePending: rec.pending || null, fareSource: rec.source,
+      meterFareSub: f.sub != null ? f.sub : null, meterFareTax: f.tax != null ? f.tax : null, meterFareTotal: f.total != null ? f.total : null,
+      meterFareReadingCents: f.meterReadingCents != null ? f.meterReadingCents : (f.sub != null ? f.sub : null) };
+  }
+  /* r6: driver % of the fare of record (never of tax); null when pending */
+  function recCommissionCents(rec, pct) { return !rec || rec.pending || rec.sub == null ? null : Math.round(rec.sub * (Number(pct) || 0) / 100); }
   function cashCollectCents(M, r) {
     if (!M) return null;
     if (meterShown(M)) return Number(M.fare && M.fare.total) || 0;
@@ -14724,11 +15040,11 @@
         cashReceivedCents: received, changeCents: changeC, highTipConfirmed: highTip || null,
         paidOtherBy: M.driverName, paidOtherByDriverId: M.driverId, updatedAt: now }, cashLines));
       meterIndexPatch(M, psO, { paymentStatus: psO,
-        paidOther: Object.assign({ at: now, method: method, paidBy: "driver", amountCents: amount, tipCents: tip, cashReceivedCents: received, changeCents: changeC, by: M.driverName, driverId: M.driverId, fareTotal: M.fare.total }, cashLines) });
+        paidOther: Object.assign({ at: now, method: method, paidBy: "driver", amountCents: amount, tipCents: tip, cashReceivedCents: received, changeCents: changeC, by: M.driverName, driverId: M.driverId, fareTotal: meterShown(M) ? M.fare.total : meterFareRec(M).total /* r6 */ }, cashLines) });
       if (method === "test") meterMarkTest(M, now); else
       if (method === "cash" && M.schedId) schedPatch(M.schedId, paidCashRecord(M, amount, tip, now)); /* v77.26: shows "Paid: cash, collected by <first name>" on the God card */
-      var pw = method === "test" ? null : paidWeekNumbers(M, amount, meterPct(M)); /* v2.0d r3c (Harry): non-Metered -> driver's % of what was actually paid */
-      if (pw && M.logDay) { var stP = readDayStats(M.logDay), oldC = meterCommissionCents(M.fare, meterPct(M)); stP.commissionCents += pw.commissionCents - oldC; stP.rideTotalCents += pw.fareTotal - (Number(M.fare.total) || 0); writeDayStats(M.logDay, stP); }
+      var pw = method === "test" ? null : paidWeekNumbers(M, amount, meterRidePct(M)); /* v2.0d r3c (Harry): non-Metered -> driver's % of what was actually paid */
+      if (pw && M.logDay) { var stP = readDayStats(M.logDay), lfP = M.logFare || { fareTotal: Number(M.fare.total) || 0, commissionCents: meterCommissionCents(M.fare, meterRidePct(M)) }; stP.commissionCents += pw.commissionCents - lfP.commissionCents; stP.rideTotalCents += pw.fareTotal - lfP.fareTotal; writeDayStats(M.logDay, stP); M.logFare = { fareTotal: pw.fareTotal, commissionCents: pw.commissionCents }; } /* r6 */
       meterUpdatePayWeek(M, Object.assign({ tipCents: tip, paymentStatus: psO, paidVia: method, paidBy: method === "cash" ? "driver" : null, cashReceivedCents: received, changeCents: changeC }, cashLines, pw || {}));
       meterNoteFlush(M); /* v76d */
       render();
@@ -14757,7 +15073,8 @@
     if (M.link && M.link.id) meterPost("/meter/void", { rideCode: M.code }).catch(function () {}); /* best effort */
     meterWrite(rideUrl(M.code), "PATCH", { paymentStatus: "unpaid", meterUnpaidFinishedAt: now, updatedAt: now });
     meterIndexPatch(M, "unpaid", { paymentStatus: "unpaid", unpaidFinishedAt: now });
-    state.driverNotice = "Metered ride " + M.code + " was saved as NOT PAID (" + money(M.fare.total) + "). It shows in red in God mode.";
+    var unpaidAmt = meterShown(M) ? M.fare.total : cashCollectCents(M, M.schedId ? schedFind(M.schedId) : null); /* v2.0d.5 r5: never the meter on a non-Metered ride */
+    state.driverNotice = (meterShown(M) ? "Metered ride " : "Ride ") + M.code + " was saved as NOT PAID" + (unpaidAmt != null ? " (" + money(unpaidAmt) + " to collect)" : "") + ". It shows in red in God mode.";
     if (meterNoteUnsaved(M)) { /* v77.22: save a typed note before the screen closes */
       var nd = state.meterNoteDraft, notice = state.driverNotice;
       meterNoteWrite(M, nd).then(function (ok) { if (!ok) { state.driverNotice = notice + " Your note was NOT SAVED: \"" + rideNoteClean(nd) + "\". Add it in God mode."; render(); } });
@@ -14768,6 +15085,7 @@
   function meterClear() {
     meterStopTimers();
     var M = state.meter;
+    if (M && M.schedId) { try { rideLockRelease("sched", M.schedId); } catch (e) {} } /* r13b: metered scheduled ride ended / cancelled */
     if (M) { try { localStorage.setItem("pcs-meter-last-" + driverPresenceId(), JSON.stringify(M)); } catch (e) {} }
     state.meter = null;
     state.meterOpen = false;
@@ -14855,7 +15173,7 @@
       ".meter-rqr-code{flex:0 0 152px;width:152px}.meter-rqr-code svg{display:block;width:152px;height:152px}" +
       ".meter-rqr-text{display:flex;flex-direction:column;gap:4px;font-size:13px;line-height:1.3}.meter-rqr-text b{font-size:16px}" +
       ".meter-rqr-count{font-weight:800;color:#7a1f1f}" +
-      ".meter-map .map-caption{margin:4px 0 0}" +
+      ".meter-map .map-caption{margin:4px 0 0}.meter-map-col>.meter-map-caption{margin:6px 0 0}" +
       ".meter-map{position:relative}.meter-eta-chip{position:absolute;top:8px;right:8px;z-index:900;background:#0e2442;color:#f0d48a;border:1.5px solid #f0d48a;border-radius:999px;padding:5px 11px;font-size:13px;font-weight:800;box-shadow:0 2px 6px rgba(0,0,0,.35);max-width:70%;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}" +
       ".meter-eta-chip.has-dest{background:#f0d48a;color:#0b1f3a}" +
       ".meter-dest{margin:10px 0}.meter-dest input{width:100%;font-size:16px;padding:10px;border-radius:10px;border:1px solid rgba(212,177,90,.5);background:#0b1c33;color:#f4efe4}" +
@@ -15247,7 +15565,7 @@
         "</section>");
       return (
         '<section id="meter-paid">' + meterTestTag(M) +
-        '<p class="tag">' + (meterNumHidden(M) ? "Ride " : "Metered ride ") + esc(M.code) + "</p>" + /* v2.0d r2 */
+        '<p class="tag">' + (meterShown(M) ? "Metered ride " : "Ride ") + esc(M.code) + "</p>" + /* v2.0d r2; r5: gated on meterShown */
         '<p class="meter-paid" id="meter-paid-amount">' + (unver ? "Recorded, NOT verified: " : P.method === "cash" ? "Paid: cash, collected by you · " : "Paid ") + (meterNumHidden(M) ? (P.tipCents ? "tip " + money(P.tipCents) : "") : money(paidOther ? (P.amountCents || 0) + (P.tipCents || 0) : (P.totalCents || 0))) + "</p>" + /* v2.0d r2: no meter-derived amount on a non-Metered ride */
         '<p class="meter-sub" id="meter-paid-detail">' +
         (paidOther
@@ -15318,18 +15636,19 @@
     var busy = state.meterBusy ? '<p class="note" role="status" id="meter-busy">' + esc(state.meterBusy) + "</p>" : "";
     return (
       '<section id="meter-running" class="meter-panel">' + meterTestTag(M) +
-      meterModeHtml(M.tier, M.tierLabel, "meter-mode") +
+      (meterShown(M) ? meterModeHtml(M.tier, M.tierLabel, "meter-mode") : "") + /* v2.0d.5 r3: no DAY RATE header on a scheduled / invoiced ride */
       (!meterShown(M) ? "" : rateOvLocked(M) ? rateOvBadgeHtml("meter-contract-badge") : '<p class="meter-rates" id="meter-profile">' + esc(M.tierLabel) + " · starts " + money(M.baseCents) + (Number(M.includedMiles) > 0 ? " incl. " + (Number(M.includedMiles) === 1 ? "1st mile" : esc(String(M.includedMiles)) + " mi") : "") +
         " · " + money(M.perMileCents) + "/mi after · " + money(M.waitCentsPerMin) + "/min under " + esc(String(M.slowMph)) + " mph</p>") +
       (meterShown(M) ? prepaidBadgeHtml(M.prepaid, "meter-prepaid-badge") + /* v75v */
       '<p class="meter-fare" id="meter-fare" aria-live="off">' + meterMoneyShown(M, f.sub) + "</p>" +
       '<p class="meter-sub">Meter' + (M.minCents > M.baseCents ? " · " + money(M.minCents) + " minimum" : "") + (M.taxRate ? " · tax added at the end" : "") + "</p>"
         : rideInvoiceBadgeHtml(meterInvInfo(M), "meter-inv-badge")) + /* v2.0a: no fare on a non-metered ride */
+      (!meterShown(M) ? "" : /* v2.0d.5 r3: miles / time / slow min / mph are the meter: metered rides only */
       '<div class="meter-grid"><div><b id="meter-miles">' + f.miles.toFixed(2) + "</b><span>Miles</span></div>" +
       '<div><b id="meter-time">' + meterClock(Date.now() - M.startedAt) + "</b><span>Time</span></div>" +
       '<div><b id="meter-wait">' + f.waitMin + "</b><span>Slow min</span></div>" +
       (function () { var mph = meterMphNow(M); return '<div id="meter-mph-box" class="' + meterMphBoxClass(M, mph) + '"><b id="meter-mph">' + (mph === null ? "--" : mph) +
-        '</b><span id="meter-mph-label">' + esc(meterMphLabel(M, mph)) + "</span></div>"; })() + "</div>" +
+        '</b><span id="meter-mph-label">' + esc(meterMphLabel(M, mph)) + "</span></div>"; })() + "</div>") +
       '<p class="meter-status-line"><span class="meter-free" id="meter-free">' + esc(meterFreeLine(M)) + '</span><span id="meter-gps">' + esc(meterGpsLine(M)) + "</span></p>" +
       (M.dest ? '<p class="meter-dest-eta meter-run-eta" id="meter-dest-eta" role="status">' + esc(meterEtaLine(M)) + "</p>" : "") + /* v72z (Matthew): ETA in the meter card, under GPS OK, above End ride */
       (M.riderCard ? '<p class="fine" id="meter-rider-card-note" style="color:#8fd0a8;text-align:center;margin:0">✓ Rider saved a card on their meter page</p>' : "") +
@@ -15339,7 +15658,7 @@
       (state.meterConfirmEnd
         ? '<div id="meter-confirm-end"><p class="lede" style="margin:6px 0">End this ride?' + (M.prepaid ? " " + invoiceFareText(M.prepaid) + "." : meterShown(M) ? " Meter " + money(f.sub) + "." : "") + "</p>" +
           '<button class="btn meter-big meter-end" type="button" id="meter-end-yes">Yes, end ride</button>' +
-          '<button class="btn ghost" type="button" id="meter-end-no">Keep the meter running</button></div>'
+          '<button class="btn ghost" type="button" id="meter-end-no">' + (meterShown(M) ? "Keep the meter running" : "Keep driving") + "</button></div>" /* v2.0d.5 r5 */
         : '<div class="meter-actions' + (meterQrShowing() ? " meter-actions-qr" : "") + '">' + (meterQrShowing() || !meterShown(M) ? "" : '<button class="btn ghost meter-showrider" type="button" id="meter-show-rider">Show rider meter</button>') +
           '<button class="btn meter-big meter-end" type="button" id="meter-end"' + (state.meterBusy ? " disabled" : "") + ">End ride</button></div>") +
       "</section>"
@@ -15352,8 +15671,9 @@
       '<div id="live-map" role="img" aria-label="Map: you during the metered ride"></div>' +
       '<div class="meter-topstack" id="meter-topstack">' + meterTurnHtml() + /* v72t: next turn right on the map; v72u: ETA on its own line below it */
       '<button type="button" class="meter-eta-chip' + (state.meter && state.meter.dest ? " has-dest" : "") + '" id="meter-eta-chip"' + (meterEtaBoxHtml(state.meter).indexOf("display:none") === -1 ? ' style="display:none"' : "") + ">" + esc(meterChipText(state.meter)) + "</button>" + meterEtaBoxHtml(state.meter) + "</div>" + /* v71; v77.8 big ETA box */
-      '<p class="map-caption">You · metered ride</p>' +
-      "</div>" + meterEstLineHtml() + "</div></div>" + /* v72u: estimate under the map during the ride too */
+      "</div>" + /* v2.0d.5 r3 (Matthew iPad 712px): the caption sat inside the map under Full screen; now below the map, never over its buttons,
+         and only on a ride started as Metered (a scheduled / invoiced ride also runs a trip session but is not metered) */
+      (meterShown(state.meter) ? '<p class="map-caption meter-map-caption" id="meter-map-caption">You · metered ride</p>' : "") + meterEstLineHtml() + "</div></div>" + /* v72u: estimate under the map during the ride too */
       (isFinite(state.hereLat) ? "" : '<p class="fine">Allow location so the map can show where you are.</p>') +
       bgGpsTipCard()
     );
@@ -15415,8 +15735,34 @@
           var pl = it.place || {};
           return { main: String(pl.line1 || ""), sub: [pl.city, pl.state].filter(Boolean).join(", "), lat: +pl.lat, lng: +pl.lng, miles: here && isFinite(it.dist) ? +it.dist : null };
         }).filter(function (x) { return x.main && isCoord(x.lat) && isCoord(x.lng); });
-      }).catch(function () { return []; });
+      }).catch(function () { return []; }).then(function (list) { return list.length ? list : meterDestGeocode(q, here, bias); });
     });
+  }
+  /* v2.0d.5 (Matthew: "14002 winding springs" -> No match yet): nothing from autocomplete or the map search -> geocode the
+     typed text with the driver's area ("<q>, <city near the driver>, TX", then "<q>, TX"), keep a hit within 60 mi of the driver
+     (or Houston). House number + street then works without the city. */
+  var METER_DEST_AREAS = [["Houston", 29.7604, -95.3698], ["Spring", 30.0799, -95.4172], ["Tomball", 30.0972, -95.6161], ["Cypress", 29.9691, -95.6972],
+    ["Katy", 29.7858, -95.8245], ["The Woodlands", 30.1658, -95.4613], ["Conroe", 30.3119, -95.4561], ["Humble", 29.9988, -95.2622], ["Kingwood", 30.0500, -95.1858],
+    ["Sugar Land", 29.6197, -95.6349], ["Pearland", 29.5636, -95.2861], ["Pasadena", 29.6911, -95.2091], ["Magnolia", 30.2091, -95.7508], ["Montgomery", 30.3882, -95.6963]];
+  function meterDestArea(pt) {
+    var best = METER_DEST_AREAS[0], bd = Infinity;
+    METER_DEST_AREAS.forEach(function (a) { var d = haversineMi(pt.lat, pt.lng, a[1], a[2]); if (d < bd) { bd = d; best = a; } });
+    return best[0];
+  }
+  function meterDestGeocode(q, here, bias) {
+    if (!/\d/.test(q)) return Promise.resolve([]); /* house number + street only */
+    var tries = [q + ", " + meterDestArea(bias) + ", TX", q + ", TX"];
+    var one = function (i) {
+      if (i >= tries.length) return Promise.resolve([]);
+      return meterPlaces("/geocode", { address: tries[i].slice(0, 200) }, 6000).then(function (d) {
+        var p = d && d.place;
+        if (!p || !isCoord(p.lat) || !isCoord(p.lng) || haversineMi(bias.lat, bias.lng, +p.lat, +p.lng) > 60) return one(i + 1);
+        var f = String(p.formatted || "").replace(/, USA$/, ""), cut = f.indexOf(",");
+        return [{ main: String(p.street || (cut > 0 ? f.slice(0, cut) : f) || q), sub: cut > 0 ? f.slice(cut + 1).trim() : [p.city, p.state].filter(Boolean).join(", "),
+          lat: +p.lat, lng: +p.lng, miles: here ? haversineMi(here.lat, here.lng, +p.lat, +p.lng) : null, geocoded: true }];
+      });
+    };
+    return one(0);
   }
   function meterDestListHtml() {
     var list = state.meterDestList || [];
@@ -15498,34 +15844,174 @@
     }
     return best;
   }
+  /* r8 (Matthew 10/23, IAH: "the map is not auto correcting if I changed my path quick enough"): one fast off-route detector
+     for both legs (to the pickup and to the drop-off). Off = more than NAV_OFF_M (45 m) from the route line, OR more than
+     NAV_OFF_HEAD_M (20 m) while the GPS heading is NAV_OFF_DEG (55) off the nearest segment's bearing at speed (a parallel
+     service road or a ramp the line doesn't take). Reroute after 2 new GPS fixes off, or 3.5 s off, at most once per 9 s
+     (and NAV_REROUTE_CAP per 10 min) so Worker /route stays far under its 60/min/IP limit. On route: no extra calls. (pure, tested) */
+  var NAV_OFF_M = 45, NAV_OFF_HEAD_M = 20, NAV_OFF_DEG = 55, NAV_OFF_FIXES = 2, NAV_REROUTE_MIN_MS = 9000, NAV_REROUTE_CAP = 30;
+  var NAV_ACC_MAX_M = 30, NAV_SLOW_MPH = 5, NAV_SLOW_OFF_M = 120, NAV_UTURN_DEG = 120, NAV_UTURN_R_M = 25; /* r10: U-turn only when no segment within 25 m goes our way */ /* r9 (Harry): bad fixes skipped, stopped-car drift ignored, U-turn on the same road */
+  function navNearestSeg(pt, line) {
+    if (!pt || !line || line.length < 2) return { d: Infinity, brg: null };
+    var R = 6371000, k = Math.cos(pt.lat * Math.PI / 180), best = Infinity, brg = null, i;
+    var X = function (q) { return [(q[1] - pt.lng) * Math.PI / 180 * R * k, (q[0] - pt.lat) * Math.PI / 180 * R]; };
+    var a = X(line[0]);
+    for (i = 1; i < line.length; i += 1) {
+      var b = X(line[i]), dx = b[0] - a[0], dy = b[1] - a[1], L = dx * dx + dy * dy;
+      var t = L > 0 ? Math.max(0, Math.min(1, -(a[0] * dx + a[1] * dy) / L)) : 0;
+      var x = a[0] + t * dx, y = a[1] + t * dy, d = Math.sqrt(x * x + y * y);
+      if (d < best && L > 0) { best = d; brg = (Math.atan2(dx, dy) * 180 / Math.PI + 360) % 360; } else if (d < best) best = d;
+      a = b;
+    }
+    return { d: best, brg: brg };
+  }
+  function navHeadingNow() {
+    var g = state.folGps;
+    if (g && g.hdg != null && isFinite(g.hdg) && Date.now() - (g.at || 0) < 6000 && !(g.mph != null && g.mph < 6)) return +g.hdg;
+    return null; /* no fresh moving heading: distance rule only */
+  }
+  function navFixQ() { var g = state.folGps || {}; var mph = g.mph != null && isFinite(g.mph) ? +g.mph : (isFinite(state.speedMph) ? +state.speedMph : null); return { acc: g.acc != null && isFinite(g.acc) ? +g.acc : null, mph: g.mph != null && isFinite(g.mph) ? +g.mph : null, rawHdg: g.rawHdg, hdg: g.rawHdg != null && isFinite(g.rawHdg) && g.rawHdg >= 0 ? +g.rawHdg : null }; } /* r10: only what the phone itself reported (no derived speed) */
+  /* r11: start point carries the verified track heading (Google Routes Location.heading) so a fresh route starts the way we
+     are driving. Worker v2.0d.4 ignores it (needs the worker/index.js r11 change, not deployed); harmless until then. */
+  function navRoutePt(p) { var o = { lat: +p.lat, lng: +p.lng }; if (p.hdg != null && isFinite(+p.hdg)) o.heading = Math.round(+p.hdg + 360) % 360; return o; }
+  function navTrackHdg(st, now) { return st && st.trkBrg != null && now - st.trkAt < 15000 ? st.trkBrg : null; }
+  function navOffStep(st, line, here, heading, fixAt, now, q) {
+    /* r10 (Harry): decisions only on NEW good fixes (new timestamp or moved), judged with motion we can verify from the fixes
+       themselves (displacement consistent in speed + direction), never from the phone's speed/heading alone. */
+    if (!here || !line || line.length < 2) { st.cnt = 0; return false; }
+    q = q || {};
+    if (q.acc != null && q.acc > NAV_ACC_MAX_M) return false; /* fuzzy fix: not counted either way */
+    var fx = st.fx || (st.fx = []), last = fx[fx.length - 1];
+    var isNew = !last || (fixAt && fixAt !== last.at) || navMeters(last, here) > 0.5;
+    if (!isNew) return false; /* timer tick with no new fix: nothing new to judge */
+    fx.push({ lat: here.lat, lng: here.lng, at: fixAt || now, t: now, mph: q.mph, hdg: q.hdg }); if (fx.length > 4) fx.shift(); st.nfix = (st.nfix || 0) + 1;
+    var lf = st.lf || (st.lf = []); lf.push(fx[fx.length - 1]); if (lf.length > 6) lf.shift(); /* r12: longer window for the slow track */
+    if (st.rrLine) { /* after a reroute: wait for the NEW route, then 2 good fixes on it */
+      if (line === st.rrLine && now - st.lastReroute < 15000) { st.cnt = 0; return false; }
+      st.rrLine = null; st.settle = 2; fx.splice(0, fx.length - 1); st.lf = fx.slice();
+    }
+    if (st.settle > 0) { st.settle -= 1; st.cnt = 0; return false; }
+    var m = navMotion(fx);
+    if (m.ok && q.acc != null && q.acc >= 10 && !(navMeters(fx[0], fx[fx.length - 1]) > 2.5 * q.acc)) m = { ok: false }; /* r13: on a poor fix (>= 10 m), a 3 s move inside 2.5x the GPS error is not motion (parked phone, fake speed) */
+    if (m.ok) { st.trkBrg = m.brg; st.trkAt = now; }
+    if (st.seenLine !== line) { /* r11: a fresh route whose first leg points back against our verified track (Google started it
+       the old way): no U-turn verdicts on this route, distance / moving-away rules still apply */
+      st.seenLine = line; st.farN = 0; st.farH = 0; st.dH = [];
+      var tb = navTrackHdg(st, now), b0 = line && line.length > 1 ? navBrg({ lat: line[0][0], lng: line[0][1] }, { lat: line[1][0], lng: line[1][1] }) : null;
+      st.noUturn = tb != null && b0 != null && navAngDiff(tb, b0) > NAV_UTURN_DEG; st.fwdN = 0;
+      /* r12: the router keeps answering with a backward start (live Worker ignores heading; OSRM / capped days): back off 30 s, then 60 s */
+      if (st.lastReroute && now - st.lastReroute < 20000) st.bwN = st.noUturn ? (st.bwN || 0) + 1 : 0;
+    }
+    if (st.noUturn && m.ok && line.length > 2) { /* r12: verified track follows the route past its first leg (<30 deg) for 2 fixes: route accepted, U-turn rule back on */
+      st.fwdN = navSegMatch(here, line.slice(1), m.brg, NAV_OFF_HEAD_M, 30) ? (st.fwdN || 0) + 1 : 0;
+      if (st.fwdN >= 2) { st.noUturn = false; st.bwN = 0; }
+    }
+    var L = st.noUturn && line.length > 2 ? line.slice(1) : line; /* r11: judge against the route past its backward first leg */
+    var n = navNearestSeg(here, L);
+    st.dist = n.d; st.motion = m;
+    var prevD = st.prevD, prevD2 = st.prevD2; st.prevD2 = prevD; st.prevD = n.d; /* d 1 and 2 fixes ago */
+    var diff = m.ok && n.brg != null ? navAngDiff(m.brg, n.brg) : null, pdiff = st.diff; st.diff = diff; /* r11: last fix's angle too */
+    var off = false, clear = false;
+    if (n.d > NAV_SLOW_OFF_M) { off = true; } /* far from the line, moving or not */
+    else if (m.ok) {
+      var away = prevD != null && prevD2 != null && n.d > prevD && n.d > prevD2 + 8 && m.mph >= 25 && ((pdiff != null && pdiff > 12) || diff > 30 || n.d > prevD2 + 18); /* r11: >= 25 mph (slower = noisy 3 s track),: + already angled last fix, or diverging fast */ /* moving away from the line over the last 2 fixes */
+      st.farH = ((st.farH || 0) << 1 | (n.d > NAV_OFF_M ? 1 : 0)) & 15; st.farN = (st.farH & 1) + (st.farH >> 1 & 1) + (st.farH >> 2 & 1) + (st.farH >> 3 & 1); var dh = st.dH || (st.dH = []); dh.push(n.d); if (dh.length > 3) dh.shift(); var far3 = st.farN >= 3 || (dh.length === 3 && (dh[0] + dh[1] + dh[2]) / 3 > NAV_OFF_M && Math.min(dh[0], dh[1], dh[2]) > NAV_OFF_M - 12); /* r11: steady 45-65 m offset, 3 of the last 4 good fixes = off */
+      if ((n.d > NAV_OFF_M && (away || diff > 20 || n.d > 65)) || far3) { off = true; clear = (away && diff > 25) || far3; } /* >=45 m and moving away: enough on its own */
+      else if (n.d > NAV_OFF_HEAD_M && away && diff > 25 && !navSegMatch(here, L, m.brg, NAV_UTURN_R_M, 20)) { off = true; clear = true; }
+ /* diverging (exit ramp) */
+      else if (n.d > NAV_OFF_HEAD_M && diff > NAV_OFF_DEG && !navSegMatch(here, L, m.brg, NAV_UTURN_R_M, NAV_OFF_DEG)) { off = true; }
+      else if (!st.noUturn && n.d <= NAV_OFF_HEAD_M && diff > NAV_UTURN_DEG && !navSegMatch(here, L, m.brg, NAV_UTURN_R_M, 60)) { off = true; clear = true; } /* the 4-fix verified track is the 2nd look */ /* U-turn: no segment nearby goes our way (out-and-back safe) */
+    }
+    if (!off && !st.noUturn && n.d > NAV_OFF_HEAD_M && n.d <= NAV_OFF_M + 20) { /* r13: the bearing checks run on every fix in the band; r12: slow turn-off (< 25 mph), 20-65 m: 3 fixes of growing distance,
+       angled > 25 deg from the route, no segment our way; a slow track is too noisy for navMotion, so use the net 3-fix move (>= 10 m) */
+      /* r13 (Harry r12 blocker: a parked phone 30-60 m off route rerouted): real movement first. Reported speed >= 5 mph
+         (a phone with no speed needs the verified 4-fix track), a net move over 2.5x the reported accuracy, and the same
+         bearing (< 30 deg) on 2 consecutive checks */
+      var sthr = q.acc != null && q.acc > 0 ? 2.5 * q.acc : 10, sb = null, sw = null;
+      if (m.ok) sb = m.brg;
+      else if (q.mph != null && (q.acc == null || q.acc <= 20)) { [st.lf, fx].forEach(function (w) { if (sb == null && w && w.length > 1 && navLooseBrg(w) != null && navMeters(w[0], w[w.length - 1]) > sthr) { sw = w; sb = navLooseBrg(w); } }); }
+      var moving = q.mph != null ? q.mph >= 5 : m.ok;
+      if (sb != null && sw && !(navMeters(sw[0], sw[sw.length - 1]) > sthr)) sb = null;
+      if (sb != null && !moving) sb = null;
+      if (sb != null && !m.ok && q.acc != null && q.acc >= 10 && q.hdg != null && navAngDiff(sb, q.hdg) > 45) sb = null; /* on a poor fix, a reported heading that disagrees with the loose track is noise */
+      var same = sb != null && st.slowB != null && st.slowAt < st.nfix && st.slowAt >= st.nfix - 4 && navAngDiff(sb, st.slowB) < (q.acc != null && q.acc >= 10 ? 30 : 40); /* the previous slow check (within 4 fixes); tighter on a poor fix */
+      if (sb != null) { st.slowB = sb; st.slowAt = st.nfix; }
+      var smph = m.ok ? m.mph : q.mph;
+      var sd = sb != null && n.brg != null ? navAngDiff(sb, n.brg) : null;
+      var grow = prevD != null && prevD2 != null && n.d > prevD - 2 && prevD > prevD2 - 2 && n.d > prevD2 + 5;
+      if (grow && (same || m.ok) && smph < 25 && sd != null && sd > 25 && !navSegMatch(here, L, sb, NAV_UTURN_R_M, 25)) { off = true; clear = true; if (!m.ok) { st.trkBrg = sb; st.trkAt = now; } } /* the slow track also feeds the reroute heading / backward-start check */
+    }
+    if (!off && !m.ok && n.d > NAV_OFF_HEAD_M) return false; /* no verified motion this fix: no verdict either way (keeps the count) */
+    if (!off) { st.cnt = 0; return false; }
+    st.cnt = st.offFix === st.nfix - 1 ? (st.cnt || 0) + 1 : 1; st.offFix = st.nfix; /* consecutive good fixes only */
+    if (!(clear || st.cnt >= NAV_OFF_FIXES)) return false;
+    if (st.lastReroute && now - st.lastReroute < (st.bwN >= 2 ? 60000 : st.bwN === 1 ? 30000 : NAV_REROUTE_MIN_MS)) return false; /* r12: longer back-off after backward-start answers */
+    st.hist = (st.hist || []).filter(function (t) { return now - t < 600000; });
+    if (st.hist.length >= NAV_REROUTE_CAP) return false;
+    st.hist.push(now); st.lastReroute = now; st.cnt = 0; st.rrLine = line; st.prevD = st.prevD2 = null; st.reroutes = (st.reroutes || 0) + 1;
+    return true;
+  }
+  function navLooseBrg(fx) { /* r12: slow-track bearing for the slow turn-off rule, over the last 4-6 good fixes:
+     net move >= 12 m, path <= 2x net, the two halves agree (< 60 deg) */
+    var n = fx.length, h = n >> 1, path = 0, i;
+    if (n < 4) return null;
+    for (i = 1; i < n; i += 1) path += navMeters(fx[i - 1], fx[i]);
+    var net = navMeters(fx[0], fx[n - 1]);
+    if (net < 12 || path > 2 * net || navAngDiff(navBrg(fx[0], fx[h]), navBrg(fx[h - 1], fx[n - 1])) > 60) return null;
+    return navBrg(fx[0], fx[n - 1]);
+  }
+  function navMeters(a, b) { var k = Math.cos(a.lat * Math.PI / 180); var dx = (b.lng - a.lng) * 111320 * k, dy = (b.lat - a.lat) * 111320; return Math.sqrt(dx * dx + dy * dy); }
+  function navBrg(a, b) { var k = Math.cos(a.lat * Math.PI / 180); return (Math.atan2((b.lng - a.lng) * k, b.lat - a.lat) * 180 / Math.PI + 360) % 360; }
+  function navAngDiff(x, y) { return Math.abs((((x - y) % 360) + 540) % 360 - 180); }
+  /* r10: real movement, verified from the last 4 good fixes (~3 s), not from the phone's own speed/heading:
+     net move 3-110 mph, a nearly straight track (path <= 1.5x the net move), the two halves pointing the same way (<35 deg);
+     a reported speed must agree (a parked phone saying 7 mph does not travel 3 m/s in a straight line) and under 5 mph means
+     stopped; a reported heading must agree with the track and be steady across the fixes. */
+  function navMotion(fx) {
+    if (fx.length < 4) return { ok: false };
+    var f0 = fx[fx.length - 4], f1 = fx[fx.length - 3], f2 = fx[fx.length - 2], f3 = fx[fx.length - 1];
+    var dt = (f3.t - f0.t) / 1000; if (!(dt > 1.2 && dt < 12)) return { ok: false };
+    var D = navMeters(f0, f3), path = navMeters(f0, f1) + navMeters(f1, f2) + navMeters(f2, f3), v = D / dt * 2.23694;
+    if (D < 4 || v < 3 || v > 110 || path > 1.5 * D) return { ok: false };
+    var brg = navBrg(f0, f3); if (navAngDiff(navBrg(f0, f2), navBrg(f1, f3)) > 35) return { ok: false };
+    if (f3.mph != null && f3.mph >= 0) { if (f3.mph < NAV_SLOW_MPH) return { ok: false }; if (v > 2 * f3.mph + 8 || v < 0.5 * f3.mph - 3) return { ok: false }; }
+    if (f3.hdg != null) { if (navAngDiff(f3.hdg, brg) > 50) return { ok: false };
+      for (var i = fx.length - 3; i < fx.length; i += 1) if (fx[i].hdg != null && (navAngDiff(fx[i].hdg, brg) > 60 || (fx[i - 1].hdg != null && navAngDiff(fx[i - 1].hdg, fx[i].hdg) > 40))) return { ok: false }; }
+    return { ok: true, brg: brg, mph: v };
+  }
+  function navSegMatch(pt, line, brg, r, deg) { /* any route segment within r m heading our way (within deg) */
+    var R = 6371000, k = Math.cos(pt.lat * Math.PI / 180), i;
+    var X = function (q) { return [(q[1] - pt.lng) * Math.PI / 180 * R * k, (q[0] - pt.lat) * Math.PI / 180 * R]; };
+    var a = X(line[0]);
+    for (i = 1; i < line.length; i += 1) {
+      var b = X(line[i]), dx = b[0] - a[0], dy = b[1] - a[1], L = dx * dx + dy * dy;
+      if (L > 0) { var t = Math.max(0, Math.min(1, -(a[0] * dx + a[1] * dy) / L)), x = a[0] + t * dx, y = a[1] + t * dy;
+        if (Math.sqrt(x * x + y * y) <= r && navAngDiff((Math.atan2(dx, dy) * 180 / Math.PI + 360) % 360, brg) <= deg) return true; }
+      a = b;
+    }
+    return false;
+  }
   function meterOffRouteCheck(now) {
     var M = state.meter;
-    if (!M || M.status !== "running" || !M.dest || !meterRoute || meterRoute.approx || !meterRoute.line || meterRouteBusy) { meterOff.since = 0; meterOff.fixes = 0; return; }
-    var h = meterHerePt(); if (!h) return;
-    var fixAt = Number(state.gpsAt) || 0;
-    var d = meterDistToLineM(h, meterRoute.line);
-    meterOff.dist = d;
-    if (!(d > METER_OFFROUTE_M)) { meterOff.since = 0; meterOff.fixes = 0; return; }
-    if (!meterOff.since) meterOff.since = now;
-    if (fixAt && fixAt !== meterOff.lastFix) { meterOff.fixes += 1; meterOff.lastFix = fixAt; }
-    if ((meterOff.fixes >= METER_OFFROUTE_FIXES || now - meterOff.since >= METER_OFFROUTE_MS) && now - meterOff.lastReroute >= METER_REROUTE_MIN_MS) {
-      meterOff.lastReroute = now; meterOff.since = 0; meterOff.fixes = 0; meterOff.reroutes += 1;
-      meterRouteFetch(true);
-    }
+    if (!M || M.status !== "running" || !M.dest || !meterRoute || meterRoute.approx || !meterRoute.line) { meterOff.cnt = 0; return; }
+    if (navOffStep(meterOff, meterRoute.line, meterHerePt(), navHeadingNow(), Number(state.gpsAt) || 0, now, navFixQ())) meterRouteFetch(true, true); /* r8: fast reroute */
   }
   window.__pcsMeterOffRoute = function () { return { dist: Math.round(meterOff.dist), fixes: meterOff.fixes, reroutes: meterOff.reroutes, lastReroute: meterOff.lastReroute }; }; /* test/debug hook */
-  function meterRouteFetch(force) {
+  var meterRouteSeq = 0;
+  function meterRouteFetch(force, reroute) {
     var M = state.meter;
-    if (!M || M.status !== "running" || !M.dest || meterRouteBusy) return;
+    if (!M || M.status !== "running" || !M.dest || (meterRouteBusy && !reroute)) return; /* r8: a reroute doesn't wait on an older request */
     var key = meterDestKey(M.dest) + (M.stop && !M.stopDone ? "|" + meterDestKey(M.stop) : "");
     if (!force && meterRoute && meterRoute.key === key && Date.now() - meterRoute.at < METER_ROUTE_REFRESH_MS) return;
     var from = meterHerePt();
     if (!from) return;
-    meterRouteBusy = true;
+    meterRouteBusy = true; var seq = ++meterRouteSeq;
     var to = { lat: +M.dest.lat, lng: +M.dest.lng };
     if (M.stop && !M.stopDone && haversineMi(from.lat, from.lng, +M.stop.lat, +M.stop.lng) <= METER_DEST_ARRIVED_MI) { M.stopDone = true; meterSave(); }
+    var h0 = reroute ? navTrackHdg(meterOff, Date.now()) : null; if (h0 != null) from = { lat: from.lat, lng: from.lng, hdg: h0 }; /* r11 */
     var pts = [from]; if (M.stop && !M.stopDone) pts.push({ lat: +M.stop.lat, lng: +M.stop.lng }); pts.push(to); /* v72s: via the stop */
     meterOsrm(pts).then(function (rt) {
+      if (seq !== meterRouteSeq) return; /* r8: a newer (reroute) request owns the line; drop this stale reply */
       meterRouteBusy = false;
       var cur = state.meter;
       if (!cur || cur.status !== "running" || !cur.dest || (meterDestKey(cur.dest) + (cur.stop && !cur.stopDone ? "|" + meterDestKey(cur.stop) : "")) !== key) return;
@@ -15660,7 +16146,7 @@
       : stop ? '<div class="meter-stop" id="meter-stop-set"><span class="meter-route-lbl">Stop</span> <strong id="meter-stop-label">' + esc(stop.label) + '</strong> <button class="btn ghost meter-mini" type="button" id="meter-stop-clear">Remove</button></div>'
       : '<button class="btn ghost meter-mini" type="button" id="meter-stop-add">+ Add a stop</button>';
     return '<div class="card meter-route" id="meter-route">' +
-      '<div class="meter-from" id="meter-from"><span class="meter-route-lbl">From</span> ' + (where === "run" ? "Pickup (meter start)" : "Your location") + "</div>" +
+      '<div class="meter-from" id="meter-from"><span class="meter-route-lbl">From</span> ' + (where === "run" ? (meterShown(state.meter) ? "Pickup (meter start)" : "Pickup") : "Your location") /* v2.0d.5 r5 */ + "</div>" +
       stopRow +
       (editingStop ? (meterDestNow() ? '<div class="meter-from"><span class="meter-route-lbl">To</span> ' + esc(meterDestNow().label) + "</div>" : "") : meterDestHtml(where, "dest")) +
       "</div>";
@@ -16170,12 +16656,13 @@
       list = rides.map(function (r) {
         return (
           '<article class="card">' +
-          "<p class=\"tag\">" + esc(r.code || "Ride") + (r.rideType === "metered" ? " · Metered" : "") + "</p>" +
+          "<p class=\"tag\">" + esc(r.code || "Ride") + (histMetered(r) ? " · Metered" : "") + "</p>" + /* v2.0d.5 r5: the metered flag, not rideType */
           "<p><strong>" + esc(r.riderName || "Rider") + "</strong></p>" +
           "<p class=\"fine\">" + esc(r.pickup || "") + " → " + esc(r.drop || "") + "</p>" +
+          (r.pricePending && !(Number(r.fareTotal) > 0) ? '<div class="money-row hub-price-pending"><span>Ride total</span><span>' + PRICE_PENDING_TEXT + "</span></div>" : /* v2.0d.5 r6: no amount, no commission until God settles */
           '<div class="money-row"><span>Ride total</span><span>' + money(r.fareTotal || 0) + "</span></div>" +
           '<div class="money-row"><span>Commission (' + esc(String(r.commissionPct || "")) + "%)</span><span>" +
-          money(r.commissionCents || 0) + "</span></div>" +
+          money(r.commissionCents || 0) + "</span></div>") +
           (r.billedMiles != null ? '<p class="fine">' + esc(String(r.billedMiles)) + " billed mi</p>" : "") +
           (Number(r.tipCents) > 0 ? '<div class="money-row"><span>Tip (100% yours)</span><span>' + money(r.tipCents) + "</span></div>" : "") +
           (Number(r.tollCents) > 0 ? '<div class="money-row hub-toll-row"><span>' + esc(r.tollLabel || "Tolls") + " (paid back, 100% yours)</span><span>" + money(r.tollCents) + "</span></div>" : "") + /* v76b */
@@ -16347,7 +16834,7 @@
         esc(state.pinDraft || "") + '">' +
         '<p class="error" id="pin-error" role="alert">' + esc(state.pinError || "") + "</p>" +
         '<button class="btn" type="submit">Start ride</button>' +
-        "</form></div>"
+        "</form></div>" + drvCancelBtnHtml("ride", String(state.driverCode || readDriverCode() || "")) /* r13 */
       );
     }
     if (started) {
@@ -16366,7 +16853,7 @@
         "</div>"
       );
       completeBtn = (
-        '<button class="btn" type="button" id="complete-ride">Ride complete</button>'
+        '<button class="btn" type="button" id="complete-ride">Ride complete</button>' + drvCancelBtnHtml("ride", String(state.driverCode || readDriverCode() || "")) /* r13 */
       );
     }
     if (completed) {
@@ -16714,7 +17201,7 @@
             /* v50: pull the saved car details + photos from the server (or back them up if only here). */
             syncDriverProfile().then(function () { render(); });
             noteFreshLogin(); /* v72w */ state.loginGate = true; state.preGateOpenedAt = 0; /* v75u */
-            try { if (!driverMidRide() && !meterActive()) localStorage.setItem(qOffKey(), "1"); localStorage.setItem("pcs-login-at", String(Date.now())); } catch (e) {} /* v73: every login lands on Offline; v74b login time (forced logouts before it are ignored) */
+            try { if (!driverRideLocked()) localStorage.setItem(qOffKey(), "1"); localStorage.setItem("pcs-login-at", String(Date.now())); } catch (e) {} /* v73: every login lands on Offline; v74b login time (forced logouts before it are ignored) */
             mergeMidnightSplit(); /* v72r */
             ensureMilesDayReady();
             try { hosPullHistory().then(function () { hosCheck(); render(); }); } catch (e) {} /* v72x: HOS history (incl. breaks / PCS resets) right at login */
@@ -16891,7 +17378,7 @@
             /* v50: pull the saved car details + photos from the server (or back them up if only here). */
             syncDriverProfile().then(function () { render(); });
             noteFreshLogin(); /* v72w */ state.loginGate = true; state.preGateOpenedAt = 0; /* v75u */
-            try { if (!driverMidRide() && !meterActive()) localStorage.setItem(qOffKey(), "1"); localStorage.setItem("pcs-login-at", String(Date.now())); } catch (e) {} /* v73: every login lands on Offline; v74b login time (forced logouts before it are ignored) */
+            try { if (!driverRideLocked()) localStorage.setItem(qOffKey(), "1"); localStorage.setItem("pcs-login-at", String(Date.now())); } catch (e) {} /* v73: every login lands on Offline; v74b login time (forced logouts before it are ignored) */
             mergeMidnightSplit(); /* v72r */
             ensureMilesDayReady();
             try { hosPullHistory().then(function () { hosCheck(); render(); }); } catch (e) {} /* v72x: HOS history (incl. breaks / PCS resets) right at login */
@@ -17089,8 +17576,8 @@
           lastUpdate: now,
           shiftClosed: false,
           /* Online time: earlier shifts today + this shift from now. */
-          onlineMs: Number(closeOnlineSegment(Object.assign({}, prev), now).onlineMs) || 0,
-          shiftStartAt: now
+          onlineMs: prev.rideAutoShift && Number(prev.shiftStartAt) > 0 && !shiftClosed(prev) ? Number(prev.onlineMs) || 0 : Number(closeOnlineSegment(Object.assign({}, prev), now).onlineMs) || 0,
+          shiftStartAt: prev.rideAutoShift && Number(prev.shiftStartAt) > 0 && !shiftClosed(prev) ? Number(prev.shiftStartAt) : now /* r13b: shift began with the ride */
         };
         if (prev.endOdometer != null) row.priorEndOdometer = prev.endOdometer;
         /* v71m keep shifts: never drop earlier shifts / the day's first opening odometer on a same-day re-login. */
@@ -17262,7 +17749,7 @@
         if (mdc) {
           if (!window.confirm(schedMeterDoneText(mdc))) return;
           btn.disabled = true;
-          schedCloseMetered(zr, mdc).then(function () { render(); });
+          schedCloseMetered(zr, mdc).then(function () { rideLockRelease("sched", id); render(); }); /* r13b */
           return;
         }
         var startV76i = zr ? Date.parse(zr.start || "") : NaN; /* v76i: Jeff Beeler 3:45 PM was closed at 6:06 AM by mistake (the list moved up) */
@@ -17274,6 +17761,7 @@
         btn.disabled = true;
         completeScheduledRide(id).then(function () {
           btn.disabled = false;
+          var zz = schedFind(id); if (zz && rideLockDone(zz.status)) rideLockRelease("sched", id); /* r13b */
           render();
         });
       });
@@ -19182,7 +19670,7 @@
       try { /* v76f: raw GPS speed + heading for the follow page (only when the phone reports them) */
         var c76 = pos.coords, now76 = Date.now();
         state.folGps = { mph: c76.speed != null && isFinite(c76.speed) && c76.speed >= 0 ? c76.speed * 2.23694 : null,
-          hdg: c76.heading != null && isFinite(c76.heading) && c76.speed != null && c76.speed > 0.8 ? c76.heading : null, at: now76 };
+          hdg: c76.heading != null && isFinite(c76.heading) && c76.speed != null && c76.speed > 0.8 ? c76.heading : null, at: now76, rawHdg: c76.heading != null && isFinite(c76.heading) ? +c76.heading : null, acc: c76.accuracy != null && isFinite(c76.accuracy) ? +c76.accuracy : null };
       } catch (e) {}
       try { navNoteHeading(pos); } catch (e) {} /* v72u */
       try { brkNoteMotion(state.speedMph, Date.now()); } catch (e) {} /* v72u */
@@ -19191,6 +19679,7 @@
       trackDailyMiles(pos);
       refreshMilesTodayDom();
       meterOnGps(pos); /* v70 */
+      try { var nw8 = Date.now(); if (schedNavTrip()) schedNavOffCheck(nw8); else if (state.meter && state.meter.dest) meterOffRouteCheck(nw8); } catch (e) {} /* r8: check on every fix, not only on the timer */
       try { fsSpeedOnGps(pos); } catch (e) {} /* v76b: MPH on the full-screen map */
     }
     var ride = currentRide();
@@ -19610,11 +20099,12 @@
     if (ROLE !== "driver" || !signedIn()) return false;
     var on = false; try { on = localStorage.getItem(qOffKey()) === "1"; } catch (e) {}
     if (!on) return false;
-    try { if (driverMidRide() || meterActive()) return false; } catch (e) {}
+    try { if (driverRideLocked()) return false; } catch (e) {} /* r13: + scheduled trip (pickup nav / at pickup / on ride) */
     return true;
   }
   function qSetOffline(on) {
     if (ROLE !== "driver") return;
+    if (on && driverRideLocked()) { qd.brkMsg = RIDE_LOCK_MSG; try { render(); } catch (e) {} return; } /* r13: never Offline mid-ride */
     try { autoBrkClear(); } catch (e) {} /* v74d */
     try {
       if (on) { localStorage.setItem(qOffKey(), "1"); localStorage.removeItem(qBusyKey()); localStorage.removeItem(qBusyKey() + "-prev"); }
@@ -19631,7 +20121,7 @@
   }
   function qOnBreak() {
     if (ROLE !== "driver") return false;
-    try { return localStorage.getItem(qBusyKey()) === "b" && !qAutoBusy(); } catch (e) { return false; }
+    try { return localStorage.getItem(qBusyKey()) === "b" && !qAutoBusy() && !driverRideLocked(); } catch (e) { return false; } /* r13 */
   }
   /* v72u (Matthew): Break only when stopped (GPS under 3 mph for 10+ s); moving over 5 mph for 10+ s ends the break
      automatically and returns to the status before Break. Moving time never counts as break (HOS still-time resets on movement). */
@@ -19678,6 +20168,7 @@
   }
   function qSetBreak(on) {
     if (ROLE !== "driver") return;
+    if (on && driverRideLocked()) { qd.brkMsg = RIDE_LOCK_MSG; try { render(); } catch (e) {} return; } /* r13: no Break mid-ride */
     try { autoBrkClear(); } catch (e) {} /* v74d */
     try {
       if (on) { localStorage.setItem(qBusyKey() + "-prev", localStorage.getItem(qBusyKey()) || ""); localStorage.setItem(qBusyKey(), "b"); }
@@ -19739,12 +20230,13 @@
     }
     if (!flag && now - autoBrk.since >= AUTO_BRK_STILL_MS) autoBrkSet(true, now, autoBrk.since);
   }
-  setInterval(function () { try { autoBrkTick(Date.now()); } catch (e) {} }, 30000);
+  setInterval(function () { try { if (rideLockSync(Date.now())) render(); } catch (e) {} try { autoBrkTick(Date.now()); } catch (e) {} }, 30000); /* r13: ride started while Offline/Break -> On a ride */
   function qAutoBusy() {
     if (ROLE !== "driver" || !signedIn()) return false;
     var st = String(state.rideStatus || "").toLowerCase();
     if (state.screen === "trip" && (st === "accepted" || st === "started")) return true;
     try { if (meterActive()) return true; } catch (e) {}
+    try { if (driverRideLocked()) return true; } catch (e) {} /* r13: PCS scheduled trip = On a ride */
     return false;
   }
   function qDriverBusy() { return qManualBusy() || qAutoBusy() || qOnBreak(); } /* v75q: Break pauses offers again (unavailable for the break) */
@@ -19795,8 +20287,10 @@
   function qDriverSliderHtml() {
     if (ROLE !== "driver" || !signedIn()) return "";
     ensureQueueStyle();
+    try { rideLockSync(); } catch (e) {} /* r13 */
     var auto = qAutoBusy(), off = qOffline(), brk = !off && qOnBreak(), busy = !off && (auto || qManualBusy());
-    var tok = qToken();
+    var tok = qToken(), lk = driverRideLocked();
+    var lkA = lk ? ' aria-disabled="true" data-ride-lock="1" title="' + RIDE_LOCK_MSG + '" style="opacity:.45"' : "";
     var brkEarly = false; try { brkEarly = brk && !!hosStatus(Date.now()).breakEarly; } catch (e) {} /* v72y */
     return (
       '<div class="card q-avail q-three q-four' + (busy ? " q-busy" : "") + (brk ? " q-break" : "") + (off ? " q-offline" : "") + '" id="q-avail">' +
@@ -19805,16 +20299,19 @@
       '<span class="q-knob" aria-hidden="true"></span>' +
       '<button type="button" role="radio" class="q-opt" id="q-set-available" aria-checked="' + (busy || brk || off ? "false" : "true") + '"' + (auto || (!tok && !off) ? " disabled" : "") + ">Available</button>" +
       '<button type="button" role="radio" class="q-opt" id="q-set-onride" aria-checked="' + (busy ? "true" : "false") + '"' + (auto || !tok || off ? " disabled" : "") + ">On a ride</button>" +
-      '<button type="button" role="radio" class="q-opt" id="q-set-break" aria-checked="' + (brk ? "true" : "false") + '"' + (auto || !tok || off ? " disabled" : "") + ">Break</button>" + /* v72y: Break always selectable (owner 7:38 AM); v73: not while Offline (already off duty) */
-      '<button type="button" role="radio" class="q-opt" id="q-set-offline" aria-checked="' + (off ? "true" : "false") + '"' + (auto ? " disabled" : "") + ">Offline</button>" + /* v73 */
+      '<button type="button" role="radio" class="q-opt" id="q-set-break" aria-checked="' + (brk ? "true" : "false") + '"' + (lk ? lkA : auto || !tok || off ? " disabled" : "") + ">Break</button>" + /* v72y: Break always selectable (owner 7:38 AM); v73: not while Offline (already off duty) */
+      '<button type="button" role="radio" class="q-opt" id="q-set-offline" aria-checked="' + (off ? "true" : "false") + '"' + (lk ? lkA : auto ? " disabled" : "") + ">Offline</button>" + /* v73 */
       "</div>" +
       (tok || off ? "" : qDriverAuthHtml()) +
       (qd.brkMsg ? '<p class="fine" id="q-break-msg" role="alert" style="color:#b91c1c;font-weight:700">' + esc(qd.brkMsg) + "</p>" : "") +
       (qd.brkMsg ? washAskHtml() : "") + /* v77.9 */
       (qd.washMsg && !qd.brkMsg ? '<p class="fine" id="q-wash-msg" style="background:#fff4d6;color:#4a3000;border-radius:8px;padding:6px 8px;font-weight:700">' + esc(qd.washMsg) + "</p>" : "") + /* v76d-pretrip */
       (brk && brkEarly ? '<p class="fine" id="q-break-early">Won\u2019t count as your 30-min break until ' + esc(String(hosCfg.breakMinOnDutyHours)) + " h on duty since your last break. Shift and Cycle are paused.</p>" : "") +
+      (lk ? rideLockBackHtml() : "") + /* r13b */
       '<p class="fine" id="q-avail-note">' + esc(off
         ? "Offline: you are logged in but not online. Ride offers are paused, and your Shift and Cycle clocks are stopped (off duty). Tap Available to go online."
+        : lk
+        ? "On a ride: set automatically while you have a ride (heading to the pickup, at the pickup, or on the ride). Offline and Break unlock when the ride ends or is cancelled."
         : auto
         ? "Set automatically during your PCS ride. You switch back to Available when it ends."
         : qAutoBreak() ? "Break (auto, available): you haven\u2019t moved for 10+ minutes, so this counts as break time from when you stopped. You are still Available and ride offers still come in. Moving or accepting a ride ends it."
@@ -20004,6 +20501,8 @@
       }).catch(function (e) { qd.authBusy = false; qd.authErr = e.message || "Couldn't confirm your password."; render(); });
       return;
     }
+    if (t.id === "q-ride-back") { var lo = rideLockRaw(); if (lo && lo.k === "ride") { writeDriverCode(lo.id); state.driverCode = lo.id; state.mode = "driver"; state.screen = "trip"; state.syncStamp = ""; render(); } return; } /* r13b */
+    if ((t.id === "q-set-offline" || t.id === "q-set-break") && driverRideLocked()) { qd.brkMsg = RIDE_LOCK_MSG; render(); return; } /* r13 */
     if (t.id === "q-set-offline") { if (!qOffline()) offlineAsk(); return; } /* v74b: "Are you logging out for the day?" */
     if (t.id === "q-set-available" && qOffline()) { availFlow(); return; } /* v74b: pre-trip first, then odometer */
     if (t.id === "q-set-available" && dvirBlock()) { /* v73 DVIR: unsafe defect -> God mode must clear it first */
