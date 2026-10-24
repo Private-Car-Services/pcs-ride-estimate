@@ -15,6 +15,22 @@
   var token = m ? m[1] : "";
   var S = { d: null, off: 0, err: "", phase: "", polls: 0, timer: 0, busy: "", infoMsg: "", infoErr: "", cardErr: "", cardOpen: false,
     sqCard: null, tip: "", tipCustom: "", confirm: null, payErr: "", stopped: false };
+  /* v2.0d.5 r5 (Harry): on a non-Metered ride (Worker hideFare) no "meter" wording anywhere on this page. Before the first answer the
+     page is neutral unless this tab already saw the ride as Metered (sessionStorage, per token). */
+  var HIDE_KEY = "pcsrm_hide_" + token.slice(0, 24);
+  function rmHide() {
+    if (S.d) return !!S.d.hideFare;
+    try { var v = sessionStorage.getItem(HIDE_KEY); return v == null ? true : v === "1"; } catch (e) { return true; }
+  }
+  function rmWords() {
+    var hide = rmHide();
+    try { if (S.d) sessionStorage.setItem(HIDE_KEY, hide ? "1" : "0"); } catch (e) {}
+    var t = (hide ? "Your ride" : "Your meter") + " \u00b7 Private Car Services"; if (document.title !== t) document.title = t;
+    var wm = document.querySelector(".pcs-wm"); if (wm) wm.setAttribute("aria-label", hide ? "Private Car Services" : "Private Car Services meter");
+    var ws = document.getElementById("rm-wm-sub"); if (ws) ws.textContent = hide ? "" : "meter"; /* wordmark subtitle */
+    var ld = document.getElementById("rm-loading"); if (ld) ld.textContent = hide ? "Loading your ride\u2026" : "Loading your meter\u2026";
+  }
+  rmWords();
 
   function esc(v) {
     return String(v == null ? "" : v).replace(/[&<>"']/g, function (c) { return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]; });
@@ -65,6 +81,7 @@
     post("/meter/live", { t: token, check: check }).then(function (d) {
       S.err = "";
       S.off = (Number(d.now) || Date.now()) - Date.now();
+      if (d && d.live && d.live.meterVisible === false) { d.hideFare = true; d.live.fareCents = null; d.live.estCents = d.live.estLoCents = d.live.estHiCents = null; } /* v2.0d.5 r7: non-Metered ride -> never a running amount, even if the Worker flag is missing */
       S.d = d;
       if (d.pay && d.pay.paid) S.stopped = true;
       draw();
@@ -77,7 +94,7 @@
         draw(true);
         return;
       }
-      S.err = e.network ? "No signal right now. The meter keeps running in the car; this page catches up when you're back online." : e.message;
+      S.err = e.network ? (rmHide() ? "No signal right now. Your ride continues; this page catches up when you're back online." : "No signal right now. The meter keeps running in the car; this page catches up when you're back online.") : e.message;
       var el = $("rm-net");
       if (el) el.textContent = S.err;
       else if (!S.d) draw(true);
@@ -352,9 +369,11 @@
       (d.final ? breakdownHtml(d) : "");
   }
   function draw(force) {
+    rmWords(); /* v2.0d.5 r5 */
     var d = S.d;
     if (!d) {
-      app.innerHTML = '<div class="card" id="rm-error"><p class="tag">Your meter</p><p class="lede">' + esc(S.err || (token ? "Loading your meter…" : "This meter link isn\u2019t valid or has expired.")) + "</p>" +
+      var hz = rmHide(); /* v2.0d.5 r5 */
+      app.innerHTML = '<div class="card" id="rm-error"><p class="tag">' + (hz ? "Your ride" : "Your meter") + '</p><p class="lede">' + esc(S.err || (token ? (hz ? "Loading your ride…" : "Loading your meter…") : (hz ? "This ride link isn\u2019t valid or has expired." : "This meter link isn\u2019t valid or has expired."))) + "</p>" +
         '<p class="fine">Questions? Call <a href="tel:' + BUSINESS_PHONE + '" style="color:#f0d48a">' + BUSINESS_PHONE + "</a>.</p></div>";
       S.phase = "none";
       return;
@@ -394,7 +413,7 @@
       var eb = $("rm-est-box"); if (eb) { var show = !!estText(d); if ((eb.style.display !== "none") !== show) eb.style.display = show ? "" : "none"; }
       var age = d.live.at ? Math.max(0, Math.round((now() - d.live.at) / 1000)) : -1;
       setText("rm-updated", age < 0 ? "Waiting for the first update from the car…" : age <= 12 ? "Live · updated just now" : age < 60 ? "Live · updated " + age + " s ago" :
-        "Waiting for the driver\u2019s phone (last update " + Math.floor(age / 60) + " min ago). The meter keeps running in the car.");
+        "Waiting for the driver\u2019s phone (last update " + Math.floor(age / 60) + " min ago)." + (d.hideFare ? "" : " The meter keeps running in the car.")); /* v2.0d.5 r5 */
       setText("rm-net", S.err || "");
     }
   }
