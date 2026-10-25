@@ -161,6 +161,33 @@
   function godFakeRes(status, body) {
     return { ok: status >= 200 && status < 300, status: status, json: function () { return Promise.resolve(body); }, text: function () { return Promise.resolve(body == null ? "null" : JSON.stringify(body)); } };
   }
+  /* v2.0j r2 privacy: the DB rules refuse anonymous LISTING of rides/<HUB> (REQUESTS, DRVRSTTS, FLWRDMAP; optionally all
+     hubs). This function shadows fetch inside God mode only: a plain GET of a WHOLE hub (baseUrl()/rides/<HUB>.json[?query])
+     goes to the Worker (POST /god/read with the God token; the Worker adds the DB secret). Per-key reads and every write
+     are unchanged. 404 (Worker before v2.0j) = the old direct read; 401 drops the stale God token. */
+  var GOD_LIST_HUBS = { REQUESTS: 1, PCSCALND: 1, DRVRHSTY: 1, PAYMENTS: 1, VHCLMNTC: 1, DRVRMLES: 1, DRVRPRFL: 1, RDRHSTRY: 1, FLWRDMAP: 1, FLWSHARE: 1, DSCNTRQS: 1, RATECNTR: 1, SAFETY: 1, DRVRSTTS: 1, AVLBLDRV: 1, DRVRHSLG: 1, HSLGLMTS: 1, HSLGVRDE: 1 };
+  var godReadOff = false;
+  function fetch(url, opts) {
+    var gf = (typeof window !== "undefined" && window.fetch) ? window.fetch : globalThis.fetch, wf = function (a, b) { return gf.call(typeof window !== "undefined" ? window : globalThis, a, b); }, m = String((opts && opts.method) || "GET").toUpperCase();
+    var u = typeof url === "string" ? url : "", root = baseUrl() + "/rides/";
+    var hit = m === "GET" && !godReadOff && u.indexOf(root) === 0 ? /^([A-Z0-9]{8})\.json(?:\?(.*))?$/.exec(u.slice(root.length)) : null;
+    if (!hit || !GOD_LIST_HUBS[hit[1]]) return wf(url, opts);
+    var t = ""; try { t = gqTok(); } catch (e) {}
+    var pw = (typeof gq !== "undefined" && gq && gq.pw) ? gq.pw : "";
+    if (!t && !pw) return wf(url, opts);
+    var query = {};
+    String(hit[2] || "").split("&").forEach(function (kv) { if (!kv) return; var k = kv.split("=")[0], v = kv.slice(k.length + 1); try { query[decodeURIComponent(k)] = decodeURIComponent(v); } catch (e) {} });
+    var body = { hub: hit[1], query: query }; if (t) body.godToken = t; else body.godPassword = pw;
+    return wf(PAY_WORKER + "/god/read", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }).then(function (res) {
+      return res.json().catch(function () { return {}; }).then(function (d) {
+        if (res.status === 404 && d && d.error === "Not found") { godReadOff = true; return wf(url, opts); }
+        if (d && d.godToken) { try { gqSetTok(d.godToken); gq.pw = ""; gq.tokOn = true; } catch (e) {} }
+        if (res.status === 401) { try { gqSetTok(""); } catch (e) {} return godFakeRes(401, null); }
+        if (!res.ok || !d || d.ok !== true) return godFakeRes(res.status || 502, null);
+        return godFakeRes(200, d.value === undefined ? null : d.value);
+      });
+    });
+  }
   function godWriteAuth() {
     var t = ""; try { t = gqTok(); } catch (e) {}
     if (t) return { godToken: t };
@@ -2157,8 +2184,26 @@
   function signalBadgeHtml(d, now) { var lv = d && (d.signalLost ? "gone" : signalLevel(d, now)); if (!lv || lv === "ok") return "";
     return '<span class="badge signal-lost" style="background:#b91c1c;color:#fff;font-weight:800">SIGNAL LOST \u00b7 last seen ' + esc(ctClock(d.lastSeenAt)) + "</span>"; }
 
+  /* v2.0j privacy: the rules no longer let anyone list rides/AVLBLDRV/drivers, so the live driver map reads it through the
+     Worker (POST /god/presence, God device token). Falls back to the direct read only if the Worker doesn't have the route yet
+     (404) or this device has no God token/password yet (then the database answers 401 -> "denied", same as before). */
+  function presenceListFetch() {
+    var t = ""; try { t = gqTok(); } catch (e) {}
+    var pw = (typeof gq !== "undefined" && gq && gq.pw) ? gq.pw : "";
+    if (!t && !pw) return fetch(driversUrl());
+    return fetch(PAY_WORKER + "/god/presence", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(t ? { godToken: t } : { godPassword: pw }) })
+      .then(function (res) {
+        return res.json().catch(function () { return {}; }).then(function (d) {
+          if (res.status === 404) return fetch(driversUrl()); /* Worker before v2.0j */
+          if (d && d.godToken) { try { gqSetTok(d.godToken); gq.pw = ""; gq.tokOn = true; } catch (e) {} }
+          if (res.status === 401) { try { gqSetTok(""); } catch (e) {} return godFakeRes(401, null); }
+          if (!res.ok || !d || d.ok !== true) return godFakeRes(res.status || 502, null);
+          return godFakeRes(200, d.drivers || null);
+        });
+      });
+  }
   function listOnlineDrivers() {
-    return fetch(driversUrl()).then(function (res) {
+    return presenceListFetch().then(function (res) {
       if (res.status === 401 || res.status === 403) {
         var err = new Error("drivers-denied");
         err.denied = true;
@@ -3571,33 +3616,19 @@
     rideStream = null;
     if (streamRetryTimer) { clearTimeout(streamRetryTimer); streamRetryTimer = null; }
   }
+  /* v2.0j r2 privacy: rides/REQUESTS is no longer anonymously listable, and an EventSource can't carry God auth, so the
+     board polls every 5 s instead (each poll goes through POST /god/read). Changes now show within ~5 s instead of ~1 s. */
+  var RIDE_POLL_MS = 5000;
   function startRideStream() {
     stopRideStream();
-    if (typeof window.EventSource !== "function" || state.screen !== "board") return;
-    var es;
-    try { es = new window.EventSource(openUrl()); } catch (e) { return; }
-    rideStream = es;
-    var kick = function () {
-      if (rideStream !== es) return;
+    if (state.screen !== "board") return;
+    var id = setInterval(function () {
+      if (state.screen !== "board") { stopRideStream(); return; }
+      if (document.visibilityState === "hidden") return;
       lastStreamEventAt = Date.now();
-      if (streamKickTimer) return;
-      streamKickTimer = setTimeout(function () {
-        streamKickTimer = null;
-        if (state.screen === "board") refresh();
-      }, 250);
-    };
-    es.addEventListener("put", kick);
-    es.addEventListener("patch", kick);
-    es.addEventListener("cancel", function () { if (rideStream === es) stopRideStream(); });
-    es.onerror = function () {
-      if (es.readyState !== 2) return; /* 0 = the browser is reconnecting by itself */
-      if (rideStream === es) rideStream = null;
-      if (streamRetryTimer) clearTimeout(streamRetryTimer);
-      streamRetryTimer = setTimeout(function () {
-        streamRetryTimer = null;
-        if (state.screen === "board" && !rideStream && document.visibilityState !== "hidden") startRideStream();
-      }, 10000);
-    };
+      refresh();
+    }, RIDE_POLL_MS);
+    rideStream = { close: function () { clearInterval(id); } };
   }
 
   /* ---- Phone alerts (Web Push) ---- */
