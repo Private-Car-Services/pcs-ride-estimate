@@ -8151,13 +8151,20 @@
      Current mileage = newest of (driver app shift odometers rides/DRVRMLES/{driverId}) and God override.
      Status: red = overdue, amber = <= 1,000 mi or <= 7 days left, green otherwise. */
   var VM_HUB = "VHCLMNTC", VM_FALLBACK_MPD = 2500 / 7;
-  var vm = { list: {}, loaded: false, err: "", screen: "", editId: "" };
+  var vm = { list: {}, dvir: {}, loaded: false, err: "", screen: "", editId: "" };
   function vmUrl(p) { return baseUrl() + "/rides/" + VM_HUB + (p ? "/" + p : "") + ".json"; }
   function vmLoad() {
     return Promise.race([fetch(vmUrl(""), { cache: "no-store" }), new Promise(function (_, rej) { setTimeout(function () { rej(new Error("timed out after 15 s. Check the connection and tap Home, then reopen.")); }, 15000); })]).then(function (r) { return r.ok ? r.json() : Promise.reject(new Error("HTTP " + r.status)); })
-      .then(function (d) { vm.list = d || {}; vm.loaded = true; vm.err = ""; vmPaint(); })
+      .then(function (d) { vm.list = d || {}; vm.loaded = true; vm.err = ""; vmPaint(); return vmDvirLoad(); })
       .catch(function (e) { vm.err = String(e && e.message || e); vmPaint(); });
   }
+  function vmIdNorm(v) { return String(v || "").toLowerCase().replace(/[^a-z0-9]/g, "_").replace(/^_+|_+$/g, "").slice(0, 48); } /* = Worker vmIdNorm */
+  function vmDvirLoad() { /* v2.0i (Harry r4 #3): each assigned driver's inspections (raw + normalized id, no date window) = Worker vmDriverDvir */
+    var ids = {}; Object.keys(vm.list || {}).forEach(function (k) { var d = (vm.list[k] || {}).driverId; if (d) { ids[String(d)] = 1; ids[vmIdNorm(d)] = 1; } });
+    return Promise.all(Object.keys(ids).map(function (id) { return fetch(baseUrl() + "/rides/DRVRHSLG/" + encodeURIComponent(id) + "/dvir.json", { cache: "no-store" }).then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; })
+      .then(function (o) { vm.dvir[id] = o && typeof o === "object" ? o : {}; }); })).then(function () { vmPaint(); });
+  }
+  function vmDvirFor(v) { var d = v && v.driverId; if (!d) return []; return [vm.dvir[String(d)], vm.dvir[vmIdNorm(d)]].filter(Boolean); }
   function vmDayMs(ymd) { var p = String(ymd || "").split("-"); return p.length === 3 ? Date.UTC(+p[0], +p[1] - 1, +p[2], 18) : 0; }
   function vmParseDate(s) { /* "2025-11-08" or "11-8-25" / "11/8/2025" */
     s = String(s || "").trim(); if (!s) return 0; var m;
@@ -8187,9 +8194,8 @@
   function vmCalc(v, now) {
     now = now || Date.now();
     var did = vmDriverFor(v), hist = did ? vmOdoHistory(did) : [], app = hist.length ? hist[hist.length - 1] : null;
-    var ovr = v.odoOverride && dmNum(v.odoOverride.miles) > 0 ? v.odoOverride : null, cur = null, src = "";
-    if (app && (!ovr || app.odo >= dmNum(ovr.miles))) { cur = app.odo; src = "driver app"; }
-    else if (ovr) { cur = dmNum(ovr.miles); src = "entered in God mode"; }
+    /* v2.0i (Harry r4 #3): current miles = the ONE per-plate rule (PCSVM.fromInspection over the assigned driver's inspections, God-accepted lower readings) */
+    var Mi = window.PCSVM, insp = Mi && Mi.fromInspection ? Mi.fromInspection(vmDvirFor(v), v.plate, now, v.odoAccept) : null, cur = insp ? insp.cur : null, src = insp ? "latest " + insp.src + " " + insp.date + " \u00b7 plate " + insp.plate : (v.plate ? "no inspection odometer for this plate yet" : "no plate on file: add the plate");
     function one(s, defInt) {
       s = s || {}; var interval = dmNum(s.interval) || defInt, last = dmNum(s.lastMiles), lastAt = vmParseDate(s.lastDate);
       if (last == null) return { interval: interval, status: "unknown" };
@@ -8202,7 +8208,12 @@
       var status = left == null ? "unknown" : left <= 0 ? "red" : (left <= 1000 || dLeft <= 7) ? "amber" : "green";
       return { interval: interval, last: last, lastAt: lastAt, due: due, left: left, mpd: mpd, mpdSrc: mpdSrc, daysSince: lastAt ? days : null, sinceMiles: cur != null ? cur - last : null, dLeft: dLeft, dueAt: dueAt, status: status };
     }
-    return { driverId: did, cur: cur, src: src, oil: one(v.oil, 25000), rot: one(v.rot, 10000) };
+    /* v2.0f: oil = the driver's own interval; rotation fixed at 10,000 (PCSVM); sheet math (vmaint.js) wins when it is defined */
+    var M = window.PCSVM, sh = M && cur != null ? M.compute(v, cur, now) : null;
+    var res = { driverId: did, cur: cur, src: src, insp: insp, oil: one(v.oil, M ? M.oilInterval(v) : 25000), rot: one(Object.assign({}, v.rot || {}, { interval: 10000 }), 10000), blocks: sh ? sh.blocks : [] };
+    if (sh) ["oil", "rot"].forEach(function (k) { var a = sh[k], b = res[k]; if (a.avg != null) { b.mpd = a.avg; b.mpdSrc = "since last service"; b.dLeft = a.daysUntil; b.dueAt = a.projected ? vmDayMs(a.projected) : null;
+      b.status = a.status === "yellow" ? "amber" : a.status; } });
+    return res;
   }
   var VM_COL = { green: "#3fae5a", amber: "#f0b429", red: "#e5534b", unknown: "#8a9a8a" };
   function vmBlock(label, c) {
@@ -8212,13 +8223,17 @@
       '<b>' + label + '</b> <span style="background:' + VM_COL[c.status] + ';color:#0b1f0b;border-radius:10px;padding:1px 8px;font-weight:800;font-size:12px">' + word + "</span>" +
       '<div class="fine">Last ' + vmN(c.last) + " mi" + (c.lastAt ? " on " + esc(vmFmtDate(c.lastAt)) + " (" + vmN(c.daysSince) + " days ago)" : "") + " \u00b7 every " + vmN(c.interval) + " mi \u00b7 due at <b>" + vmN(c.due) + " mi</b></div>" +
       '<div class="fine">Miles left <b>' + vmN(c.left) + "</b> \u00b7 driven since " + vmN(c.sinceMiles) + " \u00b7 avg " + vmN(c.mpd) + " mi/day (" + esc(c.mpdSrc) + ")</div>" +
-      '<div class="fine">Est. ' + (c.dLeft != null ? (c.dLeft <= 0 ? "now" : vmN(c.dLeft) + " days") : "\u2014") + " \u00b7 due date <b>" + (c.dueAt ? esc(vmFmtDate(c.dueAt)) : "\u2014") + "</b></div></div>";
+      '<div class="fine">Est. ' + (c.dLeft != null ? (c.dLeft <= 0 ? "now" : vmN(c.dLeft) + " days") : "\u2014") + " \u00b7 projected <b>" + (c.dueAt ? esc(vmFmtDate(c.dueAt)) : "\u2014") + "</b> (estimate from the average)</div></div>"; /* v2.0f: never a fixed due date */
   }
   function vmName(v) { return [v.year, v.make, v.model].filter(Boolean).join(" ") || "Vehicle"; }
   function vmDriverName(id) { var r = (state.roster || {})[id] || {}; return r.name || id || ""; }
+  function vmFluidLine(v) { /* v2.0f: driver-entered fluid check */
+    var f = v.fluids || {}, M = window.PCSVM; if (!f.date || !M) return '<div class="fine">Fluid check: never logged</div>';
+    return '<div class="fine">Fluid check ' + esc(f.date) + ": " + M.FLUIDS.map(function (x) { var l = f[x[0]] || "\u2014"; return esc(x[1]) + " " + (l === "Low" ? '<b style="color:#f0b429">Low</b>' : esc(l)); }).join(" \u00b7 ") + (f.by ? " \u00b7 " + esc(f.by) : "") + "</div>";
+  }
   function vmListHtml() {
     var ids = Object.keys(vm.list || {}).sort(function (a, b) { return vmName(vm.list[a]).localeCompare(vmName(vm.list[b])); });
-    var h = '<p class="fine">Oil and tire rotation countdowns for every PCS vehicle. Current miles come from the driver app\'s shift odometer readings (or the miles you enter). Amber = 1,000 mi or 7 days left; red = overdue. The assigned driver sees a heads-up banner in the driver app at amber and red.</p>' +
+    var h = '<p class="fine">Oil and tire rotation countdowns for every PCS vehicle. Current miles come from the odometer on the assigned driver\'s latest inspection for the vehicle\'s plate. Amber = 1,000 mi or 7 days left; red = overdue. The assigned driver sees a heads-up banner in the driver app at amber and red.</p>' +
       '<p><button type="button" class="btn btn-gold" data-vm-edit="__new">+ Add vehicle</button></p>';
     if (vm.err) h += '<p class="fine" style="color:#ff9b9b">Could not load vehicles: ' + esc(vm.err) + "</p>";
     if (!ids.length && vm.loaded) h += '<p class="fine">No vehicles yet.</p>';
@@ -8227,7 +8242,11 @@
       h += '<div class="vm-card" style="border:1px solid #2e5a2e;border-top:4px solid ' + VM_COL[worst] + ';border-radius:12px;padding:12px;margin:12px 0;background:#102810">' +
         '<div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap"><div><b style="font-size:17px">' + esc(vmName(v)) + "</b>" + (v.plate ? ' <span class="fine">\u00b7 ' + esc(v.plate) + "</span>" : "") +
         '<div class="fine">Driver: ' + esc(c.driverId ? vmDriverName(c.driverId) + (v.driverId ? "" : " (matched by car)") : "not assigned") + "</div>" +
-        '<div>Current <b>' + vmN(c.cur) + " mi</b> " + (c.src ? '<span class="fine">(' + esc(c.src) + ")</span>" : "") + "</div></div>" +
+        '<div>Current <b>' + vmN(c.cur) + " mi</b> " + (c.src ? '<span class="fine">(' + esc(c.src) + ")</span>" : "") + "</div>" +
+        (c.insp && c.insp.warn ? '<div style="color:#f0b429;font-weight:700">\u26A0 ' + esc(c.insp.warn) + " (warning only)</div>" : "") +
+        (c.insp && c.insp.ignored && c.insp.ignored.length ? '<div><button type="button" class="btn btn-ghost" data-vm-accept="' + esc(id) + '" data-vm-odo="' + esc(c.insp.ignored[c.insp.ignored.length - 1].odo) + '">Accept lower reading ' + vmN(c.insp.ignored[c.insp.ignored.length - 1].odo) + " mi (logged)</button></div>" : "") +
+        (c.blocks && c.blocks.length ? '<div style="color:#ff9b9b;font-weight:800">\u26D4 BLOCKED from going online: ' + c.blocks.map(function (b) { return esc(b.why); }).join(" ") + "</div>" : "") +
+        vmFluidLine(v) + "</div>" +
         '<div><button type="button" class="btn btn-ghost" data-vm-edit="' + esc(id) + '">Edit</button></div></div>' +
         vmBlock("Oil change", c.oil) + '<button type="button" class="btn btn-gold" data-vm-done="oil" data-vm-id="' + esc(id) + '">Mark oil change done</button>' +
         vmBlock("Tire rotation", c.rot) + '<button type="button" class="btn btn-gold" data-vm-done="rot" data-vm-id="' + esc(id) + '">Mark rotation done</button>' +
@@ -8248,9 +8267,9 @@
     return '<form id="vm-form" data-vm-id="' + esc(id) + '"><h3 style="margin:4px 0">' + (id === "__new" ? "Add vehicle" : "Edit " + esc(vmName(v))) + "</h3>" +
       f("year", "Year", v.year) + f("make", "Make", v.make) + f("model", "Model", v.model) + f("plate", "Plate (optional)", v.plate) +
       '<label style="display:block;margin:6px 0"><span class="fine">Assigned driver</span><br><select name="driverId">' + opts + "</select></label>" +
-      f("odo", "Current mileage override (leave blank to use the driver app)", v.odoOverride && v.odoOverride.miles, "number") +
+      '<p class="fine">Current mileage = the odometer on the driver\'s latest inspection for this plate (v2.0i). A lower reading is ignored until you accept it on the vehicle card.</p>' +
       "<h4>Oil change</h4>" + f("oilMiles", "Last oil change miles", o.lastMiles, "number") + f("oilDate", "Last oil change date", o.lastDate, "date") + f("oilInt", "Interval (miles)", o.interval || 25000, "number") +
-      "<h4>Tire rotation</h4>" + f("rotMiles", "Last rotation miles", r.lastMiles, "number") + f("rotDate", "Last rotation date", r.lastDate, "date") + f("rotInt", "Interval (miles)", r.interval || 10000, "number") +
+      "<h4>Tire rotation</h4>" + f("rotMiles", "Last rotation miles", r.lastMiles, "number") + f("rotDate", "Last rotation date", r.lastDate, "date") + f("rotInt", "Interval (miles, fixed)", 10000, "number").replace("<input ", "<input readonly ") +
       '<p><button type="submit" class="btn btn-gold">Save</button> <button type="button" class="btn btn-ghost" data-vm-cancel="1">Cancel</button></p><p class="fine" id="vm-form-err"></p></form>';
   }
   function vmNum(x) { x = String(x == null ? "" : x).replace(/[,\s]/g, ""); return x && isFinite(Number(x)) ? Math.round(Number(x)) : null; }
@@ -8280,6 +8299,11 @@
     if (t.getAttribute("data-vm-close")) { vm.screen = ""; var ov = document.getElementById("vm-screen"); if (ov) ov.remove(); return; }
     if (t.getAttribute("data-vm-edit")) { vm.editId = t.getAttribute("data-vm-edit"); vmPaint(); return; }
     if (t.getAttribute("data-vm-cancel")) { vm.editId = ""; vmPaint(); return; }
+    if (t.getAttribute("data-vm-accept")) { /* v2.0i: God accepts a lower inspection odometer for this plate (logged on the record) */
+      var aid = t.getAttribute("data-vm-accept"), ao = vmNum(t.getAttribute("data-vm-odo")); if (!(ao > 0)) return;
+      var why = window.prompt("Accept " + vmN(ao) + " mi as the current odometer for this plate? Reason (logged):", ""); if (why == null) return;
+      var ap = { updatedAt: Date.now() }, an = Date.now(); ap["odoAccept/" + an] = { odo: ao, at: an, by: godWho(), plate: String((vm.list[aid] || {}).plate || "").toUpperCase().replace(/[^A-Z0-9]/g, ""), why: String(why).slice(0, 200) };
+      vmSave(aid, ap).catch(function (er) { alert(String(er.message || er)); }); return; }
     var kind = t.getAttribute("data-vm-done");
     if (kind) {
       var id = t.getAttribute("data-vm-id"), v = vm.list[id] || {}, c = vmCalc(v);
@@ -8287,7 +8311,8 @@
       if (!(miles > 0)) return;
       var date = (window.prompt("Date done (YYYY-MM-DD):", chicagoToday()) || "").trim(); if (!vmParseDate(date)) { alert("Date not recognized."); return; }
       var now = Date.now(), patch = {}, sv = v[kind] || {};
-      patch[kind] = { lastMiles: miles, lastDate: date, interval: dmNum(sv.interval) || (kind === "oil" ? 25000 : 10000) };
+      if (dmNum(sv.lastMiles) > 0 && miles < dmNum(sv.lastMiles)) { alert("Mileage must be at least the last one (" + vmN(dmNum(sv.lastMiles)) + ")."); return; } /* v2.0f */
+      patch[kind] = { lastMiles: miles, lastDate: date, interval: kind === "rot" ? 10000 : (dmNum(sv.interval) || 25000) };
       patch["services/" + now] = { kind: kind, date: date, miles: miles, by: godWho(), at: now };
       patch["alerts/" + kind] = null; patch.updatedAt = now;
       vmSave(id, patch).catch(function (er) { alert(String(er.message || er)); });
@@ -8297,12 +8322,10 @@
     e.preventDefault(); var f = e.target, id = f.getAttribute("data-vm-id"), err = document.getElementById("vm-form-err");
     if (!f.model.value.trim()) { err.textContent = "Enter at least the model."; return; }
     if (id === "__new") id = ("v" + (f.year.value || "") + "-" + f.make.value + "-" + f.model.value).toLowerCase().replace(/[^a-z0-9_-]+/g, "-").slice(0, 60) + "-" + Date.now().toString(36);
-    var old = vm.list[id] || {}, odo = vmNum(f.odo.value), now = Date.now();
+    var old = vm.list[id] || {}, now = Date.now();
     var rec = { year: f.year.value.trim(), make: f.make.value.trim(), model: f.model.value.trim(), plate: f.plate.value.trim(), driverId: f.driverId.value,
       oil: { lastMiles: vmNum(f.oilMiles.value), lastDate: f.oilDate.value || "", interval: vmNum(f.oilInt.value) || 25000 },
-      rot: { lastMiles: vmNum(f.rotMiles.value), lastDate: f.rotDate.value || "", interval: vmNum(f.rotInt.value) || 10000 }, updatedAt: now };
-    var prevO = old.odoOverride && dmNum(old.odoOverride.miles);
-    rec.odoOverride = odo > 0 ? (odo === prevO ? old.odoOverride : { miles: odo, at: now, by: godWho() }) : null;
+      rot: { lastMiles: vmNum(f.rotMiles.value), lastDate: f.rotDate.value || "", interval: 10000 /* v2.0f fixed */ }, updatedAt: now };
     err.textContent = "Saving\u2026";
     vmSave(id, rec).then(function () { vm.editId = ""; vmPaint(); }).catch(function (er) { err.textContent = String(er.message || er); });
   }
