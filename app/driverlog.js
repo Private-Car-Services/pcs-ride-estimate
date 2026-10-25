@@ -340,6 +340,10 @@
           '<label class="dl-photo-btn" style="display:inline-block;padding:8px 14px;border-radius:8px;background:#374151;color:#fff;font-weight:600;cursor:pointer">\ud83d\udcf7 Take photo<input type="file" accept="image/*" capture="environment" name="photo-' + esc(it.k) + '" data-photo="' + esc(it.k) + '" style="position:absolute;width:1px;height:1px;opacity:0;overflow:hidden"></label> <span class="dl-photo-count" data-photo-count="' + esc(it.k) + '" style="font-size:13px;color:#555"></span>' +
           '<div class="dl-photo-thumbs" data-photo-thumbs="' + esc(it.k) + '"></div>') + "</div></div>";
       }).join("") +
+      (function () { var pv = String((meta.vehicle && meta.vehicle.plate) || ""), pls = (Array.isArray(meta.plates) ? meta.plates : []).concat(pv ? [pv] : []).filter(function (p, i, a) { return p && a.indexOf(p) === i; }); /* v2.0i (Harry r4 #2): the vehicle inspected is picked ON the form (default = profile plate; a rental can be entered) and stored on the row */
+        return '<label style="display:block;margin-top:8px">Vehicle plate inspected <input type="text" name="plate" id="dl-dvir-plate" list="dl-dvir-plates" autocomplete="off" autocapitalize="characters" spellcheck="false" maxlength="10" value="' + esc(pv) + '" style="width:140px;text-transform:uppercase"></label>' +
+          '<datalist id="dl-dvir-plates">' + pls.map(function (p) { return '<option value="' + esc(p) + '">'; }).join("") + "</datalist>" +
+          '<p class="fine" style="margin:2px 0 0;font-size:12px;color:#555">Driving a different car (e.g. a rental)? Change the plate. That inspection then counts only for that plate.</p>'; })() +
       '<label style="display:block;margin-top:8px">' + (kind === "pre" ? "Odometer (opening odometer for this shift)" : "Odometer (ending odometer for this shift)") + ' <input type="text" inputmode="none" pattern="[0-9]*" name="odometer" id="dl-dvir-odo" data-odopad-in="1" autocomplete="off" autocorrect="off" spellcheck="false" maxlength="7" value="' + esc(kind === "pre" && meta.odoNow != null && isFinite(Number(meta.odoNow)) ? String(Math.floor(Number(meta.odoNow))) : "") + '" style="width:140px"></label>' +
       odoPadHtml() + /* v75z: big on-screen number pad (iPadOS ignores inputmode="numeric" and opens the full keyboard) */
       '<p style="margin:10px 0 4px">Driver signature</p><canvas id="dl-sig-pad" width="680" height="140" style="width:100%;height:140px;touch-action:none;display:block;background:#fafafa"></canvas><div style="border-top:1px solid #333"></div>' +
@@ -520,14 +524,16 @@
         if (f.__startedAt && Date.now() - f.__startedAt < f.__minMs) { err.textContent = "Take at least " + Math.round(f.__minMs / 1000) + " seconds to inspect the vehicle (" + Math.ceil((f.__startedAt + f.__minMs - Date.now()) / 1000) + " s left)."; return; }
         if (odoRaw && !/^\d+$/.test(odoRaw)) { err.textContent = "Odometer: whole miles only (no decimal point)."; return; } /* v74 */
         if (!(odo > 0)) { err.textContent = "Enter the odometer reading."; return; }
-        if (typeof meta.odoCheck === "function") { var oErr = ""; try { oErr = meta.odoCheck(f.getAttribute("data-kind"), odo) || ""; } catch (eO) {} if (oErr) { err.textContent = oErr; return; } } /* v75u: same floor rule as the shift odometer */
+        var dvPlate = f.plate ? String(f.plate.value || "").toUpperCase().replace(/[^A-Z0-9]/g, "") : String((meta.vehicle && meta.vehicle.plate) || "").toUpperCase().replace(/[^A-Z0-9]/g, ""); /* v2.0i */
+        if (!dvPlate) { err.textContent = "Enter the plate of the vehicle you inspected."; return; }
+        if (typeof meta.odoCheck === "function") { var oErr = ""; try { oErr = meta.odoCheck(f.getAttribute("data-kind"), odo, dvPlate) || ""; } catch (eO) {} if (oErr) { err.textContent = oErr; return; } } /* v75u: same floor rule as the shift odometer */
         if (!pad || !pad.__ink) { err.textContent = "Sign with your finger to submit."; return; }
         t.disabled = true;
         var mo = f.__motion || {}; if (mo.moving) { err.textContent = "Stop the vehicle to complete inspection"; t.disabled = false; return; }
         readDvir(f, meta).then(function (r) { r.motion = mo.seen ? "verified" : "unverified"; if (f.__startedAt) { r.startedAt = f.__startedAt; r.finishedAt = Date.now(); r.durationSec = Math.round((r.finishedAt - r.startedAt) / 1000); } if (mo.seen) r.maxMph = Math.round(mo.max); if (r.error) { err.textContent = r.error; t.disabled = false; return; }
           var ft = r.items && r.items.fulltank; /* v74b (Matthew): tank not full at post-trip -> reminder pop-up, OK acknowledged + logged */
           if (ft && ft.noteFlag && ft.fuel) { if (!f.__fuelAck) { t.disabled = false; fuelPopup(function () { f.__fuelAck = Date.now(); t.click(); }); return; } ft.fuelAckAt = f.__fuelAck; ft.fuelMsg = FUEL_MSG; }
-          var kind = f.getAttribute("data-kind"); meta.onDvir(day.day, kind, Object.assign(r, { kind: kind, day: day.day, at: Date.now(), odometer: odo, sig: pad.toDataURL("image/png"), driver: meta.driver || "", vehicle: meta.vehicle || {} }));
+          var kind = f.getAttribute("data-kind"); meta.onDvir(day.day, kind, Object.assign(r, { kind: kind, day: day.day, at: Date.now(), odometer: odo, plate: dvPlate, sig: pad.toDataURL("image/png"), driver: meta.driver || "", vehicle: meta.vehicle || {} }));
           open(days, meta, "day:" + day.day + ":insp" + (kind === "post" ? "-post" : "")); });
         return;
       }

@@ -3037,6 +3037,9 @@
   function normalizePlate(value) {
     return String(value || "").trim().toUpperCase().replace(/\s+/g, " ");
   }
+  /* v2.0i (Harry r5): plate MATCHING uses the same key as vmaint/Worker normPlate (A-Z0-9 only), so "ABC 1234" = "abc-1234"; blank never matches. */
+  function plateKey(v) { return String(v || "").toUpperCase().replace(/[^A-Z0-9]/g, ""); }
+  function samePlate(a, b) { var x = plateKey(a); return !!x && x === plateKey(b); }
 
   function hasCompleteCar(account) {
     if (!account) return false;
@@ -3196,8 +3199,8 @@
   var SHIFT_STALE_MS = 18 * 3600000;
   var CARRY_KEY = "pcs-driver-fresh-login-v72w";
   function carriedLoginAt() { try { return Number(localStorage.getItem(CARRY_KEY)) || 0; } catch (e) { return 0; } }
-  function noteFreshLogin() { try { localStorage.setItem(CARRY_KEY, String(Date.now())); } catch (e) {} }
-  function clearFreshLogin() { try { localStorage.removeItem(CARRY_KEY); } catch (e) {} }
+  function noteFreshLogin() { try { vehPickClear(); } catch (e) {} try { localStorage.setItem(CARRY_KEY, String(Date.now())); } catch (e) {} }
+  function clearFreshLogin() { try { vehPickClear(); } catch (e) {} try { localStorage.removeItem(CARRY_KEY); } catch (e) {} }
   function shiftLastActive(row) {
     var t = Math.max(Number(row && row.lastUpdate) || 0, Number(row && row.shiftStartAt) || 0, Number(row && row.startedAt) || 0);
     try { var seg = hosReadLog()[String(Number(row && row.shiftStartAt) || 0)]; if (seg && Number(seg.e) > t) t = Number(seg.e); } catch (e) {} /* app open = active */
@@ -3736,7 +3739,7 @@
     return { now: now, days: Math.max(15, Number(state.dlDays) || 15), snapshots: snaps, more: function (n) { state.dlDays = n; openDriverLog("history:" + (n - 1)); }, currentStatus: cur, currentNote: qOffline() ? "Offline (logged in)" : qOnBreak() ? "On break" : qAutoBreak() ? "Break (auto, available)" : "",
       fluidsDays: (function () { try { return Number(localStorage.getItem("pcs-dvir-fluids-days")) || 7; } catch (e) { return 7; } })(), /* v74: God-editable fluids interval */
       dvirItems: (function () { try { return JSON.parse(localStorage.getItem("pcs-dvir-cfg") || "null"); } catch (e) { return null; } })(), /* God-mode checklist (rides/DVIRCFG) */
-      cityAt: dlCityAt, canSign: true, odoNow: state.milesStartOdo, odoCheck: dvirOdoCheck, /* v75u */
+      cityAt: dlCityAt, canSign: true, odoNow: state.milesStartOdo, odoCheck: dvirOdoCheck, /* v75u */ plates: (function () { try { var m = state.vmMine || {}; return Object.keys(m).map(function (k) { return normalizePlate((m[k] && m[k].plate) || ""); }).filter(Boolean); } catch (e) { return []; } })(), /* v2.0i: plate picker choices */
       signOf: function (d) { return dlRec("signs")[d] || (hist.signs || {})[d] || null; },
       onSign: function (d, rec) { dlPut("signs", d, rec); },
       dvirOf: function (d, k) { var a = dlRec("dvir")[d] || {}, b2 = (hist.dvir || {})[d] || {}; var r = a[k] || b2[k] || null; if (r && b2[k] && b2[k].cleared) r = Object.assign({}, r, { cleared: b2[k].cleared });
@@ -3745,9 +3748,10 @@
         return r; },
       vehDates: function () { var pl = normalizePlate(acc.carPlate || "") || "car"; try { return (JSON.parse(localStorage.getItem("pcs-dvir-veh") || "{}") || {})[pl] || ((hist.veh || {})[pl]) || {}; } catch (e) { return {}; } },
       onDvir: function (d, k, rec) { /* registration / insurance / car-wash dates remembered per vehicle (plate): local + rides/DVIRVEH/{plate} */
-        try { var pl = normalizePlate(acc.carPlate || "") || "car", vm = JSON.parse(localStorage.getItem("pcs-dvir-veh") || "{}") || {}; vm[pl] = Object.assign({}, vm[pl] || {}, rec.vehDates || {}, { updatedAt: Date.now(), driver: driverPresenceId(), vehicle: [acc.carYear, acc.carMake, acc.carModel].filter(Boolean).join(" ") }); localStorage.setItem("pcs-dvir-veh", JSON.stringify(vm));
+        rec.plate = normalizePlate(rec.plate || dlPlate() || acc.carPlate || ""); /* v2.0i (Harry r4 #2): plate picked on the form wins (rental); confirmed vehicle otherwise */
+        if (k === "pre" && rec.plate && !samePlate(rec.plate, dlPlate())) vehPickSet(rec.plate, "form"); /* v2.0i: the plate inspected becomes this login's vehicle */
+        try { var pl = rec.plate || "car", vm = JSON.parse(localStorage.getItem("pcs-dvir-veh") || "{}") || {}; vm[pl] = Object.assign({}, vm[pl] || {}, rec.vehDates || {}, { updatedAt: Date.now(), driver: driverPresenceId(), vehicle: [acc.carYear, acc.carMake, acc.carModel].filter(Boolean).join(" ") }); localStorage.setItem("pcs-dvir-veh", JSON.stringify(vm));
           if (syncOn()) authFetch(databaseURL() + "/rides/DVIRVEH/" + encodeURIComponent(pl) + ".json", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(vm[pl]) }).catch(function () {}); } catch (e) {}
-        rec.plate = normalizePlate(acc.carPlate || "");
         if (k === "post" && rec.vehDates && rec.vehDates.carwash) { var lw = { date: rec.vehDates.carwash, at: Number(rec.at) || Date.now(), plate: rec.plate }; /* v77.9: last car wash per driver (God mode shows it) */
           try { localStorage.setItem("pcs-last-wash", JSON.stringify(lw)); } catch (e) {}
           if (syncOn()) authFetch(databaseURL() + "/rides/DRVRHSLG/" + encodeURIComponent(driverPresenceId()) + "/lastWash.json", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(lw) }).catch(function () {}); }
@@ -3764,6 +3768,7 @@
         try { render(); } catch (e) {}
         if (k === "pre" && state.availAfterPre) { state.availAfterPre = false; setTimeout(function () { /* v74b: pre-trip done -> odometer -> Available */
           if (dvirBlock() || vehAvailBlocks().length) { qd.brkMsg = availBlockMsg(dvirBlock() || { blocks: vehAvailBlocks() }); render(); return; }
+          if (vmBlocksNow().length) { qd.brkMsg = vmBlockMsg(); render(); return; } /* v2.0f */
           var o = document.getElementById("dl-overlay"); if (o) o.remove(); qSetOffline(false); }, 300); }
         if (k === "post" && state.availAfterMissed === d) { state.availAfterMissed = null; /* v74b: missed post-trip done -> resolve the flag, then today's pre-trip */
           var mm = dlRec("missed"); if (mm[d]) { mm[d].resolvedAt = Date.now(); try { localStorage.setItem(dlKey("missed"), JSON.stringify(mm)); } catch (e) {} }
@@ -3773,7 +3778,7 @@
         if (k === "post" && state.logoutAfterPost) { state.logoutAfterPost = false; setTimeout(function () { driverLogoutStart(rec); }, 300); } },
       duty: hosDutySegs(now), drive: hosAllDrive(now), breaks: hosBreaks(now), offline: hosOffline(now), rows: rows,
       overrides: (hist.ovr || []).concat(hosOvr && hosOvr.override ? [hosOvr.override] : []).concat(hosRestarts(now)),
-      driver: acc.name || state.driverName || "", vehicle: { year: acc.carYear || "", make: acc.carMake || "", model: acc.carModel || "", plate: normalizePlate(acc.carPlate || ""), vin: acc.carVin || acc.vin || "" } };
+      driver: acc.name || state.driverName || "", vehicle: dlPlate() && !samePlate(dlPlate(), acc.carPlate) ? { year: "", make: "", model: "", plate: dlPlate(), vin: "" } /* v2.0i: confirmed rental / other car */ : { year: acc.carYear || "", make: acc.carMake || "", model: acc.carModel || "", plate: normalizePlate(acc.carPlate || ""), vin: acc.carVin || acc.vin || "" } };
   }
   /* Driver's Log places: a GPS point every 5 min (and at every status change) + a city cache from reverse geocoding */
   /* v73 Driver's Log: signatures (rides/DRVRHSLG/{driver}/signs/{day}) and DVIR inspections (.../dvir/{day}/{pre|post}); kept permanently */
@@ -3787,7 +3792,7 @@
   function dvirBlock() {
     var loc = dlRec("dvir"), srv = hosReadHist().dvir || {}, hit = null, cleanPre = 0;
     /* v77.15 (Anson 10/20): a newer CLEAN pre-trip supersedes older inspection / Available blocks (previous shifts) */
-    [loc, srv].forEach(function (m) { Object.keys(m || {}).forEach(function (d) { var p = m[d] && m[d].pre; if (p && !p.unsafe && Number(p.at) > cleanPre && (!p.plate || !dlPlate() || p.plate === dlPlate())) cleanPre = Number(p.at); }); });
+    [loc, srv].forEach(function (m) { Object.keys(m || {}).forEach(function (d) { var p = m[d] && m[d].pre; if (p && !p.unsafe && Number(p.at) > cleanPre && (!p.plate || !dlPlate() || samePlate(p.plate, dlPlate()))) cleanPre = Number(p.at); }); });
     [loc, srv].forEach(function (m) { Object.keys(m || {}).forEach(function (d) { ["pre", "post", "avail"].forEach(function (k) {
       var r = m[d] && m[d][k]; if (!r || !r.unsafe) return;
       var sup = cleanPre && Number(r.at) > 0 && Number(r.at) < cleanPre; /* v77.15 (Harry): a newer clean pre-trip supersedes ONLY wash / stale blocks (add2: never photo/Cracks) */
@@ -3813,13 +3818,28 @@
     return out;
   }
   function dlToday() { return new Intl.DateTimeFormat("en-CA", { timeZone: "America/Chicago", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date()); }
-  function dlPlate() { return normalizePlate((readDriverAccount() || {}).carPlate || ""); }
+  function chiDay(t) { return new Intl.DateTimeFormat("en-CA", { timeZone: "America/Chicago", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date(Number(t) || 0)); } /* v2.0h */
+  /* v2.0i (Harry r4 merge blocker): the driver CONFIRMS the vehicle at the login gate first (profile car, another assigned plate or a
+     rental). dlPlate() = that confirmed plate for this login + Chicago day, else the profile plate; the day rule, postTripSince(Any),
+     preTripLatest and dvirBlock all key off dlPlate(), so they follow the chosen vehicle. Cleared on every login / logout. */
+  var VEH_PICK_KEY = "pcs-veh-pick";
+  function vehPickRead() { try { var p = JSON.parse(localStorage.getItem(VEH_PICK_KEY) || "null"); if (p && normalizePlate(p.plate) && Number(p.at) > 0 && chiDay(p.at) === chiDay(Date.now())) return p; } catch (e) {} return null; }
+  function vehPickSet(plate, how) { var pl = normalizePlate(plate || ""); if (!pl) return null; var p = { plate: pl, at: Date.now(), how: how || "gate" }; try { localStorage.setItem(VEH_PICK_KEY, JSON.stringify(p)); } catch (e) {} return p; }
+  function vehPickClear() { try { localStorage.removeItem(VEH_PICK_KEY); } catch (e) {} }
+  function dlPlate() { var p = vehPickRead(); return p ? normalizePlate(p.plate) : normalizePlate((readDriverAccount() || {}).carPlate || ""); }
+  /* v2.0i (Harry, non-blocking): the day skip uses SERVER time (Worker /time), not the phone clock; unknown -> no day skip */
+  var srvClock = { skew: null, at: 0 };
+  function srvNow() { return srvClock.skew != null && Date.now() - srvClock.at < 6 * 3600000 ? Date.now() + srvClock.skew : null; }
+  function srvClockSync() {
+    try { var t0 = Date.now(); return fetch(METER_WORKER + "/time", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" }).then(function (r) { return r.json(); }).then(function (d) {
+      var n = Number(d && d.now), t1 = Date.now(); if (n > 0 && t1 - t0 < 10000) { srvClock.skew = n - Math.round((t0 + t1) / 2); srvClock.at = t1; } return srvNow(); }).catch(function () { return null; }); } catch (e) { return Promise.resolve(null); }
+  }
   function dlDvirRec(d, k) { var a = (dlRec("dvir")[d] || {})[k], b = ((hosReadHist().dvir || {})[d] || {})[k]; if (a && b && b.cleared) a = Object.assign({}, a, { cleared: b.cleared }); return a || b || null; }
   /* v76c (Matthew 10/18, 12:20 AM mid-shift): a pre-trip is only required after a post-trip / shift end. An OPEN shift (opening
      odometer, no ending odometer, no post-trip since it started, last activity less than resetHours (10 h) ago) carries across
      midnight and across an app update / reload: approval, car and opening odometer carry; Available and the meter Start pass.
      10 h off in a row (HOS reset) or a post-trip ends it, and the next shift needs a pre-trip + new opening odometer. */
-  function postTripSinceAny(t) { var pl = dlPlate(), hit = null; [dlRec("dvir"), hosReadHist().dvir || {}].forEach(function (m) { Object.keys(m || {}).forEach(function (d) { var r = m[d] && m[d].post; if (r && Number(r.at) > 0 && Number(r.at) >= (Number(t) || 0) && (!r.plate || !pl || r.plate === pl)) hit = r; }); }); return hit; }
+  function postTripSinceAny(t) { var pl = dlPlate(), hit = null; [dlRec("dvir"), hosReadHist().dvir || {}].forEach(function (m) { Object.keys(m || {}).forEach(function (d) { var r = m[d] && m[d].post; if (r && Number(r.at) > 0 && Number(r.at) >= (Number(t) || 0) && (!r.plate || !pl || samePlate(r.plate, pl))) hit = r; }); }); return hit; }
   function shiftResetMs() { return ((hosCfg && Number(hosCfg.resetHours)) || 6) * 3600000; } /* v76d-pretrip: God-mode off-duty reset, default 6 h */
   function shiftContinues(row, now) {
     if (!row || typeof row !== "object" || !shiftOpen(row)) return false;
@@ -3888,13 +3908,17 @@
   function preTripLatest() {
     var pl = dlPlate(), best = null;
     [dlRec("dvir"), hosReadHist().dvir || {}].forEach(function (m) { Object.keys(m || {}).forEach(function (d) { var r = m[d] && m[d].pre;
-      if (r && Number(r.at) > 0 && (!r.plate || !pl || r.plate === pl) && (!best || Number(r.at) > Number(best.rec.at))) best = { day: d, rec: r }; }); });
+      if (r && Number(r.at) > 0 && (!r.plate || !pl || samePlate(r.plate, pl)) && (!best || Number(r.at) > Number(best.rec.at))) best = { day: d, rec: r }; }); });
     return best;
   }
   function preTripState(now) {
     now = now || Date.now();
     var L = preTripLatest(); if (!L) return { ok: false, why: "none" };
     var at = Number(L.rec.at), reset = shiftResetMs(), out = { ok: false, rec: L.rec, day: L.day };
+    /* v2.0h (Matthew 10/24): ONE pre-trip per vehicle (plate) per calendar day, America/Chicago. A clean pre-trip for THIS plate
+       earlier today still counts after logout/post-trip/idle; a different plate or a new Chicago day needs a new one.
+       v2.0i: "this plate" = the vehicle confirmed at the login gate (dlPlate); "today" = server clock (srvNow), never the phone's. */
+    var pl0 = dlPlate(), sn = srvNow(); if (!L.rec.unsafe && pl0 && L.rec.plate && samePlate(L.rec.plate, pl0) && sn != null && chiDay(at) === chiDay(sn) && at <= sn + 600000) { out.ok = true; out.why = "day"; return out; }
     if (postTripSinceAny(at)) { out.why = "post"; return out; }
     if (offDutyGapAfter(at, now) >= reset) { out.why = "off"; return out; }
     if (now - lastActiveSince(at, now) >= reset) { out.why = "idle"; return out; }
@@ -3966,8 +3990,9 @@
   function missedPostDay() { var m = dlRec("missed"), ds = Object.keys(m).filter(function (d) { var x = m[d]; if (!x || !x.at || x.resolvedAt) return false; var p = dlDvirRec(d, "post"); return !(p && Number(p.at) >= Number(x.at)); }).sort(); return ds[0] || null; }
   function availFlow() {
     qd.washAsk = false; /* v77.9 */
-    return dvirRefresh().then(function () {
+    return Promise.all([dvirRefresh(), vmRefresh()]).then(function () {
       if (dvirBlock()) { qd.brkMsg = availBlockMsg(dvirBlock()); render(); return; }
+      if (vmBlocksNow().length) { qd.brkMsg = vmBlockMsg(); render(); return; } /* v2.0f maintenance hard block */
       var md = missedPostDay();
       if (md && false) { state.availAfterMissed = md; /* v75 (Matthew): a missed post-trip never blocks going Available; God mode still sees the flag */ state.availAfterPre = false; qd.brkMsg = "You ended the " + md + " shift without a post-trip inspection. Complete it now, then today\u2019s pre-trip, to go Available."; render(); openDriverLog("day:" + md + ":insp-post"); return; }
       if (!preTripDoneToday()) { state.availAfterPre = true; qd.brkMsg = "Complete today\u2019s pre-trip inspection to go Available."; render(); openDriverLog("day:" + dlToday() + ":insp"); return; }
@@ -4000,6 +4025,7 @@
   function forceDriverLogout(fl) {
     try { nativeGpsStop("god-logout"); } catch (e) {} 
     try { noteLogoutAt(Date.now()); } catch (e) {} /* v76d-pretrip: off duty from here */
+    try { vehPickClear(); } catch (e) {} /* v2.0i */
     try { localStorage.setItem(qOffKey(), "1"); localStorage.removeItem(qBusyKey()); } catch (e) {}
     try { hosTick(Date.now()); } catch (e) {}
     try { stopOpenRideAlert(); } catch (e) {}
@@ -4035,7 +4061,7 @@
   function endOfDay() { driverLogoutStart(); }
   function endOfDayOld() {
     var r = dlDvirRec(dlToday(), "post");
-    if (!(r && Number(r.at) > 0 && (!r.plate || !dlPlate() || r.plate === dlPlate()))) { state.logoutAfterPost = true; openDriverLog("day:" + dlToday() + ":insp-post");
+    if (!(r && Number(r.at) > 0 && (!r.plate || !dlPlate() || samePlate(r.plate, dlPlate())))) { state.logoutAfterPost = true; openDriverLog("day:" + dlToday() + ":insp-post");
       return; }
     endOfDayOdo();
   }
@@ -4050,7 +4076,8 @@
   /* v75u (Matthew 10/16): mileage is asked ONCE, inside the inspection. Pre-trip odometer = opening odometer,
      post-trip odometer = ending odometer. Every Log out (Available, Offline, Break, or with an unopened shift) goes
      through the post-trip inspection; logout only finishes after it is saved. God mode "Log out driver" stays immediate. */
-  function dvirOdoCheck(kind, odo) {
+  function dvirOdoCheck(kind, odo, plate) {
+    try { var pp = normalizePlate(((readDriverAccount() || {}).carPlate) || ""); if (plate && pp && !samePlate(plate, pp)) return ""; } catch (e) {} /* v2.0i: another vehicle (rental): the profile car's shift floor doesn't apply */
     var floor = 0; try { floor = odoOverrideActive() ? 0 : (lastKnownOdometer() || 0); } catch (e) {}
     if (floor > 0 && odo < floor) return "Odometer can't be lower than your last reading (" + floor.toFixed(1) + "). If the odometer really reads lower, ask God mode for an override.";
     if (kind === "post") { var si = null; try { si = currentShiftInfo(); } catch (e) {} if (si && si.startOdo != null && !state.milesNeedStart && odo < si.startOdo && !odoOverrideActive()) return "The ending odometer can't be less than the opening odometer (" + si.startOdo.toFixed(1) + ")."; }
@@ -4058,7 +4085,7 @@
   }
   function postTripSince(t) { /* v76h: the post-trip for THIS shift = any post-trip saved at/after the shift start (or login), whatever calendar day it is filed under (shift across midnight), incl. the same-day "earlier" stash */
     t = Number(t) || 0; var pl = dlPlate(), best = null, from = t > 0 ? dlYmd(t - 86400000) : "";
-    var ok = function (r) { return r && typeof r === "object" && Number(r.at) > 0 && Number(r.at) >= t && (!r.plate || !pl || r.plate === pl); };
+    var ok = function (r) { return r && typeof r === "object" && Number(r.at) > 0 && Number(r.at) >= t && (!r.plate || !pl || samePlate(r.plate, pl)); };
     [dlRec("dvir"), hosReadHist().dvir || {}].forEach(function (m) { Object.keys(m || {}).forEach(function (d) { if (from && d < from) return; var o = m[d] || {};
       var c = [o.post]; Object.keys(o.earlier || {}).forEach(function (ek) { if (/^post-/.test(ek)) c.push(o.earlier[ek]); });
       c.forEach(function (r) { if (ok(r) && (!best || Number(r.at) > Number(best.at))) best = r; }); }); });
@@ -4135,13 +4162,32 @@
   function maybeOpenPreTripGate() {
     if (!state.loginGate || ROLE !== "driver" || !signedIn() || !state.milesNeedStart || state.preGateOpenedAt || state.logoutAfterPost) return; /* v76h: Log out always gets the POST-trip, never the login pre-trip */
     try { if (driverMidRide() || meterActive() || document.getElementById("dl-overlay")) return; } catch (e) { return; }
+    if (!vehPickRead()) { vehPickOpen(); return; } /* v2.0i: confirm the vehicle FIRST; the gate re-runs after the pick */
     state.preGateOpenedAt = Date.now();
     /* v2.0c (Matthew 10/23, on the highway): a fresh login / wiped storage must not re-ask a pre-trip the server already has.
        Check Firebase first; open the pre-trip only when the server has no open shift with today's clean pre-trip. */
     /* v2.0c r2 (Harry): 8 s cap + reject/throw handling; the pre-trip opens exactly once if the server can't confirm */
     var done = false, go = function (ok) { if (done) return; done = true; if (ok) { try { render(); } catch (e) {} return; } setTimeout(function () { openDriverLog("day:" + dlToday() + ":insp"); }, 50); };
     setTimeout(function () { go(false); }, 8000);
-    try { serverShiftRestore().then(go, function () { go(false); }); } catch (e) { go(false); }
+    var rest = function () { try { serverShiftRestore().then(go, function () { go(false); }); } catch (e) { go(false); } };
+    /* v2.0h: same plate (the CONFIRMED vehicle) already inspected today (Chicago, server clock) -> no pre-trip */
+    srvClockSync().then(function () { try { if (preTripState().ok) { go(true); return; } } catch (e) {} rest(); }, rest);
+  }
+  /* v2.0i: login-gate vehicle confirm. Profile car first, other assigned plates, or type a rental plate. */
+  function vehPickOpen() {
+    if (document.getElementById("veh-pick")) return;
+    var acc = readDriverAccount() || {}, prof = normalizePlate(acc.carPlate || ""), opts = [];
+    if (prof) opts.push({ plate: prof, name: [acc.carYear, acc.carMake, acc.carModel].filter(Boolean).join(" ") || "My car" });
+    try { var mine = state.vmMine || {}; Object.keys(mine).forEach(function (id) { var v = mine[id] || {}, pl = normalizePlate(v.plate || ""); if (pl && !opts.some(function (o) { return samePlate(o.plate, pl); })) opts.push({ plate: pl, name: [v.year, v.make, v.model].filter(Boolean).join(" ") }); }); } catch (e) {}
+    var el = document.createElement("div"); el.id = "veh-pick"; el.setAttribute("role", "dialog");
+    el.style.cssText = "position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,.6);display:flex;align-items:center;justify-content:center;padding:16px";
+    el.innerHTML = '<div class="card" style="max-width:420px;width:100%;padding:16px"><h3 style="margin:0 0 8px">Which vehicle are you driving?</h3><p class="fine" style="margin:0 0 10px">Confirm before your inspection. Driving a rental or another car? Type its plate.</p>' +
+      opts.map(function (o) { return '<button type="button" class="btn" data-veh-pick="' + esc(o.plate) + '" style="display:block;width:100%;margin:0 0 8px;text-align:left">' + esc(o.name) + ' \u00b7 ' + esc(o.plate) + "</button>"; }).join("") +
+      '<form id="veh-pick-other" style="margin-top:4px"><input name="plate" placeholder="Other / rental plate" autocapitalize="characters" maxlength="10" style="display:block;width:100%;box-sizing:border-box;margin:0 0 8px"><button class="btn" type="submit" style="display:block;width:100%">Use this plate</button></form><p class="fine" id="veh-pick-msg" style="color:#e5534b;margin:6px 0 0"></p></div>';
+    var done = function (pl, how) { if (!vehPickSet(pl, how)) { el.querySelector("#veh-pick-msg").textContent = "Enter the plate of the vehicle you are driving."; return; } el.remove(); try { render(); } catch (e) {} maybeOpenPreTripGate(); };
+    el.addEventListener("click", function (e) { var b = e.target.closest && e.target.closest("[data-veh-pick]"); if (b) done(b.getAttribute("data-veh-pick"), b.getAttribute("data-veh-pick") === prof ? "profile" : "assigned"); });
+    el.querySelector("#veh-pick-other").addEventListener("submit", function (e) { e.preventDefault(); done((el.querySelector("#veh-pick-other input") || {}).value, "other"); });
+    document.body.appendChild(el);
   }
   function serverShiftRestoreFrom(pre, post, row, now) { /* pure: does the server show this shift still open + covered? */
     now = now || Date.now();
@@ -4149,7 +4195,7 @@
     if (post && Number(post.at) >= Number(pre.at)) return false;
     if (!row || typeof row !== "object" || row.shiftClosed === true || !(Number(row.startOdometer) > 0) || !(Number(row.shiftStartAt) > 0)) return false;
     if (row.endOdometer != null && row.endOdometer !== "") return false;
-    var pl = dlPlate(); if (pre.plate && pl && normalizePlate(pre.plate) !== pl) return false;
+    var pl = dlPlate(); if (pre.plate && pl && !samePlate(pre.plate, pl)) return false;
     var last = Math.max(Number(row.lastUpdate) || 0, Number(row.shiftStartAt) || 0, Number(pre.at) || 0);
     return now - last < shiftResetMs();
   }
@@ -4299,12 +4345,12 @@
   function vmDriverCheck() {
     if (ROLE !== "driver") return;
     var me = ""; try { me = driverPresenceId(); } catch (e) {} if (!me) return;
-    fetch(databaseURL() + "/rides/VHCLMNTC.json", { cache: "no-store" }).then(function (r) { return r.ok ? r.json() : null; }).then(function (all) {
-      var odo = null; try { odo = lastKnownOdometer(); } catch (e) {}
-      var msgs = [];
+    return fetch(databaseURL() + "/rides/VHCLMNTC.json", { cache: "no-store" }).then(function (r) { return r.ok ? r.json() : null; }).then(function (all) {
+      vmSaveMine(all, me); /* v2.0f: maintenance log on Home + hard block */
+      var msgs = []; /* v2.0i (Harry r4 #3): heads-up uses the one per-plate inspection rule (vmCurOdo), not shift miles */
       Object.keys(all || {}).forEach(function (id) {
         var v = all[id] || {}; if (String(v.driverId || "") !== me) return;
-        var cur = Number(odo) > 0 ? Number(odo) : (v.odoOverride && Number(v.odoOverride.miles)) || 0; if (!(cur > 0)) return;
+        var cur = Number(vmCurOdo(v)) || 0; if (!(cur > 0)) return;
         [["oil", "Oil change", 25000], ["rot", "Tire rotation", 10000]].forEach(function (k) {
           var s = v[k[0]] || {}; if (!(Number(s.lastMiles) > 0)) return;
           var left = Number(s.lastMiles) + (Number(s.interval) || k[2]) - cur, lvl = left <= 0 ? "red" : left <= 1000 ? "amber" : "";
@@ -4325,6 +4371,128 @@
     }).catch(function () {});
   }
   if (ROLE === "driver") { setTimeout(vmDriverCheck, 15000); setInterval(vmDriverCheck, 30 * 60000); }
+  /* ---------- v2.0f (Matthew 10/24): maintenance log on driver Home, extends rides/VHCLMNTC (no second store) ----------
+     Driver-entered: fluids {date, oil, coolant, brake, trans, ps: OK|Low|Topped off} (+ fluidChecks/{at}),
+     oil {lastMiles, lastDate, interval (driver's own)}, rot {lastMiles, lastDate} (interval fixed 10,000), services/{at}.
+     Math + flags + hard block in vmaint.js (PCSVM), same as Matthew's sheet. A record is mine when schedIdNorm(driverId) == schedIdNorm(me).
+     Driver writes go through the Worker (POST /vmaint/log, ownership-checked), never straight to Firebase.
+     Cached per driver so the block survives a reload with no signal. */
+  /* PENDING MATTHEW (Harry r1 #6): the maintenance block also stops Break / Busy -> Available. true = enforced (default). */
+  var VM_BLOCK_BREAK_TO_ONLINE = true;
+  function vmMineKey(me) { return "pcs-vm-mine-" + (me || driverPresenceId()); }
+  function vmSaveMine(all, me) {
+    if (!all || typeof all !== "object") return; /* fetch failed: keep the cache */
+    var mine = {}; Object.keys(all).forEach(function (id) { var v = all[id]; if (v && typeof v === "object" && schedIdNorm(v.driverId) && schedIdNorm(v.driverId) === schedIdNorm(me)) mine[id] = v; /* Harry r1 #5 */ });
+    var before = JSON.stringify(state.vmMine || null), now = JSON.stringify(mine);
+    state.vmMine = mine; state.vmLoaded = true; try { localStorage.setItem(vmMineKey(me), now); } catch (e) {}
+    if (before !== now) { try { render(); } catch (e) {} }
+  }
+  function vmMine() {
+    if (state.vmMine) return state.vmMine;
+    try { var c = JSON.parse(localStorage.getItem(vmMineKey()) || "null"); if (c && typeof c === "object") { state.vmMine = c; return c; } } catch (e) {}
+    return {};
+  }
+  function vmDvirAll() { var a = {}, h = {}; try { a = dlRec("dvir") || {}; } catch (e) {} try { h = hosReadHist().dvir || {}; } catch (e) {} var o = {};
+    Object.keys(h).concat(Object.keys(a)).forEach(function (d) { var x = Object.assign({}, h[d] || {}, a[d] || {}); x.earlier = Object.assign({}, (h[d] || {}).earlier || {}, (a[d] || {}).earlier || {}); o[d] = x; }); return o; }
+  function vmInsp(v) { return window.PCSVM && window.PCSVM.fromInspection ? window.PCSVM.fromInspection(vmDvirAll(), (v && v.plate) || "", Date.now(), v && v.odoAccept) /* v2.0i: one per-plate rule */ : null; }
+  function vmCurOdo(v) { /* v2.0g (Matthew 10/24): current miles = the odometer on the driver's latest inspection form (driver-entered; never GPS / shift miles) */ var i = vmInsp(v); return i ? i.cur : null; }
+  function vmCalcMine() { var M = window.PCSVM, m = vmMine(), out = []; if (!M) return out;
+    Object.keys(m).sort().forEach(function (id) { var v = m[id] || {}; out.push({ id: id, v: v, c: M.compute(v, vmCurOdo(v), Date.now()) }); }); return out; }
+  function vmBlocksNow() { if (ROLE !== "driver") return []; var b = [];
+    var nr = window.PCSVM ? window.PCSVM.noRecordBlocks(state.vmLoaded ? vmCalcMine().length : null) : []; if (nr.length) return nr; /* r2: NO_RECORD_BLOCKS (vmaint.js L15) */ vmCalcMine().forEach(function (x) { x.c.blocks.forEach(function (k) { b.push(Object.assign({ id: x.id, car: vmCarName(x.v) }, k)); }); }); return b; }
+  function vmBlockMsg() { return "Maintenance block: " + vmBlocksNow().map(function (b) { return b.why; }).join(" ") + " Open Maintenance log on Home."; }
+  function vmRefresh() { try { var p = vmDriverCheck(); return p && p.then ? p.catch(function () {}) : Promise.resolve(); } catch (e) { return Promise.resolve(); } }
+  function vmCarName(v) { return [v.year, v.make, v.model].filter(Boolean).join(" ") || "Your vehicle"; }
+  var VMD_COL = { green: "#3fae5a", yellow: "#f0b429", red: "#e5534b", unknown: "#8a9a8a" };
+  function vmFmt(n) { return n == null || !isFinite(n) ? "\u2014" : Math.round(n).toLocaleString("en-US"); }
+  function vmFmtYmd(s) { if (!s) return "\u2014"; var p = s.split("-"); return new Date(Date.UTC(+p[0], +p[1] - 1, +p[2], 18)).toLocaleDateString("en-US", { timeZone: "UTC", month: "short", day: "numeric", year: "numeric" }); }
+  function vmLeftText(c) { if (c.status === "unknown") return c.last > 0 ? "logged; no inspection odometer for this plate yet" : "not logged yet"; /* v2.0i: never "not logged" when it is */ return c.left <= 0 ? vmFmt(-c.left) + " mi OVERDUE" : vmFmt(c.left) + " mi left"; }
+  function vmProjText(c) { return c.projected ? "projected ~" + vmFmtYmd(c.projected) : ""; }
+  function vmHomeCard() {
+    if (ROLE !== "driver" || !signedIn() || driverMidRide()) return "";
+    var rows = vmCalcMine(), blocks = vmBlocksNow();
+    if (!rows.length) return state.vmLoaded ? '<div class="card" id="vm-home" style="padding:8px 12px"><p class="fine" style="margin:0">\uD83D\uDD27 Maintenance log: no vehicle on file for you. Ask God mode to add it.</p>' + (blocks.length ? '<div id="vm-block" role="alert" style="background:#e5534b;color:#1a0505;border-radius:10px;padding:8px 10px;margin:6px 0 0;font-weight:700">\u26D4 You can\u2019t go online: ' + esc(blocks[0].why) + "</div>" : "") + "</div>" : "";
+    var h = '<div class="card" id="vm-home" style="padding:8px 12px">';
+    if (blocks.length) h += '<div id="vm-block" role="alert" style="background:#e5534b;color:#1a0505;border-radius:10px;padding:8px 10px;margin:0 0 8px;font-weight:700">\u26D4 You can\u2019t go online: ' + blocks.map(function (b) { return esc(b.why); }).join(" ") + "</div>";
+    rows.forEach(function (x) {
+      var line = function (lbl, c) { return '<span style="display:inline-block;margin-right:12px"><span style="display:inline-block;width:10px;height:10px;border-radius:5px;background:' + VMD_COL[c.status] + ';margin-right:4px"></span><b>' + lbl + "</b> " + esc(vmLeftText(c)) + (vmProjText(c) ? ' <span class="fine">(' + esc(vmProjText(c)) + ")</span>" : "") + "</span>"; };
+      h += '<p class="fine" style="margin:2px 0">\uD83D\uDD27 <b>' + esc(vmCarName(x.v)) + "</b><br>" + line("Oil", x.c.oil) + line("Tires", x.c.rot) + "<br>" + vmLastLine("Last oil change", x.c.oil) + "<br>" + vmLastLine("Last tire rotation", x.c.rot) + "</p>";
+    });
+    return h + '<button type="button" class="btn ghost" data-vmd="open" style="width:auto;min-height:0;padding:4px 12px;margin:4px 0 0">Maintenance log</button></div>';
+  }
+  function vmLastLine(lbl, c) { return "<b>" + lbl + ":</b> " + (c.lastDate ? esc(vmFmtYmd(c.lastDate)) : "date not logged") + " at " + (c.last > 0 ? vmFmt(c.last) + " mi" : "\u2014"); }
+  function vmInspHtml(i) { if (!i) return '<p class="fine" style="margin:6px 0">From inspection: no inspection with an odometer yet. Current miles come from your latest pre-/post-trip inspection.</p>';
+    var t = i.tires || {};
+    return '<p class="fine" style="margin:6px 0">From your latest ' + esc(i.src) + " (" + esc(vmFmtYmd(i.date)) + "): odometer <b>" + vmFmt(i.cur) + " mi</b>" + (t.tread || t.pressure || t.damage ? " \u00b7 tires: tread " + esc(t.tread || "\u2014") + ", pressure " + esc(t.pressure || "\u2014") + ", damage " + esc(t.damage || "\u2014") : "") + "</p>" +
+      (i.warn ? '<p role="status" style="background:#f0b429;color:#0b1f0b;border-radius:8px;padding:6px 8px;font-weight:700;margin:6px 0">\u26A0 ' + esc(i.warn) + " (warning only)</p>" : ""); }
+  function vmSvcHtml(label, kind, c, id, v) {
+    var M = window.PCSVM, w = c.status === "red" ? "OVERDUE" : c.status === "yellow" ? "GETTING CLOSE" : c.status === "green" ? "OK" : "NOT LOGGED";
+    var row = 'display:flex;flex-wrap:nowrap;align-items:center;gap:6px;margin-top:4px', btn = 'class="btn ghost" style="flex:none;width:auto;min-height:0;margin:0;padding:4px 10px"';
+    return '<div style="border-left:6px solid ' + VMD_COL[c.status] + ';padding-left:10px;margin:10px 0"><div style="display:flex;flex-wrap:nowrap;align-items:center;gap:6px"><b style="white-space:nowrap">' + label + '</b><span style="flex:none;white-space:nowrap;background:' + VMD_COL[c.status] + ';color:#0b1f0b;border-radius:10px;padding:1px 8px;font-weight:800;font-size:11px">' + w + "</span></div>" +
+      '<div><b>Last ' + (kind === "oil" ? "oil change" : "tire rotation") + ":</b> " + (c.lastDate ? esc(vmFmtYmd(c.lastDate)) : "date not logged") + " at <b>" + vmFmt(c.last) + ' mi</b></div><div class="fine">Every ' + vmFmt(c.interval) + " mi" + (kind === "rot" ? " (fixed)" : "") + " \u00b7 due at " + vmFmt(c.due) + " mi</div>" +
+      '<div class="fine">Current ' + vmFmt(c.cur) + " mi (latest inspection odometer) \u00b7 miles left <b>" + vmFmt(c.left) + "</b> \u00b7 avg " + vmFmt(c.avg) + " mi/day over " + vmFmt(c.daysSince) + " days</div>" +
+      '<div class="fine">Days until ' + (c.daysUntil == null ? "\u2014" : c.daysUntil <= 0 ? "now" : vmFmt(Math.floor(c.daysUntil))) + " \u00b7 projected date <b>" + esc(c.projected ? vmFmtYmd(c.projected) : "\u2014") + "</b> (estimate from your average, not a fixed date)</div>" +
+      '<form data-vmd-form="' + kind + '" data-vmd-id="' + esc(id) + '" style="margin-top:6px"><div class="fine">Log ' + (kind === "oil" ? "oil change" : "rotation and balance") + ':</div><div style="' + row + '">' +
+      '<input name="date" type="date" value="' + esc(M.ctToday()) + '" style="flex:1 1 0;min-width:0;width:auto;margin:0"><input name="odo" inputmode="numeric" placeholder="odometer" value="' + (c.cur > 0 ? esc(String(c.cur)) : "") + '" style="flex:0 0 6.5em;width:6.5em;min-width:0;margin:0"><button type="submit" ' + btn + '>Save</button></div></form>' +
+      (kind === "oil" ? '<form data-vmd-form="int" data-vmd-id="' + esc(id) + '" style="margin-top:4px"><div style="' + row + '"><span class="fine" style="white-space:nowrap">My oil interval (mi):</span><input name="int" inputmode="numeric" value="' + esc(String(M.oilInterval(v))) + '" style="flex:0 0 6em;width:6em;min-width:0;margin:0"><button type="submit" ' + btn + '>Save</button></div></form>' : "") + "</div>";
+  }
+  function vmFluidsHtml(id, v) { /* Harry r1: compact 2-column grid, short labels, each select starts at the last saved level */
+    var M = window.PCSVM, f = v.fluids || {}, ins = vmInsp(v), pre = {}; /* v2.0g: oil / coolant prefilled from a newer inspection */
+    if (ins && (!f.date || ins.date >= f.date)) Object.keys(ins.fluids || {}).forEach(function (k) { if (ins.fluids[k]) pre[k] = ins.fluids[k]; });
+    f = Object.assign({}, f, pre);
+    return '<div style="margin:10px 0"><b>Fluid check</b> <span class="fine">last: ' + esc(f.date ? vmFmtYmd(f.date) : "never") + "</span>" +
+      '<form data-vmd-form="fluids" data-vmd-id="' + esc(id) + '"><input name="date" type="date" value="' + esc(M.ctToday()) + '" style="width:9.5em;margin:4px 0">' +
+      '<div style="display:grid;grid-template-columns:1fr 1fr;gap:6px 10px;margin:4px 0">' +
+      M.FLUIDS.map(function (fl) { var cur = M.LEVELS.indexOf(f[fl[0]]) >= 0 ? f[fl[0]] : "";
+        return '<label style="display:flex;align-items:center;gap:6px;margin:0;min-width:0"><span class="fine" style="flex:0 0 4.2em;white-space:nowrap">' + fl[2] + '</span><select name="' + fl[0] + '" style="flex:1 1 0;min-width:0;width:auto;min-height:0;margin:0;padding:4px 6px;font-size:14px">' +
+          (cur ? "" : '<option value="">\u2014</option>') + M.LEVELS.map(function (l) { return "<option" + (l === cur ? " selected" : "") + ">" + l + "</option>"; }).join("") + "</select></label>"; }).join("") + "</div>" +
+      '<button type="submit" class="btn ghost" style="width:auto;min-height:0;padding:4px 10px">Save fluid check</button></form></div>';
+  }
+  function vmSheetHtml() {
+    var rows = vmCalcMine();
+    return '<div style="max-width:640px;margin:0 auto"><p style="text-align:right"><button type="button" class="btn ghost" data-vmd="close" style="width:auto;min-height:44px">Close</button></p><h2 style="margin:4px 0">Maintenance log</h2>' +
+      '<p class="fine" id="vm-sheet-msg" role="status">' + esc(state.vmMsg || "") + "</p>" +
+      rows.map(function (x) { return '<div class="card" style="padding:10px 12px"><h3 style="margin:0">' + esc(vmCarName(x.v)) + (x.v.plate ? ' <span class="fine">\u00b7 ' + esc(x.v.plate) + "</span>" : "") + "</h3>" + vmInspHtml(vmInsp(x.v)) +
+        x.c.blocks.map(function (b) { return '<p role="alert" style="background:#e5534b;color:#1a0505;border-radius:8px;padding:6px 8px;font-weight:700">\u26D4 ' + esc(b.why) + "</p>"; }).join("") +
+        vmFluidsHtml(x.id, x.v) + vmSvcHtml("Oil change", "oil", x.c.oil, x.id, x.v) + vmSvcHtml("Tire rotation and balance", "rot", x.c.rot, x.id, x.v) + "</div>"; }).join("") + "</div>";
+  }
+  function vmSheetPaint() { var ov = document.getElementById("vm-sheet"); if (ov) ov.innerHTML = vmSheetHtml(); }
+  function vmSheetOpen() {
+    var ov = document.getElementById("vm-sheet"); if (!ov) { ov = document.createElement("div"); ov.id = "vm-sheet";
+      ov.style.cssText = "position:fixed;inset:0;z-index:9500;background:#0b1f0b;color:#eef5ee;overflow:auto;padding:max(40px, calc(12px + env(safe-area-inset-top))) 14px 60px;-webkit-overflow-scrolling:touch"; document.body.appendChild(ov); }
+    state.vmMsg = ""; vmSheetPaint();
+  }
+  function vmPatch(id, kind, fd) { /* Harry r1 #3: through the Worker (ownership-checked), not straight to Firebase */
+    var tk = ""; try { tk = qToken(); } catch (e) {} if (!tk) return Promise.reject(new Error("Log in again to save."));
+    return qWorker("/vmaint/log", { token: tk, id: id, kind: kind, fields: fd })
+      .then(function (d) { if (!d || !d.ok) throw new Error((d && d.error) || "Not saved. Try again."); return vmRefresh(); });
+  }
+  /* pure: the PATCH body for one driver entry (tested); "" err when OK */
+  function vmEntryPatch(kind, id, v, fd, cur, now, who) {
+    var M = window.PCSVM, p = { updatedAt: now };
+    if (kind === "fluids") { var f = { date: fd.date }; M.FLUIDS.forEach(function (x) { f[x[0]] = fd[x[0]] || ""; }); var e = M.checkFluids(f, now); if (e) return { err: e };
+      f.by = who; f.at = now; p.fluids = f; p["fluidChecks/" + now] = f; return { patch: p }; }
+    if (kind === "int") { var n = Number(String(fd.int || "").replace(/[,\s]/g, "")), ie = M.checkInterval(v, n, cur, now); if (ie) return { err: ie }; /* Harry r1 #1 */
+      p["oil/interval"] = n; return { patch: p }; }
+    var odo = Number(String(fd.odo || "").replace(/[,\s]/g, "")), err = M.checkService(v, kind, odo, fd.date, cur, now); if (err) return { err: err };
+    p[kind + "/lastMiles"] = odo; p[kind + "/lastDate"] = fd.date; if (kind === "oil") p["oil/interval"] = M.oilInterval(v); else p["rot/interval"] = M.ROT_INTERVAL;
+    p["services/" + now] = { kind: kind, date: fd.date, miles: odo, by: who, at: now }; p["alerts/" + kind] = null; return { patch: p };
+  }
+  if (typeof document !== "undefined" && ROLE === "driver") {
+    document.addEventListener("click", function (e) { var t = e.target && e.target.closest ? e.target.closest("[data-vmd]") : null; if (!t) return;
+      var k = t.getAttribute("data-vmd");
+      if (k === "open") vmSheetOpen();
+      else if (k === "close") { var ov = document.getElementById("vm-sheet"); if (ov) ov.remove(); try { render(); } catch (er) {} }
+    });
+    document.addEventListener("submit", function (e) { var f = e.target; if (!f || !f.getAttribute || !f.getAttribute("data-vmd-form")) return; e.preventDefault();
+      var kind = f.getAttribute("data-vmd-form"), id = f.getAttribute("data-vmd-id"), v = vmMine()[id] || {}, fd = {};
+      Array.prototype.forEach.call(f.elements, function (el) { if (el.name) fd[el.name] = el.value; });
+      var r = vmEntryPatch(kind, id, v, fd, vmCurOdo(v), Date.now(), "driver: " + ((readDriverAccount() || {}).name || driverPresenceId()));
+      if (r.err) { state.vmMsg = r.err; vmSheetPaint(); return; }
+      state.vmMsg = "Saving\u2026"; vmSheetPaint();
+      vmPatch(id, kind, fd).then(function () { state.vmMsg = "Saved."; vmSheetPaint(); try { render(); } catch (er) {} }).catch(function (er) { state.vmMsg = String(er.message || er); vmSheetPaint(); });
+    });
+  }
 
   function lastKnownOdometer() {
     var best = null, add = function (v) { v = Number(v); if (v > 0 && isFinite(v) && (best == null || v > best)) best = v; };
@@ -16734,6 +16902,7 @@
         : "") +
       approvalGateCard() +
       vehicleNeededCard() +
+      vmHomeCard() + /* v2.0f maintenance log */
       milesStartCard() +
       (gated
         ? ( /* v76a (Matthew 10/17: Offline Home had the scheduled rides but no map): same layout as Available. Metered ride + the
@@ -20524,6 +20693,7 @@
       dvirRefresh().then(function () { if (dvirBlock()) { var bk = dvirBlock(), bl = (bk && bk.blocks || []).map(function (b) { return b.label + (b.why === "photo" ? " (photo waiting for God approval)" : b.why !== "defect" ? " (" + b.why + ")" : ""); }).join(", "); qd.brkMsg = "Unsafe vehicle defect reported" + (bl ? ": " + bl : "") + ". You can\u2019t go Available until God mode clears it." + (bk && bk.rejected ? " God mode rejected the photo: " + bk.rejected.reason + ". Do a new inspection with a new photo." : ""); render(); } else { qd.brkMsg = ""; if (qOffline()) qSetOffline(false); else qSetManualBusy(false); } });
       return;
     }
+    if (t.id === "q-set-available" && VM_BLOCK_BREAK_TO_ONLINE && (qManualBusy() || qOnBreak()) && vmBlocksNow().length) { qd.brkMsg = vmBlockMsg(); render(); return; } /* v2.0f Harry r1 #6 (flag pending Matthew) */
     if (t.id === "q-set-available") { if (qOffline()) { qSetOffline(false); return; } if (qManualBusy() || qOnBreak()) qSetManualBusy(false); return; }
     if (t.id === "q-set-onride") { if (!qManualBusy() || qOnBreak()) qSetManualBusy(true); return; }
     if (t.id === "hos-gap-ok") { qd.gapConfirm = null; render(); return; }
@@ -20586,7 +20756,7 @@
   }
   window.__pcsQueue = {
     state: function () { return { join: qr.join, place: qr.place, inLine: qr.inLine, queued: !!state.qQueued, allBusy: qAllBusy(), ws: qr.ws, order: qd.order, token: !!qToken() }; },
-    dvirBlock: function () { return dvirBlock(); }, manualBusy: function () { return qManualBusy(); }, offline: function () { return qOffline(); }, setOffline: qSetOffline, availFlow: availFlow, preTripDone: function () { return preTripDoneToday(); }, vehBlocks: function () { return vehAvailBlocks(); }, forceCheck: function () { return forceLogoutCheck(); }, endOfDay: function () { return endOfDay(); }, missedDay: function () { return missedPostDay(); }, onBreak: function () { return qOnBreak(); }, autoBreak: function () { return qAutoBreak(); }, autoBrkTick: function (now) { autoBrkTick(now); }, autoBrkState: function () { return { since: autoBrk.since, lat: autoBrk.lat, lng: autoBrk.lng }; }, hosBrkLog: function () { return hosReadBrk(); }, brkMotion: function (mph, now) { brkNoteMotion(mph, now); }, brkReset: function () { brkMotion = { stillSince: 0, fastSince: 0, lastAt: 0 }; }, autoBusy: function () { return qAutoBusy(); }, testLiveRide: function (v) { brkTestLive = v == null ? null : !!v; }, liveRide: function () { return brkLiveRide(); },
+    dvirBlock: function () { return dvirBlock(); }, vmBlocks: function () { return vmBlocksNow(); }, manualBusy: function () { return qManualBusy(); }, offline: function () { return qOffline(); }, setOffline: qSetOffline, availFlow: availFlow, preTripDone: function () { return preTripDoneToday(); }, vehBlocks: function () { return vehAvailBlocks(); }, forceCheck: function () { return forceLogoutCheck(); }, endOfDay: function () { return endOfDay(); }, missedDay: function () { return missedPostDay(); }, onBreak: function () { return qOnBreak(); }, autoBreak: function () { return qAutoBreak(); }, autoBrkTick: function (now) { autoBrkTick(now); }, autoBrkState: function () { return { since: autoBrk.since, lat: autoBrk.lat, lng: autoBrk.lng }; }, hosBrkLog: function () { return hosReadBrk(); }, brkMotion: function (mph, now) { brkNoteMotion(mph, now); }, brkReset: function () { brkMotion = { stillSince: 0, fastSince: 0, lastAt: 0 }; }, autoBusy: function () { return qAutoBusy(); }, testLiveRide: function (v) { brkTestLive = v == null ? null : !!v; }, liveRide: function () { return brkLiveRide(); },
     offers: function () { return alertableOpenRides().map(function (r) { return r.code; }); }, poll: function () { qd.pollAt = 0; qDriverPoll(); qRiderPollOnce(); }, setOnRide: qSetManualBusy
   };
 
