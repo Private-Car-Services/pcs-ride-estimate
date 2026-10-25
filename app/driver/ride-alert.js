@@ -592,11 +592,25 @@
     }).catch(function () { return false; });
   }
 
+  /* v2.0j r2 privacy: rides/REQUESTS is no longer anonymously listable; read it through the Worker with this phone's
+     roster / driver token (the Worker adds the DB secret). 404 = older Worker: the old direct read. */
+  function openList() {
+    var direct = function () { return fetch(db() + "/rides/REQUESTS.json").then(function (res) { return res.ok ? res.json() : null; }); };
+    var body = { hub: "REQUESTS" }, rt = ls("pcs-roster-tok"), qt = ls("pcs-driver-qtoken-" + driverId());
+    if (rt) body.rtok = rt;
+    if (qt) body.token = qt;
+    if (!rt && !qt) return direct();
+    return fetch("https://pcs-pay.pcsrides.workers.dev/driver/read", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }).then(function (res) {
+      if (res.status === 404) return direct();
+      return res.json().catch(function () { return {}; }).then(function (d) { return res.ok && d && d.ok ? d.value : null; });
+    });
+  }
+
   function tick() {
     if (!session() || !db() || midRide()) { hide(); return; }
     checkApproved().then(function (ok) {
       if (!ok) { hide(); return; }
-      return fetch(db() + "/rides/REQUESTS.json").then(function (res) { return res.ok ? res.json() : null; }).then(function (data) {
+      return openList().then(function (data) {
         var owner = OWNER.indexOf(session()) !== -1;
         var list = [];
         Object.keys(data && typeof data === "object" ? data : {}).forEach(function (code) {
