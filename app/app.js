@@ -4345,7 +4345,7 @@
   function vmDriverCheck() {
     if (ROLE !== "driver") return;
     var me = ""; try { me = driverPresenceId(); } catch (e) {} if (!me) return;
-    return fetch(databaseURL() + "/rides/VHCLMNTC.json", { cache: "no-store" }).then(function (r) { return r.ok ? r.json() : null; }).then(function (all) {
+    return hubListFetch("VHCLMNTC", databaseURL() + "/rides/VHCLMNTC.json").then(function (r) { return r.ok ? r.json() : null; }).then(function (all) {
       vmSaveMine(all, me); /* v2.0f: maintenance log on Home + hard block */
       var msgs = []; /* v2.0i (Harry r4 #3): heads-up uses the one per-plate inspection rule (vmCurOdo), not shift miles */
       Object.keys(all || {}).forEach(function (id) {
@@ -5552,7 +5552,9 @@
     if (someoneAvailable()) {
       return '<div class="status"><i></i><span>' + esc(onTheWayLabel) + "</span></div>";
     }
-    return unavailableCall();
+    /* v2.0j privacy: riders can't see who is online any more, so before a driver accepts we show a neutral line
+       (never claims who is or is not available). */
+    return '<div class="status"><i></i><span>Finding your driver</span></div>';
   }
 
   function routePoints() {
@@ -9561,7 +9563,7 @@
 
   function listScheduledRides() {
     if (!syncOn()) return Promise.resolve([]);
-    return authFetch(calendarHubUrl()).then(function (res) {
+    return hubListFetch("PCSCALND", calendarHubUrl()).then(function (res) {
       if (res.status === 401 || res.status === 403) {
         var err = new Error("calendar-denied");
         err.denied = true;
@@ -10519,7 +10521,7 @@
     var pk = folPlace(o.pickup); if (pk) out.pickup = pk;
     var dr = folPlace(o.dest); if (dr) out.dest = dr;
     var sx = folStopsOut(o.stops); if (sx) out.stops = sx; /* v76g */
-    if ((live || done) && o.pos) { var p = folPosOut(o.pos, now, live); if (p) out.pos = p; }
+    if (live && o.pos) { var p = folPosOut(o.pos, now, live); if (p) out.pos = p; } /* v2.0j privacy: no car point once the ride is done */
     if (live && o.eta && isFinite(+o.eta.min) && isFinite(+o.eta.miles)) { out.eta = { min: Math.max(0, Math.round(+o.eta.min)), miles: Math.max(0, Math.round(+o.eta.miles * 10) / 10), to: o.eta.to === "dest" ? "dest" : "pickup" }; out.etaAt = now; }
     if (live) { var r = folRoute(o.route); if (r) out.route = r; }
     if (done) out.endedAt = Number(o.endedAt) || now;
@@ -10543,6 +10545,11 @@
   }
   function folWipe(t, why) {
     var now = Date.now();
+    /* v2.0j privacy: stop the fast lane for this token first, and clear the car point again a few seconds later so a fast-lane
+       PATCH already in flight can't put pos back on an ended share (seen live: stopped/cancelled shares still holding pos). */
+    if (fol.live) delete fol.live[t];
+    if (fol.fast) delete fol.fast[t];
+    setTimeout(function () { folWrite(folNodeUrl(t), "PATCH", { pos: null, eta: null, route: null }); }, 4000);
     return folWrite(folNodeUrl(t), "PUT", { v: 1, status: why === "stopped" || why === "cancelled" ? why : "ended", endedAt: now, updatedAt: now });
   }
   function folMapLoad(k, force) {
@@ -10680,6 +10687,7 @@
     if (role === "rider") { /* the rider phone only refreshes what it knows: status + the car point it sees */
       var p = { status: snap.status, updatedAt: now };
       if (snap.pos) p.pos = snap.pos;
+      else if (done) { p.pos = null; p.eta = null; p.route = null; } /* v2.0j privacy: PATCH null deletes the last car point */
       if (snap.endedAt) p.endedAt = snap.endedAt;
       folWrite(folNodeUrl(t), "PATCH", p);
     } else folWrite(folNodeUrl(t), "PUT", snap);
@@ -10701,7 +10709,7 @@
       var m = o[t];
       if (!m || m.wiped || m.endedAt || seen[t] || m.role === "rider" || now - (m.seenAt || m.at || 0) < 120000) return;
       m.endedAt = now; ch = true;
-      folWrite(folNodeUrl(t), "PATCH", { status: m.last === "picked_up" || m.last === "completed" ? "completed" : "ended", endedAt: now, updatedAt: now });
+      folWrite(folNodeUrl(t), "PATCH", { status: m.last === "picked_up" || m.last === "completed" ? "completed" : "ended", endedAt: now, updatedAt: now, pos: null, eta: null, route: null }); /* v2.0j: drop the car point */
     });
     if (ch) folMineSave(o);
   }
@@ -12084,9 +12092,33 @@
     });
   }
 
+  /* v2.0j r2 privacy: the DB rules refuse anonymous LISTING of rides/REQUESTS (and, with the optional file, PCSCALND/VHCLMNTC).
+     A signed-in driver reads the whole hub through the Worker (POST /driver/read with the driver/roster token; the Worker
+     adds the DB secret). No token, or an older Worker (404): the old direct read. Returns a fetch-style response. */
+  function hubListFetch(hub, directUrl) {
+    var body = { hub: hub }, qt = "", rt = "";
+    try { qt = localStorage.getItem("pcs-driver-qtoken-" + driverPresenceId()) || ""; } catch (e) {}
+    try { rt = localStorage.getItem("pcs-roster-tok") || ""; } catch (e) {}
+    if (!qt && !rt) return authFetch(directUrl);
+    if (qt) body.token = qt;
+    if (rt) body.rtok = rt;
+    return fetch(METER_WORKER + "/driver/read", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }).then(function (res) {
+      if (res.status === 404) return authFetch(directUrl);
+      return res.json().catch(function () { return {}; }).then(function (d) {
+        var ok = res.ok && d && d.ok !== false, txt = ok ? JSON.stringify(d.value === undefined ? null : d.value) : "";
+        return { ok: ok, status: ok ? 200 : res.status, text: function () { return Promise.resolve(txt); }, json: function () { return Promise.resolve(ok ? (d.value === undefined ? null : d.value) : null); } };
+      });
+    });
+  }
+  /* v2.0j r2: the rider's booking-clash check asks the Worker yes/no; it never sees other riders' codes. */
+  function riderClashCheck(date, time, code) {
+    return fetch(METER_WORKER + "/rider/clash", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ date: date, time: time, code: code || "" }) })
+      .then(function (res) { return res.ok ? res.json() : null; }).then(function (d) { return !!(d && d.clash); }).catch(function () { return false; });
+  }
+
   function listOpenSummariesRaw() {
     if (!syncOn()) return Promise.resolve([]);
-    return authFetch(openIndexUrl()).then(function (res) {
+    return hubListFetch("REQUESTS", openIndexUrl()).then(function (res) {
       if (!res.ok) return [];
       return res.text().then(function (text) {
         if (!text || text === "null") return [];
@@ -12109,7 +12141,7 @@
 
   function listOpenRides() {
     if (!syncOn()) return Promise.resolve([]);
-    return authFetch(openIndexUrl()).then(function (res) {
+    return hubListFetch("REQUESTS", openIndexUrl()).then(function (res) {
       if (res.status === 401 || res.status === 403) {
         var err = new Error("open-denied");
         err.denied = true;
@@ -12255,32 +12287,14 @@
     return authFetch(driversUrl(driverPresenceId()), { method: "DELETE" }).catch(function () {});
   }
 
+  /* v2.0j privacy (Harry): the rider app no longer lists every online driver (rides/AVLBLDRV/drivers). It reads ONLY the
+     driver assigned to its own ride, by id, and only once that driver has accepted. The database rules refuse the list. */
   function listOnlineDrivers() {
-    if (!syncOn()) return Promise.resolve([]);
-    return authFetch(driversUrl()).then(function (res) {
-      if (res.status === 401 || res.status === 403) {
-        var err = new Error("drivers-denied");
-        err.denied = true;
-        throw err;
-      }
-      if (!res.ok) throw new Error("drivers");
-      return res.text().then(function (text) {
-        if (!text || text === "null") return [];
-        var data;
-        try { data = JSON.parse(text); } catch (e) { return []; }
-        if (!data || typeof data !== "object") return [];
-        var cutoff = Date.now() - 2 * 60 * 1000;
-        var out = [];
-        Object.keys(data).forEach(function (id) {
-          var row = data[id];
-          if (!row || typeof row !== "object") return;
-          if (row.online === false) return;
-          if (Number(row.at || 0) < cutoff) return;
-          row.id = id;
-          out.push(row);
-        });
-        return out;
-      });
+    var id = state.driverId;
+    if (!syncOn() || !id || !driverHasAccepted()) return Promise.resolve([]);
+    return fetchDriverPresence(id).then(function (row) {
+      if (!row || row.online === false || Number(row.at || 0) < Date.now() - 2 * 60 * 1000) return [];
+      return [row];
     });
   }
 
@@ -13308,7 +13322,7 @@
         ? '<div class="status"><i></i><span>Ride complete</span></div>'
         : (started
           ? '<div class="status"><i></i><span>Ride started</span></div>'
-          : waitingStatusBlock(near || state.driverName ? "Driver on the way" : "Drivers are available"))) +
+          : waitingStatusBlock(near || state.driverName ? "Driver on the way" : "Finding your driver"))) +
       driverIdentityLine() +
       driverEtaLine() +
       folRiderHtml() + /* v76b: Follow my ride */
@@ -13353,7 +13367,7 @@
       ? "Booking declined"
       : (st === "pending_owner"
         ? "Waiting for confirmation"
-        : (near ? "Waiting for a driver" : (driversOnlineNow().length ? "Drivers are available" : "Waiting for a driver")));
+        : (near ? "Waiting for a driver" : (driversOnlineNow().length ? "Driver on the way" : "Waiting for a driver")));
     var statusHtml = st === "denied"
       ? '<div class="status"><i></i><span>Booking declined</span></div>'
       : (st === "cancelled"
@@ -18164,24 +18178,11 @@
             requestRide(busyHit ? { conflict: true, conflictReason: "calendar busy" } : null);
             return;
           }
-          listOpenSummariesRaw().then(function (open) {
-            var startMs = pickupInstant().getTime();
-            var endMs = startMs + 60 * 60 * 1000;
-            var clashRow = null;
-            (open || []).some(function (row) {
-              if (!row || rideIsAsap(row)) return false;
-              if (state.code && String(row.code || "") === String(state.code)) return false;
-              var st = String(row.status || "requested").toLowerCase();
-              if (st === "denied" || st === "cancelled" || st === "completed") return false;
-              if (!row.date || !row.time) return false;
-              var other = chicagoWallToMs(row.date, row.time);
-              if (!isFinite(other) || !isFinite(startMs)) return false;
-              if (other < endMs && startMs < other + 60 * 60 * 1000) { clashRow = row; return true; }
-              return false;
-            });
+          /* v2.0j r2: yes/no clash from the Worker; riders no longer list rides/REQUESTS (locked) or see other codes */
+          (state.asap || isAsapValue(state.time) ? Promise.resolve(false) : riderClashCheck(state.date, state.time, state.code)).then(function (clash) {
             var reasons = [];
             if (busyHit) reasons.push("calendar busy");
-            if (clashRow) reasons.push("overlaps booking " + (clashRow.code || "?"));
+            if (clash) reasons.push("overlaps another booking");
             requestRide(reasons.length ? { conflict: true, conflictReason: reasons.join("; ") } : null);
           }).catch(function () {
             requestRide(busyHit ? { conflict: true, conflictReason: "calendar busy" } : null);
@@ -20501,7 +20502,7 @@
         : qAutoBreak() ? "Break (auto, available): you haven\u2019t moved for 10+ minutes, so this counts as break time from when you stopped. You are still Available and ride offers still come in. Moving or accepting a ride ends it."
         : brk ? "On break: your Break clock is running. Ride offers still come in; accepting one ends the break. 30 minutes of break resets your Break clock."
         : (busy
-          ? "Riders see you are online but finishing a ride, and can join the queue. New ride offers are paused. Slide to Available for the next rider in line."
+          ? "Riders see that drivers are busy and can join the queue. New ride offers are paused. Slide to Available for the next rider in line."
           : "Slide to On a ride whenever you are carrying a passenger, so riders can join the queue instead.")) + "</p>" +
       (qd.pubErr ? '<p class="error" id="q-pub-err">' + esc(qd.pubErr) + "</p>" : "") +
       '<div id="q-driver-queue-host">' + qDriverQueueInner() + "</div>" +
@@ -20534,7 +20535,7 @@
 
   /* ---------- rider side ---------- */
   function qAllBusy() { return !!(qr.ws && qr.ws.allBusy); }
-  function qBusyText() { return "Driver online, finishing a ride"; } /* v72u: riders never see "Driver on break" */
+  function qBusyText() { return "Our drivers are busy right now"; } /* v72u: riders never see "Driver on break"; v2.0j: no driver state at all */
   function qOwnerKey(code) { return "pcs-q-owner-" + String(code || ""); }
   function qOwnerSecret(code) { try { return localStorage.getItem(qOwnerKey(code)) || ""; } catch (e) { return ""; } }
   function qMyQueued() {
@@ -20551,14 +20552,12 @@
   }
   function qPromptInner() {
     if (!qAllBusy()) return "";
-    var n = (qr.ws && qr.ws.inLine) || 0;
     var onForm = state.riderView === "book";
     if (onForm && qr.join) {
       return (
         '<div class="card q-prompt q-joined" id="q-prompt">' +
         '<div class="status"><i></i><span>' + esc(qBusyText()) + '</span></div>' +
         '<p class="lede">You\u2019re joining the queue for the next ride. Send your request below (pickup now) to get your place in line.</p>' +
-        (n ? '<p class="fine">' + n + (n === 1 ? " rider is" : " riders are") + " in line now.</p>" : "") +
         '<button class="btn ghost" type="button" id="q-unjoin">Don\u2019t join the queue</button>' +
         "</div>"
       );
@@ -20566,8 +20565,7 @@
     return (
       '<div class="card q-prompt" id="q-prompt">' +
       '<div class="status"><i></i><span>' + esc(qBusyText()) + '</span></div>' +
-      '<p class="lede">Your driver is finishing a ride. Join the queue and you\u2019ll be picked up next.</p>' +
-      (n ? '<p class="fine" id="q-count">' + n + (n === 1 ? " rider is" : " riders are") + " in line now.</p>" : '<p class="fine" id="q-count">No one is in line yet.</p>') +
+      '<p class="lede">Join the queue and you\u2019ll get the next free driver.</p>' +
       '<button class="btn" type="button" id="q-join">Join the queue for the next ride</button>' +
       "</div>"
     );
@@ -20594,7 +20592,7 @@
       '<p class="q-place-big" id="q-place-num">' + (place ? "You\u2019re " + qOrdinal(place) + " in line" : "Getting your place in line\u2026") + "</p>" +
       '<p class="lede">' + esc(st === "pending_owner"
         ? "Private Car Services is confirming your request. Your place in line is saved."
-        : (place === 1 ? "You\u2019re next. The first free driver gets your ride." : "Driver online, finishing a ride. Your place updates as riders ahead of you are picked up.")) + "</p>" +
+        : (place === 1 ? "You\u2019re next. The first free driver gets your ride." : "Your place updates as riders ahead of you are picked up.")) + "</p>" +
       (qr.joinErr ? '<p class="error" id="q-join-err">' + esc(qr.joinErr) + "</p>" : "") +
       leave +
       "</div>"
