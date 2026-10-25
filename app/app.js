@@ -3991,7 +3991,14 @@
       forceDriverLogout(fl); return true;
     }).catch(function () { return false; });
   }
+  /* native: a confirmed Worker auth 401 ends the session through the real logout flow
+     (stops GPS, clears presence, shows login). 403s and network errors never log out. */
+  function driverAuthLost(why) {
+    if (ROLE !== "driver" || !signedIn()) return;
+    forceDriverLogout({ at: Date.now(), reason: why, msg: "Your driver session expired. Log in again to keep driving." });
+  }
   function forceDriverLogout(fl) {
+    try { nativeGpsStop("god-logout"); } catch (e) {} 
     try { noteLogoutAt(Date.now()); } catch (e) {} /* v76d-pretrip: off duty from here */
     try { localStorage.setItem(qOffKey(), "1"); localStorage.removeItem(qBusyKey()); } catch (e) {}
     try { hosTick(Date.now()); } catch (e) {}
@@ -4006,7 +4013,7 @@
     state.hubOpen = false; state.hubView = "menu"; state.meterOpen = false; state.milesNeedStart = true;
     writeSession("");
     try { var a = pcsAuth(); if (a && a.signOut) a.signOut(); } catch (e) {}
-    state.loginError = "God mode logged you out" + (fl.reason ? ": " + fl.reason : "") + ". Log in again when you\u2019re ready.";
+    state.loginError = fl.msg || ("God mode logged you out" + (fl.reason ? ": " + fl.reason : "") + ". Log in again when you\u2019re ready.");
     state.gateStep = ""; state.screen = "home"; state.isTest = false; state.onlineDrivers = []; state.onlineStamp = "";
     render();
   }
@@ -4070,6 +4077,7 @@
     return since;
   }
   function driverLogoutStart(postRec) {
+    try { nativeGpsStop("logout-start"); } catch (e) {} 
     if (ROLE !== "driver" || !signedIn()) { finishLogoutHook(); return; }
     var open = !state.milesNeedStart && !!(todayMilesRow() || readShift());
     var since = currentShiftSince();
@@ -12505,7 +12513,11 @@
     try { return localStorage.getItem(sessionKey()) || ""; } catch (err) { return ""; }
   }
 
+  /* native app: background GPS runs from login to logout (incl. Offline/Break/between rides) */
+  function nativeGpsStop(why) { if (window.PCSNative && window.PCSNative.stop) window.PCSNative.stop(why); }
+  function nativeGpsStart() { if (window.PCSNative && window.PCSNative.start && ROLE === "driver" && signedIn()) window.PCSNative.start(); }
   function writeSession(username) {
+    try { var prevU = localStorage.getItem(sessionKey()) || ""; if (ROLE === "driver" && prevU !== (username || "")) nativeGpsStop(username ? "driver-switch" : "session-cleared"); } catch (e) {}
     try {
       if (username) localStorage.setItem(sessionKey(), username);
       else localStorage.removeItem(sessionKey());
@@ -17453,6 +17465,7 @@
     }
     finishLogoutHook = finishDriverLogout;
     function finishDriverLogout() {
+      try { nativeGpsStop("logout"); } catch (e) {} 
       stopOpenRideAlert();
       try { var dlo = document.getElementById("dl-overlay"); if (dlo) dlo.remove(); } catch (e) {} /* v76h: a login pre-trip left open never stays on top of the login screen */
       state.milesEndFromDvir = false; state.logoutAfterPost = false; state.loginGate = false; state.preGateOpenedAt = 0;
@@ -19781,6 +19794,7 @@
   }
 
   function followGps() {
+    try { nativeGpsStart(); } catch (e) {}
     if (!navigator.geolocation) return;
     if (!state.gpsWatch) {
       state.gpsWatch = navigator.geolocation.watchPosition(onGpsFix, function () {}, {
@@ -20077,6 +20091,7 @@
       }).catch(function (e) {
         if (e.code === "pw_expired") { pwMustSet(email, true); render(); return; } /* v77.1 */
         if (e.status === 403 && e.code !== "pin_changed" && tries < 3) { setTimeout(go, 4000 * tries); return; } /* roster password backfill may land a moment later */
+        if (e.status === 401) { driverAuthLost("session-401"); return; } /* failed token refresh = real logout */
         qd.authErr = e.message || "Couldn't confirm your driver login.";
       });
     };
@@ -20250,7 +20265,7 @@
       qd.pubBusy = false; qd.pubErr = "";
     }).catch(function (e) {
       qd.pubBusy = false; qd.pubErr = e.message || "Couldn't update your status.";
-      if (e.status === 401) { qSetToken(""); qd.lastPub = null; render(); }
+      if (e.status === 401) { qSetToken(""); qd.lastPub = null; driverAuthLost("status-401"); render(); }
     });
   }
   function qSetManualBusy(on) {
@@ -20276,7 +20291,7 @@
     var tok = qToken();
     if (!tok || Date.now() - qd.pollAt < Q_DRIVER_POLL_MS - 200) return;
     qd.pollAt = Date.now();
-    qWorker("/queue/state", { token: tok }).then(function (d) { qd.order = (d.order || []).map(String); qPaintDriver(); }).catch(function (e) { if (e.status === 401) { qSetToken(""); render(); } });
+    qWorker("/queue/state", { token: tok }).then(function (d) { qd.order = (d.order || []).map(String); qPaintDriver(); }).catch(function (e) { if (e.status === 401) { qSetToken(""); driverAuthLost("queue-state-401"); render(); } });
   }
   function qDriverAuthHtml() {
     return '<div id="q-auth"><p class="fine">Confirm your password once to use Available / On a ride on this phone.</p>' +
