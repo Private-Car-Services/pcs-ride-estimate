@@ -8260,7 +8260,7 @@
   function vmDriverName(id) { var r = (state.roster || {})[id] || {}; return r.name || id || ""; }
   function vmFluidLine(v) { /* v2.0f: driver-entered fluid check */
     var f = v.fluids || {}, M = window.PCSVM; if (!f.date || !M) return '<div class="fine">Fluid check: never logged</div>';
-    return '<div class="fine">Fluid check ' + esc(f.date) + ": " + M.FLUIDS.map(function (x) { var l = f[x[0]] || "\u2014"; return esc(x[1]) + " " + (l === "Low" ? '<b style="color:#f0b429">Low</b>' : esc(l)); }).join(" \u00b7 ") + (f.by ? " \u00b7 " + esc(f.by) : "") + "</div>";
+    return '<div class="fine">Fluid check ' + esc(f.date) + ": " + M.FLUIDS.map(function (x) { var l = (M.normLevel ? M.normLevel(f[x[0]]) : f[x[0]]) || "\u2014"; /* v2.0k r2 */ return esc(x[1]) + " " + (l === "Low" ? '<b style="color:#f0b429">Low</b>' : esc(l)); }).join(" \u00b7 ") + (f.by ? " \u00b7 " + esc(f.by) : "") + "</div>";
   }
   function vmListHtml() {
     var ids = Object.keys(vm.list || {}).sort(function (a, b) { return vmName(vm.list[a]).localeCompare(vmName(vm.list[b])); });

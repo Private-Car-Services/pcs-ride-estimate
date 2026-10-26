@@ -563,13 +563,14 @@
   function hrFixPast(m, day, total) { var r = m && m[day]; if (!r || !(r.mins > 0) || r.open) return false; var rt = hrRateOf(total, r.mins);
     if (r.rate === rt && r.sum === total) return false; m[day] = Object.assign({}, r, { rate: rt, sum: total }); return true; }
   function dayTotal(day) { var s = 0; Object.keys((D && D.entries) || {}).forEach(function (k) { var e = D.entries[k]; if (e && e.date === day && e.line !== "exp" && e.type !== "adjustment") s += Number(e.amount) || 0; }); return Math.round(s * 100) / 100; }
+  function pdWk(d) { var m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(d || "")); if (!m) return ""; return ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][new Date(Date.UTC(+m[1], +m[2] - 1, +m[3])).getUTCDay()]; } /* v2.0l item 6: day of the week */
   function pastDaysHtml(t) { var hr = (D && D.dayHrs) || {}, days = {}; Object.keys(hr).forEach(function (d) { if (d < t) days[d] = 1; });
     Object.keys((D && D.entries) || {}).forEach(function (k) { var d = String(D.entries[k].date || ""); if (d < t && d >= addDays(t, -7)) days[d] = 1; });
     var list = Object.keys(days).sort().reverse().slice(0, 7); if (!list.length) return "";
     var fixed = false; list.forEach(function (d) { if (hrFixPast(hr, d, dayTotal(d))) fixed = true; }); /* v77.18: save the corrected rate once */
     if (fixed && D) { try { var sp = save(); if (sp && sp.catch) sp.catch(function () {}); } catch (e) {} }
     return '<table style="margin-top:8px"><tr class="fine"><th style="text-align:left">Past days</th><th class="r">Daily total</th><th class="r">On shift</th><th class="r">$/hr</th></tr>' + list.map(function (d) { var r = hr[d];
-      return '<tr class="b"><td style="text-align:left">' + esc(fmtD(d)) + '</td><td class="r pos">' + $m(dayTotal(d), true) + '</td><td class="r">' + (r ? Math.floor(r.mins / 60) + "h " + (r.mins % 60) + "m" : "\u2014") + '</td><td class="r pos">' + (r && r.mins > 0 ? "$" + hrRateOf(dayTotal(d), r.mins).toFixed(2) : "\u2014") /* v77.18 */ + "</td></tr>"; }).join("") + "</table>"; }
+      return '<tr class="b"><td style="text-align:left">' + esc(pdWk(d) + " " + fmtD(d)) + '</td><td class="r pos">' + $m(dayTotal(d), true) + '</td><td class="r">' + (r ? Math.floor(r.mins / 60) + "h " + (r.mins % 60) + "m" : "\u2014") + '</td><td class="r pos">' + (r && r.mins > 0 ? "$" + hrRateOf(dayTotal(d), r.mins).toFixed(2) : "\u2014") /* v77.18 */ + "</td></tr>"; }).join("") + "</table>"; }
   function hrPaint() { var el = typeof document !== "undefined" && document.getElementById("gl-hr"); if (el && D) el.innerHTML = hrHtml(today()); }
   if (typeof setInterval === "function") setInterval(hrPaint, 60000);
   if (typeof window !== "undefined") window.__pcsGoalHourly = { hrCalc: hrCalc, hrText: hrText, hrShiftStart: hrShiftStart, hrPrevDay: hrPrevDay, hrSpans: hrSpans, hrDayStartMs: hrDayStartMs, hrRecord: hrRecord, hrNeedSave: hrNeedSave, hrRateOf: hrRateOf, hrFixPast: hrFixPast, pastDaysHtml: function (t) { return pastDaysHtml(t); } };
