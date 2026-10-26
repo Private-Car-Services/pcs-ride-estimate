@@ -8305,7 +8305,7 @@
       '<p><button type="submit" class="btn btn-gold">Save</button> <button type="button" class="btn btn-ghost" data-vm-cancel="1">Cancel</button></p><p class="fine" id="vm-form-err"></p></form>';
   }
   var VM_EXTRA = [["tiresReplaced", "New tires"], ["brakeFront", "Front brakes"], ["brakeRear", "Rear brakes"]];
-  function vmExtraFormHtml(v, f) { return VM_EXTRA.map(function (r) { var s = v[r[0]] || {}; return "<h4>" + r[1] + "</h4>" + f(r[0] + "Miles", "Last " + r[1].toLowerCase() + " miles", s.lastMiles, "number") + f(r[0] + "Date", "Last " + r[1].toLowerCase() + " date", s.lastDate, "date"); }).join(""); }
+  function vmExtraFormHtml(v, f) { return VM_EXTRA.map(function (r) { var s = v[r[0]] || {}; return "<h4>" + r[1] + "</h4>" + f(r[0] + "Miles", "Last " + r[1].toLowerCase() + " miles", s.lastMiles, "number") + f(r[0] + "Date", "Last " + r[1].toLowerCase() + " date", s.lastDate, "date") + f(r[0] + "Int", "Every ___ miles (God only)", s.interval, "number"); }).join(""); }
   function vmNum(x) { x = String(x == null ? "" : x).replace(/[,\s]/g, ""); return x && isFinite(Number(x)) ? Math.round(Number(x)) : null; }
   function vmSave(id, rec) {
     return godFetch(vmUrl(encodeURIComponent(id)), { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(rec) })
@@ -8361,7 +8361,8 @@
       oil: { lastMiles: vmNum(f.oilMiles.value), lastDate: f.oilDate.value || "", interval: vmNum(f.oilInt.value) || 25000 },
       rot: { lastMiles: vmNum(f.rotMiles.value), lastDate: f.rotDate.value || "", interval: 10000 /* v2.0f fixed */ }, updatedAt: now };
     VM_EXTRA.forEach(function (r) { var k = r[0], mi = vmNum(f[k + "Miles"].value), dt = f[k + "Date"].value || "", ol = old[k] || {};
-      if (mi > 0 || dt || ol.lastMiles) { rec[k] = { lastMiles: mi, lastDate: dt }; if (ol.lastNotes) rec[k].lastNotes = ol.lastNotes; if (mi > 0 && mi !== vmNum(ol.lastMiles)) rec["services/" + now + "k" + k] = { kind: k, date: dt, miles: mi, by: godWho(), at: now }; } }); /* v2.0m-b */
+      var iv = vmNum(f[k + "Int"].value); /* v2.0m-c */
+      if (mi > 0 || dt || ol.lastMiles || iv) { rec[k] = { lastMiles: mi, lastDate: dt }; if (iv > 0) rec[k].interval = iv; if (ol.lastNotes) rec[k].lastNotes = ol.lastNotes; if (mi > 0 && mi !== vmNum(ol.lastMiles)) rec["services/" + now + "k" + k] = { kind: k, date: dt, miles: mi, by: godWho(), at: now }; } }); /* v2.0m-b */
     err.textContent = "Saving\u2026";
     vmSave(id, rec).then(function () { vm.editId = ""; vmPaint(); }).catch(function (er) { err.textContent = String(er.message || er); });
   }
