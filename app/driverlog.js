@@ -161,7 +161,7 @@
   var DVIR = [
     ch("lowbeam", "Low beam", WK, "Headlights", { block: true }), ch("highbeam", "High beam", WK, "Headlights", { block: true }),
     ch("turn", "Turn signals and hazards", WK, "", { block: true }), ch("brakelights", "Brake lights", WK, "", { block: true }), ch("taillights", "Taillights", WK), ch("brakes", "Brakes", WK, "", { block: true }), ch("brakenoise", "Do the wheels make a scratching or grinding noise while driving at low speeds?", YN_YESBAD, "", { sub: true, noPhoto: true, noCamera: true, warn: "A brake job may be necessary before continuing operation." }), /* v74: flag + warning; blocking OFF until Matthew decides (God editor toggle) */ ch("ebrake", "Emergency / parking brake", WK, "", { block: true }),
-    ch("oil", "Oil", LF, "Fluids", { block: true }), ch("coolant", "Coolant", LF, "Fluids", { block: true }), ch("washer", "Washer fluid", LF, "Fluids", { block: true }), /* block = blocks while the fluids check is overdue; a Low answer only flags */
+    ch("oil", "Engine oil", LF, "Fluids", { block: true }), ch("brakefluid", "Brake fluid", LF, "Fluids", { block: true }), /* v2.0k r2 (Matthew 10/25): fluids = Engine oil + Brake fluid (coolant removed) */ /* block = blocks while the fluids check is overdue; a Low answer only flags */
     ch("tread", "Tread 3/32\u2033 minimum", YN_NOBAD, "Tires"), ch("pressure", "Pressure 32 psi minimum", YN_NOBAD, "Tires"), ch("tiredamage", "Damage", YN_YESBAD, "Tires"),
     ch("belts", "Seat belts", WK),
     ch("wscracks", "Cracks", YN_YESBAD, "Windshield", { block: true, photoApprove: true }), /* v74: blocked until God approves the live photo */
@@ -231,7 +231,11 @@
     var iv = setInterval(tick, 500); tick();
   }
   function fmtDur(sec) { sec = Math.max(0, Math.round(Number(sec) || 0)); return Math.floor(sec / 60) + "m " + ("0" + (sec % 60)).slice(-2) + "s"; }
-  function items(meta) { var c = meta && meta.dvirItems; return (Array.isArray(c) && c.length ? c : DVIR).map(norm1).filter(Boolean); }
+  var FLUID_DROP = { washer: 1, washerfluid: 1, coolant: 1, trans: 1, transmission: 1, ps: 1, powersteering: 1 }; /* v2.0k r2: also dropped from an older God-edited checklist */
+  function items(meta) { var c = meta && meta.dvirItems, out = (Array.isArray(c) && c.length ? c : DVIR).map(norm1).filter(Boolean).filter(function (i) { return !FLUID_DROP[i.k]; });
+    var oi = -1; out.forEach(function (i, n) { if (i.k === "oil") { oi = n; if (i.label === "Oil") i.label = "Engine oil"; } });
+    if (!out.some(function (i) { return i.k === "brakefluid"; })) { var bf = ch("brakefluid", "Brake fluid", LF, "Fluids", { block: true }); if (oi >= 0) out.splice(oi + 1, 0, bf); else out.push(bf); }
+    return out; }
   /* MM/DD/YYYY -> ms at Chicago midnight (null if invalid) */
   function parseMdy(v) { var my = /^(\d{4})-(\d{2})$/.exec(String(v || "").trim()) || (function (z) { return z ? [z[0], z[2], z[1]] : null; })(/^(\d{1,2})\/(\d{4})$/.exec(String(v || "").trim()));
     if (my) { var yy = +my[1], mm = +my[2]; if (mm < 1 || mm > 12) return null; var last = new Date(Date.UTC(yy, mm, 0)).getUTCDate(); return parseMdy(mm + "/" + last + "/" + yy); } /* v75: YYYY-MM / MM/YYYY = end of that month */

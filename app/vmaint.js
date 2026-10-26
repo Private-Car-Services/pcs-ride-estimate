@@ -13,8 +13,11 @@
   var ROT_INTERVAL = 10000, OIL_DEFAULT = 25000, OIL_BLOCK_OVER = 500, ROT_BLOCK_SINCE = 11000, WARN_MI = 1000, WARN_DAYS = 7;
   /* PENDING MATTHEW: a driver with NO maintenance record at all. false = not blocked (default); true = blocked from going online. */
   var NO_RECORD_BLOCKS = false;
-  var FLUIDS = [["oil", "Oil", "Oil"], ["coolant", "Coolant", "Coolant"], ["brake", "Brake", "Brake"], ["trans", "Transmission", "Trans"], ["ps", "Power steering", "P/S"]]; /* [key, long, short label] */
-  var LEVELS = ["OK", "Low", "Topped off"];
+  /* v2.0k r2 (Matthew 10/25): only Oil and Brake fluid, each Full or Low. Old saved coolant / trans / P/S values are ignored;
+     old "OK" / "Topped off" read as Full (normLevel). */
+  var FLUIDS = [["oil", "Engine oil", "Engine oil"], ["brake", "Brake fluid", "Brake fluid"]]; /* spelled out (Matthew) */ /* [key, long, short label] */
+  var LEVELS = ["Full", "Low"];
+  function normLevel(l) { l = String(l == null ? "" : l).trim(); return l === "Low" ? "Low" : (l === "Full" || l === "OK" || l === "Topped off") ? "Full" : ""; }
   function num(x) { if (x == null || x === "") return null; x = Number(String(x).replace(/[,\s]/g, "")); return isFinite(x) ? x : null; }
   function ymdOk(s) { var m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(s || "")); if (!m) return false; var d = new Date(Date.UTC(+m[1], +m[2] - 1, +m[3])); return d.getUTCMonth() === +m[2] - 1 && d.getUTCDate() === +m[3]; }
   function ymdToDay(s) { if (!ymdOk(s)) return null; var p = s.split("-"); return Math.round(Date.UTC(+p[0], +p[1] - 1, +p[2]) / 86400000); }
@@ -36,29 +39,29 @@
   function compute(v, cur, now) {
     v = v || {}; cur = num(cur); var today = ctToday(now);
     var oil = one(v.oil, oilInterval(v), cur, today), rot = one(v.rot, ROT_INTERVAL, cur, today), blocks = [];
-    if (oil.left != null && oil.left < -OIL_BLOCK_OVER) blocks.push({ kind: "oil", why: "Oil change is " + Math.round(-oil.left).toLocaleString("en-US") + " mi past due (limit 500). Log the oil change to go online." });
-    if (!(oil.last > 0)) blocks.push({ kind: "oil", invalid: true, why: "Oil change record is missing a valid last odometer. Log the oil change to go online." });
-    if (!(rot.last > 0)) blocks.push({ kind: "rot", invalid: true, why: "Tire rotation record is missing a valid last odometer. Log the tire rotation and balance to go online." });
-    if (rot.since != null && rot.since > ROT_BLOCK_SINCE) blocks.push({ kind: "rot", why: "Tires are " + Math.round(rot.since).toLocaleString("en-US") + " mi since the last rotation (limit 11,000). Log the tire rotation and balance to go online." });
+    if (oil.left != null && oil.left < -OIL_BLOCK_OVER) blocks.push({ kind: "oil", why: "Your oil change is " + Math.round(-oil.left).toLocaleString("en-US") + " miles late. You need an oil change now! Write it down here, then you can drive." });
+    if (!(oil.last > 0)) blocks.push({ kind: "oil", invalid: true, why: "We don't know the miles at your last oil change. Write it down here, then you can drive." });
+    if (!(rot.last > 0)) blocks.push({ kind: "rot", invalid: true, why: "We don't know the miles at your last tire rotation. Write it down here, then you can drive." });
+    if (rot.since != null && rot.since > ROT_BLOCK_SINCE) blocks.push({ kind: "rot", why: "Your tires went " + Math.round(rot.since).toLocaleString("en-US") + " miles since the last rotation. That is too many. Get the tires rotated now! Write it down here, then you can drive." });
     return { today: today, cur: cur, oil: oil, rot: rot, blocks: blocks, worst: [oil.status, rot.status].indexOf("red") >= 0 ? "red" : [oil.status, rot.status].indexOf("yellow") >= 0 ? "yellow" : "green" };
   }
   /* a new service entry: odometer >= the last one (and not above the current odometer + 50 typo slack); date a real day, not in the future */
   function checkService(v, kind, odo, date, cur, now) {
     var s = (v && v[kind]) || {}, last = num(s.lastMiles), o = num(odo);
-    if (!(o > 0) || Math.round(o) !== o) return "Enter the odometer in whole miles.";
-    if (last > 0 && o < last) return "Odometer must be at least the last " + (kind === "oil" ? "oil change" : "rotation") + " (" + last.toLocaleString("en-US") + ").";
-    if (num(cur) > 0 && o > num(cur) + 50) return "Odometer is above your latest inspection odometer (" + num(cur).toLocaleString("en-US") + ").";
-    if (!ymdOk(date)) return "Enter the date.";
-    if (date > ctToday(now)) return "Date can't be in the future.";
-    if (s.lastDate && ymdOk(s.lastDate) && date < s.lastDate) return "Date is before the last one (" + s.lastDate + ").";
+    if (!(o > 0) || Math.round(o) !== o) return "Type the miles on your car. Use whole numbers.";
+    if (last > 0 && o < last) return "The miles must be the same or more than your last " + ({ oil: "oil change", rot: "tire rotation", tiresReplaced: "new tires", brakePads: "new brake pads", brakeFront: "front brakes", brakeRear: "rear brakes" }[kind] || "one") + " (" + last.toLocaleString("en-US") + ").";
+    if (num(cur) > 0 && o > num(cur) + 50) return "That is more miles than your last pre-trip (" + num(cur).toLocaleString("en-US") + ").";
+    if (!ymdOk(date)) return "Put in the day.";
+    if (date > ctToday(now)) return "That day has not come yet.";
+    if (s.lastDate && ymdOk(s.lastDate) && date < s.lastDate) return "That day is before your last one (" + s.lastDate + ").";
     return "";
   }
   /* driver interval change: 1,000-50,000; an INCREASE is refused while blocked or within 1,000 mi of due (God mode is not limited) */
   function checkInterval(v, n, cur, now) {
-    n = num(n); if (!(n >= 1000 && n <= 50000) || Math.round(n) !== n) return "Oil interval must be 1,000\u201350,000 mi.";
+    n = num(n); if (!(n >= 1000 && n <= 50000) || Math.round(n) !== n) return "Pick a number from 1,000 to 50,000 miles.";
     if (n > oilInterval(v)) { var c = compute(v, cur, now); /* r2: no / NaN current odometer = can't prove it's safe, refused */
-      if (!c.blocks.length && (!(c.cur > 0) || c.oil.left == null)) return "Can't confirm your current odometer yet. Finish a shift with an odometer reading, then raise the interval.";
-      if (c.blocks.length || c.oil.status !== "green") return "You can't raise the oil interval while blocked or when the oil change is due soon (within 1,000 mi or about 7 days). Log the oil change first (God mode can change it)."; } /* v2.0i: same yellow rule as the card (1,000 mi OR 7 days) */
+      if (!c.blocks.length && (!(c.cur > 0) || c.oil.left == null)) return "We don't know your car's miles yet. Do a pre-trip first, then try again.";
+      if (c.blocks.length || c.oil.status !== "green") return "You can't make this bigger now. Your oil change is late or coming soon. Get the oil change first."; } /* v2.0i: same yellow rule as the card (1,000 mi OR 7 days) */
     return "";
   }
   var CUR_SKEW_MS = 600000, CUR_DAYS = 60, CUR_KEEP = 10;
@@ -115,12 +118,12 @@
     rows.forEach(function (x) { if (last && x.odo < last.odo && !acc[x.odo]) { ignored.push({ odo: x.odo, at: x.at, day: x.day, below: last.odo }); return; } prev = last; last = x; });
     if (!last) return null;
     var r = last.r, it = r.items || {}, odo = last.odo, pv = prev ? prev.odo : null;
-    var lvl = function (k) { var a = ans(it[k]); return a === "Full" ? "OK" : a === "Low" ? "Low" : ""; };
+    var lvl = function (k) { return normLevel(ans(it[k])); }; /* v2.0k r2: Full stays Full */
     var lateIgn = ignored.filter(function (g) { return g.at > last.at; });
     var out = { cur: odo, at: last.at, date: last.day, kind: r.kind || "", plate: normPlate(plate), src: (r.kind === "post" ? "post-trip" : "pre-trip") + " inspection", prev: pv,
-      fluids: { oil: lvl("oil"), coolant: lvl("coolant") }, tires: { tread: ans(it.tread), pressure: ans(it.pressure), damage: ans(it.tiredamage) }, warn: "", ignored: lateIgn };
-    if (pv > 0 && odo - pv > JUMP_WARN_MI) out.warn = "Odometer jumped " + Math.round(odo - pv).toLocaleString("en-US") + " mi since the previous inspection (" + pv.toLocaleString("en-US") + "). Check the reading.";
-    if (lateIgn.length) { var g = lateIgn[lateIgn.length - 1]; out.warn = "Your latest inspection odometer (" + g.odo.toLocaleString("en-US") + ") is lower than the accepted reading (" + odo.toLocaleString("en-US") + ") for this plate, so it is not used. If it's right, ask God mode to accept it."; }
+      fluids: { oil: lvl("oil"), brake: lvl("brakefluid") } /* v2.0k r2: from the pre-trip (Engine oil, Brake fluid: Full/Low); coolant no longer tracked */, tires: { tread: ans(it.tread), pressure: ans(it.pressure), damage: ans(it.tiredamage) }, warn: "", ignored: lateIgn };
+    if (pv > 0 && odo - pv > JUMP_WARN_MI) out.warn = "Your miles went up a lot. They went up " + Math.round(odo - pv).toLocaleString("en-US") + " miles since your last pre-trip. Please check the number."; /* warn only, never blocks (Matthew's rule) */
+    if (lateIgn.length) { var g = lateIgn[lateIgn.length - 1]; out.warn = "Your last pre-trip says " + g.odo.toLocaleString("en-US") + " miles. That is less than " + odo.toLocaleString("en-US") + " miles, so we did not use it. If it is right, ask the office to OK it."; }
     return out;
   }
   function inspCur(dvirs, plate, now, accepts) { var i = fromInspection(dvirs, plate, now, accepts); return i ? i.cur : null; }
@@ -128,11 +131,11 @@
   /* r2: the NO_RECORD_BLOCKS rule (L15) as a block check. n = how many records this driver has (null = not loaded yet: no block) */
   function noRecordBlocks(n) { return NO_RECORD_BLOCKS && n === 0 ? [{ id: "", car: "", kind: "none", why: "No maintenance record is on file for your vehicle. Ask God mode to add it." }] : []; }
   function checkFluids(f, now) {
-    if (!f || !ymdOk(f.date)) return "Enter the date.";
-    if (f.date > ctToday(now)) return "Date can't be in the future.";
-    for (var i = 0; i < FLUIDS.length; i++) if (LEVELS.indexOf(f[FLUIDS[i][0]]) < 0) return "Pick a level for " + FLUIDS[i][1] + ".";
+    if (!f || !ymdOk(f.date)) return "Put in the day.";
+    if (f.date > ctToday(now)) return "That day has not come yet.";
+    for (var i = 0; i < FLUIDS.length; i++) if (LEVELS.indexOf(normLevel(f[FLUIDS[i][0]])) < 0) return "Pick Full or Low for " + FLUIDS[i][1] + ".";
     return "";
   }
-  var api = { curFrom: curFrom, fromInspection: fromInspection, inspCur: inspCur, inspRows: inspRows, JUMP_WARN_MI: JUMP_WARN_MI, NO_RECORD_BLOCKS: NO_RECORD_BLOCKS, WARN_DAYS: WARN_DAYS, checkInterval: checkInterval, noRecordBlocks: noRecordBlocks, ROT_INTERVAL: ROT_INTERVAL, OIL_DEFAULT: OIL_DEFAULT, FLUIDS: FLUIDS, LEVELS: LEVELS, compute: compute, oilInterval: oilInterval, checkService: checkService, checkFluids: checkFluids, ctToday: ctToday, ymdOk: ymdOk };
+  var api = { curFrom: curFrom, fromInspection: fromInspection, inspCur: inspCur, inspRows: inspRows, JUMP_WARN_MI: JUMP_WARN_MI, NO_RECORD_BLOCKS: NO_RECORD_BLOCKS, WARN_DAYS: WARN_DAYS, checkInterval: checkInterval, noRecordBlocks: noRecordBlocks, ROT_INTERVAL: ROT_INTERVAL, OIL_DEFAULT: OIL_DEFAULT, FLUIDS: FLUIDS, LEVELS: LEVELS, normLevel: normLevel, compute: compute, oilInterval: oilInterval, checkService: checkService, checkFluids: checkFluids, ctToday: ctToday, ymdOk: ymdOk };
   if (typeof module !== "undefined" && module.exports) module.exports = api; else root.PCSVM = api;
 })(typeof window !== "undefined" ? window : this);
