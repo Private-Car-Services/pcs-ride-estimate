@@ -29,7 +29,7 @@
     var st = document.createElement("style"); st.id = "fl-style";
     st.textContent = "#fl-live{background:#f0fdf4;color:#0b3d23;border:3px solid #2e9d4f;border-radius:16px;padding:12px}" +
       "#fl-live p{color:#0b3d23}.fl-status{display:block;margin:0 0 8px;padding:10px 12px;border-radius:12px;background:#0b6b3a;color:#fff !important;font-size:21px;font-weight:900;text-align:center}" +
-      ".fl-drv{display:flex;align-items:center;gap:10px;background:#0b3d23;color:#f3ead2;border:2px solid #d4b15a;border-radius:14px;padding:6px 10px;margin:0 0 6px}.fl-drv .fl-who,.fl-drv .fl-car{color:#f3ead2}.fl-photo{width:64px;height:64px;border-radius:50%;object-fit:cover;border:3px solid #d4b15a;flex:none;background:#20371d}.fl-drv-t{min-width:0}.fl-drv .fl-plate{color:#0b3d23}" +
+      ".fl-drv{display:flex;align-items:center;gap:10px;background:#0b3d23;color:#f3ead2;border:2px solid #d4b15a;border-radius:14px;padding:6px 10px;margin:0 0 6px}#fl-live .fl-drv .fl-who,#fl-live .fl-drv .fl-car{color:#f3ead2}.fl-photo{width:64px;height:64px;border-radius:50%;object-fit:cover;border:3px solid #d4b15a;flex:none;background:#20371d}.fl-drv-t{min-width:0}.fl-drv .fl-plate{color:#0b3d23}" +
       ".fl-who{font-size:18px;font-weight:800;margin:4px 0}.fl-car{font-size:16px;font-weight:700;margin:2px 0 8px}.fl-plate{display:inline-block;background:#fff;border:2px solid #0b3d23;border-radius:8px;padding:0 8px;margin-left:4px;font-weight:900;letter-spacing:.06em}" +
       "#fl-map{height:62vh;min-height:340px;border-radius:14px;margin:6px 0 10px;border:2px solid #0b3d23}" +
       ".fl-eta{font-size:19px;font-weight:900;text-align:center;margin:6px 0}.fl-row{margin:3px 0;font-size:16px}.fl-row b{display:inline-block;min-width:44px}" +
@@ -73,7 +73,7 @@
   }
   function shell() {
     style();
-    app.innerHTML = '<div class="card" id="fl-live"><p class="fl-status" id="fl-status" role="status" aria-live="polite"></p>' +
+    app.innerHTML = '<div class="card" id="fl-live"><p class="fl-status" id="fl-status" role="status" aria-live="polite"></p><p class="fl-bill" id="fl-bill" hidden style="margin:0 0 8px;padding:6px 10px;border-radius:12px;border:2px solid #0b6b3a;background:#fff;color:#0b3d23;font-size:19px;font-weight:900;text-align:center"></p>' +
       '<div class="fl-drv" id="fl-drv"><img class="fl-photo" id="fl-photo" alt="Your PCS driver" hidden width="64" height="64"><div class="fl-drv-t"><p class="fl-who" id="fl-who"></p><p class="fl-car" id="fl-car"></p></div></div>' +
       '<div class="fl-big" id="fl-big" hidden><div class="fl-spd" id="fl-spd"><b id="fl-mph">--</b><span id="fl-mph-l">mph</span><small id="fl-mph-n"></small></div>' +
       '<div class="fl-arr" id="fl-arr"><span class="k" id="fl-arr-k"></span><b id="fl-arr-t"></b><span id="fl-arr-m"></span><small id="fl-arr-to"></small></div></div>' +
@@ -180,7 +180,7 @@
       S.car = L.marker(car, { icon: L.divIcon({ className: "fl-carico", iconSize: [44, 44], iconAnchor: [22, 22], html: ARROW }), keyboard: false, zIndexOffset: 1000 }).bindTooltip("Your PCS car").addTo(S.map);
       S.carAt = car; S.carDeg = S.brg !== null ? S.brg : 0; carPaint(car, S.carDeg);
     }
-    if (!S.loop) { S.loop = 1; S.lastFrame = Date.now(); (window.requestAnimationFrame || function (f) { return setTimeout(f, 16); })(frame); }
+    if (!S.loop) { S.loop = 1; S.gen = (S.gen || 0) + 1; S.lastFrame = Date.now(); var g = S.gen; (window.requestAnimationFrame || function (f) { return setTimeout(f, 16); })(function () { frame(g); }); } /* v2.0k r2: one generation per loop */
   }
   function ahead(p, deg, mi) { /* point mi miles from p along deg (flat-earth, fine for a few metres) */
     var r = Math.PI / 180, dLat = (mi / 69.0) * Math.cos(deg * r), dLng = (mi / (69.0 * Math.cos(p[0] * r))) * Math.sin(deg * r);
@@ -191,7 +191,8 @@
     var dt = Math.min(DR_MS, Math.max(0, now - S.fix.t)), mph = S.spdLive && S.mph !== null ? S.mph : 0;
     return mph >= 2 && S.brg !== null ? ahead(S.fix.p, S.brg, mph * dt / 3600000) : S.fix.p;
   }
-  function frame() {
+  function frame(g) {
+    if (g !== S.gen) return; /* v2.0k r2 (Harry): a stale loop from before a re-init exits */
     if (!S.car || S.ended) { S.loop = 0; return; }
     var now = Date.now(), dt = Math.min(200, now - (S.lastFrame || now)); S.lastFrame = now;
     var k = 1 - Math.exp(-dt / 250), tg = target(now), at = S.carAt || tg;
@@ -205,7 +206,7 @@
       S.mphShown = S.mphShown == null ? S.mph : S.mphShown + (S.mph - S.mphShown) * k;
       var m = Math.round(S.mphShown); setText("fl-mph", m < 2 ? "0" : String(m)); setText("fl-mph-l", m < 2 ? "mph \u00b7 Stopped" : "mph");
     }
-    (window.requestAnimationFrame || function (f) { return setTimeout(f, 16); })(frame);
+    (window.requestAnimationFrame || function (f) { return setTimeout(f, 16); })(function () { frame(g); });
   }
   function carPaint(at, deg) {
     try { S.car.setLatLng(at); } catch (e) {}
@@ -255,16 +256,21 @@
     if (etaOk) {
       var arr = eAt + Math.max(0, num(e.min)) * 60000, left = Math.max(1, Math.round((arr - now) / 60000)), t = "";
       if (arr < now) arr = now + 60000;
-      try { t = new Date(arr).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }); } catch (x) {}
+      try { t = ctTime(arr); } catch (x) {}
       setText("fl-arr-t", "about " + t);
       setText("fl-arr-m", (soonFired(dest ? "dest" : "pickup") && legOf(d) ? "Arriving shortly" : left + " min") + " \u00b7 " + Math.max(0, num(e.miles)).toFixed(1) + " mi");
     } else { setText("fl-arr-t", "Updating\u2026"); setText("fl-arr-m", soonFired(dest ? "dest" : "pickup") && legOf(d) ? "Arriving shortly" : ""); }
     setText("fl-arr-to", nm);
   }
+  /* v2.0l item 7 (customer report 10/26): times are the ride's time (Central, the driver's zone), never the phone's zone, with "CT". */
+  function ctTime(ms) { try { return new Date(ms).toLocaleTimeString("en-US", { timeZone: "America/Chicago", hour: "numeric", minute: "2-digit" }) + " CT"; } catch (x) { return ""; } }
+  if (typeof window !== "undefined") window.__pcsFollowCtTime = ctTime;
   function update(d) {
     if (!$("fl-live")) shell();
     var now = Date.now();
     setText("fl-status", statusText(d));
+    var bl = $("fl-bill"), bt = d.bill === "invoiced" ? "Invoiced ride" : d.bill === "prepaid" ? "Prepaid ride" : ""; /* v2.0l r3: plain word, no amount */
+    if (bl) { if (bl.textContent !== bt) bl.textContent = bt; bl.hidden = !bt; }
     var who = txt(d.driverFirst, 31);
     setText("fl-who", who ? "Your PCS driver: " + who : "Your PCS driver");
     var car = $("fl-car"), ct = carText(d.car), plate = d.car && typeof d.car === "object" ? txt(d.car.plate, 12) : "";
@@ -276,7 +282,7 @@
     var done = d.status === "completed" || d.status === "cancelled";
     var e = d.eta, etaOk = live && e && num(e.min) !== null && num(e.miles) !== null && (!num(d.etaAt) || now - num(d.etaAt) <= 180000);
     var at = "";
-    if (etaOk) { try { at = new Date(now + Math.max(0, num(e.min)) * 60000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }); } catch (x) {} }
+    if (etaOk) { try { at = ctTime(now + Math.max(0, num(e.min)) * 60000); } catch (x) {} }
     setText("fl-eta", $("fl-big") ? "" : etaOk ? "About " + Math.max(1, Math.round(num(e.min))) + " min \u00b7 " + Math.max(0, num(e.miles)).toFixed(1) + " mi to the " + (e.to === "dest" ? "drop-off" : "pickup") + (at ? " \u00b7 about " + at : "") : "");
     var pk = d.pickup && typeof d.pickup === "object" ? txt(d.pickup.label, 120) : "", dr = d.dest && typeof d.dest === "object" ? txt(d.dest.label, 120) : "";
     setText("fl-from", pk ? "From: " + pk : "");
@@ -406,7 +412,9 @@
     if (S.ended) return;
     if (S.es && S.streamAt && Date.now() - S.streamAt < 40000) { S.timer = setTimeout(poll, 3000); return; } /* stream is live */
     if (document.visibilityState === "hidden") { S.timer = setTimeout(poll, POLL_MS); return; }
-    fetch(DB + "/rides/FLWSHARE/" + token + ".json", { cache: "no-store" }).then(function (r) {
+    S.busy = true; /* v2.0k r2 (Harry): busy until this read has set its next timer; a hung read aborts after 10 s */
+    var ac = typeof window.AbortController === "function" ? new window.AbortController() : null, abT = ac ? setTimeout(function () { try { ac.abort(); } catch (e) {} }, 10000) : 0;
+    fetch(DB + "/rides/FLWSHARE/" + token + ".json", ac ? { cache: "no-store", signal: ac.signal } : { cache: "no-store" }).then(function (r) {
       if (r.status === 401 || r.status === 403) { var e = new Error("denied"); e.denied = true; throw e; }
       if (!r.ok) throw new Error("net");
       return r.json();
@@ -416,7 +424,7 @@
         S.misses += 1;
         if (S.misses >= 60) { message("Follow the ride", "This follow link isn\u2019t active. Ask for a new link, or call PCS.", true); return; }
         if (!$("fl-live")) message("Follow the ride", "Getting the ride ready\u2026");
-        S.timer = setTimeout(poll, POLL_MS); return;
+        clearTimeout(S.timer); S.timer = setTimeout(poll, POLL_MS); return;
       }
       S.misses = 0;
       var why = over(d, now);
@@ -424,18 +432,39 @@
       S.d = d; S.raw = d; update(d);
       if ($("fl-net")) setText("fl-net", "");
       stream();
-      S.timer = setTimeout(poll, POLL_MS);
+      clearTimeout(S.timer); S.timer = setTimeout(poll, POLL_MS);
     }).catch(function (e) {
       if (e && e.denied) { message("Follow the ride", "This follow link can\u2019t be opened right now. Please call PCS.", true); return; }
       if ($("fl-net")) setText("fl-net", "Signal dropped for a moment. This page catches up when you\u2019re back online.");
       else message("Follow the ride", "Loading the ride\u2026 trying again.");
-      S.timer = setTimeout(poll, POLL_MS * 2);
-    });
+      clearTimeout(S.timer); S.timer = setTimeout(poll, POLL_MS * 2);
+    }).then(function () { clearTimeout(abT); S.busy = false; }, function () { clearTimeout(abT); S.busy = false; });
   }
-  document.addEventListener("visibilitychange", function () { if (document.visibilityState === "visible" && !S.ended && !S.timer) poll(); });
+  /* v2.0k: coming back to the page (app switch, Safari/Messages closed, iOS back-forward cache) must bring the map back.
+     Before, only a poll was restarted, and only if no timer was pending (one nearly always was), so a map that iOS had
+     left blank/0-size stayed blank, the dead live stream stayed dead, and nothing re-fit the view. */
+  function resume() {
+    if (document.visibilityState === "hidden" || S.ended) return;
+    var el = $("fl-map");
+    var blank = !el || !S.map || !el.querySelector(".leaflet-tile-pane") || el.clientWidth < 50 || el.clientHeight < 50 || !el.querySelector(".leaflet-tile-pane img");
+    if (el && S.map && blank) { /* re-init: tear the old map down and let update() build a fresh shell + map */
+      try { S.map.remove(); } catch (e) {}
+      S.map = null; S.layers = null; S.car = null; S.loop = 0; S.gen = (S.gen || 0) + 1; /* r2: kills the old loop */
+      var live = $("fl-live"); if (live && live.parentNode) live.parentNode.removeChild(live);
+    } else if (S.map) { try { S.map.invalidateSize(false); } catch (e) {} }
+    S.fitted = false; S.userUntil = 0; /* re-fit the route, then follow the car again */
+    if (S.d) { try { update(S.d); } catch (e) {} }
+    setTimeout(function () { try { if (S.map) S.map.invalidateSize(false); } catch (e) {} }, 300);
+    if (S.es && !(S.streamAt && Date.now() - S.streamAt < 40000)) streamStop();
+    S.noStream = false; S.sErr = 0; /* iOS kills the stream in the background: give it fresh tries */
+    if (!S.busy) { clearTimeout(S.timer); S.timer = 0; poll(); } /* read now instead of waiting on a frozen timer */
+  }
+  document.addEventListener("visibilitychange", resume);
+  window.addEventListener("pageshow", function (ev) { if (ev && ev.persisted) resume(); else if (S.map) try { S.map.invalidateSize(false); } catch (e) {} });
+  window.addEventListener("focus", function () { try { if (S.map) S.map.invalidateSize(false); } catch (e) {} });
   (function qr() { var el = $("fw-qr"); if (!el || typeof window.qrcode !== "function") return; try { var x = window.qrcode(0, "M"); x.addData("https://www.PCSrides.com"); x.make(); el.innerHTML = x.createSvgTag(4, 0); } catch (e) {} })();
   setInterval(function () { if (S.d && !S.ended && $("fl-live")) { try { bigBox(S.d, Date.now(), /^(on_way|arrived|picked_up)$/.test(String(S.d.status))); } catch (e) {} } }, 15000);
-  window.__pcsFollowLive = { setPath: setPath, update: update, track: track, state: S, over: over, statusText: statusText,
+  window.__pcsFollowLive = { resume: resume, setPath: setPath, update: update, track: track, state: S, over: over, statusText: statusText,
     stopsOf: stopsOf, nextTarget: nextTarget, soonDue: soonDue, soonText: SOON_TEXT };
   poll();
 })();

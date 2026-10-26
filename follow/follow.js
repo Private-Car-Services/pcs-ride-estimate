@@ -64,7 +64,7 @@
     setText("fw-stops", (d.stops || []).length ? "Stops: " + d.stops.map(function (s) { return s.label || "on the map"; }).join(" \u2192 ") : "");
     setText("fw-to", d.dest ? "To: " + (d.dest.label || "destination on the map") : "");
     var e = d.eta, at = "";
-    if (e) { try { at = new Date(Date.now() + e.min * 60000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }); } catch (x) {} }
+    if (e) { try { at = new Date(Date.now() + e.min * 60000).toLocaleTimeString("en-US", { timeZone: "America/Chicago", hour: "numeric", minute: "2-digit" }) + " CT" /* v2.0l item 7 */; } catch (x) {} }
     setText("fw-eta", e ? "About " + Math.max(1, e.min) + " min · " + Number(e.miles).toFixed(1) + " mi left" + (at ? " · arrive about " + at : "") : "");
     var age = d.at ? Math.round((Date.now() + S.off - d.at) / 1000) : -1;
     setText("fw-updated", age < 0 ? "Waiting for the first update from the car…" : age <= 15 ? "Live · updated just now" : "Last update " + (age < 60 ? age + " s" : Math.floor(age / 60) + " min") + " ago");
