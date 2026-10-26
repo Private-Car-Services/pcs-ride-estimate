@@ -136,6 +136,27 @@
     for (var i = 0; i < FLUIDS.length; i++) if (LEVELS.indexOf(normLevel(f[FLUIDS[i][0]])) < 0) return "Pick Full or Low for " + FLUIDS[i][1] + ".";
     return "";
   }
-  var api = { curFrom: curFrom, fromInspection: fromInspection, inspCur: inspCur, inspRows: inspRows, JUMP_WARN_MI: JUMP_WARN_MI, NO_RECORD_BLOCKS: NO_RECORD_BLOCKS, WARN_DAYS: WARN_DAYS, checkInterval: checkInterval, noRecordBlocks: noRecordBlocks, ROT_INTERVAL: ROT_INTERVAL, OIL_DEFAULT: OIL_DEFAULT, FLUIDS: FLUIDS, LEVELS: LEVELS, normLevel: normLevel, compute: compute, oilInterval: oilInterval, checkService: checkService, checkFluids: checkFluids, ctToday: ctToday, ymdOk: ymdOk };
+  /* v2.0m-c (Matthew 3:43-3:44 PM): "Where is the 'due' section" / "how many miles are left until due". One Due cell per log row:
+     due miles, miles left, projected day (same math as the next-oil line). Interval: oil = God/driver oil interval, rotation =
+     fixed 10,000, other rows = the God-only "Every ___ miles" field (no field = "Set in God mode"). */
+  var DUE_MAX_INT = 300000;
+  function rowInterval(v, kind) { if (kind === "oil") return oilInterval(v); if (kind === "rot") return ROT_INTERVAL;
+    var i = num(v && v[kind] && v[kind].interval); return i && i >= 500 && i <= DUE_MAX_INT ? Math.round(i) : null; }
+  function dueOf(v, kind, cur, now) {
+    var s = (v && v[kind]) || {}; if (!(num(s.lastMiles) > 0)) return { state: "nolog" };
+    var iv = rowInterval(v, kind); if (!iv) return { state: "noint" };
+    var o = one(s, iv, num(cur), ctToday(now)), cap = dayToYmd(Math.round((now || Date.now()) / 86400000) + 366);
+    return { state: o.left != null && o.left <= 0 ? "over" : "ok", due: o.due, left: o.left, projected: o.projected && o.projected <= cap ? o.projected : "" };
+  }
+  function fmtN(n) { return Math.round(n).toLocaleString("en-US"); }
+  function fmtDay(y) { var p = y.split("-"); return new Date(Date.UTC(+p[0], +p[1] - 1, +p[2], 18)).toLocaleDateString("en-US", { timeZone: "UTC", month: "short", day: "numeric", year: "numeric" }); }
+  function dueHtml(d) {
+    if (d.state === "nolog") return '<span data-due="nolog">Not logged yet</span>';
+    if (d.state === "noint") return '<span data-due="noint">Set in God mode</span>';
+    /* v2.0m-c (Harry 5:08 PM): at most two short lines */
+    if (d.state === "over") return '<span data-due="over" style="display:inline-block;background:#e5534b;color:#fff;border-radius:6px;padding:1px 6px;font-weight:800;white-space:nowrap">Due now \u00b7 ' + fmtN(-d.left) + " over</span>";
+    return '<span data-due="ok" style="white-space:nowrap">' + fmtN(d.due) + " mi" + (d.left != null ? " \u00b7 " + fmtN(d.left) + " left" : "") + (d.projected ? "<br>about " + fmtDay(d.projected) : "") + "</span>";
+  }
+  var api = { dueOf: dueOf, dueHtml: dueHtml, rowInterval: rowInterval, curFrom: curFrom, fromInspection: fromInspection, inspCur: inspCur, inspRows: inspRows, JUMP_WARN_MI: JUMP_WARN_MI, NO_RECORD_BLOCKS: NO_RECORD_BLOCKS, WARN_DAYS: WARN_DAYS, checkInterval: checkInterval, noRecordBlocks: noRecordBlocks, ROT_INTERVAL: ROT_INTERVAL, OIL_DEFAULT: OIL_DEFAULT, FLUIDS: FLUIDS, LEVELS: LEVELS, normLevel: normLevel, compute: compute, oilInterval: oilInterval, checkService: checkService, checkFluids: checkFluids, ctToday: ctToday, ymdOk: ymdOk };
   if (typeof module !== "undefined" && module.exports) module.exports = api; else root.PCSVM = api;
 })(typeof window !== "undefined" ? window : this);

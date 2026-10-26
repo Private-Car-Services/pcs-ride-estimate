@@ -4441,9 +4441,10 @@
   function vmHubLogButton() {
     if (ROLE !== "driver" || !signedIn()) return "";
     if (!state.vmLoaded && !state.vmAsked) { state.vmAsked = true; setTimeout(vmRefresh, 0); }
-    var open = !!state.vmHubOpen, blocks = open ? [] : vmBlocksNow();
-    return '<button class="btn secondary" type="button" id="hub-maint" aria-expanded="' + (open ? "true" : "false") + '">' + "Maintenance log" + "</button>" +
-      (open ? vmHubCard() : blocks.length ? '<div id="vm-block" role="alert" style="background:#e5534b;color:#1a0505;border-radius:10px;padding:8px 10px;margin:6px 0;font-weight:700">\u26D4 You can\u2019t go online. Your car needs service. Call Matthew.</div>' : "");
+    /* v2.0m-c (Matthew 4:55 PM): the button opens its own page (hubView "maint"); no table under it here */
+    var blocks = vmBlocksNow();
+    return '<button class="btn secondary" type="button" id="hub-maint">' + "Maintenance log" + "</button>" +
+      (blocks.length ? '<div id="vm-block" role="alert" style="background:#e5534b;color:#1a0505;border-radius:10px;padding:8px 10px;margin:6px 0;font-weight:700">\u26D4 You can\u2019t go online. Your car needs service. Call Matthew.</div>' : "");
   }
   function vmLastLine(lbl, c) { return "<b>" + lbl + ":</b> " + (c.lastDate ? esc(vmFmtYmd(c.lastDate)) : "date not logged") + " at " + (c.last > 0 ? vmFmt(c.last) + " mi" : "\u2014"); }
   function vmInspHtml(i) { if (!i) return '<p class="fine" style="margin:6px 0">From inspection: no inspection with an odometer yet. Current miles come from your latest pre-/post-trip inspection.</p>';
@@ -4486,9 +4487,9 @@
   /* v2.0l: the Home page log. A small table: Service | Last day | Miles | Notes, an Add button on each row, tap a row to see the ones before. */
   function vmLogTableHtml(x) {
     var v = x.v;
-    return '<table class="vm-log" data-vm-log style="width:100%;table-layout:auto;border-collapse:collapse;font-size:14px;margin:4px 0"><tr class="fine"><th style="text-align:left">Service</th><th style="text-align:left">Last day</th><th style="text-align:right">Miles</th><th style="text-align:left;padding-left:8px">Notes</th><th></th></tr>' +
+    return '<table class="vm-log" data-vm-log style="width:100%;table-layout:auto;border-collapse:collapse;font-size:13px;margin:4px 0"><tr class="fine"><th style="text-align:left">Service</th><th style="text-align:left;padding-left:4px">Last day</th><th style="text-align:right;padding-left:4px">Miles</th><th style="text-align:left;padding-left:6px">Due</th><th style="text-align:left;padding-left:4px;font-size:11px">Notes</th></tr>' + /* v2.0m-c: Due column; Harry 5:08 PM: Due widest, Last day / Miles / Notes tight */
       VM_ROWS.map(function (r) { var s = v[r[0]] || {}, has = Number(s.lastMiles) > 0;
-        return '<tr data-vm-home-row="' + r[0] + '" style="border-top:1px solid rgba(255,255,255,.15)"><td style="padding:6px 4px 6px 0"><b>' + r[1] + '</b></td><td>' + (has && s.lastDate ? esc(vmFmtYmd(s.lastDate)) : has ? "Day not written down" : "Not logged yet") + '</td><td style="text-align:right">' + (has ? vmFmt(s.lastMiles) : "") + '</td><td style="padding-left:8px;max-width:0;width:30%;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" class="vm-log-note" title="' + esc(vmNotes(s.lastNotes)) + '">' + esc(vmNotes(s.lastNotes)) + '</td></tr>'; }).join("") + "</table>";
+        return '<tr data-vm-home-row="' + r[0] + '" style="border-top:1px solid rgba(255,255,255,.15)"><td style="padding:6px 4px 6px 0"><b>' + r[1] + '</b></td><td style="padding-left:4px;font-size:11px;white-space:' + (has && s.lastDate ? "nowrap" : "normal") + '">' + (has && s.lastDate ? esc(vmFmtYmd(s.lastDate)) : has ? "Day not written down" : "Not logged yet") + '</td><td style="text-align:right;padding-left:4px;font-size:11px;white-space:nowrap">' + (has ? vmFmt(s.lastMiles) : "") + '</td><td class="vm-log-due" style="padding:6px 0 6px 6px;font-size:11.5px;line-height:1.3;vertical-align:middle">' + window.PCSVM.dueHtml(window.PCSVM.dueOf(v, r[0], vmCurOdo(v))) + '</td><td style="padding-left:4px;max-width:0;width:8%;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" class="vm-log-note" title="' + esc(vmNotes(s.lastNotes)) + '">' + esc(vmNotes(s.lastNotes)) + '</td></tr>'; }).join("") + "</table>";
   }
   if (typeof window !== "undefined") window.__pcsV20lLog = { rows: VM_ROWS, table: vmLogTableHtml, notes: vmNotes };
   function vmHist(v, kind) { var out = [], sv = v.services && typeof v.services === "object" ? v.services : {};
@@ -10441,7 +10442,7 @@
      number is OUR GUESS from the same route miles + minutes and the rates below (UberX-style: booking fee + base + per mile
      + per minute, with a minimum), shown as a range "about $A to $B". The office can change UBER_CMP_RATES. Pure (tested). */
   var UBER_CMP_RATES = { baseCents: 250, bookingCents: 295, perMileCents: 140, perMinCents: 28, minCents: 1050, lo: 0.9, hi: 1.3 };
-  function meterKindOf(M) { return M && meterShown(M) ? (M.meterKind === "comparison" ? "comparison" : "cash") : ""; }
+  function meterKindOf(M) { return M && meterShown(M) ? (M.meterKind === "comparison" ? "comparison" : M.meterKind === "meter" ? "meter" : "cash") : ""; } /* v2.0m-c: "meter" = plain Meter ride */
   function uberCmpCents(miles, minutes, rates) {
     var R = rates || UBER_CMP_RATES, mi = Math.max(0, +miles || 0), mn = Math.max(0, +minutes || 0);
     var c = Math.max(R.minCents, R.baseCents + R.bookingCents + mi * R.perMileCents + mn * R.perMinCents);
@@ -14801,10 +14802,10 @@
     return near.length === 1 ? near[0] : null;
   }
   function meterKindPickHtml() { /* v2.0l: Cash ride / Comparison ride, picked before Start */
-    var k = state.meterKind === "comparison" ? "comparison" : "cash";
-    var b = function (v, label) { return '<button type="button" class="btn ' + (k === v ? "" : "ghost") + '" id="meter-kind-' + v + '" data-meter-kind="' + v + '" aria-pressed="' + (k === v) + '" style="flex:1 1 0;margin:0;min-height:52px;font-weight:800">' + label + "</button>"; };
-    return '<div id="meter-kind" role="group" aria-label="What kind of meter ride" style="display:flex;gap:8px;margin:6px 0">' + b("cash", "Cash ride") + b("comparison", "Comparison ride") + "</div>" +
-      '<p class="fine" id="meter-kind-note">' + (k === "comparison" ? "The rider sees our price and the Uber price." : "The rider sees what they will pay at the end.") + "</p>";
+    var k = state.meterKind === "comparison" ? "comparison" : state.meterKind === "meter" ? "meter" : "cash"; /* v2.0m-c */
+    var b = function (v, label) { return '<button type="button" class="btn ' + (k === v ? "" : "ghost") + '" id="meter-kind-' + v + '" data-meter-kind="' + v + '" aria-pressed="' + (k === v) + '" style="flex:1 1 auto;margin:0;min-height:52px;font-weight:800">' + label + "</button>"; };
+    return '<div id="meter-kind" role="group" aria-label="What kind of meter ride" style="display:flex;flex-wrap:wrap;gap:8px;margin:6px 0">' + b("meter", "Meter ride") + b("comparison", "Comparison ride") + b("cash", "Cash ride") + "</div>" + /* v2.0m-c order */
+      '<p class="fine" id="meter-kind-note">' + (k === "comparison" ? "The rider sees our price and the Uber price." : k === "meter" ? "The rider sees the price go up as you drive." : "The rider sees what they will pay at the end.") + "</p>";
   }
   if (typeof window !== "undefined") window.__pcsV20lKindPick = meterKindPickHtml;
   function meterStart() {
@@ -14829,7 +14830,7 @@
     if (pend && isCoord(pend.lat) && isCoord(pend.lng)) M.dest = { label: String(pend.label || ""), sub: String(pend.sub || ""), lat: +pend.lat, lng: +pend.lng };
     var sr = meterSetFareRide(state.meterSchedPending); state.meterSchedPending = null; /* v73: set-fare scheduled ride */
     M.metered = !(sr || state.schedStartId); /* v2.0a: only the Metered ride button shows the meter */
-    if (M.metered) M.meterKind = state.meterKind === "comparison" ? "comparison" : "cash"; /* v2.0l: ride type known from the start */
+    if (M.metered) M.meterKind = state.meterKind === "comparison" ? "comparison" : state.meterKind === "meter" ? "meter" : "cash"; /* v2.0m-c */ /* v2.0l: ride type known from the start */
     if (sr) { M.schedId = sr.id; M.setFareCents = Math.round(Number(sr.fareBeforeTax) * 100); M.schedRider = String(sr.rider || ""); }
     else if (state.schedStartId) { var srx = schedFind(state.schedStartId); if (srx) { M.schedId = srx.id; M.schedRider = String(srx.rider || ""); M.pickupAddress = String(srx.pickup || "").slice(0, 160); } } /* v75r: metered scheduled ride */
     state.schedStartId = "";
@@ -16811,6 +16812,9 @@
   function bindMeter() {
     if (ROLE !== "driver") return;
     var on = function (id, fn) { var el = document.getElementById(id); if (el) el.addEventListener("click", fn); };
+    on("open-meter-std", function () { state.meterKind = "meter"; state.meterOpen = true; state.hubOpen = false; state.meterError = ""; render(); }); /* v2.0m-c */
+    on("hub-meter-std", function () { state.meterKind = "meter"; state.meterOpen = true; state.hubOpen = false; state.hubView = "menu"; state.meterError = ""; render(); });
+    on("meter-kind-meter", function () { state.meterKind = "meter"; render(); });
     on("open-meter-cmp", function () { state.meterKind = "comparison"; state.meterOpen = true; state.hubOpen = false; state.meterError = ""; render(); });
     on("hub-meter-cmp", function () { state.meterKind = "comparison"; state.meterOpen = true; state.hubOpen = false; state.hubView = "menu"; state.meterError = ""; render(); });
     on("meter-kind-cash", function () { state.meterKind = "cash"; render(); });
@@ -16921,14 +16925,23 @@
     }
   }
 
+  /* v2.0m-c (Matthew 10/26): "Bring back the Meter ride button next to Cash ride and Comparison ride". Order: Meter ride,
+     Comparison ride, Cash ride. Only these three show a running meter price on the map. */
+  function homeMeterBtnsHtml(oneLine) {
+    var st = 'style="flex:0 0 auto;width:auto;margin:0;padding:8px 14px;min-height:0"';
+    /* v2.0m-c (Matthew 4:51 PM): on the map row the three sit on ONE line, equal width, filling the row; labels stay whole */
+    if (oneLine) st = 'style="flex:1 1 0;width:auto;min-width:0;margin:0;padding:8px 2px;min-height:0;white-space:nowrap;font-size:clamp(10.5px,3.2vw,15px)"';
+    return '<button class="btn secondary" type="button" id="open-meter-std" ' + st + '>Meter ride</button>' +
+      '<button class="btn secondary" type="button" id="open-meter-cmp" ' + st + '>Comparison ride</button>' +
+      '<button class="btn secondary" type="button" id="open-meter" ' + st + '>Cash ride</button>';
+  }
+  if (typeof window !== "undefined") window.__pcsV20mcBtns = homeMeterBtnsHtml;
   function driverHubMenu() {
     return (
       '<button class="btn ghost" type="button" id="close-hub">← Back to map</button>' +
       "<h2>Home</h2>" +
       '<p class="lede">Keep the map clean. Open today\'s numbers, history, or profile here.</p>' +
-      (canGoOnline() || qOffline() ? qDriverSliderHtml() : "") + /* v2.0m-b: Your Status moved here from the map page (same rule as before) */
       '<button class="btn" type="button" id="hub-today">Today</button>' +
-      '<button class="btn secondary" type="button" id="hub-meter">Cash ride</button>' + '<button class="btn secondary" type="button" id="hub-meter-cmp">Comparison ride</button>' +
       '<button class="btn secondary" type="button" id="hub-history">Earnings & history</button>' +
       '<button class="btn secondary" type="button" id="hub-driverlog">Driver\u2019s Log</button>' + /* v73 */
       '<button class="btn secondary" type="button" id="hub-inspector">Show inspector</button>' + /* v73: today + previous day, full screen */
@@ -16950,6 +16963,10 @@
       "</div>";
   }
 
+  /* v2.0m-c (Matthew 4:55 PM): Maintenance log on its own page, same back button as Today / Earnings & history */
+  function driverHubMaint() {
+    return '<button class="btn ghost" type="button" id="hub-back-menu">← Home menu</button>' + "<h2>Maintenance log</h2>" + vmHubCard();
+  }
   function driverHubToday() {
     var day = chicagoToday();
     var stats = hubDayStats(day);
@@ -17060,6 +17077,7 @@
     if (state.hubView === "today") return driverHubToday();
     if (state.hubView === "history") return driverHubHistory();
     if (state.hubView === "day") return driverHubDay();
+    if (state.hubView === "maint") return driverHubMaint(); /* v2.0m-c (Matthew 4:55 PM) */
     return driverHubMenu();
   }
 
@@ -17088,7 +17106,7 @@
       accountNav() +
       meterBarHtml() + /* v70 */
       milesTodayHtml() +
-      /* v2.0m-b (Matthew 10/26): "Your Status" moved to the Home menu (driverHubMenu) */
+      (gated && !qOffline() ? "" : qDriverSliderHtml()) + /* v72q: Available / On a ride / Break (v72t) */ /* v2.0m-c (Matthew 4:26 PM): back on the map page, as in v2.0l */
       (state.driverNotice
         ? '<div class="card notice-card" role="status"><p class="lede">' + esc(state.driverNotice) + "</p>" +
           '<button class="btn ghost" type="button" id="dismiss-driver-notice">OK</button></div>'
@@ -17101,8 +17119,8 @@
         ? ( /* v76a (Matthew 10/17: Offline Home had the scheduled rides but no map): same layout as Available. Metered ride + the
              gating line on one row, then the map pinned on top (just you, open requests stay hidden while Offline), then the
              collapsible Scheduled rides section below it. homeMapFit sizes it the same way (half screen open, full when collapsed). */
-          '<div class="home-row" id="home-row" style="display:flex;align-items:center;gap:8px;margin:4px 0">' +
-          (state.meter ? "" : '<button class="btn secondary" type="button" id="open-meter" style="flex:0 0 auto;width:auto;margin:0;padding:8px 14px;min-height:0">Cash ride</button><button class="btn secondary" type="button" id="open-meter-cmp" style="flex:0 0 auto;width:auto;margin:0;padding:8px 14px;min-height:0">Comparison ride</button>') +
+          '<div class="home-row" id="home-row" style="display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:4px 0">' + /* v2.0m-c: wraps */
+          (state.meter ? "" : homeMeterBtnsHtml()) +
           '<p class="lede" id="home-gated-note" style="flex:1 1 auto;margin:0;font-size:14px">Finish the steps above to go online and see open requests.</p>' +
           (bgGpsTipDismissed() && !state.bgTipPeek ? bgGpsTipCard() : "") + "</div>" +
           (bgGpsTipDismissed() && !state.bgTipPeek ? "" : bgGpsTipCard()) +
@@ -17114,9 +17132,10 @@
           scheduledRidesCard() /* v75h: assigned rides show on Home right away; v75y/v76a: below the map */
         )
         : (
-          '<div class="home-row" id="home-row" style="display:flex;align-items:center;gap:8px;margin:4px 0">' +
-          (state.meter ? "" : '<button class="btn secondary" type="button" id="open-meter" style="flex:0 0 auto;width:auto;margin:0;padding:8px 14px;min-height:0">Cash ride</button><button class="btn secondary" type="button" id="open-meter-cmp" style="flex:0 0 auto;width:auto;margin:0;padding:8px 14px;min-height:0">Comparison ride</button>') + /* v70 */
-          '<p class="fine" id="rides-count" style="flex:1 1 auto;margin:0">' + esc(ridesCountLabel()) + "</p>" +
+          /* v2.0m-c (Matthew 3:42 PM): the three ride buttons on their own row, then the rides count, (i) and Mute on a full-width line */
+          (state.meter ? "" : '<div class="home-row home-btn-row" id="home-row" style="display:flex;flex-wrap:nowrap;align-items:center;gap:6px;margin:4px 0">' + homeMeterBtnsHtml(true) + "</div>") + /* v70; v2.0m-c 4:51 PM: one line */
+          '<div class="home-row home-count-row" id="home-count-row" style="display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:4px 0;width:100%">' +
+          '<p class="fine" id="rides-count" style="flex:1 1 100%;margin:0;min-width:0;white-space:normal">' + esc(ridesCountLabel()) + "</p>" +
           (bgGpsTipDismissed() && !state.bgTipPeek ? bgGpsTipCard() : "") + openRideAlertToggleHtml() + "</div>" +
           (bgGpsTipDismissed() && !state.bgTipPeek ? "" : bgGpsTipCard()) +
           qDriverPausedHtml() + /* v72q */
@@ -18672,7 +18691,7 @@
     var hubLog = document.getElementById("hub-driverlog");
     if (hubLog) hubLog.addEventListener("click", function () { openDriverLog("all"); });
     var hubMaint = document.getElementById("hub-maint"); /* v2.0m-b */
-    if (hubMaint) hubMaint.addEventListener("click", function () { state.vmHubOpen = !state.vmHubOpen; render(); });
+    if (hubMaint) hubMaint.addEventListener("click", function () { state.hubView = "maint"; render(); }); /* v2.0m-c (4:55 PM): own page */
     var hubInsp = document.getElementById("hub-inspector");
     if (hubInsp) hubInsp.addEventListener("click", function () { openDriverLog("inspector"); });
     var hubHistory = document.getElementById("hub-history");
