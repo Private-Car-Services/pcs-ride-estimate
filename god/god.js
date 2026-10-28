@@ -5172,6 +5172,7 @@
           (e.cashReceivedCents != null ? "<br><strong>Cash received</strong> " + esc(fmtCents(e.cashReceivedCents)) + " · <strong>change</strong> " + esc(fmtCents(Number(e.changeCents) || 0)) : "") +
           (String(e.rideType || "") === "metered" && e.paymentStatus ? "<br><strong>Payment</strong> " + esc(meterPayWord(e.paymentStatus, e.paidVia)) : "") +
           "</p>" + (isTestRide(e) ? '<p class="fine" style="color:#ffb3b3;font-weight:700">' + esc(testRideLabel(e)) + " ride: counts for nothing" + (e.testFareCents ? " (meter read " + esc(fmtCents(e.testFareCents)) + ")" : "") + "</p>" : "") +
+          godCmpHtml(e) + /* v2.0m-g: comparison ride breakdown */
           rideNoteEditHtml(driverId, e.code || "", e.rideNote) + /* v76d */
           '<button type="button" class="btn btn-ghost" data-test-toggle="' + esc(e.code || "") + '" data-driver="' + esc(driverId) + '" data-on="' + (isTestRide(e) ? "1" : "0") + '">' + (isTestRide(e) ? "Make it a real ride" : "Mark as test ride") + "</button>" +
           "</article>"
@@ -5219,6 +5220,22 @@
   function earnIsTest(e) { return isTestRide(e); }
   /* v76d (Matthew 10/18): practice, test and rate comparison rides count for NOTHING: earnings, commission, pay week, tips,
      Penny's income and ride totals all skip them. They stay in the list with a badge so nothing is lost. */
+  /* v2.0m-g (Matthew 10/28): full Comparison ride breakdown for God mode (comparison rides only). */
+  function godCmpHtml(e) {
+    var c = e && (e.comparisonRide === true || String(e.paidVia || "") === "comparison") ? e.comparison : null; if (!c || typeof c !== "object") return "";
+    var nm = c.service === "lyft" ? "Lyft" : "Uber";
+    function m(v) { return v == null || !isFinite(v) ? "\u2014" : (v < 0 ? "\u2212" : "") + fmtCents(Math.abs(v)); }
+    function row(l, v) { return "<strong>" + esc(l) + "</strong> " + v + "<br>"; }
+    return '<div class="card" style="margin-top:8px"><p class="meta">' + row("Compared with", esc(nm + (c.rideType ? " " + c.rideType.replace(/^(Uber|Lyft) /, "") : ""))) +
+      row("Start", esc(c.pickupAddress || "\u2014")) + row("End", esc(c.dropAddress || "\u2014")) +
+      row("Route", c.route && c.route.poly ? esc(String(c.route.points)) + ' GPS points <a target="_blank" rel="noopener" href="https://www.google.com/maps/dir/' + esc(c.route.start.join(",")) + "/" + esc(c.route.end.join(",")) + '">open map</a>' : "\u2014") +
+      row("Distance", c.miles != null ? esc(String(c.miles)) + " miles" : "\u2014") + row("Time", c.minutes != null ? esc(String(c.minutes)) + " minutes" : "\u2014") +
+      row(nm + " charged the customer", m(c.chargedCents)) + row("PCS fare / tax / total", m(c.pcsFareCents) + " / " + m(c.pcsTaxCents) + " / " + m(c.pcsTotalCents)) +
+      row("Price difference (" + nm + " minus PCS)", m(c.priceDiffCents)) +
+      row(nm + " paid the driver", m(c.paidDriverCents)) + row("PCS driver pay (70%)", m(c.pcsDriver70Cents)) + row("Pay difference (PCS minus " + nm + ")", m(c.payDiffCents)) +
+      row("Passenger said " + nm + " charged", m(c.paxSaidCents)) +
+      row("Driver notes", esc(c.driverNotes || "\u2014")) + row("Passenger comments", esc(c.paxComments || "\u2014")) + "</p></div>";
+  }
   function isTestRide(e) { return !!e && (e.isTest === true || e.testRide === true || (String(e.paidVia || "") === "test" || String(e.paidVia || "") === "comparison" || e.comparisonRide === true) || !!e.testKind); }
   function testRideLabel(e) { if (String(e.paidVia || "") === "comparison" || e.comparisonRide === true) return "Comparison ride"; /* v2.0m-e */ return String(e.testKind || "") === "practice" ? "Practice" : (String(e.paidVia || "") === "test" || String(e.paidVia || "") === "comparison" || e.comparisonRide === true) && !e.testKind ? "Rate comparison" : "TEST"; }
   /* Pure: pay-week patch to mark / unmark a test ride. Marking keeps the real amounts in testOriginal so it can be undone. */
