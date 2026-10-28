@@ -14873,9 +14873,10 @@
   /* v2.0m-e (Matthew 10/27): the two money boxes live on the Comparison tab (only there, not on the ride screen). Fill them any time. */
   function cmpBoxesHtml(svc) {
     var nm = (CMP_SERVICES[svc] || { label: "Uber" }).label, d = state.cmpDraft || {};
-    var box = function (id, label, v) { return '<label for="' + id + '">' + esc(label) + '</label><input id="' + id + '" type="text" inputmode="decimal" placeholder="$0.00" value="' + esc(v == null ? "" : v) + '" style="width:100%;min-height:48px;font-size:18px">'; };
+    var box = function (id, label, v) { return '<label for="' + id + '">' + esc(label) + '</label><div style="display:flex;align-items:center;gap:6px"><span aria-hidden="true" style="font-size:18px;font-weight:700">$</span><input id="' + id + '" type="text" inputmode="numeric" pattern="[0-9]*" autocomplete="off" data-money-reg="1" placeholder="0.00" value="' + esc(cmpRegShow(v)) + '" style="width:100%;min-height:48px;font-size:18px"></div>'; }; /* v2.0m-h (Matthew 10/28): cash-register entry, 2205 -> $22.05 */
     return box("cmp-charged", "What " + nm + " charged the customer", d.charged); /* v2.0m-g: "What Uber paid me" is one box at the END of the ride only */
   }
+  function cmpRegShow(v) { var c = cmpCentsOf(v); return isFinite(c) && c > 0 ? (c / 100).toFixed(2) : ""; } /* v2.0m-h: saved 28.74 or 28 shows as 28.74 / 28.00 */
   function cmpCentsOf(v) { var t = String(v == null ? "" : v).replace(/[$,\s]/g, ""); if (!/^\d+(\.\d{1,2})?$/.test(t)) return NaN; return Math.round(parseFloat(t) * 100); }
   /* v2.0m-e (Matthew 10/27): no end screen. When a Comparison ride ends, save the comparison numbers and go back to the normal screen. */
   function cmpFinish(M, now) {
@@ -16770,6 +16771,7 @@
       var id = "cmpf-" + f.k, lab = '<label for="' + id + '">' + esc(f.label.replace("{S}", nm)) + "</label>", v = c[f.k] == null ? "" : String(c[f.k]);
       if (f.kind === "service") return lab + '<select id="' + id + '" data-cmpk="service" style="' + st + '"><option value="">Pick one</option>' + Object.keys(CMP_SERVICES).map(function (k) { return '<option value="' + k + '"' + (svc === k ? " selected" : "") + ">" + CMP_SERVICES[k].label + "</option>"; }).join("") + "</select>";
       if (f.kind === "type") return lab + '<select id="' + id + '" data-cmpk="rideType" style="' + st + '"' + (S && S.types.length ? "" : " disabled") + ">" + (!S ? '<option value="">Pick Uber or Lyft first</option>' : !S.types.length ? '<option value="">Lyft ride types are coming soon</option>' : '<option value="">Pick one</option>' + S.types.map(function (t) { return '<option value="' + esc(t) + '"' + (v === t ? " selected" : "") + ">" + esc(t) + "</option>"; }).join("")) + "</select>";
+      if (f.kind === "money" && (f.k === "charged" || f.k === "paid")) return lab + '<div style="display:flex;align-items:center;gap:6px"><span aria-hidden="true" style="font-size:18px;font-weight:700">$</span><input id="' + id + '" data-cmpk="' + f.k + '" type="text" inputmode="numeric" pattern="[0-9]*" autocomplete="off" data-money-reg="1" placeholder="0.00" value="' + esc(cmpRegShow(v)) + '" style="' + st + '"></div>'; /* v2.0m-h (Matthew 10/28): cash-register entry, 2205 -> $22.05 */
       if (f.kind === "money") return lab + '<input id="' + id + '" data-cmpk="' + f.k + '" type="text" inputmode="decimal" placeholder="$0.00" value="' + esc(v) + '" style="' + st + '">';
       if (f.kind === "place") return lab + '<input id="' + id + '" data-cmpk="' + f.k + '" type="search" autocomplete="off" placeholder="Pickup address" value="' + esc(v) + '" style="' + st + '"><div id="cmpf-place-list" class="suggest-list">' + cmpPlaceListHtml() + "</div>";
       return lab + '<textarea id="' + id + '" data-cmpk="' + f.k + '" rows="3" maxlength="1000" style="width:100%;font-size:17px">' + esc(v) + "</textarea>";
