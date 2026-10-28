@@ -5149,7 +5149,7 @@
       list = entries.map(function (e) {
         return (
           '<article class="card">' +
-          "<h3>" + esc(e.code || "Ride") + (e.isTest === true || String(e.paidVia || "") === "test" ? ' <span class="badge" style="background:#7a1f1f;color:#fff;border:1px solid #fff">' + (String(e.paidVia || "") === "test" ? "Rate comparison" : "Test") + "</span>" : "") + (String(e.rideType || "") === "metered" ? ' <span class="badge" style="background:#4a3d12;color:#f0d48a;border:1px solid #f0d48a">Metered</span>' : "") + "</h3>" +
+          "<h3>" + esc(e.code || "Ride") + (e.isTest === true || (String(e.paidVia || "") === "test" || String(e.paidVia || "") === "comparison" || e.comparisonRide === true) ? ' <span class="badge" style="background:#7a1f1f;color:#fff;border:1px solid #fff">' + ((String(e.paidVia || "") === "test" || String(e.paidVia || "") === "comparison" || e.comparisonRide === true) ? "Rate comparison" : "Test") + "</span>" : "") + (String(e.rideType || "") === "metered" ? ' <span class="badge" style="background:#4a3d12;color:#f0d48a;border:1px solid #f0d48a">Metered</span>' : "") + "</h3>" +
           '<p class="meta">' +
           "<strong>Rider</strong> " + esc(e.riderName || "—") + "<br>" +
           "<strong>Route</strong> " + esc(e.pickup || "") + " → " + esc(e.drop || "") + "<br>" +
@@ -5219,8 +5219,8 @@
   function earnIsTest(e) { return isTestRide(e); }
   /* v76d (Matthew 10/18): practice, test and rate comparison rides count for NOTHING: earnings, commission, pay week, tips,
      Penny's income and ride totals all skip them. They stay in the list with a badge so nothing is lost. */
-  function isTestRide(e) { return !!e && (e.isTest === true || e.testRide === true || String(e.paidVia || "") === "test" || !!e.testKind); }
-  function testRideLabel(e) { return String(e.testKind || "") === "practice" ? "Practice" : String(e.paidVia || "") === "test" && !e.testKind ? "Rate comparison" : "TEST"; }
+  function isTestRide(e) { return !!e && (e.isTest === true || e.testRide === true || (String(e.paidVia || "") === "test" || String(e.paidVia || "") === "comparison" || e.comparisonRide === true) || !!e.testKind); }
+  function testRideLabel(e) { if (String(e.paidVia || "") === "comparison" || e.comparisonRide === true) return "Comparison ride"; /* v2.0m-e */ return String(e.testKind || "") === "practice" ? "Practice" : (String(e.paidVia || "") === "test" || String(e.paidVia || "") === "comparison" || e.comparisonRide === true) && !e.testKind ? "Rate comparison" : "TEST"; }
   /* Pure: pay-week patch to mark / unmark a test ride. Marking keeps the real amounts in testOriginal so it can be undone. */
   var TEST_MONEY_KEYS = ["fareSub", "fareTax", "fareTotal", "commissionCents", "commissionPct", "tipCents", "tollCents", "tollRoadFeeCents", "discountCents", "paidVia", "riderName"];
   function testRidePatch(e, on, by, now) {
@@ -6333,6 +6333,7 @@
     if (ps === "invoice_pending") return "Invoice sent, waiting on Square";
     if (ps === "unverified") return "Unverified" + (via ? " (" + String(via).replace("_", " ") + ")" : "") + ": not paid until Square or cash confirms";
     if (ps === "charged") return "Paid (Square)";
+    if (ps === "paid_other" && String(via || "") === "comparison") return "Comparison ride ($0)"; /* v2.0m-e */
     if (ps === "paid_other" && String(via || "") === "test") return "Rate comparison ($0)"; /* v72x.1; v73 label */
     if (ps === "paid_other") return "Paid another way" + (via ? " (" + String(via).replace("_", " ") + ")" : "");
     return "NOT PAID";
@@ -8454,8 +8455,8 @@
   }
   /* v76b: metered-ride tolls. tollCents = real tolls paid back 100% to the driver (outside commission); tollRoadFeeCents =
      "Toll road fee" in Matthew's DV-plate cars (fare income, already inside commissionCents). Shown as their own lines. */
-  function tollReimbCents(e) { return e && !(e.isTest === true || String(e.paidVia || "") === "test") ? Math.max(0, Math.round(Number(e.tollCents) || 0)) : 0; }
-  function tollFeeCents(e) { return e && !(e.isTest === true || String(e.paidVia || "") === "test") ? Math.max(0, Math.round(Number(e.tollRoadFeeCents) || 0)) : 0; }
+  function tollReimbCents(e) { return e && !(e.isTest === true || (String(e.paidVia || "") === "test" || String(e.paidVia || "") === "comparison" || e.comparisonRide === true)) ? Math.max(0, Math.round(Number(e.tollCents) || 0)) : 0; }
+  function tollFeeCents(e) { return e && !(e.isTest === true || (String(e.paidVia || "") === "test" || String(e.paidVia || "") === "comparison" || e.comparisonRide === true)) ? Math.max(0, Math.round(Number(e.tollRoadFeeCents) || 0)) : 0; }
   /* r5/r6 (Harry r4 N1-N3, r5 F1-F4/M1): EVERY entry is normalized here before any payout number is shown.
      Inputs are read ONCE per entry object (the first time it is seen) into a WeakMap snapshot; later calls never read the
      entry's own bookkeeping, so forged commissionAppCents / tollAskedCents / driverOwesAppCents etc. do nothing.
@@ -8475,7 +8476,7 @@
     var S = function (n) { return Symbol.for(n); }, INV = S("pcsInvPct"), ASCASH = S("pcsAsCash"), HKEY = S("pcsHoldKey");
     var ORIG = payBalance.__orig || (payBalance.__orig = new WeakMap()), used = {};
     function payNormalize(e) {
-      if (!e || e.isTest === true || e.testRide === true || String(e.paidVia || "") === "test" || e.testKind) return e;
+      if (!e || e.isTest === true || e.testRide === true || (String(e.paidVia || "") === "test" || String(e.paidVia || "") === "comparison" || e.comparisonRide === true) || e.testKind) return e;
       if (typeof godPricePending === "function" && godPricePending(e)) { e.commissionCents = null; return e; } /* r7: nothing to pay until God sets the price */
       var o = ORIG.get(e); if (!o) { o = Object.assign({}, e); ORIG.set(e, o); }
       var card = opts.cards && e.scheduleId ? opts.cards[e.scheduleId] : null;
@@ -8548,7 +8549,7 @@
     var out = { owedToDriver: 0, owedByDriver: 0, net: 0, cashRides: 0, cashTips: 0, tolls: 0, tollRoadFees: 0, tollsHeld: 0, heldCents: 0, held: 0, flagged: 0, loading: false };
     if (opts.waitKv && typeof state !== "undefined" && (!state.ridePctLoaded || !state.payRecLoaded)) out.loading = true;
     (entries || []).forEach(function (e) {
-      if (e && (e.isTest === true || e.testRide === true || String(e.paidVia || "") === "test" || e.testKind)) return; /* v76d: test rides count for nothing (same as isTestRide) */
+      if (e && (e.isTest === true || e.testRide === true || (String(e.paidVia || "") === "test" || String(e.paidVia || "") === "comparison" || e.comparisonRide === true) || e.testKind)) return; /* v76d: test rides count for nothing (same as isTestRide) */
       payNormalize(e);
       /* v72s: cash tips are the driver's own money (100% kept, not part of the 30% owed, not fare): record only */
       if (isCashEntry(e)) { out.owedByDriver += cashDriverOwesCents(e); out.cashRides += 1; out.cashTips += Number(e.tipCents) || 0; }
