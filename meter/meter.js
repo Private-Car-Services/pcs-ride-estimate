@@ -272,12 +272,14 @@
     var incl = Number(r.includedMiles) || 0;
     var fees = (f.feeLines || []).reduce(function (t, l) { return t + (Number(l.cents) || 0); }, 0); /* v72t airport lines */
     var parts = (f.base || 0) + (f.mileCents || 0) + (f.waitCents || 0) + fees;
+    var cashD = Number(f.cashDiscountCents) > 0 && Number(f.cashFareShownCents) > 0 ? Number(f.cashDiscountCents) : 0; /* v2.0m-e cash ride */
+    var fareShown = cashD ? Number(f.cashFareShownCents) : (f.sub || 0);
     var disc = f.discount && Number(f.discount.cents) > 0 ? f.discount : null; /* v73: Senior / Military / owner-approved discount */
-    var diff = (disc && disc.grossSub ? disc.grossSub : (f.sub || 0)) - parts;
-    var minApplied = diff > 0 && r.minCents > 0 && (disc && disc.grossSub ? disc.grossSub : f.sub) === r.minCents && diff >= (r.stepCents || 1);
+    var diff = (disc && disc.grossSub ? disc.grossSub : fareShown) - parts;
+    var minApplied = diff > 0 && r.minCents > 0 && (disc && disc.grossSub ? disc.grossSub : fareShown) === r.minCents && diff >= (r.stepCents || 1);
     var tollLines = (f.feeLines || []).filter(function (l) { return /^Toll/.test(String(l.label || "")); }); /* v76b: "Tolls (2 × $1.75)" / "Toll road fee (…)" */
     var tollFees = tollLines.reduce(function (t, l) { return t + (Number(l.cents) || 0); }, 0);
-    if (!disc && fees === tollFees && !(f.mileCents) && !(f.waitCents) && f.base > 0 && f.base + tollFees === f.sub && f.base !== r.startCents) { /* v73: fare set before the ride */
+    if (!disc && !cashD && fees === tollFees && !(f.mileCents) && !(f.waitCents) && f.base > 0 && f.base + tollFees === f.sub && f.base !== r.startCents) { /* v73: fare set before the ride */
       return '<div class="card" id="rm-breakdown">' +
         '<div class="money-row" id="rm-setfare-row"><span>Fare</span><span>' + money(f.base) + "</span></div>" +
         tollLines.map(function (l) { return '<div class="money-row rm-fee-line"><span>' + esc(l.label) + "</span><span>" + money(l.cents) + "</span></div>"; }).join("") +
@@ -293,9 +295,10 @@
       (f.feeLines || []).map(function (l) { return '<div class="money-row rm-fee-line"><span>' + esc(l.label) + "</span><span>" + money(l.cents) + "</span></div>"; }).join("") +
       (diff > 0 ? '<div class="money-row"><span>' + (minApplied ? "Minimum fare " + money(r.minCents) + " applied" : "Round up to " + money(r.stepCents) + " step") + "</span><span>" + money(diff) + "</span></div>" : "") +
       (disc ? '<div class="money-row" id="rm-disc-row" style="color:#8fd0a8"><span>' + esc(disc.label || "Discount") + " \u00b7 you save</span><span>\u2212" + money(disc.cents) + "</span></div>" : "") +
-      (f.tax || disc ? '<div class="money-row"><span>Fare</span><span id="rm-fare-sub">' + money(f.sub) + "</span></div>" : "") +
+      (f.tax || disc ? '<div class="money-row"><span>Fare</span><span id="rm-fare-sub">' + money(fareShown) + "</span></div>" : "") +
       (f.tax ? 
         '<div class="money-row" id="rm-tax-row"><span>Tax (' + pct(r.taxRate) + ")</span><span>" + money(f.tax) + "</span></div>" : "") +
+      (cashD ? '<div class="money-row" id="rm-cashdisc-row" style="color:#8fd0a8"><span>Cash discount</span><span>\u2212' + money(cashD) + "</span></div>" : "") + /* v2.0m-e */
       '<div class="total-row"><span>Total</span><span id="rm-total">' + money(f.total) + "</span></div>" +
       '<p class="fine">' + esc(d.mode.label || "") + " · " + esc(Number(f.miles || 0).toFixed(2)) + " mi · " + esc(String(f.minutes || 0)) + " min</p></div>";
   }
@@ -361,6 +364,44 @@
       '<p class="rm-sub">Total incl. tax</p>' + breakdownHtml(d) + payHtml(d) +
       '<p class="error" id="rm-net" role="status"></p>';
   }
+  /* v2.0m-e (Matthew 10/27): Comparison ride page. The Worker sends only the Uber/Lyft price ROUNDED UP to a whole dollar
+     (d.compare.otherRoundedCents), never the exact charge and never what Uber paid the driver. */
+  function cmpWhole(c) { return "$" + String(Math.round((Number(c) || 0) / 100)); }
+  function cmpInfo(d) {
+    var c = d && d.compare, f = d && d.final;
+    if (!c || !f || !(Number(f.total) > 0) || !(Number(c.otherRoundedCents) > 0)) return null;
+    var other = Number(c.otherRoundedCents), ours = Number(f.total), name = c.service === "lyft" ? "Lyft" : "Uber";
+    return { name: name, rideType: c.rideType || "", other: other, ours: ours, save: other - ours, lower: ours < other };
+  }
+  function compareHtml(d) {
+    var x = cmpInfo(d);
+    var line = x.lower
+      ? '<p class="lede" id="rm-cmp-line" style="font-size:22px;line-height:1.4;font-weight:700">' + x.name + "\u2019s price for this ride would be about " + cmpWhole(x.other) + ". Our price would be " + money(x.ours) + ", saving you " + money(x.save) + " on the ride.</p>" +
+        (x.rideType ? '<p class="fine" id="rm-cmp-type">Compared with ' + esc(x.rideType) + ".</p>" : "")
+      : '<p class="lede" id="rm-cmp-ours" style="font-size:22px;font-weight:700">Our price for this ride: ' + money(x.ours) + "</p>";
+    return testTag(d) + '<div class="card" id="rm-cmp"><p class="tag">Your ride price</p>' + line +
+      '<p style="text-align:center;margin:18px 0 8px"><button class="btn" type="button" id="rm-cmp-save">Save</button></p>' +
+      '<p class="fine" id="rm-cmp-save-note" style="text-align:center">Save a picture of this, or tap Share and then Add to Home Screen.</p>' +
+      '<p style="text-align:center;margin:14px 0 6px"><a class="btn ghost" id="rm-cmp-site" href="https://www.PCSrides.com" target="_blank" rel="noopener">www.PCSrides.com</a></p>' +
+      '<p style="text-align:center;margin:6px 0"><a class="btn ghost" id="rm-cmp-app" href="../app/" target="_blank" rel="noopener">Get the PCS rider app</a></p></div>';
+  }
+  function cmpSaveImage() {
+    var x = cmpInfo(S.d); if (!x) return;
+    var cv = document.createElement("canvas"), W = 1080, H = 1080; cv.width = W; cv.height = H;
+    var g = cv.getContext("2d"); g.fillStyle = "#0b2a1a"; g.fillRect(0, 0, W, H); g.fillStyle = "#fff"; g.textAlign = "center";
+    g.font = "bold 56px sans-serif"; g.fillText("Private Car Services", W / 2, 140);
+    var words = (x.lower ? x.name + "\u2019s price for this ride would be about " + cmpWhole(x.other) + ". Our price would be " + money(x.ours) + ", saving you " + money(x.save) + " on the ride." : "Our price for this ride: " + money(x.ours)).split(" ");
+    g.font = "bold 52px sans-serif"; var y = 320, row = "";
+    words.forEach(function (w) { var t = row ? row + " " + w : w; if (g.measureText(t).width > W - 140) { g.fillText(row, W / 2, y); y += 72; row = w; } else row = t; });
+    if (row) g.fillText(row, W / 2, y);
+    g.font = "40px sans-serif"; g.fillText("www.PCSrides.com", W / 2, H - 120);
+    cv.toBlob(function (b) {
+      if (!b) return;
+      var file = null; try { file = new File([b], "pcs-ride-price.png", { type: "image/png" }); } catch (e) {}
+      if (file && navigator.canShare && navigator.canShare({ files: [file] })) { navigator.share({ files: [file], title: "My PCS ride price" }).catch(function () {}); return; }
+      var a = document.createElement("a"); a.href = URL.createObjectURL(b); a.download = "pcs-ride-price.png"; document.body.appendChild(a); a.click(); a.remove();
+    }, "image/png");
+  }
   function paidHtml(d) {
     var p = d.pay || {};
     if (billKind(d) || p.invoice) return testTag(d) + '<p class="tag">Ride complete</p>' + invBoxHtml(d) + invoiceHtml(d);
@@ -387,7 +428,7 @@
       var keep = S.phase.indexOf("run") === 0 ? readForm() : null;
       if (S.sqCard && ph.indexOf("run|0") !== 0) { try { S.sqCard.destroy(); } catch (e) {} S.sqCard = null; }
       S.phase = ph;
-      app.innerHTML = ph === "paid" || ph === "settled" ? paidHtml(d) : d.status === "running" ? runningHtml(d) : endedHtml(d);
+      app.innerHTML = d.status !== "running" && cmpInfo(d) ? compareHtml(d) : /* v2.0m-e Comparison ride */ ph === "paid" || ph === "settled" ? paidHtml(d) : d.status === "running" ? runningHtml(d) : endedHtml(d);
       if (keep) writeForm(keep);
       bind();
     }
@@ -425,6 +466,7 @@
   /* ---------- actions ---------- */
   function on(id, fn) { var el = $(id); if (el) el.addEventListener("click", fn); }
   function bind() {
+    on("rm-cmp-save", cmpSaveImage); /* v2.0m-e */
     on("rm-save-info", saveInfo);
     bindShare();
     on("rm-add-card", function () { S.cardOpen = true; draw(true); mountCard(); });
