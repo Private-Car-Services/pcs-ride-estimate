@@ -1167,6 +1167,44 @@
       .filter(Boolean).join(", ");
   }
 
+  /* v2.0m-c (Matthew 3:46 PM): "Send every ride to Apple Maps for directions" ("Including prepaid, invoiced, or metered").
+     The same maps:// link for meter / comparison / cash / prepaid / invoiced rides (state.meter: next stop, else drop-off)
+     and board rides on the way to the pickup. One URL rule: navUrlFor(). */
+  function navUrlFor(dest, exact) {
+    if (isAppleTouchDevice()) return "maps://?daddr=" + (exact ? dest : encodeURIComponent(dest)) + "&dirflg=d";
+    return "https://www.google.com/maps/dir/?api=1&destination=" + encodeURIComponent(dest) + "&travelmode=driving";
+  }
+  function navTargetPcs() {
+    if (ROLE !== "driver") return null;
+    var M = state.meter;
+    if (M) {
+      var P = M.stop && !M.stopDone && isCoord(M.stop.lat) && isCoord(M.stop.lng) ? M.stop : M.dest, lbl = P === M.stop ? "next stop" : "drop-off";
+      if (!P || !isCoord(P.lat) || !isCoord(P.lng)) return { none: true, label: "drop-off" };
+      var d = (+P.lat).toFixed(6) + "," + (+P.lng).toFixed(6);
+      return { url: navUrlFor(d, true), label: lbl, dest: d, exact: true };
+    }
+    var t = schedNavTrip(), r = t ? schedFind(t.id) : null;
+    if (r) {
+      var ex = isCoord(r.pickupLat) && isCoord(r.pickupLng), ds = ex ? (+r.pickupLat).toFixed(6) + "," + (+r.pickupLng).toFixed(6) : String(r.pickup || "");
+      if (!ds) return { none: true, label: "pickup" };
+      return { url: navUrlFor(ds, ex), label: "pickup", dest: ds, exact: ex };
+    }
+    return null;
+  }
+  function navButtonPcsHtml() {
+    var t = navTargetPcs(); if (!t) return "";
+    if (t.none) return '<p class="nav-btn-big" id="open-nav-pcs" data-nav-none="1" role="status" style="display:block;text-align:center;font-size:24px;font-weight:800;padding:18px 12px;margin:10px 0 6px;color:#fff;border-radius:14px;text-decoration:none;box-shadow:0 4px 14px rgba(0,0,0,.25);background:#5b6b5b;font-size:20px">Add a destination first</p>';
+    return '<a class="nav-btn-big" id="open-nav-pcs" style="display:block;text-align:center;font-size:24px;font-weight:800;padding:18px 12px;margin:10px 0 6px;color:#fff;border-radius:14px;text-decoration:none;box-shadow:0 4px 14px rgba(0,0,0,.25);background:#1f6fd1" href="' + esc(t.url) + '"' + (/^maps:/.test(t.url) ? "" : ' target="_blank" rel="noopener"') + ">&#10148; Navigate to " + esc(t.label) + "</a>";
+  }
+  /* Before the hand-off: save everything (meter, miles anchor). Nothing ends, pauses or resets; no popups. */
+  function navHandoffSave() { try { meterSave(); } catch (e) {} try { saveMilesAnchor(); } catch (e2) {} }
+  if (typeof document !== "undefined") document.addEventListener("click", function (ev) {
+    var a = ev.target && ev.target.closest ? ev.target.closest("#open-nav-pcs") : null; if (!a || a.getAttribute("data-nav-none")) return;
+    var t = navTargetPcs(); if (!t || t.none) return;
+    navHandoffSave(); a.setAttribute("href", t.url);
+    if (/^maps:/i.test(t.url)) { try { ev.preventDefault(); } catch (e) {} try { window.location.assign(t.url); } catch (e2) {} }
+  });
+  if (typeof window !== "undefined") window.__pcsV20mcNav = { target: function () { return navTargetPcs(); }, html: function () { return navButtonPcsHtml(); }, save: navHandoffSave };
   function navTarget() {
     if (ROLE !== "driver") return null;
     var started = state.rideStatus === "started";
@@ -9216,7 +9254,13 @@
         : (ride.fareBeforeTax != null && isFinite(+ride.fareBeforeTax) ? Math.round(+ride.fareBeforeTax) : null),
       when: ride.when || [ride.date, ride.time].filter(Boolean).join(" "),
       name: ride.name || "",
-      pricePending: ride.pricePending === true && !(Number(ride.chargedCents) > 0) && !(Number(ride.paidOtherCents) > 0) ? true : null /* v2.0d.5 r6 */
+      pricePending: ride.pricePending === true && !(Number(ride.chargedCents) > 0) && !(Number(ride.paidOtherCents) > 0) ? true : null, /* v2.0d.5 r6 */
+      /* v2.0m-e: cash ride receipt reads like the driver screen (Fare, Tax, Cash discount, Total); Senior / Military line when it applies */
+      cashDiscountCents: Number(ride.cashDiscountCents) > 0 ? Math.round(+ride.cashDiscountCents) : null,
+      cashFareShownCents: Number(ride.cashDiscountCents) > 0 && Number(ride.cashFareShownCents) > 0 ? Math.round(+ride.cashFareShownCents) : null,
+      discountCents: Number(ride.discountCents) > 0 ? Math.round(+ride.discountCents) : null,
+      discountType: ride.discountType === "senior" || ride.discountType === "military" ? ride.discountType : null,
+      billed: !!(ride.prepaid || ride.invoiced === true || ride.billKind === "prepaid" || ride.billKind === "invoiced")
     };
     /* v58: payment + Square receipt (only fields that exist, so a later write never blanks an earlier one) */
     var payKeys = { fareTotal: "fareTotal", fareTax: "fareTax", chargedCents: "chargedCents", tipCents: "tipCents", paymentStatus: "paymentStatus",
@@ -9370,7 +9414,9 @@
   function customerHistoryReceipt() {
     var r = state.historyReceipt || {};
     var amt = r.pricePending ? PRICE_PENDING_TEXT : r.amountCents != null ? money(r.amountCents) : "—"; /* v2.0d.5 r6 */
-    var fare = !r.pricePending && r.fareBeforeTax != null ? money(r.fareBeforeTax) : "";
+    var cashR = !r.pricePending && !r.billed && Number(r.cashDiscountCents) > 0 && Number(r.cashFareShownCents) > 0; /* v2.0m-e */
+    var fare = !r.pricePending && r.fareBeforeTax != null ? money(cashR ? r.cashFareShownCents : r.fareBeforeTax) : "";
+    var discLine = cashR && r.discountType && Number(r.discountCents) > 0 ? "<p><strong>" + (r.discountType === "senior" ? "Senior discount" : "Military discount") + "</strong> \u2212" + esc(money(r.discountCents)) + "</p>" : "";
     var payLine = historyPayLine(r);
     var sqUrl = /^https:\/\//i.test(r.receiptUrl || "") ? r.receiptUrl : (/^https:\/\//i.test(r.cancelFeeReceiptUrl || "") ? r.cancelFeeReceiptUrl : "");
     return (
@@ -9381,8 +9427,10 @@
       '<p class="lede">' + esc(fmtHistoryWhen(r.at) || r.when || "") + "</p>" +
       "<p><strong>From</strong><br>" + esc(r.pickup || "—") + "</p>" +
       "<p><strong>To</strong><br>" + esc(r.drop || "—") + "</p>" +
-      (fare ? "<p><strong>Fare before tax</strong> " + esc(fare) + "</p>" : "") +
+      discLine +
+      (fare ? "<p><strong>" + (cashR ? "Fare" : "Fare before tax") + "</strong> " + esc(fare) + "</p>" : "") +
       (Number(r.fareTax) > 0 ? "<p><strong>Tax</strong> " + esc(money(r.fareTax)) + "</p>" : "") +
+      (cashR ? '<p id="receipt-cash-disc"><strong>Cash discount</strong> \u2212' + esc(money(r.cashDiscountCents)) + "</p>" : "") +
       (Number(r.tipCents) > 0 ? "<p><strong>Tip</strong> " + esc(money(r.tipCents)) + "</p>" : "") +
       "<p><strong>Total</strong> " + esc(amt) + "</p>" +
       (payLine ? '<p id="receipt-pay-line"><strong>Payment</strong> ' + esc(payLine) + "</p>" : "") +
@@ -10441,24 +10489,9 @@
      Comparison ride: the rider sees our price next to what Uber would charge. The app has no Uber price feed, so the Uber
      number is OUR GUESS from the same route miles + minutes and the rates below (UberX-style: booking fee + base + per mile
      + per minute, with a minimum), shown as a range "about $A to $B". The office can change UBER_CMP_RATES. Pure (tested). */
-  var UBER_CMP_RATES = { baseCents: 250, bookingCents: 295, perMileCents: 140, perMinCents: 28, minCents: 1050, lo: 0.9, hi: 1.3 };
   function meterKindOf(M) { return M && meterShown(M) ? (M.meterKind === "comparison" ? "comparison" : M.meterKind === "meter" ? "meter" : "cash") : ""; } /* v2.0m-c: "meter" = plain Meter ride */
-  function uberCmpCents(miles, minutes, rates) {
-    var R = rates || UBER_CMP_RATES, mi = Math.max(0, +miles || 0), mn = Math.max(0, +minutes || 0);
-    var c = Math.max(R.minCents, R.baseCents + R.bookingCents + mi * R.perMileCents + mn * R.perMinCents);
-    return { lo: Math.round(c * R.lo / 100) * 100, hi: Math.round(c * R.hi / 100) * 100 };
-  }
-  function rideCmpText(M, route) {
-    if (meterKindOf(M) !== "comparison") return null;
-    var e = route ? rideEstCost(M, null, route) : null;
-    if (!e || e.from === "none") return { ok: false, text: "Add the drop-off to see our price and the Uber price." };
-    var u = uberCmpCents((+route.milesAt || 0) + (+route.miles || 0), (+route.minAt || 0) + (+route.minutes || 0));
-    return { ok: true, ours: [e.lo, e.hi], uber: [u.lo, u.hi], text: "Our price: " + rideEstWhole(e.lo) + "\u2013" + rideEstWhole(e.hi) + ". Uber estimate: about " + rideEstWhole(u.lo) + "\u2013" + rideEstWhole(u.hi) + "." }; /* r2 (Harry): reads clearly as an estimate */
-  }
-  if (typeof window !== "undefined") window.__pcsV20lCmp = { uber: uberCmpCents, text: rideCmpText, kind: meterKindOf, rates: UBER_CMP_RATES };
+  /* v2.0m-e (Harry): the old guessed Uber range "about $A to $B" is gone; the rider QR page shows the real Uber price, rounded up */
   function rideEstHtml(M, id) {
-    var c = rideCmpText(M, rideEstRoute(M));
-    if (c) return '<p class="ride-est ride-cmp" id="' + id + '" data-est-from="compare" role="status" style="margin:4px 0;font-size:18px;font-weight:800;text-align:center">' + esc(c.text) + "</p>";
     var e = rideEstCost(M, M && M.schedId ? schedFind(M.schedId) : null, rideEstRoute(M));
     return e ? '<p class="ride-est" id="' + id + '" data-est-from="' + e.from + '" role="status" style="margin:4px 0;font-size:20px;font-weight:800;text-align:center">' + esc(e.text) + "</p>" : "";
   }
@@ -11353,7 +11386,7 @@
         var nav = schedNavUrl(r.pickup, r.pickupLat, r.pickupLng);
         actions = '<div class="sched-trip" id="sched-trip" style="background:#ecfdf5;border:2px solid #0b6b3a;border-radius:12px;padding:10px;margin:8px 0">' +
           '<p style="margin:0 0 6px;font-weight:800;color:#0b3d23">' + (trip.phase === "arrived" ? "You're at the pickup" : "On the way to the pickup") + "</p>" +
-          (trip.phase === "arrived" ? "" : schedTurnHtml()) + /* v75s: in-app turn-by-turn on the map below */
+          (trip.phase === "arrived" ? "" : navButtonPcsHtml() + schedTurnHtml()) + /* v2.0m-c: Navigate to pickup */ /* v75s: in-app turn-by-turn on the map below */
           (trip.phase === "arrived"
             ? '<button type="button" id="sched-begin" data-sched-id="' + esc(r.id) + '" style="' + SCHED_BTN_BIG + '">Rider is in \u2013 start the ride</button>' +
               (navTestOn() ? '<button type="button" id="sched-arr-open" style="' + SCHED_BTN_2 + '">Show the arrival screen</button>' : "") /* v75y test flag */
@@ -12108,7 +12141,7 @@
     } catch (e) {}
   }
   if (typeof window !== "undefined") window.__pcsV7711Rides = { merge: ridesMerge, superseded: supersededCodes, serverWins: serverWins };
-  function appIsTestRide(e) { return !!e && (e.isTest === true || e.testRide === true || String(e.paidVia || "") === "test" || !!e.testKind); } /* v76d */
+  function appIsTestRide(e) { return !!e && (e.isTest === true || e.testRide === true || (String(e.paidVia || "") === "test" || String(e.paidVia || "") === "comparison" || e.comparisonRide === true) || !!e.testKind); } /* v76d */
   function hubDayStats(day) {
     var local = readDayStats(day), rides = ridesForDay(day).filter(function (e) { return !appIsTestRide(e); }); /* v76d: test rides count for nothing */
     if (!rides.length) return ridesForDay(day).length ? { requested: local.requested, completed: 0, commissionCents: 0, rideTotalCents: 0, tipCents: 0, tollCents: 0 } : local;
@@ -14027,11 +14060,9 @@
     var reimb = Math.max(0, Number(f && f.tollReimburseCents) || 0); /* v76b: real tolls = pass-through, paid to the driver 100% (tollCents), never split */
     /* v77.10 (Matthew 10/20, replaces the v73 split): PCS absorbs EVERY discount (Military, Senior 65+, custom, approved "other"):
        the driver's % is on the UNDISCOUNTED fare. Only when God checked "Driver covers it" does the whole discount come off the driver. */
-    if (f && Number(f.discountCents) > 0 && f.grossSub != null) {
-      var gb = Math.max(0, (Number(f.grossSub) || 0) - reimb - EXTRA_FEE), full = Math.round(gb * (pct / 100));
-      return f.discountDriverCovers === true ? Math.max(0, full - (Number(f.discountCents) || 0)) : full;
-    }
-    return Math.round(Math.max(0, (Number(f.sub) || 0) - reimb - EXTRA_FEE) * (pct / 100));
+    /* v2.0m-e (Matthew 10/27, settled): the driver's % is ALWAYS on the discounted fare the rider actually paid, for every
+       discount (cash, Senior, Military, owner-approved). The old "PCS covers it" branch is removed. */
+    return Math.round(Math.max(0, (Number(f.sub) || 0) - reimb - EXTRA_FEE) * (pct / 100)); /* cash ride: total minus tax */
   }
   /* ---------- v76b: metered-ride tolls ---------- */
   function meterOwnerDriver() {
@@ -14130,15 +14161,23 @@
     if (setFare) sub = setFare; /* v73: PCS set the fare before the ride -> charge it, not the meter price */
     var disc = setFare || rateOvLocked(M) ? { cents: 0, type: null, label: "" } : meterDiscountCents(M, sub); /* v73: Senior / Military 10% or an owner-approved Other discount, before tax */
     var toll = meterTollInfo(M); /* v76b: tolls after the minimum / set fare / discount (never discounted), before tax */
+    /* v2.0m-e (Matthew 10/27, settled): Cash ride discount comes AFTER tax and equals the tax exactly.
+       Fare (after one Senior or Military discount) -> Tax 8.25% of the fare -> Cash discount = the tax -> Total = the fare.
+       The driver's % is on total minus tax (fare minus the cash discount). */
+    var cashOn = meterKindOf(M) === "cash" && M.meterKind === "cash" && !setFare && !rateOvLocked(M); /* v2.0m-e (Harry): only an explicit Cash ride; a ride with no type saved gets no cash discount */
     var grossSub = sub + toll.cents;
     sub = Math.max(0, sub - disc.cents) + toll.cents;
     var bp = Math.round((Number(M.taxRate) || 0) * 1000000); /* rate in millionths: whole-number math, half-cent rounds up */
     var tax = bp > 0 ? Math.round(sub * bp / 1000000) : 0;
-    return { discountDriverCovers: !!(disc.cents > 0 && M && M.discount && M.discount.driverCovers === true), grossSub: grossSub, discountCents: disc.cents, discountType: disc.type, discountLabel: disc.label, base: base, miles: Math.round(miles * 100) / 100, includedMiles: incl, afterMiles: Math.round(afterMiles * 100) / 100,
+    var cashDiscCents = cashOn ? tax : 0;
+    var cashFareShown = sub; /* the Fare line the driver sees (before tax) */
+    sub = sub - cashDiscCents; /* v2.0m-e: f.sub (saved as fareSub everywhere) = total minus tax = the driver-pay base, so every
+       place that re-figures driver pay from the saved fare (rate re-check, board cards, God pay) gets 70% of $16.29, not $17.75 */
+    return { cashDiscCents: cashDiscCents, cashDiscLabel: cashDiscCents ? "Cash discount" : "", discountDriverCovers: !!(disc.cents > 0 && M && M.discount && M.discount.driverCovers === true), grossSub: grossSub, discountCents: disc.cents, discountType: disc.type, discountLabel: disc.label, base: base, miles: Math.round(miles * 100) / 100, includedMiles: incl, afterMiles: Math.round(afterMiles * 100) / 100,
       mileCents: mileCents, waitMin: waitMin, waitCents: waitCents, raw: raw,
       roundCents: stepped - raw, meter: stepped, minAdd: meterSub - stepped, minApplied: meterSub > stepped, /* v73: meter vs minimum only (airport fee / discount are their own lines) */ minCents: min, freeMin: Math.max(0, Number(M.freeUsed) || 0),
       feeLines: air.lines, airportCents: air.airportCents, intlCents: air.intlCents, meterSub: meterSub,
-      sub: sub, tax: tax, total: sub + tax, setFare: !!setFare || rateOvLocked(M), contractRate: rateOvLocked(M), /* v76j: contract = one Fare line for the rider */ meterReadingCents: meterReadingCents,
+      sub: sub, tax: tax, total: sub + tax, cashFareShownCents: cashFareShown, /* v2.0m-e: cash: total = fare shown; fareTax kept */ setFare: !!setFare || rateOvLocked(M), contractRate: rateOvLocked(M), /* v76j: contract = one Fare line for the rider */ meterReadingCents: meterReadingCents,
       tollCents: toll.cents, tollCount: toll.count, tollKind: toll.kind, tollLabel: toll.label, tollLine: toll.line, tolls: toll.list, tollOn: toll.on, /* v76b */
       tollReimburseCents: toll.reimburseCents, tollRoadFeeCents: toll.roadFeeCents };
   }
@@ -14244,7 +14283,7 @@
     var f = M.fare, d = M.discount || null;
     meterWrite(rideUrl(M.code), "PATCH", Object.assign({ fareSub: f.sub, fareTax: f.tax, fareTotal: f.total, estimateCents: f.total,
       feeLines: meterRideFeeLines(f), fareBase: f.setFare ? Math.max(0, f.sub - (f.tollCents || 0)) : f.base /* v76b: set fare stays its own line, tolls separate */,
-      fareGrossSub: f.grossSub, discountType: f.discountType || null, discountCents: f.discountCents || 0,
+      fareGrossSub: f.grossSub, cashDiscountCents: f.cashDiscCents || 0, cashFareShownCents: f.cashDiscCents ? f.cashFareShownCents : null, discountType: f.discountType || null, discountCents: f.discountCents || 0,
       discount: d ? { type: d.type, status: d.status || "applied", reason: d.reason || null, cents: d.cents || null, pct: d.pct || null, approvedBy: d.approvedBy || null, decidedAt: d.decidedAt || null } : null,
       updatedAt: Date.now() }, meterTollFields(f), extra || {}));
     try { meterIndexPatch(M, "ended", { paymentStatus: (M.pay && M.pay.status) || "unpaid" }); } catch (e) {}
@@ -14757,6 +14796,8 @@
       pickupLat: M.startPt ? M.startPt.lat : null, pickupLng: M.startPt ? M.startPt.lng : null,
       isTest: false, paymentStatus: "none", paymentEnv: M.sandbox ? "sandbox" : "production", meterLive: meterLiveSnapshot(M)
     };
+    if (meterKindOf(M) === "comparison" && M.cmp) { var chS = cmpCentsOf(M.cmp.charged); /* v2.0m-e: the rider's QR page needs the Uber/Lyft charge from the start (the Worker sends only the rounded-up dollar). What Uber paid the driver is NOT written here. */
+      body.comparisonRide = true; body.comparison = { service: M.cmp.service || "", rideType: M.cmp.rideType || "", chargedCents: isFinite(chS) ? chS : null }; }
     meterLiveAt = Date.now();
     meterWrite(rideUrl(M.code), "PUT", body).then(function (ok) { if (ok) meterFetchView(); });
     meterIndexPatch(M, "running");
@@ -14804,12 +14845,62 @@
   function meterKindPickHtml() { /* v2.0l: Cash ride / Comparison ride, picked before Start */
     var k = state.meterKind === "comparison" ? "comparison" : state.meterKind === "meter" ? "meter" : "cash"; /* v2.0m-c */
     var b = function (v, label) { return '<button type="button" class="btn ' + (k === v ? "" : "ghost") + '" id="meter-kind-' + v + '" data-meter-kind="' + v + '" aria-pressed="' + (k === v) + '" style="flex:1 1 auto;margin:0;min-height:52px;font-weight:800">' + label + "</button>"; };
+    if (k === "comparison" && !cmpAllowed()) k = "meter"; /* v2.0m-e */
+    var b = function (v, label) { var off = v === "comparison" && !cmpAllowed(); /* v2.0m-e (Matthew 10/27): only Matthew can pick it; others see it grayed out */
+      return '<button type="button" class="btn ' + (k === v ? "" : "ghost") + '" id="meter-kind-' + v + '" data-meter-kind="' + v + '" aria-pressed="' + (k === v) + '"' + (off ? ' disabled aria-disabled="true"' : "") + ' style="flex:1 1 auto;margin:0;min-height:52px;font-weight:800' + (off ? ";opacity:0.4;cursor:not-allowed" : "") + '">' + label + "</button>"; };
     return '<div id="meter-kind" role="group" aria-label="What kind of meter ride" style="display:flex;flex-wrap:wrap;gap:8px;margin:6px 0">' + b("meter", "Meter ride") + b("comparison", "Comparison ride") + b("cash", "Cash ride") + "</div>" + /* v2.0m-c order */
-      '<p class="fine" id="meter-kind-note">' + (k === "comparison" ? "The rider sees our price and the Uber price." : k === "meter" ? "The rider sees the price go up as you drive." : "The rider sees what they will pay at the end.") + "</p>";
+      '<p class="fine" id="meter-kind-note">' + (k === "comparison" ? "" : k === "meter" ? "The rider sees the price go up as you drive." : "The rider sees what they will pay at the end.") + "</p>" +
+      (k === "comparison" ? cmpPickHtml() : "");
   }
   if (typeof window !== "undefined") window.__pcsV20lKindPick = meterKindPickHtml;
+  /* v2.0m-e (Matthew 10/27, App Updates): Comparison ride. Dropdown 1 = Uber or Lyft. Uber list below (all of them, UberX too).
+     Lyft list: Matthew has not given it yet, so it is empty on purpose. Only Matthew's driver app can pick a Comparison ride.
+     A Comparison ride never charges the client: no price check, no pay step. The end screen asks for the ride type, what
+     Uber or Lyft charged the rider, and what Uber or Lyft paid the driver, and saves them on the ride record. */
+  var CMP_SERVICES = { uber: { label: "Uber", types: ["UberX", "Uber Comfort", "UberXL", "Uber XXL", "Uber Black"] }, lyft: { label: "Lyft", types: [] } };
+  function cmpAllowed() { try { return meterOwnerDriver() === true; } catch (e) { return false; } }
+  function cmpRideType(svc, type) { var S = CMP_SERVICES[svc]; if (!S) return ""; return type && S.types.indexOf(type) !== -1 ? type : ""; }
+  function cmpPickHtml() {
+    var svc = CMP_SERVICES[state.cmpService] ? state.cmpService : "", S = CMP_SERVICES[svc];
+    var o1 = '<option value="">Pick one</option>' + Object.keys(CMP_SERVICES).map(function (k) { return '<option value="' + k + '"' + (svc === k ? " selected" : "") + ">" + CMP_SERVICES[k].label + "</option>"; }).join("");
+    var o2 = !svc ? '<option value="">Pick Uber or Lyft first</option>'
+      : !S.types.length ? '<option value="">Lyft ride types are coming soon</option>'
+      : '<option value="">Pick one</option>' + S.types.map(function (t) { return '<option value="' + esc(t) + '"' + (state.cmpType === t ? " selected" : "") + ">" + esc(t) + "</option>"; }).join("");
+    return '<div class="card" id="cmp-pick"><label for="cmp-service">Compare with</label><select id="cmp-service" style="width:100%;min-height:48px;font-size:18px">' + o1 + "</select>" +
+      '<label for="cmp-type">Ride type</label><select id="cmp-type" style="width:100%;min-height:48px;font-size:18px"' + (svc && S.types.length ? "" : " disabled") + ">" + o2 + "</select>" + cmpBoxesHtml(svc) + "</div>";
+  }
+  /* v2.0m-e (Matthew 10/27): the two money boxes live on the Comparison tab (only there, not on the ride screen). Fill them any time. */
+  function cmpBoxesHtml(svc) {
+    var nm = (CMP_SERVICES[svc] || { label: "Uber" }).label, d = state.cmpDraft || {};
+    var box = function (id, label, v) { return '<label for="' + id + '">' + esc(label) + '</label><input id="' + id + '" type="text" inputmode="decimal" placeholder="$0.00" value="' + esc(v == null ? "" : v) + '" style="width:100%;min-height:48px;font-size:18px">'; };
+    return box("cmp-charged", "What " + nm + " charged the customer", d.charged) + box("cmp-paid", "What " + nm + " paid me", d.paid);
+  }
+  function cmpCentsOf(v) { var t = String(v == null ? "" : v).replace(/[$,\s]/g, ""); if (!/^\d+(\.\d{1,2})?$/.test(t)) return NaN; return Math.round(parseFloat(t) * 100); }
+  /* v2.0m-e (Matthew 10/27): no end screen. When a Comparison ride ends, save the comparison numbers and go back to the normal screen. */
+  function cmpFinish(M, now) {
+    var f = M.fare || meterFare(M), c = M.cmp || {}, d = state.cmpDraft || {};
+    var ch = cmpCentsOf(d.charged != null ? d.charged : c.charged), pd = cmpCentsOf(d.paid != null ? d.paid : c.paid);
+    M.cmp = { service: c.service || "", rideType: c.rideType || "", chargedCents: isFinite(ch) ? ch : null, paidDriverCents: isFinite(pd) ? pd : null,
+      pcsFareCents: f.sub, pcsTaxCents: f.tax, pcsTotalCents: f.total, pcsDriver70Cents: meterCommissionCents(f, 70), savedAt: now };
+    M.pay = { status: "paid_other", method: "comparison", amountCents: 0, tipCents: 0, paidAt: now, via: "comparison" }; /* never charges the client */
+    M.status = "paid"; state.cmpDraft = null;
+    meterWrite(rideUrl(M.code), "PATCH", { paymentStatus: "paid_other", paidVia: "comparison", rideKind: "comparison", comparisonRide: true, comparison: M.cmp, paidOtherCents: 0, tipCents: 0, paidAt: now, updatedAt: now });
+    meterIndexPatch(M, "paid_other", { paymentStatus: "paid_other", paidVia: "comparison", rideKind: "comparison", comparisonRide: true }); /* v2.0m-e (Harry): its own kind, not "test"; still left out of pay and revenue like test rides */
+    meterMarkTest(M, now);
+    meterUpdatePayWeek(M, { comparisonRide: true, paidVia: "comparison", rideKind: "comparison", comparison: M.cmp, riderName: "Comparison ride" });
+  }
+  if (typeof window !== "undefined") window.__pcsV20meCmp = { allowed: cmpAllowed, type: cmpRideType, cents: cmpCentsOf, finish: cmpFinish, boxes: cmpBoxesHtml, pick: cmpPickHtml, list: CMP_SERVICES };
+  if (typeof document !== "undefined") {
+    document.addEventListener("change", function (e) { var t = e.target; if (!t) return;
+      if (t.id === "cmp-service") { state.cmpService = t.value; state.cmpType = ""; render(); }
+      else if (t.id === "cmp-type") { state.cmpType = t.value; render(); } });
+    document.addEventListener("input", function (e) { var t = e.target; if (!t) return;
+      if (t.id === "cmp-charged" || t.id === "cmp-paid") { state.cmpDraft = state.cmpDraft || {}; state.cmpDraft[t.id === "cmp-charged" ? "charged" : "paid"] = t.value; var Mc = state.meter; if (Mc && Mc.cmp && meterKindOf(Mc) === "comparison" && Mc.status === "running") { Mc.cmp[t.id === "cmp-charged" ? "charged" : "paid"] = t.value; try { meterSave(); } catch (e2) {} } } /* v2.0m-e (Harry): numbers typed mid-ride are kept on the running ride too */ });
+  }
   function meterStart() {
     if (state.meter || !canGoOnline() || driverMidRide()) return;
+    if (state.meterKind === "comparison" && !cmpAllowed()) { state.meterKind = "meter"; render(); return; } /* v2.0m-e */
+    if (state.meterKind === "comparison" && !cmpRideType(state.cmpService, state.cmpType)) { state.meterError = state.cmpService === "lyft" ? "Lyft ride types are coming soon. Pick Uber for now." : "Pick Uber or Lyft and the ride type first."; render(); return; } /* v2.0m-e */
     var now = Date.now();
     meterSpdPts = []; meterRoute = null; /* v71 */
     var band = meterBand(new Date(now));
@@ -14831,6 +14922,7 @@
     var sr = meterSetFareRide(state.meterSchedPending); state.meterSchedPending = null; /* v73: set-fare scheduled ride */
     M.metered = !(sr || state.schedStartId); /* v2.0a: only the Metered ride button shows the meter */
     if (M.metered) M.meterKind = state.meterKind === "comparison" ? "comparison" : state.meterKind === "meter" ? "meter" : "cash"; /* v2.0m-c */ /* v2.0l: ride type known from the start */
+    if (M.meterKind === "comparison") M.cmp = { service: state.cmpService, rideType: cmpRideType(state.cmpService, state.cmpType), charged: (state.cmpDraft || {}).charged || "", paid: (state.cmpDraft || {}).paid || "" }; /* the tab boxes ride along with the saved meter */ /* v2.0m-e: filled in from the dropdowns */
     if (sr) { M.schedId = sr.id; M.setFareCents = Math.round(Number(sr.fareBeforeTax) * 100); M.schedRider = String(sr.rider || ""); }
     else if (state.schedStartId) { var srx = schedFind(state.schedStartId); if (srx) { M.schedId = srx.id; M.schedRider = String(srx.rider || ""); M.pickupAddress = String(srx.pickup || "").slice(0, 160); } } /* v75r: metered scheduled ride */
     state.schedStartId = "";
@@ -14882,7 +14974,7 @@
       tollCount: f.tollCount || 0, tollKind: f.tollKind || "toll", tollLabel: f.tollLabel || "", /* v76b */
       tollCents: f.tollReimburseCents || 0, /* real tolls: 100% to the driver (reimbursement), not in commissionCents */
       tollRoadFeeCents: f.tollRoadFeeCents || 0, /* DV-plate cars: fare income, already inside the commission split */
-      fareGrossSub: f.grossSub != null ? f.grossSub : f.sub, discountType: f.discountType || null, discountCents: f.discountCents || 0, /* v73 */
+      fareGrossSub: f.grossSub != null ? f.grossSub : f.sub, cashDiscountCents: f.cashDiscCents || 0, cashFareShownCents: f.cashDiscCents ? f.cashFareShownCents : null, discountType: f.discountType || null, discountCents: f.discountCents || 0, /* v73 */
       discountPaidBy: (f.discountCents || 0) > 0 ? (f.discountDriverCovers ? "driver" : "pcs") : null, discountLabel: f.discountLabel || null, /* v77.10 */
       discountReview: (f.discountCents || 0) > 0 ? "pending" : null, /* r3: every discounted ride waits for God review before payout */
       discountReason: M.discount && M.discount.type === "other" ? String(M.discount.reason || "") : null,
@@ -14993,7 +15085,7 @@
       meterMiles: f.miles, billedMiles: f.miles, meterMinutes: M.minutes, waitMinutes: f.waitMin, gpsGapFills: M.gapFills || 0,
       sessionFlags: (M.sessionFlags || []).length ? M.sessionFlags.slice() : null, sessionCheckAt: now, /* v77.10: offline / quick completion flagged for God */
       discountReview: (f.discountCents || 0) > 0 ? "pending" : null, /* r3 */
-      fareBase: f.contractRate ? Math.max(0, f.sub - (f.tollCents || 0)) : f.base, fareMileCents: f.contractRate ? 0 : f.mileCents, fareWaitCents: f.contractRate ? 0 : f.waitCents, fareSub: f.sub, /* v76j */ fareTax: f.tax, fareTotal: f.total,
+      fareBase: f.contractRate ? Math.max(0, f.sub - (f.tollCents || 0)) : f.base, fareMileCents: f.contractRate ? 0 : f.mileCents, fareWaitCents: f.contractRate ? 0 : f.waitCents, fareSub: f.sub, /* v76j */ cashDiscountCents: f.cashDiscCents || 0, cashFareShownCents: f.cashDiscCents ? f.cashFareShownCents : null, /* v2.0m-e: fareSub = total minus tax on a cash ride */ fareTax: f.tax, fareTotal: f.total,
       feeLines: meterRideFeeLines(f), airportFeeCents: f.airportCents || 0, internationalFeeCents: f.intlCents || 0, meterTrip: meterTripOf(M), /* v72t; v76b + toll line */
       tollCount: f.tollCount || 0, tollCents: f.tollCents || 0, tollKind: f.tollKind || "toll", tollLabel: f.tollLabel || "", tolls: (f.tolls || []).slice(),
       tollReimburseCents: f.tollReimburseCents || 0, tollRoadFeeCents: f.tollRoadFeeCents || 0, /* v76b */
@@ -15020,10 +15112,11 @@
     if (M.ridePct == null) { var pctUsedEnd = meterRidePct(M); rateRecheckAfterEnd(M.code, pctUsedEnd, function (p) { /* v76d: re-read the driver's % */
       var recR = meterFareRec(M); if (recR) return { commissionCents: recCommissionCents(recR, p) }; /* r6 */
       return { commissionCents: M.prepaid ? prepaidWeekNumbers(M.prepaid, M.fare, p).commissionCents : meterCommissionCents(M.fare, p) }; }); }
+    if (meterKindOf(M) === "comparison") { meterGeocodeEnds(M); cmpFinish(M, now); meterSave(); meterStopTimers(); meterClear(); return; } /* v2.0m-e: no price check, no pay step, no end screen */
     meterSave();
     meterGeocodeEnds(M);
     render();
-    if (!M.prepaid) meterSchedulePoll(METER_POLL_MS); /* the rider may pay from their meter page (saved card): flip to Paid by itself */
+    if (!M.prepaid && meterKindOf(M) !== "comparison") meterSchedulePoll(METER_POLL_MS); /* v2.0m-e: no pay poll on a Comparison ride */ /* the rider may pay from their meter page (saved card): flip to Paid by itself */
   }
   /* v75v: Prepaid (Square invoice) ride: straight to Paid, zero charge, no QR / card prompt. */
   function meterFinishPrepaid(M, now) {
@@ -15752,8 +15845,9 @@
       (f.feeLines || []).map(function (l) { return '<div class="money-row meter-fee-line" id="meter-fee-' + esc(l.key) + '"><span>' + esc(l.label) + "</span><span>" + money(l.cents) + "</span></div>"; }).join("") + /* v72t airport lines */
       (f.discountCents ? '<div class="money-row meter-disc-line" id="meter-disc-line" style="color:#8fd0a8;font-weight:700"><span>' + esc(f.discountLabel) + "</span><span>\u2212" + money(f.discountCents) + "</span></div>" : "") + /* v73 */
       meterTollRowHtml(f) + /* v76b */
-      (M.taxRate ? '<div class="money-row"><span>Fare</span><span id="meter-fare-sub">' + money(f.sub) + "</span></div>" +
+      (M.taxRate ? '<div class="money-row"><span>Fare</span><span id="meter-fare-sub">' + money(f.cashDiscCents ? f.cashFareShownCents : f.sub) + "</span></div>" +
         '<div class="money-row" id="meter-tax"><span>Tax (' + meterPct(M.taxRate) + ")</span><span>" + money(f.tax) + "</span></div>" : "") +
+      (f.cashDiscCents ? '<div class="money-row meter-cashdisc-line" id="meter-cashdisc-line" style="color:#8fd0a8;font-weight:700"><span>' + esc(f.cashDiscLabel) + "</span><span>\u2212" + money(f.cashDiscCents) + "</span></div>" : "") + /* v2.0m-e */ /* after tax */
       '<div class="total-row"><span>Total</span><span id="meter-total">' + money(f.total) + "</span></div>" +
       '<p class="fine">' + esc(M.tierLabel) + " · " + esc(meterTripLabel(meterTripOf(M))) + " · " + esc(String(M.minutes || "")) + " min ride · ride " + esc(M.code) + "</p>" +
       "</div>"
@@ -15948,6 +16042,7 @@
         "</section>"
       );
     }
+    if (meterKindOf(M) === "comparison") { setTimeout(function () { if (state.meter === M && M.status === "ended") { cmpFinish(M, Date.now()); meterSave(); meterStopTimers(); meterClear(); } }, 0); return ""; } /* v2.0m-e: an old ended Comparison ride saves and closes */
     /* ended: pay */
     var linkOpen = P.status === "link_open" && M.link && M.link.url;
     var qr = linkOpen ? meterQrSvg(M.link.url) : "";
@@ -16018,7 +16113,7 @@
       (function () { var mph = meterMphNow(M); return '<div id="meter-mph-box" class="' + meterMphBoxClass(M, mph) + '"><b id="meter-mph">' + (mph === null ? "--" : mph) +
         '</b><span id="meter-mph-label">' + esc(meterMphLabel(M, mph)) + "</span></div>"; })() + "</div>") +
       '<p class="meter-status-line"><span class="meter-free" id="meter-free">' + esc(meterFreeLine(M)) + '</span><span id="meter-gps">' + esc(meterGpsLine(M)) + "</span></p>" +
-      (M.dest ? '<p class="meter-dest-eta meter-run-eta" id="meter-dest-eta" role="status">' + esc(meterEtaLine(M)) + "</p>" : "") + /* v72z (Matthew): ETA in the meter card, under GPS OK, above End ride */
+      (M.dest ? '<p class="meter-dest-eta meter-run-eta" id="meter-dest-eta" role="status">' + esc(meterEtaLine(M)) + "</p>" : "") + navButtonPcsHtml() + /* v2.0m-c: Navigate (every meter-screen ride type) */ /* v72z (Matthew): ETA in the meter card, under GPS OK, above End ride */
       (M.riderCard ? '<p class="fine" id="meter-rider-card-note" style="color:#8fd0a8;text-align:center;margin:0">✓ Rider saved a card on their meter page</p>' : "") +
       (meterQrShowing() ? '<div class="meter-qr-modal" id="meter-qr-modal">' + meterRiderQrHtml(M) + "</div>" : "") + busy + /* v72t: big QR overlay at the START */
       meterTollHtml(M) + /* v76b: + Toll $1.75 */
@@ -16815,10 +16910,10 @@
     on("open-meter-std", function () { state.meterKind = "meter"; state.meterOpen = true; state.hubOpen = false; state.meterError = ""; render(); }); /* v2.0m-c */
     on("hub-meter-std", function () { state.meterKind = "meter"; state.meterOpen = true; state.hubOpen = false; state.hubView = "menu"; state.meterError = ""; render(); });
     on("meter-kind-meter", function () { state.meterKind = "meter"; render(); });
-    on("open-meter-cmp", function () { state.meterKind = "comparison"; state.meterOpen = true; state.hubOpen = false; state.meterError = ""; render(); });
-    on("hub-meter-cmp", function () { state.meterKind = "comparison"; state.meterOpen = true; state.hubOpen = false; state.hubView = "menu"; state.meterError = ""; render(); });
+    on("open-meter-cmp", function () { if (!cmpAllowed()) return; state.meterKind = "comparison"; state.meterOpen = true; state.hubOpen = false; state.meterError = ""; render(); });
+    on("hub-meter-cmp", function () { if (!cmpAllowed()) return; state.meterKind = "comparison"; state.meterOpen = true; state.hubOpen = false; state.hubView = "menu"; state.meterError = ""; render(); });
     on("meter-kind-cash", function () { state.meterKind = "cash"; render(); });
-    on("meter-kind-comparison", function () { state.meterKind = "comparison"; render(); });
+    on("meter-kind-comparison", function () { if (!cmpAllowed()) return; state.meterKind = "comparison"; render(); });
     on("open-meter", function () { state.meterKind = "cash"; state.meterOpen = true; state.hubOpen = false; state.meterError = ""; render(); });
     on("hub-meter", function () { state.meterKind = "cash"; state.meterOpen = true; state.hubOpen = false; state.hubView = "menu"; state.meterError = ""; render(); });
     on("meter-reopen", function () { state.meterOpen = !(state.meter && state.meter.status === "running"); render(); });
@@ -16932,7 +17027,7 @@
     /* v2.0m-c (Matthew 4:51 PM): on the map row the three sit on ONE line, equal width, filling the row; labels stay whole */
     if (oneLine) st = 'style="flex:1 1 0;width:auto;min-width:0;margin:0;padding:8px 2px;min-height:0;white-space:nowrap;font-size:clamp(10.5px,3.2vw,15px)"';
     return '<button class="btn secondary" type="button" id="open-meter-std" ' + st + '>Meter ride</button>' +
-      '<button class="btn secondary" type="button" id="open-meter-cmp" ' + st + '>Comparison ride</button>' +
+      '<button class="btn secondary" type="button" id="open-meter-cmp" ' + (cmpAllowed() ? st : st.replace('style="', 'disabled aria-disabled="true" style="opacity:0.4;cursor:not-allowed;')) + '>Comparison ride</button>' + /* v2.0m-e: only Matthew */
       '<button class="btn secondary" type="button" id="open-meter" ' + st + '>Cash ride</button>';
   }
   if (typeof window !== "undefined") window.__pcsV20mcBtns = homeMeterBtnsHtml;
