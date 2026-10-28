@@ -131,6 +131,7 @@
     fareDrafts: {},
     boardNotice: "",
     expandedDrivers: {},
+    focusDriver: "", /* v2.0m-m */
     showHireForm: false,
     showBoardHow: false
   };
@@ -3820,6 +3821,75 @@
     delete state.shownWaiting[code];
     if (state.screen === "board") startPoll();
   }
+  /* v2.0m-m (Matthew 10/28): hours-limit alert. Tapping the phone alert (or the pop-up here) opens that driver's card at
+     "Log out driver". While God mode is open, a driver newly over a limit gets one pop-up per shift. */
+  function focusDriverCard() {
+    var id = state.focusDriver;
+    if (!id || state.screen !== "board") return;
+    var card = Array.prototype.filter.call(document.querySelectorAll("details.driver-card"), function (x) { return x.getAttribute("data-driver-id") === id; })[0];
+    if (!card) return; /* not painted yet: try again after the next paint */
+    state.focusDriver = "";
+    card.open = true; state.expandedDrivers[id] = true;
+    var btn = card.querySelector("[data-force-logout]") || card;
+    try { btn.scrollIntoView({ block: "center" }); } catch (e) {}
+    try { btn.focus(); } catch (e) {}
+  }
+  function openDriverFromAlert(id) {
+    id = String(id || "").replace(/[^A-Za-z0-9_]/g, "").slice(0, 64);
+    if (!id) return;
+    state.focusDriver = id; state.expandedDrivers[id] = true;
+    if (state.screen === "board") { render(); focusDriverCard(); }
+  }
+  function hosOverLimitGod(d) {
+    if (!d || !d.online) return false;
+    if (d.hosLevel === "limit") return true;
+    return ["hosDriveLeftMin", "hosShiftLeftMin", "hosCycleLeftMin", "hosBreakLeftMin"].some(function (k) { return d[k] != null && isFinite(Number(d[k])) && Number(d[k]) < 0; });
+  }
+  function hosLimitWatch(drivers) {
+    var seen = {};
+    try { seen = JSON.parse(localStorage.getItem("pcsHosLimitSeen") || "{}") || {}; } catch (e) { seen = {}; }
+    var now = Date.now(), fresh = [], changed = false;
+    Object.keys(seen).forEach(function (k) { if (now - Number(seen[k]) > 2 * 86400000) { delete seen[k]; changed = true; } });
+    (drivers || []).forEach(function (d) {
+      if (!hosOverLimitGod(d)) return;
+      var k = d.id + ":" + (Number(d.shiftStartedAt) || 0);
+      if (seen[k]) return;
+      seen[k] = now; changed = true; fresh.push(d);
+    });
+    if (changed) { try { localStorage.setItem("pcsHosLimitSeen", JSON.stringify(seen)); } catch (e) {} }
+    fresh.forEach(function (d) {
+      var name = displayName(d.name, "Driver"), body = name + " is still logged on and hit the hours limit. Tap to log him out.";
+      var shown = false;
+      try {
+        if ("Notification" in window && Notification.permission === "granted") {
+          var n = new Notification("Driver over hours limit", { body: body, tag: "hos-limit-" + d.id, requireInteraction: true });
+          n.onclick = function () { try { window.focus(); } catch (e) {} openDriverFromAlert(d.id); try { n.close(); } catch (e) {} };
+          shown = true;
+        }
+      } catch (e) {}
+      if (!shown || document.visibilityState === "visible") hosLimitPopup(d.id, body);
+    });
+    return fresh.length;
+  }
+  function hosLimitPopup(id, body) {
+    var box = document.getElementById("hos-limit-pop");
+    if (!box) {
+      box = document.createElement("div"); box.id = "hos-limit-pop"; box.setAttribute("role", "alertdialog");
+      box.style.cssText = "position:fixed;left:50%;top:12px;transform:translateX(-50%);z-index:99999;max-width:92vw;width:440px;background:#b91c1c;color:#fff;border-radius:12px;padding:12px 14px;box-shadow:0 6px 24px rgba(0,0,0,.35);font-weight:700";
+      document.body.appendChild(box);
+    }
+    var row = document.createElement("div"); row.style.margin = "6px 0";
+    row.innerHTML = '<p style="margin:0 0 8px">' + esc(body) + '</p><button type="button" class="btn btn-gold" data-hos-pop-open="1">Open driver</button> <button type="button" class="btn btn-ghost" data-hos-pop-close="1" style="color:#fff">Dismiss</button>';
+    row.querySelector("[data-hos-pop-open]").onclick = function () { row.remove(); if (!box.children.length) box.remove(); openDriverFromAlert(id); };
+    row.querySelector("[data-hos-pop-close]").onclick = function () { row.remove(); if (!box.children.length) box.remove(); };
+    box.appendChild(row);
+  }
+  (function readDriverParam() {
+    try {
+      var v = new URLSearchParams(window.location.search).get("driver");
+      if (v) state.focusDriver = String(v).replace(/[^A-Za-z0-9_]/g, "").slice(0, 64);
+    } catch (e) {}
+  })();
   (function readRideParam() {
     try {
       var c = new URLSearchParams(window.location.search).get("ride");
@@ -3832,6 +3902,7 @@
         var d = ev && ev.data;
         if (!d || typeof d !== "object") return;
         if (d.type === "pcs-open-ride") openRideFromAlert(d.code);
+        else if (d.type === "pcs-open-driver") openDriverFromAlert(d.driver); /* v2.0m-m */
         else if (d.type === "pcs-push" && state.screen === "board") startPoll();
       });
     } catch (e) {}
@@ -4098,6 +4169,7 @@
         state.drivers = (rows || []).filter(function (d) {
           return d && !d.offlineLoggedIn && isRosterActive(d.id) && signalLevel(d, nowS) !== "gone";
         });
+        try { hosLimitWatch(state.drivers); } catch (e) {} /* v2.0m-m */
       }).catch(function (err) {
         state.drivers = [];
         state.driversError = err && err.denied ? "denied" : "error";
@@ -9487,6 +9559,7 @@
     ensureMap();
     syncMap();
     setFocusBar();
+    if (state.focusDriver) { try { focusDriverCard(); } catch (e) {} } /* v2.0m-m */
     if (ncode) { var nel = Array.prototype.filter.call(document.querySelectorAll("[data-note-code]"), function (x) { return x.getAttribute("data-note-code") === ncode; })[0];
       if (nel) { try { nel.focus(); nel.setSelectionRange(nsel[0], nsel[1]); } catch (x) {} } }
   }
@@ -9655,9 +9728,14 @@
     var j = function (u) { return fetch(u).then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }); };
     return Promise.all([j(milesUrl(id)), j(baseUrl() + "/rides/DRVRHSLG/" + encodeURIComponent(id) + ".json"), godRosterRow(id)]).then(function (res) {
       var miles = res[0] || {}, hl = res[1] || {}, ro = res[2] || {}, duty = [], drive = [], breaks = [], offline = [], overrides = [];
-      var iv = function (o, arr) { if (o && typeof o === "object") Object.keys(o).forEach(function (k) { var v = o[k] || {}; var s0 = Number(v.s), e0 = Number(v.e) || s0; if (v.open && !(e0 > s0)) e0 = now; if (s0 > 0 && e0 > s0) arr.push([s0, e0]); }); };
-      Object.keys(hl).forEach(function (k) { if (/^\d+$/.test(k)) { var v = hl[k] || {}; if (Number(v.s) > 0 && Number(v.e) > Number(v.s)) duty.push([Number(v.s), Number(v.e)]); } });
+      /* v2.0m-l (Matthew 10/28): an open record with no real end (e <= s) used to run to "now" and paint days OFF (Anson since 10/21, Matthew since 10/23).
+         Now it runs to "now" only if nothing (duty/drive/break/offline/DVIR) starts after it; otherwise it ends at the next activity start. */
+      var opens = [], starts = [];
+      var iv = function (o, arr) { if (o && typeof o === "object") Object.keys(o).forEach(function (k) { var v = o[k] || {}; var s0 = Number(v.s), e0 = Number(v.e) || s0; if (s0 > 0) starts.push(s0); if (v.open && !(e0 > s0)) { if (s0 > 0) opens.push([s0, arr]); return; } if (s0 > 0 && e0 > s0) arr.push([s0, e0]); }); };
+      Object.keys(hl).forEach(function (k) { if (/^\d+$/.test(k)) { var v = hl[k] || {}; if (Number(v.s) > 0) starts.push(Number(v.s)); if (Number(v.s) > 0 && Number(v.e) > Number(v.s)) duty.push([Number(v.s), Number(v.e)]); } });
       iv(hl.drive, drive); iv(hl.breaks, breaks); iv(hl.offline, offline);
+      if (hl.dvir && typeof hl.dvir === "object") Object.keys(hl.dvir).forEach(function (d) { var o = hl.dvir[d]; if (o && typeof o === "object") Object.keys(o).forEach(function (k) { var a = Number(o[k] && o[k].at); if (a > 0) starts.push(a); }); });
+      opens.forEach(function (x) { var nx = 0; starts.forEach(function (t) { if (t > x[0] && (!nx || t < nx)) nx = t; }); var e1 = nx || now; if (e1 > x[0]) x[1].push([x[0], e1]); });
       if (hl.overrides && typeof hl.overrides === "object") Object.keys(hl.overrides).forEach(function (k) { var v = hl.overrides[k]; if (v && typeof v === "object") overrides.push(Object.assign({ at: Number(v.grantedAt || v.at || k) || 0 }, v)); });
       Object.keys(miles).forEach(function (d) { var r = miles[d] || {}, sh = r.shifts || {};
         Object.keys(sh).forEach(function (k) { var x = sh[k] || {}, a = Number(x.shiftStartedAt) || Number(k), b = Number(x.shiftEndedAt) || 0; if (!x.hosExcluded && a > 0 && b > a && !duty.some(function (g) { return g[0] < b && g[1] > a; })) duty.push([a, b]); }); });

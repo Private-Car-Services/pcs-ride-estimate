@@ -8,6 +8,7 @@ self.addEventListener("push", function (e) {
   var d = {};
   try { d = e.data ? e.data.json() : {}; } catch (x) { try { d = { body: e.data.text() }; } catch (y) { d = {}; } }
   var code = String(d.code || "").replace(/[^A-Za-z0-9]/g, "").slice(0, 12);
+  var driver = String(d.driver || "").replace(/[^A-Za-z0-9_]/g, "").slice(0, 64); /* v2.0m-m: hours-limit alert -> that driver's card */
   var title = d.title || "PCS: New ride request";
   var opts = {
     body: d.body || "A ride needs your OK. Tap to open God mode.",
@@ -18,7 +19,7 @@ self.addEventListener("push", function (e) {
     vibrate: [300, 120, 300, 120, 300],
     icon: "icon-192.png",
     badge: "icon-192.png",
-    data: { url: code ? "./?ride=" + encodeURIComponent(code) : "./", code: code },
+    data: { url: driver ? "./?driver=" + encodeURIComponent(driver) : code ? "./?ride=" + encodeURIComponent(code) : "./", code: code, driver: driver },
   };
   e.waitUntil(Promise.all([
     self.registration.showNotification(title, opts),
@@ -37,7 +38,7 @@ self.addEventListener("notificationclick", function (e) {
     for (var i = 0; i < list.length; i += 1) {
       var c = list[i];
       if (c.url.indexOf(self.registration.scope) === 0 && "focus" in c) {
-        try { c.postMessage({ type: "pcs-open-ride", code: data.code || "" }); } catch (x) {}
+        try { c.postMessage(data.driver ? { type: "pcs-open-driver", driver: data.driver } : { type: "pcs-open-ride", code: data.code || "" }); } catch (x) {}
         return c.focus();
       }
     }
