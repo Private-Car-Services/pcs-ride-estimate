@@ -8297,17 +8297,25 @@
         (c.blocks && c.blocks.length ? '<div style="color:#ff9b9b;font-weight:800">\u26D4 BLOCKED from going online: ' + c.blocks.map(function (b) { return esc(b.why); }).join(" ") + "</div>" : "") +
         vmFluidLine(v) + "</div>" +
         '<div><button type="button" class="btn btn-ghost" data-vm-edit="' + esc(id) + '">Edit</button></div></div>' +
-        vmBlock("Oil change", c.oil) + '<button type="button" class="btn btn-gold" data-vm-done="oil" data-vm-id="' + esc(id) + '">Mark oil change done</button>' +
-        vmBlock("Tire rotation", c.rot) + '<button type="button" class="btn btn-gold" data-vm-done="rot" data-vm-id="' + esc(id) + '">Mark rotation done</button>' +
+        vmBlock("Oil change", c.oil) + vmOilExtra(v, c) + /* v2.0m-j (Matthew 10/28): "Mark oil change done" / "Mark rotation done" buttons removed */
+        vmBlock("Tire rotation and balance", c.rot) + vmMoreRows(v, c) +
         vmHistHtml(v) + "</div>";
     });
     return h;
   }
+  /* v2.0m-j: oil service life (picked by the driver at the oil change), next oil change estimate (sheet math), brakes (50,000 miles each) */
+  function vmOilExtra(v, c) { var M = window.PCSVM, sh = M && c.cur != null ? M.compute(v, c.cur, Date.now()) : null, pj = sh && sh.oil.projected;
+    return '<div class="fine" data-vm-oil-life>Oil service life: <b>' + vmN(M ? M.oilInterval(v) : 25000) + " miles</b> \u00b7 " + (pj ? "Next oil change about <b>" + esc(M.fmtDay(pj)) + "</b>" : "Next oil change: Not enough miles yet to estimate") + "</div>"; }
+  function vmMoreRows(v, c) { var M = window.PCSVM; if (!M || !M.dueOf) return "";
+    return [["brakeFront", "Front brakes"], ["brakeRear", "Rear brakes"]].map(function (r) { var s = v[r[0]] || {}, d = M.dueOf(v, r[0], c.cur, Date.now());
+      return '<div class="fine" data-vm-more="' + r[0] + '" style="margin:4px 0"><b>' + r[1] + ":</b> " + (Number(s.lastMiles) > 0 ? "last " + vmN(s.lastMiles) + " miles" + (s.lastDate ? " on " + esc(s.lastDate) : "") : "not logged yet") +
+        (d.state === "ok" || d.state === "over" ? " \u00b7 next due at <b>" + vmN(d.due) + " miles</b>" + (d.left != null ? " (" + (d.left < 0 ? vmN(-d.left) + " over" : vmN(d.left) + " left") + ")" : "") + " \u00b7 " + (d.projected ? "about " + esc(M.fmtDay(d.projected)) : "not enough miles yet to estimate") : "") + "</div>"; }).join(""); }
+  var VM_KIND_NAME = { oil: "Oil change", rot: "Tire rotation and balance", tiresReplaced: "New tires", brakePads: "Brake pads", brakeFront: "Front brakes", brakeRear: "Rear brakes" };
   function vmHistHtml(v) {
     var s = v.services || {}, ks = Object.keys(s).sort().reverse().slice(0, 6);
     if (!ks.length) return "";
     return '<details style="margin-top:8px"><summary class="fine">Service log (' + Object.keys(s).length + ")</summary>" + ks.map(function (k) { var x = s[k] || {};
-      return '<div class="fine">' + esc(x.date || "") + " \u00b7 " + (x.kind === "oil" ? "Oil change" : "Tire rotation") + " at " + vmN(dmNum(x.miles)) + " mi" + (x.by ? " \u00b7 " + esc(x.by) : "") + "</div>"; }).join("") + "</details>";
+      return '<div class="fine">' + esc(x.date || "") + " \u00b7 " + (VM_KIND_NAME[x.kind] || "Service") + " at " + vmN(dmNum(x.miles)) + " mi" + (x.by ? " \u00b7 " + esc(x.by) : "") + "</div>"; }).join("") + "</details>";
   }
   function vmFormHtml(id) {
     var v = id === "__new" ? {} : (vm.list[id] || {}), o = v.oil || {}, r = v.rot || {}, ro = state.roster || {};
@@ -8359,7 +8367,7 @@
     var kind = t.getAttribute("data-vm-done");
     if (kind) {
       var id = t.getAttribute("data-vm-id"), v = vm.list[id] || {}, c = vmCalc(v);
-      var miles = vmNum(window.prompt((kind === "oil" ? "Oil change" : "Tire rotation") + " done at what mileage?", c.cur != null ? String(Math.round(c.cur)) : ""));
+      var miles = vmNum(window.prompt((kind === "oil" ? "Oil change" : "Tire rotation and balance") + " done at what mileage?", c.cur != null ? String(Math.round(c.cur)) : ""));
       if (!(miles > 0)) return;
       var date = (window.prompt("Date done (YYYY-MM-DD):", chicagoToday()) || "").trim(); if (!vmParseDate(date)) { alert("Date not recognized."); return; }
       var now = Date.now(), patch = {}, sv = v[kind] || {};
