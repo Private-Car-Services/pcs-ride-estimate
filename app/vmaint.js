@@ -5,8 +5,8 @@
    The date is a PROJECTION from the driver's average, never a fixed due date.
    Tire rotation interval is fixed at 10,000 mi (not editable). Oil interval is the driver's own (default 25,000).
    Flags: yellow when <= 1,000 mi left or <= 7 projected days; red when overdue.
-   HARD BLOCK (no going online): oil more than 500 mi past its due mileage, or more than 11,000 mi since the last
-   tire rotation. Cleared only by logging that service with an odometer >= the last one (and <= the current one).
+   HARD BLOCK (no going online): v2.0m-j (Matthew 10/28) any miles past the oil due mileage or the tire rotation due mileage
+   (old 500 / 11,000 grace removed). Cleared only by logging that service with an odometer >= the last one (and <= the current one).
    Harry r1: a record with a missing / blank / NaN oil.lastMiles or rot.lastMiles is INVALID and counts as blocked.
    A driver can't raise the oil interval while blocked or within 1,000 mi of due (God mode still can). */
 (function (root) {
@@ -39,10 +39,11 @@
   function compute(v, cur, now) {
     v = v || {}; cur = num(cur); var today = ctToday(now);
     var oil = one(v.oil, oilInterval(v), cur, today), rot = one(v.rot, ROT_INTERVAL, cur, today), blocks = [];
-    if (oil.left != null && oil.left < -OIL_BLOCK_OVER) blocks.push({ kind: "oil", why: "Your oil change is " + Math.round(-oil.left).toLocaleString("en-US") + " miles late. You need an oil change now! Write it down here, then you can drive." });
+    /* v2.0m-j (Matthew 10/28): "If at any time they go over the recommended mileage, the driver is blocked". Past due = blocked (no 500 / 11,000 grace). */
+    if (oil.left != null && oil.left < 0) blocks.push({ kind: "oil", why: "Your oil change is " + Math.round(-oil.left).toLocaleString("en-US") + " miles overdue. You cannot log on with your vehicle in an unsafe condition because the oil has not been changed. You will be able to log back in once your oil has been changed for safe operations." });
     if (!(oil.last > 0)) blocks.push({ kind: "oil", invalid: true, why: "We don't know the miles at your last oil change. Write it down here, then you can drive." });
     if (!(rot.last > 0)) blocks.push({ kind: "rot", invalid: true, why: "We don't know the miles at your last tire rotation. Write it down here, then you can drive." });
-    if (rot.since != null && rot.since > ROT_BLOCK_SINCE) blocks.push({ kind: "rot", why: "Your tires went " + Math.round(rot.since).toLocaleString("en-US") + " miles since the last rotation. That is too many. Get the tires rotated now! Write it down here, then you can drive." });
+    if (rot.left != null && rot.left < 0) blocks.push({ kind: "rot", why: "Your tire rotation and balance is " + Math.round(-rot.left).toLocaleString("en-US") + " miles overdue. You cannot log on with your vehicle in an unsafe condition because the tires have not been rotated and balanced. You will be able to log back in once your tires have been rotated and balanced for safe operations." }); /* v2.0m-j: past due = blocked */
     return { today: today, cur: cur, oil: oil, rot: rot, blocks: blocks, worst: [oil.status, rot.status].indexOf("red") >= 0 ? "red" : [oil.status, rot.status].indexOf("yellow") >= 0 ? "yellow" : "green" };
   }
   /* a new service entry: odometer >= the last one (and not above the current odometer + 50 typo slack); date a real day, not in the future */
@@ -61,7 +62,7 @@
     n = num(n); if (!(n >= 1000 && n <= 50000) || Math.round(n) !== n) return "Pick a number from 1,000 to 50,000 miles.";
     if (n > oilInterval(v)) { var c = compute(v, cur, now); /* r2: no / NaN current odometer = can't prove it's safe, refused */
       if (!c.blocks.length && (!(c.cur > 0) || c.oil.left == null)) return "We don't know your car's miles yet. Do a pre-trip first, then try again.";
-      if (c.blocks.length || c.oil.status !== "green") return "You can't make this bigger now. Your oil change is late or coming soon. Get the oil change first."; } /* v2.0i: same yellow rule as the card (1,000 mi OR 7 days) */
+      if (c.blocks.length || c.oil.status !== "green") return "You can't make this bigger now. Your oil change is overdue or coming soon. Get the oil change first."; } /* v2.0i: same yellow rule as the card (1,000 mi OR 7 days) */
     return "";
   }
   var CUR_SKEW_MS = 600000, CUR_DAYS = 60, CUR_KEEP = 10;
@@ -139,9 +140,9 @@
   /* v2.0m-c (Matthew 3:43-3:44 PM): "Where is the 'due' section" / "how many miles are left until due". One Due cell per log row:
      due miles, miles left, projected day (same math as the next-oil line). Interval: oil = God/driver oil interval, rotation =
      fixed 10,000, other rows = the God-only "Every ___ miles" field (no field = "Set in God mode"). */
-  var DUE_MAX_INT = 300000;
+  var DUE_MAX_INT = 300000, BRAKE_INTERVAL = 50000;
   function rowInterval(v, kind) { if (kind === "oil") return oilInterval(v); if (kind === "rot") return ROT_INTERVAL;
-    var i = num(v && v[kind] && v[kind].interval); return i && i >= 500 && i <= DUE_MAX_INT ? Math.round(i) : null; }
+    var i = num(v && v[kind] && v[kind].interval); return i && i >= 500 && i <= DUE_MAX_INT ? Math.round(i) : (kind === "brakeFront" || kind === "brakeRear") ? BRAKE_INTERVAL : null; } /* v2.0m-j (Matthew 10/28): brakes good for about 50,000 miles */
   function dueOf(v, kind, cur, now) {
     var s = (v && v[kind]) || {}; if (!(num(s.lastMiles) > 0)) return { state: "nolog" };
     var iv = rowInterval(v, kind); if (!iv) return { state: "noint" };
@@ -155,8 +156,11 @@
     if (d.state === "noint") return '<span data-due="noint">Set in God mode</span>';
     /* v2.0m-c (Harry 5:08 PM): at most two short lines */
     if (d.state === "over") return '<span data-due="over" style="display:inline-block;background:#e5534b;color:#fff;border-radius:6px;padding:1px 6px;font-weight:800;white-space:nowrap">Due now \u00b7 ' + fmtN(-d.left) + " over</span>";
-    return '<span data-due="ok" style="white-space:nowrap">' + fmtN(d.due) + " mi" + (d.left != null ? " \u00b7 " + fmtN(d.left) + " left" : "") + (d.projected ? "<br>about " + fmtDay(d.projected) : "") + "</span>";
+    return '<span data-due="ok" style="white-space:nowrap">' + fmtN(d.due) + " miles" + (d.left != null ? " \u00b7 " + fmtN(d.left) + " left" : "") + (d.projected ? "<br>about " + fmtDay(d.projected) : "<br>Not enough miles yet to estimate") + "</span>"; /* v2.0m-j: words, no "mi" */
   }
-  var api = { dueOf: dueOf, dueHtml: dueHtml, rowInterval: rowInterval, curFrom: curFrom, fromInspection: fromInspection, inspCur: inspCur, inspRows: inspRows, JUMP_WARN_MI: JUMP_WARN_MI, NO_RECORD_BLOCKS: NO_RECORD_BLOCKS, WARN_DAYS: WARN_DAYS, checkInterval: checkInterval, noRecordBlocks: noRecordBlocks, ROT_INTERVAL: ROT_INTERVAL, OIL_DEFAULT: OIL_DEFAULT, FLUIDS: FLUIDS, LEVELS: LEVELS, normLevel: normLevel, compute: compute, oilInterval: oilInterval, checkService: checkService, checkFluids: checkFluids, ctToday: ctToday, ymdOk: ymdOk };
+  /* v2.0m-j (Matthew 10/28): oil service life picked when the oil is changed; due pop-up inside 500 miles */
+  var OIL_LIFE = [3000, 5000, 10000, 15000, 20000, 25000], DUE_POP_MI = 500;
+  function popDue(c) { var out = []; ["oil", "rot"].forEach(function (k) { var x = c && c[k]; if (x && x.left != null && x.left <= DUE_POP_MI) out.push({ kind: k, left: x.left, due: x.due, projected: x.projected, late: x.left < 0 }); }); return out; }
+  var api = { OIL_LIFE: OIL_LIFE, DUE_POP_MI: DUE_POP_MI, popDue: popDue, dueOf: dueOf, dueHtml: dueHtml, fmtDay: fmtDay, BRAKE_INTERVAL: BRAKE_INTERVAL, rowInterval: rowInterval, curFrom: curFrom, fromInspection: fromInspection, inspCur: inspCur, inspRows: inspRows, JUMP_WARN_MI: JUMP_WARN_MI, NO_RECORD_BLOCKS: NO_RECORD_BLOCKS, WARN_DAYS: WARN_DAYS, checkInterval: checkInterval, noRecordBlocks: noRecordBlocks, ROT_INTERVAL: ROT_INTERVAL, OIL_DEFAULT: OIL_DEFAULT, FLUIDS: FLUIDS, LEVELS: LEVELS, normLevel: normLevel, compute: compute, oilInterval: oilInterval, checkService: checkService, checkFluids: checkFluids, ctToday: ctToday, ymdOk: ymdOk };
   if (typeof module !== "undefined" && module.exports) module.exports = api; else root.PCSVM = api;
 })(typeof window !== "undefined" ? window : this);

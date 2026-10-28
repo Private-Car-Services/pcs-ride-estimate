@@ -4390,7 +4390,7 @@
       Object.keys(all || {}).forEach(function (id) {
         var v = all[id] || {}; if (String(v.driverId || "") !== me) return;
         var cur = Number(vmCurOdo(v)) || 0; if (!(cur > 0)) return;
-        [["oil", "Oil change", 25000], ["rot", "Tire rotation", 10000]].forEach(function (k) {
+        [["oil", "Oil change", 25000], ["rot", "Tire rotation and balance", 10000]].forEach(function (k) {
           var s = v[k[0]] || {}; if (!(Number(s.lastMiles) > 0)) return;
           var left = Number(s.lastMiles) + (Number(s.interval) || k[2]) - cur, lvl = left <= 0 ? "red" : left <= 1000 ? "amber" : "";
           if (!lvl) return;
@@ -4401,6 +4401,7 @@
       });
       var bar = document.getElementById("vm-driver-bar"); if (bar) bar.remove();
       if (!msgs.length) return;
+      try { if (typeof vmGateItems === "function" && vmGateItems().length) return; } catch (e) {} /* v2.0m-j (Harry): no old banner over the login block */
       bar = document.createElement("div"); bar.id = "vm-driver-bar";
       var red = msgs.some(function (m) { return m.lvl === "red"; });
       bar.style.cssText = "position:fixed;left:8px;right:8px;top:calc(8px + env(safe-area-inset-top));z-index:9999;border-radius:12px;padding:12px 14px;font-weight:700;box-shadow:0 4px 16px rgba(0,0,0,.4);color:#0b1f0b;background:" + (red ? "#e5534b" : "#f0b429");
@@ -4439,7 +4440,7 @@
     Object.keys(m).sort().forEach(function (id) { var v = m[id] || {}; out.push({ id: id, v: v, c: M.compute(v, vmCurOdo(v), Date.now()) }); }); return out; }
   function vmBlocksNow() { if (ROLE !== "driver") return []; var b = [];
     var nr = window.PCSVM ? window.PCSVM.noRecordBlocks(state.vmLoaded ? vmCalcMine().length : null) : []; if (nr.length) return nr; /* r2: NO_RECORD_BLOCKS (vmaint.js L15) */ vmCalcMine().forEach(function (x) { x.c.blocks.forEach(function (k) { b.push(Object.assign({ id: x.id, car: vmCarName(x.v) }, k)); }); }); return b; }
-  function vmBlockMsg() { return "You can\u2019t go online. Your car needs service. Call Matthew."; } /* v2.0m-b (Matthew 1:32 PM): drivers cannot fix the log */
+  function vmBlockMsg() { return "You cannot log on."; } /* v2.0m-b (Matthew 1:32 PM): drivers cannot fix the log */
   function vmRefresh() { try { var p = vmDriverCheck(); return p && p.then ? p.catch(function () {}) : Promise.resolve(); } catch (e) { return Promise.resolve(); } }
   function vmCarName(v) { return [v.year, v.make, v.model].filter(Boolean).join(" ") || "Your vehicle"; }
   var VMD_COL = { green: "#3fae5a", yellow: "#f0b429", red: "#e5534b", unknown: "#8a9a8a" };
@@ -4452,16 +4453,16 @@
   /* v2.0m-b: next oil change line, plain words: due miles + projected day (miles left / average miles a day) */
   function vmOilDueHtml(c) { if (!c || c.due == null) return '<p class="fine" style="margin:2px 0">Next oil change: not known yet.</p>';
     var pj = vmProjText(c) ? ", about " + esc(vmFmtYmd(c.projected)) : "";
-    return '<p class="fine" data-vm-oil-due style="margin:2px 0">Next oil change: at <b>' + vmFmt(c.due) + " miles</b>" + pj + (c.left != null && c.left <= 0 ? " \u00b7 <b>" + vmFmt(-c.left) + " miles late</b>" : c.left != null ? " \u00b7 " + vmFmt(c.left) + " miles left" : "") + "</p>"; }
+    return '<p class="fine" data-vm-oil-due style="margin:2px 0">Next oil change: at <b>' + vmFmt(c.due) + " miles</b>" + pj + (c.left != null && c.left <= 0 ? " \u00b7 <b>" + vmFmt(-c.left) + " miles overdue</b>" : c.left != null ? " \u00b7 " + vmFmt(c.left) + " miles left" : "") + "</p>"; }
   function vmHomeCard() {
     if (ROLE !== "driver" || !signedIn() || driverMidRide()) return "";
     var rows = vmCalcMine(), blocks = vmBlocksNow();
-    if (!rows.length) return state.vmLoaded ? '<div class="card" id="vm-home" style="padding:8px 12px"><p class="fine" style="margin:0">\uD83D\uDD27 Maintenance log: no vehicle on file for you. Ask God mode to add it.</p>' + (blocks.length ? '<div id="vm-block" role="alert" style="background:#e5534b;color:#1a0505;border-radius:10px;padding:8px 10px;margin:6px 0 0;font-weight:700">\u26D4 You can\u2019t go online. Your car needs service. Call Matthew.</div>' : "") + "</div>" : "";
+    if (!rows.length) return state.vmLoaded ? '<div class="card" id="vm-home" style="padding:8px 12px"><p class="fine" style="margin:0">\uD83D\uDD27 Maintenance log: no vehicle on file for you. Ask God mode to add it.</p>' + (blocks.length ? '<div id="vm-block" role="alert" style="background:#e5534b;color:#1a0505;border-radius:10px;padding:8px 10px;margin:6px 0 0;font-weight:700">\u26D4 You cannot log on.</div>' : "") + "</div>" : "";
     var h = '<div class="card" id="vm-home" style="padding:8px 12px">';
-    if (blocks.length) h += '<div id="vm-block" role="alert" style="background:#e5534b;color:#1a0505;border-radius:10px;padding:8px 10px;margin:0 0 8px;font-weight:700">\u26D4 You can\u2019t go online. Your car needs service. Call Matthew.</div>';
+    if (blocks.length) h += '<div id="vm-block" role="alert" style="background:#e5534b;color:#1a0505;border-radius:10px;padding:8px 10px;margin:0 0 8px;font-weight:700">\u26D4 You cannot log on.</div>';
     rows.forEach(function (x) {
       var line = function (lbl, c) { return '<span style="display:inline-block;margin-right:12px"><span style="display:inline-block;width:10px;height:10px;border-radius:5px;background:' + VMD_COL[c.status] + ';margin-right:4px"></span><b>' + lbl + "</b> " + esc(vmLeftText(c)) + (vmProjText(c) ? ' <span class="fine">(' + esc(vmProjText(c)) + ")</span>" : "") + "</span>"; };
-      h += '<p style="margin:2px 0"><b>\uD83D\uDD27 Maintenance log</b> <span class="fine">' + esc(vmCarName(x.v)) + (x.v.plate ? " \u00b7 " + esc(x.v.plate) : "") + "</span></p>" + vmOilDueHtml(x.c.oil) + vmLogTableHtml(x); void line; /* v2.0m-b (Matthew 10/25 spec): service work only; no inspection lines */
+      h += '<p style="margin:2px 0"><b>\uD83D\uDD27 Maintenance log</b> <span class="fine">' + esc(vmCarName(x.v)) + (x.v.plate ? " \u00b7 " + esc(x.v.plate) : "") + "</span></p>" + vmOilDueHtml(x.c.oil) + '<p class="fine" data-vm-oil-life style="margin:2px 0">Oil service life: ' + vmFmt(window.PCSVM.oilInterval(x.v)) + " miles \u00b7 " + esc(vmNextOilLine(x.c.oil)) + "</p>" + vmLogTableHtml(x) + vmAskHtml(x); /* v2.0m-j */ void line; /* v2.0m-b (Matthew 10/25 spec): service work only; no inspection lines */
     });
     return h + "</div>";
   }
@@ -4482,7 +4483,7 @@
     /* v2.0m-c (Matthew 4:55 PM): the button opens its own page (hubView "maint"); no table under it here */
     var blocks = vmBlocksNow();
     return '<button class="btn secondary" type="button" id="hub-maint">' + "Maintenance log" + "</button>" +
-      (blocks.length ? '<div id="vm-block" role="alert" style="background:#e5534b;color:#1a0505;border-radius:10px;padding:8px 10px;margin:6px 0;font-weight:700">\u26D4 You can\u2019t go online. Your car needs service. Call Matthew.</div>' : "");
+      (blocks.length ? '<div id="vm-block" role="alert" style="background:#e5534b;color:#1a0505;border-radius:10px;padding:8px 10px;margin:6px 0;font-weight:700">\u26D4 You cannot log on.<button type="button" class="btn" data-vmq="block" style="margin:8px 0 0">Was the service done? Tap here</button></div>' : ""); /* v2.0m-j: blocked driver can enter the service mileage */
   }
   function vmLastLine(lbl, c) { return "<b>" + lbl + ":</b> " + (c.lastDate ? esc(vmFmtYmd(c.lastDate)) : "date not logged") + " at " + (c.last > 0 ? vmFmt(c.last) + " mi" : "\u2014"); }
   function vmInspHtml(i) { if (!i) return '<p class="fine" style="margin:6px 0">From inspection: no inspection with an odometer yet. Current miles come from your latest pre-/post-trip inspection.</p>';
@@ -4575,6 +4576,85 @@
     var nt = vmNotes(fd.notes); p[kind + "/lastNotes"] = nt || null; /* v2.0l: notes */
     p["services/" + now] = { kind: kind, date: fd.date, miles: odo, by: who, at: now }; if (nt) p["services/" + now].notes = nt; p["alerts/" + kind] = null; return { patch: p };
   }
+  /* ---------- v2.0m-j (Matthew 10/28): due pop-up at every log on and log off, Yes/No "was it done today?", mileage, oil service life.
+     Shows when oil change or tire rotation is 500 miles or less from due (or past due = blocked). Current miles = driver-entered odometer only.
+     Saves go through the Worker (/vmaint/log, ownership-checked) to rides/VHCLMNTC/{id}: the same record God mode and the driver log read. */
+  var VMQ_TXT = { oil: ["Oil change", "Was the oil changed today?"], rot: ["Tire rotation and balance", "Were the tires rotated and balanced today?"],
+    brakeFront: ["Front brakes", "Were the front brakes changed?"], brakeRear: ["Rear brakes", "Were the rear brakes changed?"],
+    fluidOil: ["Engine oil", "Was the engine oil changed?"] };
+  /* fluid list = vmaint FLUIDS (Engine oil only in this Yes/No list; no washer fluid). Engine oil changed = an oil change (same record, so they never disagree). */
+  function vmqKind(k) { return k === "fluidOil" ? "oil" : k; }
+  function vmNextOilLine(c) { return c && c.projected ? "Next oil change about " + vmFmtYmd(c.projected) : "Next oil change: Not enough miles yet to estimate"; }
+  function vmPopItems(cur) { var M = window.PCSVM, out = []; if (!M || !M.popDue) return out;
+    vmCalcMine().forEach(function (x) { var c = cur > 0 ? M.compute(x.v, Math.max(cur, Number(vmCurOdo(x.v)) || 0), Date.now()) : x.c;
+      M.popDue(c).forEach(function (d) { out.push(Object.assign({ id: x.id, car: vmCarName(x.v), c: c }, d)); }); }); return out; }
+  function vmPopMsg(d) { var w = d.kind === "oil" ? "Oil change" : "Tire rotation and balance";
+    return d.late ? "Your " + w.toLowerCase() + " is " + vmFmt(-d.left) + " miles overdue. It was due at " + vmFmt(d.due) + " miles. " + (d.kind === "oil" ? "You cannot log on with your vehicle in an unsafe condition because the oil has not been changed. You will be able to log back in once your oil has been changed for safe operations." : "You cannot log on with your vehicle in an unsafe condition because the tires have not been rotated and balanced. You will be able to log back in once your tires have been rotated and balanced for safe operations.")
+      : w + " due in " + vmFmt(d.left) + " miles, at " + vmFmt(d.due) + " miles."; }
+  function vmPopHtml() { var P = state.vmPop; if (!P) return ""; var d = P.items[P.i], M = window.PCSVM, q = VMQ_TXT[P.step === "miles" ? P.ask : (d.ask || d.kind)];
+    var box = '<div style="background:#102810;border:2px solid ' + (d && d.late ? "#e5534b" : "#f0b429") + ';border-radius:14px;padding:16px;max-width:420px;margin:0 auto;color:#eef5ee">';
+    var bt = 'class="btn" style="flex:1;margin:0"';
+    if (P.step === "miles") return box + '<p style="font-weight:800;margin:0 0 8px">' + esc(q[0]) + "</p><p>Mileage at service</p>" +
+      '<input id="vmq-odo" inputmode="numeric" pattern="[0-9]*" aria-label="Miles" placeholder="Miles" value="' + esc(P.odo || "") + '" style="width:100%">' +
+      (vmqKind(P.ask) === "oil" ? '<p style="margin:10px 0 4px">What is the oil service life?</p><select id="vmq-life" aria-label="Oil service life" style="width:100%">' + M.OIL_LIFE.map(function (n) { return '<option value="' + n + '"' + (Number(P.life || M.OIL_DEFAULT) === n ? " selected" : "") + ">" + vmFmt(n) + " miles</option>"; }).join("") + "</select>" : "") +
+      (P.msg ? '<p role="alert" style="color:#ff9b9b;font-weight:700">' + esc(P.msg) + "</p>" : "") +
+      '<div style="display:flex;gap:8px;margin-top:12px"><button type="button" data-vmq="save" ' + bt + ">Save</button><button type=\"button\" data-vmq=\"back\" class=\"btn ghost\" style=\"flex:1;margin:0\">Back</button></div></div>";
+    return box + '<p style="font-weight:800;margin:0 0 6px">\uD83D\uDD27 ' + esc(d.car) + "</p>" + (d.late ? '<p role="alert" style="background:#e5534b;color:#fff;border-radius:8px;padding:6px 8px;font-weight:800">You cannot log on.</p>' : "") +
+      '<p data-vmq-msg style="font-size:17px;font-weight:700">' + esc(vmPopMsg(d)) + "</p>" + (d.kind === "oil" ? '<p class="fine">' + esc(vmNextOilLine(d.c.oil)) + "</p>" : "") +
+      '<p style="margin:12px 0 6px;font-weight:700">' + esc(q[1]) + '</p><div style="display:flex;gap:8px"><button type="button" data-vmq="yes" ' + bt + '>Yes</button><button type="button" data-vmq="no" class="btn ghost" style="flex:1;margin:0">No</button></div></div>';
+  }
+  /* v2.0m-j (Matthew 10/28): true login block. A past-due oil change or tire rotation shows ONLY this screen after sign-in
+     (no Home, no going online). Same wording + Yes/No + "Mileage at service" (+ oil service life) as the pop-up. No = ask again.
+     Yes + a saved mileage that clears it = the next render goes to Home. Log out stays. Mid-ride never gated (rider in car). */
+  function vmGateItems() { if (ROLE !== "driver" || !signedIn()) return []; return vmPopItems(0).filter(function (d) { return d.late; }); }
+  function vmGateScreen() { var items = vmGateItems(), P = state.vmPop;
+    if (!P || P.when !== "gate") { var ov = document.getElementById("vm-pop"); if (ov) ov.remove(); state.vmPop = P = { when: "gate", items: items, i: 0, step: "ask", ask: items[0].ask || items[0].kind, then: null, odo: "", msg: "" }; }
+    if (P.i >= P.items.length) { P.i = 0; P.step = "ask"; }
+    return '<main id="vm-gate" style="padding:max(40px, calc(16px + env(safe-area-inset-top))) 14px 40px">' + vmPopHtml() +
+      '<div style="max-width:420px;margin:16px auto 0"><button class="btn ghost" type="button" id="log-out">Log out</button></div></main>'; }
+  function vmPopPaint() { var ov = document.getElementById("vm-pop"); if (!state.vmPop) { if (ov) ov.remove(); return; }
+    if (state.vmPop.when === "gate") { if (ov) ov.remove(); try { render(); } catch (e) {} return; } /* gate is drawn inside #app */
+    if (!ov) { ov = document.createElement("div"); ov.id = "vm-pop"; ov.setAttribute("role", "dialog");
+      ov.style.cssText = "position:fixed;inset:0;z-index:9700;background:rgba(0,0,0,.7);overflow:auto;padding:max(60px, calc(20px + env(safe-area-inset-top))) 14px 40px"; document.body.appendChild(ov); }
+    ov.innerHTML = vmPopHtml(); }
+  /* when: "on" | "off" | "block" | "ask" (log question). cur = the odometer the driver just typed. then = runs after the pop-up closes. */
+  function vmPopShow(when, cur, then, one) { var items = one ? [one] : vmPopItems(Number(cur) || 0);
+    if (!items.length) { if (then) then(); return false; }
+    state.vmPop = { when: when, items: items, i: 0, step: "ask", ask: items[0].ask || items[0].kind, then: then || null, odo: "", msg: "" }; vmPopPaint(); return true; }
+  function vmPopNext() { var P = state.vmPop; if (!P) return; P.i++; P.msg = ""; P.odo = ""; P.step = "ask";
+    if (P.i >= P.items.length) { var t = P.then; state.vmPop = null; vmPopPaint(); try { render(); } catch (e) {} if (t) t(); return; }
+    P.ask = P.items[P.i].ask || P.items[P.i].kind; vmPopPaint(); }
+  function vmDriverSave(id, kind, odo, life) { /* v2.0m-j: only these Yes/mileage saves; the rest of the log stays God-mode only (VM_DRIVER_VIEW_ONLY) */
+    var tk = ""; try { tk = qToken(); } catch (e) {} if (!tk) return Promise.reject(new Error("Log in again to save."));
+    var fd = { odo: odo, date: window.PCSVM.ctToday() }; if (kind === "oil" && life) fd.life = Number(life);
+    return qWorker("/vmaint/log", { token: tk, id: id, kind: kind, fields: fd }).then(function (d) { if (!d || !d.ok) throw new Error((d && d.error) || "Not saved. Try again."); return vmRefresh(); }); }
+  if (typeof document !== "undefined" && ROLE === "driver") document.addEventListener("input", function (e) { var t = e.target, P = state.vmPop; /* v2.0m-j: keep typed miles / life across a gate re-render */
+    if (!P || !t) return; if (t.id === "vmq-odo") P.odo = t.value; else if (t.id === "vmq-life") P.life = t.value; });
+  if (typeof document !== "undefined" && ROLE === "driver") document.addEventListener("click", function (e) {
+    var t = e.target && e.target.closest ? e.target.closest("[data-vmq]") : null; if (!t) return; var a = t.getAttribute("data-vmq"), P = state.vmPop;
+    if (a === "open") { var k = t.getAttribute("data-vmq-kind"), id = t.getAttribute("data-vmq-id"), x = vmCalcMine().filter(function (r) { return r.id === id; })[0];
+      if (x) { vmPopShow("ask", 0, null, { id: id, car: vmCarName(x.v), c: x.c, kind: k === "rot" ? "rot" : "oil", ask: k, left: 0, due: 0, late: false }); state.vmPop.step = "miles"; vmPopPaint(); } return; }
+    if (a === "block") { vmPopShow("block", 0); return; }
+    if (!P) return;
+    if (a === "no") vmPopNext();
+    else if (a === "yes") { P.ask = P.items[P.i].ask || P.items[P.i].kind; P.step = "miles"; P.msg = ""; vmPopPaint(); }
+    else if (a === "back") { if (P.when === "ask") { state.vmPop = null; vmPopPaint(); } else { P.step = "ask"; vmPopPaint(); } }
+    else if (a === "save") { var el = document.getElementById("vmq-odo"), lf = document.getElementById("vmq-life"), d = P.items[P.i], kind = vmqKind(P.ask);
+      P.odo = el ? el.value : ""; P.life = lf ? lf.value : ""; var o = Number(String(P.odo).replace(/[,\s]/g, ""));
+      if (!(o > 0) || Math.round(o) !== o) { P.msg = "Type the miles. Use whole numbers."; vmPopPaint(); return; }
+      P.msg = "Saving\u2026"; vmPopPaint();
+      vmDriverSave(d.id, kind, o, P.life).then(function () { if (P.when === "ask") { state.vmPop = null; vmPopPaint(); try { render(); } catch (er) {} } else vmPopNext(); })
+        .catch(function (er) { P.msg = String(er.message || er); vmPopPaint(); }); }
+  });
+  /* driver log: one Yes/No question per row (front brakes, rear brakes, each fluid on the list). Yes = mileage pop-up. */
+  function vmAskHtml(x) { var M = window.PCSVM, v = x.v;
+    var rows = [["brakeFront"], ["brakeRear"]].concat(M.FLUIDS.map(function (f) { return ["fluid" + f[0].charAt(0).toUpperCase() + f[0].slice(1)]; })).filter(function (r) { return VMQ_TXT[r[0]]; });
+    return '<div data-vm-ask style="margin:8px 0">' + rows.map(function (r) { var k = r[0], q = VMQ_TXT[k], s = v[vmqKind(k)] || {}, d = M.dueOf(v, vmqKind(k), vmCurOdo(v), Date.now());
+      var last = Number(s.lastMiles) > 0 ? "Last: " + vmFmt(s.lastMiles) + " miles" + (s.lastDate ? " on " + vmFmtYmd(s.lastDate) : "") : "Not logged yet";
+      var due = d.state === "ok" || d.state === "over" ? " \u00b7 Next due at " + vmFmt(d.due) + " miles" + (d.projected ? ", about " + vmFmtYmd(d.projected) : ", not enough miles yet to estimate") : "";
+      return '<div data-vm-ask-row="' + k + '" style="border-top:1px solid rgba(255,255,255,.15);padding:6px 0"><b>' + esc(q[0]) + '</b><div class="fine">' + esc(last + due) + '</div><div style="display:flex;align-items:center;gap:6px;margin-top:4px"><span style="flex:1">' + esc(q[1]) + '</span>' +
+        '<button type="button" class="btn" data-vmq="open" data-vmq-kind="' + k + '" data-vmq-id="' + esc(x.id) + '" style="flex:none;width:auto;min-height:0;margin:0;padding:4px 14px">Yes</button><button type="button" class="btn ghost" data-vmq-no="' + k + '" onclick="this.parentNode.lastChild.style.display=\'\'" style="flex:none;width:auto;min-height:0;margin:0;padding:4px 14px">No</button><span class="fine" style="display:none">OK</span></div></div>'; }).join("") + "</div>"; }
+  if (typeof window !== "undefined") window.__pcsV20mj = { popShow: vmPopShow, popHtml: vmPopHtml, askHtml: vmAskHtml, popItems: vmPopItems };
   if (typeof document !== "undefined" && ROLE === "driver") {
     document.addEventListener("click", function (e) { var t = e.target && e.target.closest ? e.target.closest("[data-vmd]") : null; if (!t) return;
       var k = t.getAttribute("data-vmd");
@@ -17778,8 +17858,10 @@
     }
     var app = document.getElementById("app");
     var html = "";
+    try { if (state.vmPop && state.vmPop.when === "gate" && !(signedIn() && !driverMidRide() && vmGateItems().length)) state.vmPop = null; } catch (e) {} /* v2.0m-j gate cleared */
     if (!signedIn()) html = accountGate();
     else if (ROLE === "driver" && (pwMustChange() || state.pwcOpen) && !driverMidRide() && !meterActive()) html = pwChangeScreen(); /* v77.1 */
+    else if (ROLE === "driver" && !driverMidRide() && vmGateItems().length) html = vmGateScreen(); /* v2.0m-j (Matthew 10/28): past-due oil / tire rotation = login block; only this screen until a saved mileage clears it */
     else if (ROLE === "driver" && state.screen === "home" && state.meterOpen) html = meterScreen(); /* v70 */
     else if (ROLE === "driver" && state.screen === "home") html = driverHome();
     else if (ROLE === "driver") html = driverTrip();
@@ -18358,6 +18440,7 @@
         state.milesOdoDraft = "";
         state.milesNeedStart = false;
         state.milesStartOdo = odo;
+        setTimeout(function () { try { vmPopShow("on", odo); } catch (e) {} }, 400); /* v2.0m-j: due pop-up every log on */
         state.milesToday = keepMiles;
         /* Fresh GPS anchor so the first post-login jump is not counted as a teleport. */
         state.milesTrackLat = null;
@@ -18449,7 +18532,7 @@
         render();
         /* Wait for the save (max 5 s) so signing out can't cut it off. */
         var done = false;
-        var finish = function () { if (done) return; done = true; finishDriverLogout(); };
+        var finish = function () { if (done) return; done = true; var go = function () { finishDriverLogout(); }; try { if (vmPopShow("off", odo, go)) return; } catch (e) {} go(); }; /* v2.0m-j: due pop-up every log off, sign-out after it closes */
         persistMilesRow(row).then(finish, finish);
         setTimeout(finish, 5000);
       });
