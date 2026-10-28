@@ -371,15 +371,16 @@
     var c = d && d.compare, f = d && d.final;
     if (!c || !f || !(Number(f.total) > 0) || !(Number(c.otherRoundedCents) > 0)) return null;
     var other = Number(c.otherRoundedCents), ours = Number(f.total), name = c.service === "lyft" ? "Lyft" : "Uber";
-    return { name: name, rideType: c.rideType || "", other: other, ours: ours, save: other - ours, lower: ours < other };
+    return { name: name, pickup: c.pickup || "", rideType: c.rideType || "", other: other, ours: ours, save: other - ours, lower: ours < other };
   }
   function compareHtml(d) {
     var x = cmpInfo(d);
     var line = x.lower
-      ? '<p class="lede" id="rm-cmp-line" style="font-size:22px;line-height:1.4;font-weight:700">' + x.name + "\u2019s price for this ride would be about " + cmpWhole(x.other) + ". Our price would be " + money(x.ours) + ", saving you " + money(x.save) + " on the ride.</p>" +
+      ? '<p class="lede" id="rm-cmp-line" style="font-size:22px;line-height:1.4;font-weight:700">' + x.name + "\u2019s price for this ride would be about " + cmpWhole(x.other) + ". Our price would be " + money(x.ours) + ". You could have saved " + money(x.save) + " on the ride.</p>" +
         (x.rideType ? '<p class="fine" id="rm-cmp-type">Compared with ' + esc(x.rideType) + ".</p>" : "")
       : '<p class="lede" id="rm-cmp-ours" style="font-size:22px;font-weight:700">Our price for this ride: ' + money(x.ours) + "</p>";
-    return testTag(d) + '<div class="card" id="rm-cmp"><p class="tag">Your ride price</p>' + line +
+    var from = x.pickup ? '<p class="fine" id="rm-cmp-from" style="font-size:17px">Start: ' + esc(x.pickup) + "</p>" : ""; /* v2.0m-f */
+    return testTag(d) + '<div class="card" id="rm-cmp"><p class="tag">Your ride price</p>' + from + line +
       '<p style="text-align:center;margin:18px 0 8px"><button class="btn" type="button" id="rm-cmp-save">Save</button></p>' +
       '<p class="fine" id="rm-cmp-save-note" style="text-align:center">Save a picture of this, or tap Share and then Add to Home Screen.</p>' +
       '<p style="text-align:center;margin:14px 0 6px"><a class="btn ghost" id="rm-cmp-site" href="https://www.PCSrides.com" target="_blank" rel="noopener">www.PCSrides.com</a></p>' +
@@ -390,7 +391,7 @@
     var cv = document.createElement("canvas"), W = 1080, H = 1080; cv.width = W; cv.height = H;
     var g = cv.getContext("2d"); g.fillStyle = "#0b2a1a"; g.fillRect(0, 0, W, H); g.fillStyle = "#fff"; g.textAlign = "center";
     g.font = "bold 56px sans-serif"; g.fillText("Private Car Services", W / 2, 140);
-    var words = (x.lower ? x.name + "\u2019s price for this ride would be about " + cmpWhole(x.other) + ". Our price would be " + money(x.ours) + ", saving you " + money(x.save) + " on the ride." : "Our price for this ride: " + money(x.ours)).split(" ");
+    var words = (x.lower ? x.name + "\u2019s price for this ride would be about " + cmpWhole(x.other) + ". Our price would be " + money(x.ours) + ". You could have saved " + money(x.save) + " on the ride." : "Our price for this ride: " + money(x.ours)).split(" ");
     g.font = "bold 52px sans-serif"; var y = 320, row = "";
     words.forEach(function (w) { var t = row ? row + " " + w : w; if (g.measureText(t).width > W - 140) { g.fillText(row, W / 2, y); y += 72; row = w; } else row = t; });
     if (row) g.fillText(row, W / 2, y);
