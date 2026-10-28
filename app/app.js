@@ -14425,6 +14425,7 @@
     if (now - Number(M.lastPt.t || now) > METER_GAP_MS) M.gapFills = (M.gapFills || 0) + 1;
     M.miles = Math.round(((Number(M.miles) || 0) + d) * 100000) / 100000;
     M.lastPt = { lat: lat, lng: lng, t: now };
+    if (M.meterKind === "comparison") cmpTrailAdd(M, lat, lng, now); /* v2.0m-g: Comparison ride route */
     meterEvalMinutes(now, false);
     meterSave();
   }
@@ -14873,15 +14874,16 @@
   function cmpBoxesHtml(svc) {
     var nm = (CMP_SERVICES[svc] || { label: "Uber" }).label, d = state.cmpDraft || {};
     var box = function (id, label, v) { return '<label for="' + id + '">' + esc(label) + '</label><input id="' + id + '" type="text" inputmode="decimal" placeholder="$0.00" value="' + esc(v == null ? "" : v) + '" style="width:100%;min-height:48px;font-size:18px">'; };
-    return box("cmp-charged", "What " + nm + " charged the customer", d.charged) + box("cmp-paid", "What " + nm + " paid me", d.paid);
+    return box("cmp-charged", "What " + nm + " charged the customer", d.charged); /* v2.0m-g: "What Uber paid me" is one box at the END of the ride only */
   }
   function cmpCentsOf(v) { var t = String(v == null ? "" : v).replace(/[$,\s]/g, ""); if (!/^\d+(\.\d{1,2})?$/.test(t)) return NaN; return Math.round(parseFloat(t) * 100); }
   /* v2.0m-e (Matthew 10/27): no end screen. When a Comparison ride ends, save the comparison numbers and go back to the normal screen. */
   function cmpFinish(M, now) {
     var f = M.fare || meterFare(M), c = M.cmp || {}, d = state.cmpDraft || {};
     var ch = cmpCentsOf(d.charged != null ? d.charged : c.charged), pd = cmpCentsOf(d.paid != null ? d.paid : c.paid);
-    M.cmp = { service: c.service || "", rideType: c.rideType || "", chargedCents: isFinite(ch) ? ch : null, paidDriverCents: isFinite(pd) ? pd : null,
+    M.cmp = { service: c.service || "", rideType: c.rideType || "", pickupAddress: String(c.pickupAddress || "").slice(0, 160) /* v2.0m-f */, chargedCents: isFinite(ch) ? ch : null, paidDriverCents: isFinite(pd) ? pd : null,
       pcsFareCents: f.sub, pcsTaxCents: f.tax, pcsTotalCents: f.total, pcsDriver70Cents: meterCommissionCents(f, 70), savedAt: now };
+    cmpFinishExtra(M, c, d, f, now); /* v2.0m-g: route, distance, time, notes, differences */
     M.pay = { status: "paid_other", method: "comparison", amountCents: 0, tipCents: 0, paidAt: now, via: "comparison" }; /* never charges the client */
     M.status = "paid"; state.cmpDraft = null;
     meterWrite(rideUrl(M.code), "PATCH", { paymentStatus: "paid_other", paidVia: "comparison", rideKind: "comparison", comparisonRide: true, comparison: M.cmp, paidOtherCents: 0, tipCents: 0, paidAt: now, updatedAt: now });
@@ -14923,6 +14925,7 @@
     M.metered = !(sr || state.schedStartId); /* v2.0a: only the Metered ride button shows the meter */
     if (M.metered) M.meterKind = state.meterKind === "comparison" ? "comparison" : state.meterKind === "meter" ? "meter" : "cash"; /* v2.0m-c */ /* v2.0l: ride type known from the start */
     if (M.meterKind === "comparison") M.cmp = { service: state.cmpService, rideType: cmpRideType(state.cmpService, state.cmpType), charged: (state.cmpDraft || {}).charged || "", paid: (state.cmpDraft || {}).paid || "" }; /* the tab boxes ride along with the saved meter */ /* v2.0m-e: filled in from the dropdowns */
+    if (M.meterKind === "comparison") { var cpa = String(state.cmpFromQ || "").trim().slice(0, 160); if (cpa) { M.cmp.pickupAddress = cpa; M.pickupAddress = cpa; } state.cmpFromQ = null; state.cmpFromList = []; cmpFromGeoAt = 0; } /* v2.0m-f: typed pickup */
     if (sr) { M.schedId = sr.id; M.setFareCents = Math.round(Number(sr.fareBeforeTax) * 100); M.schedRider = String(sr.rider || ""); }
     else if (state.schedStartId) { var srx = schedFind(state.schedStartId); if (srx) { M.schedId = srx.id; M.schedRider = String(srx.rider || ""); M.pickupAddress = String(srx.pickup || "").slice(0, 160); } } /* v75r: metered scheduled ride */
     state.schedStartId = "";
@@ -15112,7 +15115,7 @@
     if (M.ridePct == null) { var pctUsedEnd = meterRidePct(M); rateRecheckAfterEnd(M.code, pctUsedEnd, function (p) { /* v76d: re-read the driver's % */
       var recR = meterFareRec(M); if (recR) return { commissionCents: recCommissionCents(recR, p) }; /* r6 */
       return { commissionCents: M.prepaid ? prepaidWeekNumbers(M.prepaid, M.fare, p).commissionCents : meterCommissionCents(M.fare, p) }; }); }
-    if (meterKindOf(M) === "comparison") { meterGeocodeEnds(M); cmpFinish(M, now); meterSave(); meterStopTimers(); meterClear(); return; } /* v2.0m-e: no price check, no pay step, no end screen */
+    if (meterKindOf(M) === "comparison") { meterGeocodeEnds(M); cmpFinish(M, now); meterSave(); meterStopTimers(); cmpOpenEnd(M); meterClear(); render(); return; } /* v2.0m-g: end screen */ /* v2.0m-e: no price check, no pay step, no end screen */
     meterSave();
     meterGeocodeEnds(M);
     render();
@@ -15157,6 +15160,9 @@
       });
       if (state.meter && state.meter.code === code) meterSave();
       meterWrite(rideUrl(code), "PATCH", patch);
+      if (state.cmpView && state.cmpView.code === code && state.cmpView.cmp) { var cv = state.cmpView.cmp, ch = false; /* v2.0m-g: fill the comparison end screen */
+        if (!cv.dropAddress && cur.dropAddress) { cv.dropAddress = cur.dropAddress; ch = true; } if (!cv.pickupAddress && cur.pickupAddress) { cv.pickupAddress = cur.pickupAddress; ch = true; }
+        if (ch) { cmpSaveNow(); cmpEndRefresh(cv); } }
       meterIndexPatch(cur, meterIndexStatus(cur));
       meterUpdatePayWeek(cur, { pickup: cur.pickupAddress || (meterShown(cur) ? "Metered ride start" : "Ride start"), drop: cur.dropAddress || (meterShown(cur) ? "Metered ride end" : "Ride end") } /* r5 */);
     });
@@ -16129,14 +16135,14 @@
   }
   function meterMapHome() {
     return (
-      accountNav() + '<div class="meter-split" id="meter-split-run"><div class="meter-col">' + meterPanelHtml() + meterRouteHtml("run") + meterTripHtml(state.meter) + "</div>" +
+      accountNav() + '<div class="meter-split" id="meter-split-run"><div class="meter-col">' + meterPanelHtml() + (meterKindOf(state.meter) === "comparison" ? cmpRunHtml(state.meter) : "") /* v2.0m-g */ + meterRouteHtml("run") + meterTripHtml(state.meter) + "</div>" +
       '<div class="meter-map-col"><div class="map-stage board-map meter-map" id="meter-map-stage">' + /* v76b: id for Full screen */
       '<div id="live-map" role="img" aria-label="Map: you during the metered ride"></div>' +
       '<div class="meter-topstack" id="meter-topstack">' + meterTurnHtml() + /* v72t: next turn right on the map; v72u: ETA on its own line below it */
       '<button type="button" class="meter-eta-chip' + (state.meter && state.meter.dest ? " has-dest" : "") + '" id="meter-eta-chip"' + (meterEtaBoxHtml(state.meter).indexOf("display:none") === -1 ? ' style="display:none"' : "") + ">" + esc(meterChipText(state.meter)) + "</button>" + meterEtaBoxHtml(state.meter) + "</div>" + /* v71; v77.8 big ETA box */
       "</div>" + /* v2.0d.5 r3 (Matthew iPad 712px): the caption sat inside the map under Full screen; now below the map, never over its buttons,
          and only on a ride started as Metered (a scheduled / invoiced ride also runs a trip session but is not metered) */
-      (meterShown(state.meter) ? '<p class="map-caption meter-map-caption" id="meter-map-caption">You · metered ride</p>' : "") + meterEstLineHtml() + "</div></div>" + /* v72u: estimate under the map during the ride too */
+      (meterShown(state.meter) ? '<p class="map-caption meter-map-caption" id="meter-map-caption">' + (meterKindOf(state.meter) === "comparison" ? "You · comparison ride" : "You · metered ride") /* v2.0m-g */ + "</p>" : "") + meterEstLineHtml() + "</div></div>" + /* v72u: estimate under the map during the ride too */
       (isFinite(state.hereLat) ? "" : '<p class="fine">Allow location so the map can show where you are.</p>') +
       bgGpsTipCard()
     );
@@ -16602,6 +16608,263 @@
     if (M && M.status === "running") return M.stop && !M.stopDone ? M.stop : null;
     return M ? null : state.meterStopPending || null;
   }
+  /* v2.0m-f (Matthew 10/28): Comparison ride only. "From" is a line the driver can type a pickup address into, with the same
+     Google suggestions as "Where to?". It can be filled from GPS, and it can always be changed. Saved on the ride; the rider QR page shows it. */
+  var cmpFromTimer = null, cmpFromSeq = 0, cmpFromGeoAt = 0;
+  function cmpFromOn(where) {
+    if (where === "run") { var M = state.meter; return !!(M && meterKindOf(M) === "comparison" && M.cmp && M.cmp.pickupAddress); }
+    return where === "ready" && state.meterKind === "comparison" && cmpAllowed();
+  }
+  function cmpFromHtml(where) {
+    if (where === "run") return '<div class="meter-from" id="meter-from"><span class="meter-route-lbl">From</span> <strong id="cmp-from-label">' + esc(state.meter.cmp.pickupAddress) + "</strong></div>";
+    var ae = typeof document !== "undefined" ? document.activeElement : null;
+    if (ae && ae.id === "cmp-from-q") state.meterRefocus = "cmp-from-q";
+    if (state.cmpFromQ == null && !cmpFromGeoAt) cmpFromGps();
+    return '<div class="meter-from" id="meter-from"><label class="meter-route-lbl" for="cmp-from-q">From</label> ' +
+      '<input id="cmp-from-q" type="search" inputmode="search" autocomplete="off" enterkeyhint="search" placeholder="Pickup address" aria-label="Pickup address" value="' + esc(state.cmpFromQ || "") + '" style="width:100%;min-height:48px;font-size:18px">' +
+      '<div id="cmp-from-list" class="suggest-list">' + cmpFromListHtml() + "</div></div>";
+  }
+  function cmpFromListHtml() {
+    var list = state.cmpFromList || [];
+    if (!list.length) return "";
+    return list.map(function (x, i) {
+      return '<button type="button" class="suggest-item cmp-from-item" data-i="' + i + '"><span class="suggest-main"><strong>' + esc(x.main) + "</strong>" +
+        (x.miles != null ? '<em class="suggest-dist">' + esc(fmtMiles(x.miles)) + "</em>" : "") + "</span><span>" + esc(x.sub) + "</span></button>";
+    }).join("") + (list[0] && list[0].placeId ? '<p class="suggest-note powered-by-google" style="text-align:right;margin:0;padding:4px 8px;font-size:12px;opacity:.85">Powered by Google</p>' : "");
+  }
+  function cmpFromDomList() {
+    var box = document.getElementById("cmp-from-list"); if (!box) return;
+    box.innerHTML = cmpFromListHtml();
+    Array.prototype.forEach.call(box.querySelectorAll(".cmp-from-item"), function (b) { b.addEventListener("click", function () { cmpFromPick(Number(b.getAttribute("data-i"))); }); });
+  }
+  function cmpFromSetText(t) { state.cmpFromQ = String(t || "").slice(0, 160); state.cmpFromList = []; var q = document.getElementById("cmp-from-q"); if (q) q.value = state.cmpFromQ; cmpFromDomList(); }
+  function cmpFromPick(i) {
+    var x = (state.cmpFromList || [])[i]; if (!x) return;
+    var t = [x.main, x.sub].filter(Boolean).join(", ");
+    cmpFromSetText(t);
+    var q = document.getElementById("cmp-from-q"); if (q && q.blur) try { q.blur(); } catch (e) {}
+  }
+  function cmpFromInput(q) {
+    state.cmpFromQ = q;
+    if (cmpFromTimer) clearTimeout(cmpFromTimer);
+    var t = String(q || "").trim();
+    if (t.length < 3) { state.cmpFromList = []; cmpFromDomList(); return; }
+    cmpFromTimer = setTimeout(function () {
+      var seq = ++cmpFromSeq;
+      meterDestSearch(t).then(function (list) { if (seq !== cmpFromSeq) return; state.cmpFromList = list || []; cmpFromDomList(); });
+    }, 350);
+  }
+  function cmpFromGps() { /* fill once from GPS; the driver can change it */
+    cmpFromGeoAt = Date.now();
+    if (!(isCoord(state.hereLat) && isCoord(state.hereLng))) return;
+    reverseGeocode(+state.hereLat, +state.hereLng).then(function (place) {
+      if (!place || state.cmpFromQ) return;
+      cmpFromSetText(meterPlaceText(place));
+    });
+  }
+  if (typeof document !== "undefined") document.addEventListener("input", function (e) { var t = e.target; if (t && t.id === "cmp-from-q") cmpFromInput(t.value); });
+  if (typeof window !== "undefined") window.__pcsV20mfFrom = { on: cmpFromOn, html: cmpFromHtml, input: cmpFromInput, pick: cmpFromPick, set: cmpFromSetText };
+  /* ---------- v2.0m-g (Matthew 10/28): Comparison ride: details card while driving, big rider QR code, end screen, edit later ----------
+     Comparison rides only. To add a box later, add one line to CMP_FIELDS (k = saved name, where = screens it shows on). */
+  var CMP_FIELDS = [
+    { k: "service", kind: "service", label: "Compare with", where: "run end" },
+    { k: "rideType", kind: "type", label: "Ride type", where: "run end" },
+    { k: "charged", kind: "money", label: "What {S} charged the customer", where: "run end" },
+    { k: "paid", kind: "money", label: "What {S} paid me", where: "end" } /* end of the ride only */,
+    { k: "pickupAddress", kind: "place", label: "Starting address", where: "run end" },
+    { k: "paxSaid", kind: "money", label: "What the passenger said {S} charged", where: "end" },
+    { k: "driverNotes", kind: "text", label: "Driver notes", where: "end" },
+    { k: "paxComments", kind: "text", label: "Passenger comments", where: "end" }
+  ];
+  var CMP_PRIVATE = ["paid", "paidDriverCents", "payDiffCents", "paxSaid", "paxSaidCents", "driverNotes", "paxComments"]; /* never sent while driving; the Worker never sends them to the rider page */
+  var cmpSaveTimer = null, cmpQrAsked = false, cmpPlaceTimer = null, cmpPlaceSeq = 0;
+  function cmpIsRec(r) { return !!r && (r.comparisonRide === true || r.rideKind === "comparison" || r.paidVia === "comparison" || r.meterKind === "comparison"); }
+  function cmpTrailAdd(M, lat, lng, now) {
+    var t = M.cmpTrail || (M.cmpTrail = []), last = t[t.length - 1];
+    if (last && haversineMi(last[0], last[1], lat, lng) < 0.03) return; /* about every 50 m */
+    if (t.length >= 2000) { M.cmpTrail = t = t.filter(function (x, i) { return i % 2 === 0; }); }
+    t.push([Math.round(lat * 1e5) / 1e5, Math.round(lng * 1e5) / 1e5, Math.round((now - (M.startedAt || now)) / 1000)]);
+  }
+  function cmpPolyEncode(pts) { /* Google encoded polyline */
+    var out = "", pl = 0, pg = 0;
+    function enc(v) { v = v < 0 ? ~(v << 1) : v << 1; var s = ""; while (v >= 0x20) { s += String.fromCharCode((0x20 | (v & 0x1f)) + 63); v >>= 5; } return s + String.fromCharCode(v + 63); }
+    pts.forEach(function (p) { var a = Math.round(p[0] * 1e5), b = Math.round(p[1] * 1e5); out += enc(a - pl) + enc(b - pg); pl = a; pg = b; });
+    return out;
+  }
+  function cmpDerive(c) {
+    if (!c) return c;
+    ["charged:chargedCents", "paid:paidDriverCents", "paxSaid:paxSaidCents"].forEach(function (pr) { var a = pr.split(":");
+      if (c[a[0]] != null && String(c[a[0]]).trim() !== "") { var v = cmpCentsOf(c[a[0]]); c[a[1]] = isFinite(v) ? v : null; } else if (c[a[0]] != null) c[a[1]] = null; });
+    c.priceDiffCents = c.chargedCents != null && c.pcsTotalCents != null ? c.chargedCents - c.pcsTotalCents : null;
+    c.payDiffCents = c.paidDriverCents != null && c.pcsDriver70Cents != null ? c.pcsDriver70Cents - c.paidDriverCents : null;
+    return c;
+  }
+  function cmpFinishExtra(M, c, d, f, now) {
+    var X = M.cmp;
+    ["pickupAddress", "paxSaid", "driverNotes", "paxComments"].forEach(function (k) { if (c[k] != null && X[k] == null) X[k] = String(c[k]).slice(0, k === "pickupAddress" ? 160 : 1000); });
+    X.charged = String(d.charged || "").trim() ? d.charged : (c.charged || ""); X.paid = String(d.paid || "").trim() ? d.paid : (c.paid || ""); /* the box filled last wins over an empty one */
+    if (!X.pickupAddress && M.pickupAddress) X.pickupAddress = String(M.pickupAddress).slice(0, 160);
+    X.dropAddress = String(M.dropAddress || (M.dest && [M.dest.label, M.dest.sub].filter(Boolean).join(", ")) || "").slice(0, 160);
+    X.miles = Math.round((Number(f.miles) || 0) * 100) / 100;
+    X.minutes = Math.max(0, Math.round(((M.endedAt || now) - (M.startedAt || now)) / 60000));
+    var tr = (M.cmpTrail || []).slice();
+    if (M.startPt && (!tr.length || tr[0][2] !== 0)) tr.unshift([M.startPt.lat, M.startPt.lng, 0]);
+    if (M.endPt) tr.push([M.endPt.lat, M.endPt.lng, Math.round(((M.endedAt || now) - (M.startedAt || now)) / 1000)]);
+    X.route = tr.length > 1 ? { poly: cmpPolyEncode(tr), points: tr.length, start: tr[0].slice(0, 2), end: tr[tr.length - 1].slice(0, 2) } : null;
+    cmpDerive(X);
+  }
+  function cmpOpenEnd(M) {
+    state.cmpView = { code: M.code, cmp: M.cmp, tok: M.viewToken || "", end: true };
+    try { if (M.viewToken) localStorage.setItem("pcs-cmp-tok-" + M.code, M.viewToken); } catch (e) {}
+  }
+  function cmpOpenLater(code) {
+    var tok = ""; try { tok = localStorage.getItem("pcs-cmp-tok-" + code) || ""; } catch (e) {}
+    state.cmpView = { code: code, cmp: null, tok: tok, loading: true }; render();
+    authFetch(rideUrl(code), {}).then(function (r) { return r.json(); }).then(function (ride) {
+      if (!state.cmpView || state.cmpView.code !== code) return;
+      var c = Object.assign({}, (ride && ride.comparison) || {});
+      if (!c.pickupAddress && ride && ride.pickupAddress) c.pickupAddress = ride.pickupAddress;
+      if (c.charged == null && c.chargedCents != null) c.charged = (c.chargedCents / 100).toFixed(2);
+      if (c.paid == null && c.paidDriverCents != null) c.paid = (c.paidDriverCents / 100).toFixed(2);
+      if (c.paxSaid == null && c.paxSaidCents != null) c.paxSaid = (c.paxSaidCents / 100).toFixed(2);
+      state.cmpView.cmp = c; state.cmpView.loading = false; render();
+    }, function () { if (state.cmpView) { state.cmpView.loading = false; state.cmpView.err = "Could not load this ride. Try again."; render(); } });
+  }
+  function cmpTarget() {
+    if (state.cmpView) return state.cmpView.cmp;
+    var M = state.meter; return M && meterKindOf(M) === "comparison" && M.status === "running" ? (M.cmp || (M.cmp = {})) : null;
+  }
+  function cmpSaveSoon() {
+    if (cmpSaveTimer) clearTimeout(cmpSaveTimer);
+    cmpSaveTimer = setTimeout(cmpSaveNow, 600);
+  }
+  function cmpSaveNow() {
+    var V = state.cmpView, M = state.meter, c = cmpTarget(); if (!c) return;
+    var code = V ? V.code : M && M.code; if (!code) return;
+    var running = !V;
+    if (running) { try { meterSave(); } catch (e) {} }
+    cmpDerive(c);
+    var rec = {}; Object.keys(c).forEach(function (k) { if (!(running && CMP_PRIVATE.indexOf(k) !== -1)) rec[k] = c[k] == null ? null : c[k]; });
+    rec.editedAt = Date.now();
+    meterWrite(databaseURL() + "/rides/" + encodeURIComponent(code) + "/comparison.json", "PATCH", rec);
+    if (c.pickupAddress) { if (running) M.pickupAddress = c.pickupAddress; meterWrite(rideUrl(code), "PATCH", { pickupAddress: String(c.pickupAddress).slice(0, 160), updatedAt: Date.now() }); }
+  }
+  function cmpUrlFor(tok) { try { return tok ? new URL(METER_VIEW_PATH + "?t=" + encodeURIComponent(tok), APP_SCRIPT_SRC || window.location.href).href : ""; } catch (e) { return ""; } }
+  function cmpQrHtml(tok) {
+    var url = cmpUrlFor(tok), svg = "";
+    if (url) { try { svg = meterQrSvg(url, "QR code for the rider", "M"); } catch (e) { svg = ""; } }
+    if (url && !svg && !cmpQrAsked) { cmpQrAsked = true; try { meterLoadQr().then(function () { cmpQrAsked = false; render(); }); } catch (e) {} }
+    return '<div class="card" id="cmp-qr-card" style="text-align:center">' +
+      '<p class="tag" style="display:block;text-align:center;font-size:16px">Rider: scan this code</p>' +
+      (svg ? '<button type="button" id="cmp-qr-tap" aria-label="Make the code bigger" style="background:#fff;border:0;border-radius:12px;padding:12px;width:100%;max-width:300px;cursor:pointer">' + svg + "</button>" +
+        '<p class="fine">Tap the code to make it bigger.</p>'
+        : '<p class="fine" id="cmp-qr-wait">Getting the code…</p>') + "</div>" +
+      (svg && state.cmpQrBig ? '<div id="cmp-qr-big" role="button" aria-label="Tap to close" style="position:fixed;inset:0;z-index:9999;background:#fff;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:16px">' +
+        '<div style="width:min(92vw,92vh);max-width:900px">' + svg + '</div><p style="color:#000;font:700 22px sans-serif;margin-top:12px">Scan to see your ride price. Tap to close.</p></div>' : "");
+  }
+  function cmpFieldsHtml(c, where) {
+    c = c || {};
+    var svc = CMP_SERVICES[c.service] ? c.service : "", S = CMP_SERVICES[svc], nm = (S || { label: "Uber" }).label;
+    var st = "width:100%;min-height:48px;font-size:18px";
+    return CMP_FIELDS.filter(function (f) { return Array.isArray(where) ? where.indexOf(f.k) !== -1 : (" " + f.where + " ").indexOf(" " + where + " ") !== -1; }).map(function (f) {
+      var id = "cmpf-" + f.k, lab = '<label for="' + id + '">' + esc(f.label.replace("{S}", nm)) + "</label>", v = c[f.k] == null ? "" : String(c[f.k]);
+      if (f.kind === "service") return lab + '<select id="' + id + '" data-cmpk="service" style="' + st + '"><option value="">Pick one</option>' + Object.keys(CMP_SERVICES).map(function (k) { return '<option value="' + k + '"' + (svc === k ? " selected" : "") + ">" + CMP_SERVICES[k].label + "</option>"; }).join("") + "</select>";
+      if (f.kind === "type") return lab + '<select id="' + id + '" data-cmpk="rideType" style="' + st + '"' + (S && S.types.length ? "" : " disabled") + ">" + (!S ? '<option value="">Pick Uber or Lyft first</option>' : !S.types.length ? '<option value="">Lyft ride types are coming soon</option>' : '<option value="">Pick one</option>' + S.types.map(function (t) { return '<option value="' + esc(t) + '"' + (v === t ? " selected" : "") + ">" + esc(t) + "</option>"; }).join("")) + "</select>";
+      if (f.kind === "money") return lab + '<input id="' + id + '" data-cmpk="' + f.k + '" type="text" inputmode="decimal" placeholder="$0.00" value="' + esc(v) + '" style="' + st + '">';
+      if (f.kind === "place") return lab + '<input id="' + id + '" data-cmpk="' + f.k + '" type="search" autocomplete="off" placeholder="Pickup address" value="' + esc(v) + '" style="' + st + '"><div id="cmpf-place-list" class="suggest-list">' + cmpPlaceListHtml() + "</div>";
+      return lab + '<textarea id="' + id + '" data-cmpk="' + f.k + '" rows="3" maxlength="1000" style="width:100%;font-size:17px">' + esc(v) + "</textarea>";
+    }).join("");
+  }
+  function cmpPlaceListHtml() {
+    var list = state.cmpPlaceList || []; if (!list.length) return "";
+    return list.map(function (x, i) { return '<button type="button" class="suggest-item cmpf-place-item" data-i="' + i + '"><span class="suggest-main"><strong>' + esc(x.main) + "</strong>" + (x.miles != null ? '<em class="suggest-dist">' + esc(fmtMiles(x.miles)) + "</em>" : "") + "</span><span>" + esc(x.sub) + "</span></button>"; }).join("") +
+      (list[0] && list[0].placeId ? '<p class="suggest-note powered-by-google" style="text-align:right;margin:0;padding:4px 8px;font-size:12px;opacity:.85">Powered by Google</p>' : "");
+  }
+  function cmpRunHtml(M) {
+    if (!M.viewToken && !M.cmpViewAsked) { M.cmpViewAsked = true; try { meterFetchView(); } catch (e) {} }
+    return cmpQrHtml(M.viewToken || "") + '<div class="card" id="cmp-run-card"><p class="tag">Comparison details</p>' + cmpFieldsHtml(M.cmp, "run") +
+      '<p class="fine">Saved as you type.</p></div>';
+  }
+  function cmpRow(l, v, id) { return '<div class="money-row"' + (id ? ' id="' + id + '"' : "") + "><span>" + esc(l) + "</span><span>" + v + "</span></div>"; }
+  function cmpMoneyOr(c) { return c == null || !isFinite(c) ? "—" : (c < 0 ? "−" : "") + money(Math.abs(c)); }
+  function cmpBreakdownHtml(c) {
+    c = cmpDerive(c || {}); var nm = (CMP_SERVICES[c.service] || { label: "Uber" }).label;
+    return '<div class="card" id="cmp-bd"><p class="tag">Ride breakdown</p>' +
+      cmpRow("Start", esc(c.pickupAddress || "—")) + cmpRow("End", esc(c.dropAddress || "—")) +
+      cmpRow("Route", c.route && c.route.points ? esc(String(c.route.points)) + " GPS points saved" : "—", "cmp-bd-route") +
+      cmpRow("Distance", c.miles != null ? esc(String(c.miles)) + " miles" : "—") + cmpRow("Time", c.minutes != null ? esc(String(c.minutes)) + " minutes" : "—") +
+      cmpRow(nm + (c.rideType ? " (" + c.rideType + ")" : "") + " price", cmpMoneyOr(c.chargedCents)) +
+      cmpRow("Our fare", cmpMoneyOr(c.pcsFareCents)) + cmpRow("Our tax", cmpMoneyOr(c.pcsTaxCents)) + cmpRow("Our total", cmpMoneyOr(c.pcsTotalCents)) +
+      cmpRow("Price difference (" + nm + " minus ours)", cmpMoneyOr(c.priceDiffCents), "cmp-bd-pricediff") +
+      cmpRow("What " + nm + " paid me", cmpMoneyOr(c.paidDriverCents)) + cmpRow("What PCS pays the driver (70%)", cmpMoneyOr(c.pcsDriver70Cents)) +
+      cmpRow("Pay difference (PCS minus " + nm + ")", cmpMoneyOr(c.payDiffCents), "cmp-bd-paydiff") +
+      (c.paxSaidCents != null ? cmpRow("Passenger said " + nm + " charged", cmpMoneyOr(c.paxSaidCents)) : "") + "</div>";
+  }
+  /* v2.0m-g.2 (Matthew 10/28 7:09): end screen top = for the customer (big); driver items in a closed "Driver only" section. */
+  function cmpUberRounded(c) { return c && c.chargedCents != null && isFinite(c.chargedCents) && c.chargedCents > 0 ? Math.ceil(c.chargedCents / 100) * 100 : null; } /* same rounding as the rider page */
+  function cmpCustHtml(c) {
+    c = cmpDerive(c || {}); var nm = (CMP_SERVICES[c.service] || { label: "Uber" }).label, ur = cmpUberRounded(c), save = ur != null && c.pcsTotalCents != null ? ur - c.pcsTotalCents : null;
+    function big(l, v, col) { return '<div style="display:flex;justify-content:space-between;align-items:baseline;gap:12px;padding:10px 0;border-bottom:1px solid rgba(255,255,255,.15)"><span style="font-size:22px;font-weight:700">' + esc(l) + '</span><span style="font-size:40px;font-weight:800' + (col ? ";color:" + col : "") + '">' + v + "</span></div>"; }
+    return '<div class="card" id="cmp-cust"><p class="tag" style="display:block;font-size:16px">Your ride</p>' +
+      big("Our price", cmpMoneyOr(c.pcsTotalCents)) +
+      (save != null && save < 0 ? "" : big(nm + " price", ur != null ? "about " + money(ur) : "—")) + /* v2.0m-g.3 (Matthew 10/28): when ours is higher, the customer never sees Uber's price */
+      (save == null ? '<p class="fine" style="font-size:16px">Type what ' + esc(nm) + ' charged in Driver only below to show the difference.</p>'
+        : save > 0 ? big("You could have saved", money(save), "#5fd38d") : save === 0 ? big("Difference", "$0.00") : "") /* when ours is higher: just Our price; Uber price and differences stay in Driver only */ +
+      '<p class="fine" style="font-size:17px;margin-top:8px">' + (c.miles != null ? esc(String(c.miles)) + " miles" : "") + (c.minutes != null ? " · " + esc(String(c.minutes)) + " minutes" : "") +
+      (c.pickupAddress ? "<br>From " + esc(c.pickupAddress) : "") + (c.dropAddress ? "<br>To " + esc(c.dropAddress) : "") + "</p></div>";
+  }
+  function cmpDrvBdHtml(c) {
+    c = cmpDerive(c || {}); var nm = (CMP_SERVICES[c.service] || { label: "Uber" }).label;
+    return '<div id="cmp-bd">' + cmpRow(nm + (c.rideType ? " (" + c.rideType + ")" : "") + " exact price", cmpMoneyOr(c.chargedCents)) +
+      cmpRow("Our fare / tax / total", cmpMoneyOr(c.pcsFareCents) + " / " + cmpMoneyOr(c.pcsTaxCents) + " / " + cmpMoneyOr(c.pcsTotalCents)) +
+      cmpRow("Price difference (" + nm + " minus ours)", cmpMoneyOr(c.priceDiffCents), "cmp-bd-pricediff") +
+      cmpRow("What " + nm + " paid me", cmpMoneyOr(c.paidDriverCents)) + cmpRow("What PCS pays the driver (70%)", cmpMoneyOr(c.pcsDriver70Cents)) +
+      cmpRow("Pay difference (PCS minus " + nm + ")", cmpMoneyOr(c.payDiffCents), "cmp-bd-paydiff") +
+      cmpRow("Passenger said " + nm + " charged", cmpMoneyOr(c.paxSaidCents)) +
+      cmpRow("Route", c.route && c.route.points ? esc(String(c.route.points)) + " GPS points saved" : "—", "cmp-bd-route") + "</div>";
+  }
+  function cmpEndPageHtml() {
+    var V = state.cmpView;
+    if (V.loading) return '<div class="card"><p class="lede">Loading the comparison ride…</p></div>';
+    if (V.err) return '<div class="card"><p class="error">' + esc(V.err) + '</p><button class="btn" type="button" id="cmp-end-done">Back</button></div>';
+    return '<div id="cmp-end"><h2>Comparison ride ' + (V.end ? "done" : "details") + '</h2>' +
+      cmpCustHtml(V.cmp) + (V.tok ? cmpQrHtml(V.tok) : "") +
+      '<details class="card" id="cmp-drv"' + (state.cmpDrvOpen ? " open" : "") + '><summary style="font-size:20px;font-weight:700;cursor:pointer;min-height:44px">Driver only</summary>' +
+      '<p class="fine">Ride ' + esc(V.code) + ". Saved as you type. None of this shows to the rider.</p>" +
+      cmpFieldsHtml(V.cmp, ["service", "rideType", "charged", "paid", "pickupAddress", "paxSaid", "driverNotes", "paxComments"]) + cmpDrvBdHtml(V.cmp) + "</details>" +
+      '<button class="btn meter-big" type="button" id="cmp-end-done">Done</button></div>';
+  }
+  function cmpEndRefresh(c) { /* live update without closing the keyboard */
+    [["cmp-cust", cmpCustHtml], ["cmp-bd", cmpDrvBdHtml]].forEach(function (x) { var el = document.getElementById(x[0]); if (el) { var t = document.createElement("div"); t.innerHTML = x[1](c); el.parentNode.replaceChild(t.firstChild, el); } });
+  }
+  function cmpPlacePick(i) {
+    var x = (state.cmpPlaceList || [])[i], c = cmpTarget(); if (!x || !c) return;
+    c.pickupAddress = [x.main, x.sub].filter(Boolean).join(", ").slice(0, 160); state.cmpPlaceList = [];
+    var q = document.getElementById("cmpf-pickupAddress"); if (q) { q.value = c.pickupAddress; try { q.blur(); } catch (e) {} }
+    var lb = document.getElementById("cmp-from-label"); if (lb) lb.textContent = c.pickupAddress;
+    var box = document.getElementById("cmpf-place-list"); if (box) box.innerHTML = "";
+    cmpSaveSoon();
+  }
+  if (typeof document !== "undefined") {
+    document.addEventListener("input", function (e) { var t = e.target, k = t && t.getAttribute && t.getAttribute("data-cmpk"); if (!k || t.tagName === "SELECT") return;
+      var c = cmpTarget(); if (!c) return; c[k] = t.value; cmpSaveSoon();
+      if (!state.cmpView && (k === "charged" || k === "paid")) { state.cmpDraft = state.cmpDraft || {}; state.cmpDraft[k] = t.value; } /* cmpFinish reads the draft first */
+      if (k === "pickupAddress") { var lb = document.getElementById("cmp-from-label"); if (lb) lb.textContent = t.value;
+        if (cmpPlaceTimer) clearTimeout(cmpPlaceTimer); var q = String(t.value || "").trim();
+        if (q.length < 3) { state.cmpPlaceList = []; var b0 = document.getElementById("cmpf-place-list"); if (b0) b0.innerHTML = ""; }
+        else cmpPlaceTimer = setTimeout(function () { var seq = ++cmpPlaceSeq; meterDestSearch(q).then(function (list) { if (seq !== cmpPlaceSeq) return; state.cmpPlaceList = list || []; var b = document.getElementById("cmpf-place-list"); if (b) b.innerHTML = cmpPlaceListHtml(); }); }, 350); }
+      if (state.cmpView) cmpEndRefresh(c); });
+    document.addEventListener("change", function (e) { var t = e.target, k = t && t.getAttribute && t.getAttribute("data-cmpk"); if (!k || t.tagName !== "SELECT") return;
+      var c = cmpTarget(); if (!c) return; c[k] = t.value; if (k === "service") c.rideType = ""; cmpSaveSoon(); render(); });
+    document.addEventListener("click", function (e) { var t = e.target && e.target.closest ? e.target : null; if (!t) return;
+      var pi = t.closest(".cmpf-place-item"); if (pi) { cmpPlacePick(Number(pi.getAttribute("data-i"))); return; }
+      if (t.closest("#cmp-qr-tap")) { state.cmpQrBig = true; render(); return; }
+      if (t.closest("#cmp-qr-big")) { state.cmpQrBig = false; render(); return; }
+      if (t.closest("#cmp-drv > summary")) { state.cmpDrvOpen = !document.getElementById("cmp-drv").open; return; }
+      if (t.closest("#cmp-end-done")) { state.cmpDrvOpen = false; if (cmpSaveTimer) { clearTimeout(cmpSaveTimer); cmpSaveNow(); } state.cmpView = null; state.cmpQrBig = false; state.cmpPlaceList = []; render(); return; }
+      var ob = t.closest(".cmp-open-btn"); if (ob) { cmpOpenLater(ob.getAttribute("data-cmp-code")); return; } });
+  }
+  if (typeof window !== "undefined") window.__pcsV20mgCmp = { fields: CMP_FIELDS, derive: cmpDerive, poly: cmpPolyEncode, end: cmpEndPageHtml, run: cmpRunHtml, bd: cmpBreakdownHtml, open: cmpOpenLater, save: cmpSaveNow, isRec: cmpIsRec };
   function meterRouteHtml(where) {
     var stop = meterStopNow();
     var editingStop = state.meterDestEdit && state.meterDestTarget === "stop";
@@ -16609,7 +16872,8 @@
       : stop ? '<div class="meter-stop" id="meter-stop-set"><span class="meter-route-lbl">Stop</span> <strong id="meter-stop-label">' + esc(stop.label) + '</strong> <button class="btn ghost meter-mini" type="button" id="meter-stop-clear">Remove</button></div>'
       : '<button class="btn ghost meter-mini" type="button" id="meter-stop-add">+ Add a stop</button>';
     return '<div class="card meter-route" id="meter-route">' +
-      '<div class="meter-from" id="meter-from"><span class="meter-route-lbl">From</span> ' + (where === "run" ? (meterShown(state.meter) ? "Pickup (meter start)" : "Pickup") : "Your location") /* v2.0d.5 r5 */ + "</div>" +
+      (cmpFromOn(where) ? cmpFromHtml(where) : /* v2.0m-f: Comparison ride: typed pickup address */
+      '<div class="meter-from" id="meter-from"><span class="meter-route-lbl">From</span> ' + (where === "run" ? (meterShown(state.meter) ? "Pickup (meter start)" : "Pickup") : "Your location") /* v2.0d.5 r5 */ + "</div>") +
       stopRow +
       (editingStop ? (meterDestNow() ? '<div class="meter-from"><span class="meter-route-lbl">To</span> ' + esc(meterDestNow().label) + "</div>" : "") : meterDestHtml(where, "dest")) +
       "</div>";
@@ -17153,6 +17417,7 @@
           (Number(r.tollCents) > 0 ? '<div class="money-row hub-toll-row"><span>' + esc(r.tollLabel || "Tolls") + " (paid back, 100% yours)</span><span>" + money(r.tollCents) + "</span></div>" : "") + /* v76b */
           (Number(r.tollRoadFeeCents) > 0 ? '<div class="money-row hub-tollfee-row"><span>' + esc(r.tollLabel || "Toll road fee") + " (fare, in the commission)</span><span>" + money(r.tollRoadFeeCents) + "</span></div>" : "") +
           (r.rideType === "metered" && r.paymentStatus && r.paymentStatus !== "charged" && r.paymentStatus !== "paid_other" ? '<p class="error">Not paid yet</p>' : "") +
+          (cmpIsRec(r) && r.code ? '<button class="btn secondary cmp-open-btn" type="button" data-cmp-code="' + esc(r.code) + '">Comparison details</button>' : "") + /* v2.0m-g */
           "</article>"
         );
       }).join("");
@@ -17192,6 +17457,7 @@
         '<div class="app-nav"><button class="btn secondary" type="button" id="gate-stay-offline">Stay logged in</button>' + logoutLine() + "</div>"
       );
     }
+    if (state.cmpView) return cmpEndPageHtml(); /* v2.0m-g: Comparison ride end screen / edit later */
     if (state.hubOpen) return driverHub();
     if (meterOnMap()) return meterMapHome(); /* v70: running meter = compact panel above the map (never covers it) */
     var gated = !canGoOnline();
