@@ -3325,6 +3325,8 @@
         var d = days[i];
         if (!row || typeof row !== "object") return;
         var loc = map[d];
+        try { noteServerOdometer(row); } catch (e) {} /* v2.0m-n */
+        if (loc && odoFieldsServerWins(loc, row).odoFromServer) changed = true; /* v2.0m-n: server odometer wins */
         if (!loc || (Number(row.lastUpdate) || 0) > (Number(loc.lastUpdate) || 0) + 1000) { map[d] = row; changed = true; }
         else if (serverClosedLocalShift(loc, row)) { map[d] = row; changed = true; state.shiftClosedElsewhere = true; } /* v72v: logged out on another device */
       });
@@ -4118,6 +4120,9 @@
     try { var pp = normalizePlate(((readDriverAccount() || {}).carPlate) || ""); if (plate && pp && !samePlate(plate, pp)) return ""; } catch (e) {} /* v2.0i: another vehicle (rental): the profile car's shift floor doesn't apply */
     var floor = 0; try { floor = odoOverrideActive() ? 0 : (lastKnownOdometer() || 0); } catch (e) {}
     if (floor > 0 && odo < floor) return "Odometer can't be lower than your last reading (" + floor.toFixed(1) + "). If the odometer really reads lower, ask God mode for an override.";
+    /* v2.0m-n: same 1,000 mi rule as the log-back-in prompt: type it twice to confirm. God override skips it. */
+    if (floor > 0 && odo - floor > ODO_JUMP_MAX && !odoOverrideActive() && state.dvirOdoHighOk !== odo) { state.dvirOdoHighOk = odo; return "That is " + Math.round(odo - floor).toLocaleString("en-US") + " miles more than your last reading (" + floor.toFixed(1) + "). Check the number. If it is right, tap Save again."; }
+    state.dvirOdoHighOk = null;
     if (kind === "post") { var si = null; try { si = currentShiftInfo(); } catch (e) {} if (si && si.startOdo != null && !state.milesNeedStart && odo < si.startOdo && !odoOverrideActive()) return "The ending odometer can't be less than the opening odometer (" + si.startOdo.toFixed(1) + ")."; }
     return "";
   }
@@ -4244,7 +4249,8 @@
       var dv = a[0] || {}, row = a[1];
       if (!serverShiftRestoreFrom(dv.pre, dv.post, row, Date.now())) return false;
       try { var all = dlRec("dvir"); all[d] = Object.assign({}, all[d] || {}, { pre: dv.pre }); localStorage.setItem(dlKey("dvir"), JSON.stringify(all)); } catch (e) {}
-      try { var map = readMilesLocal(); map[d] = Object.assign({}, row, map[d] || {}); writeMilesLocal(map); } catch (e) {}
+      try { noteServerOdometer(row); } catch (e) {} /* v2.0m-n */
+      try { var map = readMilesLocal(); map[d] = odoFieldsServerWins(Object.assign({}, row, map[d] || {}), row); writeMilesLocal(map); } catch (e) {} /* v2.0m-n: odometer fields from the server win */
       try { if (!readShift()) writeShift({ startOdo: Number(row.startOdometer), shiftStartedAt: Number(row.shiftStartAt), startDay: d, trackedMiles: Number(row.gpsMiles) || 0, filledInMiles: Number(row.filledMiles) || 0 }); } catch (e) {}
       state.milesNeedStart = false; state.loginGate = false;
       return true;
@@ -4672,20 +4678,58 @@
     });
   }
 
-  function lastKnownOdometer() {
-    var best = null, add = function (v) { v = Number(v); if (v > 0 && isFinite(v) && (best == null || v > best)) best = v; };
-    try {
-      var map = readMilesLocal();
-      Object.keys(map || {}).forEach(function (d) {
-        var r = map[d]; if (!r || typeof r !== "object") return;
-        add(r.endOdometer); add(r.priorEndOdometer); add(r.startOdometer); add(r.firstStartOdometer);
-        var sh = r.shifts && typeof r.shifts === "object" ? r.shifts : {};
-        Object.keys(sh).forEach(function (k) { add(sh[k] && sh[k].endOdo); add(sh[k] && sh[k].startOdo); });
-      });
-    } catch (e) {}
-    try { add(localStorage.getItem("pcs-driver-lastodo-" + driverPresenceId())); } catch (e) {}
-    return best;
+  /* v2.0m-n (Matthew 10/29: a mistyped 2222222 stuck on the phone): odometer readings the server has for this driver.
+     The highest one is kept so the phone copy can be checked against it. */
+  var ODO_JUMP_MAX = 1000;
+  function rowOdoValues(r) {
+    var out = [], add = function (v) { v = Number(v); if (v > 0 && isFinite(v)) out.push(v); };
+    if (!r || typeof r !== "object") return out;
+    add(r.endOdometer); add(r.priorEndOdometer); add(r.startOdometer); add(r.firstStartOdometer);
+    var sh = r.shifts && typeof r.shifts === "object" ? r.shifts : {};
+    Object.keys(sh).forEach(function (k) { add(sh[k] && sh[k].endOdo); add(sh[k] && sh[k].startOdo); });
+    return out;
   }
+  function srvOdoKey() { return "pcs-driver-srvodo-" + driverPresenceId(); }
+  function serverOdometer() { try { var v = Number(localStorage.getItem(srvOdoKey())); return v > 0 && isFinite(v) ? v : null; } catch (e) { return null; } }
+  function noteServerOdometer(row) {
+    var vals = rowOdoValues(row); if (!vals.length) return;
+    var m = Math.max.apply(null, vals), cur = serverOdometer();
+    /* the server's own rows can hold a bad number too: apply the same 1,000 mi jump rule to them */
+    vals = vals.filter(function (v, i) { return vals.indexOf(v) === i; }); vals.sort(function (a, b) { return b - a; }); while (vals.length > 1 && vals[0] - vals[1] > ODO_JUMP_MAX) vals.shift(); m = vals[0];
+    try { if (!(cur >= m) || (cur > m + ODO_JUMP_MAX)) localStorage.setItem(srvOdoKey(), String(m)); } catch (e) {}
+    try { var lk = "pcs-driver-lastodo-" + driverPresenceId(), lo = Number(localStorage.getItem(lk)); if (lo > m + ODO_JUMP_MAX) localStorage.removeItem(lk); } catch (e) {} /* bad phone copy: drop it */
+  }
+  /* Pure rule (also used by tests): highest believable reading. A reading more than 1,000 mi above the server's value,
+     or more than 1,000 mi above the next-highest reading, is a typo and is ignored. */
+  function pickBelievableOdo(vals, srv) {
+    vals = (vals || []).map(Number).filter(function (v) { return v > 0 && isFinite(v); });
+    srv = Number(srv); if (srv > 0 && isFinite(srv)) { vals = vals.filter(function (v) { return v <= srv + ODO_JUMP_MAX; }); vals.push(srv); }
+    if (!vals.length) return null;
+    vals = vals.filter(function (v, i) { return vals.indexOf(v) === i; }); /* the same typo saved in several places is still one reading */
+    vals.sort(function (a, b) { return b - a; });
+    while (vals.length > 1 && vals[0] - vals[1] > ODO_JUMP_MAX) vals.shift();
+    return vals[0];
+  }
+  function lastKnownOdometer() {
+    var vals = [];
+    try { var map = readMilesLocal(); Object.keys(map || {}).forEach(function (d) { vals = vals.concat(rowOdoValues(map[d])); }); } catch (e) {}
+    try { vals.push(localStorage.getItem("pcs-driver-lastodo-" + driverPresenceId())); } catch (e) {}
+    return pickBelievableOdo(vals, serverOdometer());
+  }
+  /* (b) odometer fields: the server value replaces the phone's ONLY when the phone's is more than 1,000 mi above it (a typo). Smaller differences keep the normal merge, so an offline reading survives and uploads (Harry 10/29). */
+  function odoFieldsServerWins(loc, srv) {
+    if (!loc || typeof loc !== "object" || !srv || typeof srv !== "object") return loc;
+    var changed = false;
+    ["endOdometer", "priorEndOdometer", "startOdometer", "firstStartOdometer"].forEach(function (k) {
+      if (srv[k] != null && srv[k] !== "" && Number(srv[k]) > 0 && Number(loc[k]) > Number(srv[k]) + ODO_JUMP_MAX) { loc[k] = srv[k]; changed = true; }
+    });
+    var ss = srv.shifts && typeof srv.shifts === "object" ? srv.shifts : {}, ls = loc.shifts && typeof loc.shifts === "object" ? loc.shifts : null;
+    if (ls) Object.keys(ss).forEach(function (sk) { var a = ls[sk], b = ss[sk]; if (!a || !b) return;
+      ["endOdo", "startOdo"].forEach(function (k) { if (b[k] != null && Number(b[k]) > 0 && Number(a[k]) > Number(b[k]) + ODO_JUMP_MAX) { a[k] = b[k]; changed = true; } }); });
+    if (changed) try { loc.odoFromServer = Date.now(); } catch (e) {}
+    return loc;
+  }
+  window.__pcsOdo = { pick: function (v, s) { return pickBelievableOdo(v, s); }, merge: function (l, s) { return odoFieldsServerWins(l, s); } }; /* v2.0m-n test hook */
   function noteLastOdometer(v) { v = Number(v); if (!(v > 0)) return; try { var k = "pcs-driver-lastodo-" + driverPresenceId(); if (!(Number(localStorage.getItem(k)) >= v)) localStorage.setItem(k, String(v)); } catch (e) {} }
   /* v72u one-time repair: an OPEN shift whose opening odometer is below the last ending odometer (e.g. 0 typed in by mistake)
      takes the last ending odometer instead, unless God mode allowed the lower number. Logged on the row as odoRepaired. */
@@ -16851,7 +16895,7 @@
       var id = "cmpf-" + f.k, lab = '<label for="' + id + '">' + esc(f.label.replace("{S}", nm)) + "</label>", v = c[f.k] == null ? "" : String(c[f.k]);
       if (f.kind === "service") return lab + '<select id="' + id + '" data-cmpk="service" style="' + st + '"><option value="">Pick one</option>' + Object.keys(CMP_SERVICES).map(function (k) { return '<option value="' + k + '"' + (svc === k ? " selected" : "") + ">" + CMP_SERVICES[k].label + "</option>"; }).join("") + "</select>";
       if (f.kind === "type") return lab + '<select id="' + id + '" data-cmpk="rideType" style="' + st + '"' + (S && S.types.length ? "" : " disabled") + ">" + (!S ? '<option value="">Pick Uber or Lyft first</option>' : !S.types.length ? '<option value="">Lyft ride types are coming soon</option>' : '<option value="">Pick one</option>' + S.types.map(function (t) { return '<option value="' + esc(t) + '"' + (v === t ? " selected" : "") + ">" + esc(t) + "</option>"; }).join("")) + "</select>";
-      if (f.kind === "money" && (f.k === "charged" || f.k === "paid")) return lab + '<div style="display:flex;align-items:center;gap:6px"><span aria-hidden="true" style="font-size:18px;font-weight:700">$</span><input id="' + id + '" data-cmpk="' + f.k + '" type="text" inputmode="numeric" pattern="[0-9]*" autocomplete="off" data-money-reg="1" placeholder="0.00" value="' + esc(cmpRegShow(v)) + '" style="' + st + '"></div>'; /* v2.0m-h (Matthew 10/28): cash-register entry, 2205 -> $22.05 */
+      if (f.kind === "money" && (f.k === "charged" || f.k === "paid" || f.k === "paxSaid")) return lab + '<div style="display:flex;align-items:center;gap:6px"><span aria-hidden="true" style="font-size:18px;font-weight:700">$</span><input id="' + id + '" data-cmpk="' + f.k + '" type="text" inputmode="numeric" pattern="[0-9]*" autocomplete="off" data-money-reg="1" placeholder="0.00" value="' + esc(cmpRegShow(v)) + '" style="' + st + '"></div>'; /* v2.0m-h (Matthew 10/28): cash-register entry, 2205 -> $22.05; v2.0m-n (Matthew 10/29): passenger-said box too */
       if (f.kind === "money") return lab + '<input id="' + id + '" data-cmpk="' + f.k + '" type="text" inputmode="decimal" placeholder="$0.00" value="' + esc(v) + '" style="' + st + '">';
       if (f.kind === "place") return lab + '<input id="' + id + '" data-cmpk="' + f.k + '" type="search" autocomplete="off" placeholder="Pickup address" value="' + esc(v) + '" style="' + st + '"><div id="cmpf-place-list" class="suggest-list">' + cmpPlaceListHtml() + "</div>";
       return lab + '<textarea id="' + id + '" data-cmpk="' + f.k + '" rows="3" maxlength="1000" style="width:100%;font-size:17px">' + esc(v) + "</textarea>";
@@ -18378,6 +18422,15 @@
           render();
           return;
         }
+        /* v2.0m-n (Matthew 10/29: 2222222 accepted at log-back-in): a reading more than 1,000 mi above the last one must be typed twice to confirm (same 1,000 mi rule as the inspection warning). God override skips it. */
+        if (lastOdo != null && odo - lastOdo > 1000 && !odoOverrideActive() && state.milesOdoHighOk !== odo) {
+          state.milesOdoHighOk = odo;
+          state.milesOdoError = "That is " + Math.round(odo - lastOdo).toLocaleString("en-US") + " miles more than your last reading (" + lastOdo.toFixed(1) + "). Check the number. If it is right, tap Save again.";
+          state.milesOdoDraft = raw;
+          render();
+          return;
+        }
+        state.milesOdoHighOk = null;
         /* v72r: close a stale (18 h+ idle) shift from an earlier day with its ending odometer, under ITS start day. */
         var staleInfo = openShiftDayInfo();
         if (staleInfo && staleInfo.stale) {

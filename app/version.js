@@ -3,7 +3,7 @@
    ranks "v2.0b" below "v77.x", so they never offered the update. This decoy reads newer to them (banner + reload); the v2+
    compare ranks every v7x/v9x below v2.x, so current copies ignore it. Not code, never runs: var APP_VERSION = "v99.0" */
 (function () {
-  var APP_VERSION = "v2.0m-m";
+  var APP_VERSION = "v2.0m-n";
   window.PCS_APP_VERSION = APP_VERSION;
   /* "v72r" -> [72, "r"]; returns <0 if a is older than b. Unknown/missing counts as oldest. */
   /* v2.0a (Harry r2): a first number < 70 is the NEW v2+ line, newer than every v77.x.
