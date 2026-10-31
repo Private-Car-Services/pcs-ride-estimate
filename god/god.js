@@ -8314,9 +8314,10 @@
   }
   function vmCalc(v, now) {
     now = now || Date.now();
-    var did = vmDriverFor(v), hist = did ? vmOdoHistory(did) : [], app = hist.length ? hist[hist.length - 1] : null;
+    var did = v.personal ? "" : vmDriverFor(v), hist = did ? vmOdoHistory(did) : [], app = hist.length ? hist[hist.length - 1] : null; /* v2.0m-o: personal = no driver */
     /* v2.0i (Harry r4 #3): current miles = the ONE per-plate rule (PCSVM.fromInspection over the assigned driver's inspections, God-accepted lower readings) */
     var Mi = window.PCSVM, insp = Mi && Mi.fromInspection ? Mi.fromInspection(vmDvirFor(v), v.plate, now, v.odoAccept) : null, cur = insp ? insp.cur : null, src = insp ? "latest " + insp.src + " " + insp.date + " \u00b7 plate " + insp.plate : (v.plate ? "no inspection odometer for this plate yet" : "no plate on file: add the plate");
+    if (v.personal) { var po = v.odoOverride || {}; insp = null; cur = dmNum(po.miles) > 0 ? dmNum(po.miles) : null; src = cur != null ? (po.date ? "typed by you " + po.date : "saved " + (po.at ? vmFmtDate(po.at) : "") + (po.by ? " \u00b7 " + po.by : "")) : "type the current mileage below"; } /* v2.0m-o (Matthew 10/30): personal vehicle, mileage Matthew types */
     function one(s, defInt) {
       s = s || {}; var interval = dmNum(s.interval) || defInt, last = dmNum(s.lastMiles), lastAt = vmParseDate(s.lastDate);
       if (last == null) return { interval: interval, status: "unknown" };
@@ -8331,7 +8332,7 @@
     }
     /* v2.0f: oil = the driver's own interval; rotation fixed at 10,000 (PCSVM); sheet math (vmaint.js) wins when it is defined */
     var M = window.PCSVM, sh = M && cur != null ? M.compute(v, cur, now) : null;
-    var res = { driverId: did, cur: cur, src: src, insp: insp, oil: one(v.oil, M ? M.oilInterval(v) : 25000), rot: one(Object.assign({}, v.rot || {}, { interval: 10000 }), 10000), blocks: sh ? sh.blocks : [] };
+    var res = { driverId: did, cur: cur, src: src, insp: insp, oil: one(v.oil, M ? M.oilInterval(v) : 25000), rot: one(Object.assign({}, v.rot || {}, { interval: 10000 }), 10000), blocks: sh && !v.personal ? sh.blocks : [] };
     if (sh) ["oil", "rot"].forEach(function (k) { var a = sh[k], b = res[k]; if (a.avg != null) { b.mpd = a.avg; b.mpdSrc = "since last service"; b.dLeft = a.daysUntil; b.dueAt = a.projected ? vmDayMs(a.projected) : null;
       b.status = a.status === "yellow" ? "amber" : a.status; } });
     return res;
@@ -8346,6 +8347,10 @@
       '<div class="fine">Miles left <b>' + vmN(c.left) + "</b> \u00b7 driven since " + vmN(c.sinceMiles) + " \u00b7 avg " + vmN(c.mpd) + " mi/day (" + esc(c.mpdSrc) + ")</div>" +
       '<div class="fine">Est. ' + (c.dLeft != null ? (c.dLeft <= 0 ? "now" : vmN(c.dLeft) + " days") : "\u2014") + " \u00b7 projected <b>" + (c.dueAt ? esc(vmFmtDate(c.dueAt)) : "\u2014") + "</b> (estimate from the average)</div></div>"; /* v2.0f: never a fixed due date */
   }
+  /* v2.0m-o (Matthew 10/30): miles until due (or overdue by) + miles since last, shown next to each service */
+  function vmMilesLine(c, sinceWord) { if (!c || c.left == null || c.sinceMiles == null) return "";
+    return '<div data-vm-miles style="font-weight:700;margin:2px 0">' + (c.left < 0 ? '<span style="color:#ff9b9b">Overdue by ' + vmN(-c.left) + " miles</span>" : "Miles until due: " + vmN(c.left)) +
+      " \u00b7 Miles since " + sinceWord + ": " + vmN(c.sinceMiles) + "</div>"; }
   function vmName(v) { return [v.year, v.make, v.model].filter(Boolean).join(" ") || "Vehicle"; }
   function vmDriverName(id) { var r = (state.roster || {})[id] || {}; return r.name || id || ""; }
   function vmFluidLine(v) { /* v2.0f: driver-entered fluid check */
@@ -8353,26 +8358,36 @@
     return '<div class="fine">Fluid check ' + esc(f.date) + ": " + M.FLUIDS.map(function (x) { var l = (M.normLevel ? M.normLevel(f[x[0]]) : f[x[0]]) || "\u2014"; /* v2.0k r2 */ return esc(x[1]) + " " + (l === "Low" ? '<b style="color:#f0b429">Low</b>' : esc(l)); }).join(" \u00b7 ") + (f.by ? " \u00b7 " + esc(f.by) : "") + "</div>";
   }
   function vmListHtml() {
-    var ids = Object.keys(vm.list || {}).sort(function (a, b) { return vmName(vm.list[a]).localeCompare(vmName(vm.list[b])); });
+    var all = Object.keys(vm.list || {}).sort(function (a, b) { return vmName(vm.list[a]).localeCompare(vmName(vm.list[b])); });
+    var ina = function (k) { return !!(vm.list[k] || {}).inactive; }; /* v2.0m-o (Matthew 10/30): inactive = read-only, full history kept, only Restore */
+    var ids = all.filter(function (k) { return !ina(k) && !(vm.list[k] || {}).personal; }), pids = all.filter(function (k) { return !ina(k) && (vm.list[k] || {}).personal; }), iids = all.filter(ina); /* v2.0m-o */
     var h = '<p class="fine">Oil and tire rotation countdowns for every PCS vehicle. Current miles come from the odometer on the assigned driver\'s latest inspection for the vehicle\'s plate. Amber = 1,000 mi or 7 days left; red = overdue. The assigned driver sees a heads-up banner in the driver app at amber and red.</p>' +
       '<p><button type="button" class="btn btn-gold" data-vm-edit="__new">+ Add vehicle</button></p>';
     if (vm.err) h += '<p class="fine" style="color:#ff9b9b">Could not load vehicles: ' + esc(vm.err) + "</p>";
     if (!ids.length && vm.loaded) h += '<p class="fine">No vehicles yet.</p>';
-    ids.forEach(function (id) {
-      var v = vm.list[id] || {}, c = vmCalc(v), worst = [c.oil.status, c.rot.status].indexOf("red") >= 0 ? "red" : [c.oil.status, c.rot.status].indexOf("amber") >= 0 ? "amber" : "green";
+    function card(id) {
+      var v = vm.list[id] || {}, ro = !!v.inactive, c = vmCalc(v), worst = [c.oil.status, c.rot.status].indexOf("red") >= 0 ? "red" : [c.oil.status, c.rot.status].indexOf("amber") >= 0 ? "amber" : "green";
       h += '<div class="vm-card" style="border:1px solid #2e5a2e;border-top:4px solid ' + VM_COL[worst] + ';border-radius:12px;padding:12px;margin:12px 0;background:#102810">' +
-        '<div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap"><div><b style="font-size:17px">' + esc(vmName(v)) + "</b>" + (v.plate ? ' <span class="fine">\u00b7 ' + esc(v.plate) + "</span>" : "") +
-        '<div class="fine">Driver: ' + esc(c.driverId ? vmDriverName(c.driverId) + (v.driverId ? "" : " (matched by car)") : "not assigned") + "</div>" +
+        '<div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap"><div><b style="font-size:17px">' + esc(vmName(v)) + "</b>" + ' <b data-vm-cur style="font-size:17px">\u00b7 ' + (c.cur != null ? vmN(c.cur) + " mi" : "miles unknown") + "</b>" + (v.plate ? ' <span class="fine">\u00b7 ' + esc(v.plate) + "</span>" : "") +
+        (v.personal ? '<div class="fine">Personal vehicle (not a PCS car, no driver, no pay)</div>' : '<div class="fine">Driver: ' + esc(c.driverId ? vmDriverName(c.driverId) + (v.driverId ? "" : " (matched by car)") : "not assigned") + "</div>") +
         '<div>Current <b>' + vmN(c.cur) + " mi</b> " + (c.src ? '<span class="fine">(' + esc(c.src) + ")</span>" : "") + "</div>" +
+        (v.personal && !ro ? '<div style="margin:4px 0"><input data-vm-odo-in="' + esc(id) + '" type="text" inputmode="numeric" pattern="[0-9]*" autocomplete="off" placeholder="Current mileage" style="width:150px"> <button type="button" class="btn btn-ghost" data-vm-odo-save="' + esc(id) + '">Save mileage</button></div>' : "") +
         (c.insp && c.insp.warn ? '<div style="color:#f0b429;font-weight:700">\u26A0 ' + esc(c.insp.warn) + " (warning only)</div>" : "") +
-        (c.insp && c.insp.ignored && c.insp.ignored.length ? '<div><button type="button" class="btn btn-ghost" data-vm-accept="' + esc(id) + '" data-vm-odo="' + esc(c.insp.ignored[c.insp.ignored.length - 1].odo) + '">Accept lower reading ' + vmN(c.insp.ignored[c.insp.ignored.length - 1].odo) + " mi (logged)</button></div>" : "") +
-        (c.blocks && c.blocks.length ? '<div style="color:#ff9b9b;font-weight:800">\u26D4 BLOCKED from going online: ' + c.blocks.map(function (b) { return esc(b.why); }).join(" ") + "</div>" : "") +
+        (!ro && c.insp && c.insp.ignored && c.insp.ignored.length ? '<div><button type="button" class="btn btn-ghost" data-vm-accept="' + esc(id) + '" data-vm-odo="' + esc(c.insp.ignored[c.insp.ignored.length - 1].odo) + '">Accept lower reading ' + vmN(c.insp.ignored[c.insp.ignored.length - 1].odo) + " mi (logged)</button></div>" : "") +
+        (!ro && c.blocks && c.blocks.length ? '<div style="color:#ff9b9b;font-weight:800">\u26D4 BLOCKED from going online: ' + c.blocks.map(function (b) { return esc(b.why); }).join(" ") + "</div>" : "") +
         vmFluidLine(v) + "</div>" +
-        '<div><button type="button" class="btn btn-ghost" data-vm-edit="' + esc(id) + '">Edit</button></div></div>' +
-        vmBlock("Oil change", c.oil) + vmOilExtra(v, c) + /* v2.0m-j (Matthew 10/28): "Mark oil change done" / "Mark rotation done" buttons removed */
-        vmBlock("Tire rotation and balance", c.rot) + vmMoreRows(v, c) +
+        (ro ? '<div><span class="fine">Inactive' + (v.inactiveAt ? " since " + esc(vmFmtDate(v.inactiveAt)) : "") + " (read-only)</span> " + '<button type="button" class="btn btn-gold" data-vm-restore="' + esc(id) + '">Restore</button></div></div>'
+          : '<div><button type="button" class="btn btn-ghost" data-vm-edit="' + esc(id) + '">Edit</button> <button type="button" class="btn btn-ghost" data-vm-inactive="' + esc(id) + '">Make inactive</button></div></div>') +
+        vmBlock("Oil change", c.oil) + vmMilesLine(c.oil, "last change") + vmOilExtra(v, c) + /* v2.0m-j (Matthew 10/28): "Mark oil change done" / "Mark rotation done" buttons removed */
+        vmBlock("Tires rotated and balanced", c.rot) + vmMilesLine(c.rot, "tires rotated and balanced") + vmMoreRows(v, c) +
         vmHistHtml(v) + "</div>";
-    });
+    }
+    ids.forEach(card);
+    h += '<h3 style="margin:22px 0 4px;color:#f0d48a">Personal vehicles</h3><p class="fine">Your own cars. Not PCS vehicles: no driver, no pay, no driver blocks. Type the current mileage on each card.</p>' + /* v2.0m-o (Matthew 10/30) */
+      '<p><button type="button" class="btn btn-gold" data-vm-edit="__newp">+ Add personal vehicle</button></p>';
+    if (!pids.length && vm.loaded) h += '<p class="fine">No personal vehicles yet.</p>';
+    pids.forEach(card);
+    if (iids.length) { h += '<h3 style="margin:22px 0 4px;color:#8a9a8a">Inactive vehicles</h3><p class="fine">Read-only. Inspections, mileage and maintenance history are kept. Tap Restore to use one again.</p>'; iids.forEach(card); }
     return h;
   }
   /* v2.0m-j: oil service life (picked by the driver at the oil change), next oil change estimate (sheet math), brakes (50,000 miles each) */
@@ -8382,7 +8397,7 @@
     return [["brakeFront", "Front brakes"], ["brakeRear", "Rear brakes"]].map(function (r) { var s = v[r[0]] || {}, d = M.dueOf(v, r[0], c.cur, Date.now());
       return '<div class="fine" data-vm-more="' + r[0] + '" style="margin:4px 0"><b>' + r[1] + ":</b> " + (Number(s.lastMiles) > 0 ? "last " + vmN(s.lastMiles) + " miles" + (s.lastDate ? " on " + esc(s.lastDate) : "") : "not logged yet") +
         (d.state === "ok" || d.state === "over" ? " \u00b7 next due at <b>" + vmN(d.due) + " miles</b>" + (d.left != null ? " (" + (d.left < 0 ? vmN(-d.left) + " over" : vmN(d.left) + " left") + ")" : "") + " \u00b7 " + (d.projected ? "about " + esc(M.fmtDay(d.projected)) : "not enough miles yet to estimate") : "") + "</div>"; }).join(""); }
-  var VM_KIND_NAME = { oil: "Oil change", rot: "Tire rotation and balance", tiresReplaced: "New tires", brakePads: "Brake pads", brakeFront: "Front brakes", brakeRear: "Rear brakes" };
+  var VM_KIND_NAME = { inactive: "Made inactive", restored: "Restored", oil: "Oil change", rot: "Tire rotation and balance", tiresReplaced: "New tires", brakePads: "Brake pads", brakeFront: "Front brakes", brakeRear: "Rear brakes" };
   function vmHistHtml(v) {
     var s = v.services || {}, ks = Object.keys(s).sort().reverse().slice(0, 6);
     if (!ks.length) return "";
@@ -8390,15 +8405,17 @@
       return '<div class="fine">' + esc(x.date || "") + " \u00b7 " + (VM_KIND_NAME[x.kind] || "Service") + " at " + vmN(dmNum(x.miles)) + " mi" + (x.by ? " \u00b7 " + esc(x.by) : "") + "</div>"; }).join("") + "</details>";
   }
   function vmFormHtml(id) {
-    var v = id === "__new" ? {} : (vm.list[id] || {}), o = v.oil || {}, r = v.rot || {}, ro = state.roster || {};
+    var v = id === "__newp" ? { personal: true } : id === "__new" ? {} : (vm.list[id] || {}), o = v.oil || {}, r = v.rot || {}, ro = state.roster || {};
     function f(name, label, val, type) { return '<label style="display:block;margin:6px 0"><span class="fine">' + label + '</span><br><input name="' + name + '" type="' + (type === "number" ? "text" : (type || "text")) + '"' + (type === "number" ? ' inputmode="numeric" pattern="[0-9]*" autocomplete="off"' : "") + ' value="' + esc(val == null ? "" : val) + '" style="width:100%;max-width:260px"></label>'; }
     var opts = '<option value="">(match by car / none)</option>' + Object.keys(ro).map(function (k) { return '<option value="' + esc(k) + '"' + (v.driverId === k ? " selected" : "") + ">" + esc(ro[k].name || k) + "</option>"; }).join("");
-    return '<form id="vm-form" data-vm-id="' + esc(id) + '"><h3 style="margin:4px 0">' + (id === "__new" ? "Add vehicle" : "Edit " + esc(vmName(v))) + "</h3>" +
+    return '<form id="vm-form" data-vm-id="' + esc(id) + '"><h3 style="margin:4px 0">' + (id === "__new" ? "Add vehicle" : id === "__newp" ? "Add personal vehicle" : "Edit " + esc(vmName(v))) + "</h3>" +
       f("year", "Year", v.year) + f("make", "Make", v.make) + f("model", "Model", v.model) + f("plate", "Plate (optional)", v.plate) +
+      (v.personal ? '<input type="hidden" name="personal" value="1"><p class="fine">Personal vehicle (no driver, no pay).</p>' + f("curMiles", "Current mileage (you type it)", v.odoOverride && v.odoOverride.miles, "number") : /* v2.0m-o */
       '<label style="display:block;margin:6px 0"><span class="fine">Assigned driver</span><br><select name="driverId">' + opts + "</select></label>" +
-      '<p class="fine">Current mileage = the odometer on the driver\'s latest inspection for this plate (v2.0i). A lower reading is ignored until you accept it on the vehicle card.</p>' +
-      "<h4>Oil change</h4>" + f("oilMiles", "Last oil change miles", o.lastMiles, "number") + f("oilDate", "Last oil change date", o.lastDate, "date") + f("oilInt", "Interval (miles)", o.interval || 25000, "number") +
-      "<h4>Tire rotation and balance</h4>" /* v2.0m-b same name as the driver log */ + f("rotMiles", "Last rotation miles", r.lastMiles, "number") + f("rotDate", "Last rotation date", r.lastDate, "date") + f("rotInt", "Interval (miles, fixed)", 10000, "number").replace("<input ", "<input readonly ") +
+      '<p class="fine">Current mileage = the odometer on the driver\'s latest inspection for this plate (v2.0i). A lower reading is ignored until you accept it on the vehicle card.</p>') +
+      (id !== "__new" && id !== "__newp" ? (function () { var c = vmCalc(v); return '<div data-vm-cur style="font-weight:800;margin:6px 0">Current mileage: ' + (c.cur != null ? vmN(c.cur) + " mi" : "unknown") + "</div>"; })() : "") +
+      "<h4>Oil change</h4>" + (id !== "__new" && id !== "__newp" ? vmMilesLine(vmCalc(v).oil, "last change") : "") + f("oilMiles", "Last oil change miles", o.lastMiles, "number") + f("oilDate", "Last oil change date", o.lastDate, "date") + f("oilInt", "Interval (miles)", o.interval || 25000, "number") +
+      "<h4>Tires rotated and balanced</h4>" /* v2.0m-b same name as the driver log */ + (id !== "__new" && id !== "__newp" ? vmMilesLine(vmCalc(v).rot, "tires rotated and balanced") : "") + f("rotMiles", "Last rotation miles", r.lastMiles, "number") + f("rotDate", "Last rotation date", r.lastDate, "date") + f("rotInt", "Interval (miles, fixed)", 10000, "number").replace("<input ", "<input readonly ") +
       vmExtraFormHtml(v, f) + /* v2.0m-b: new tires, front brakes, rear brakes (same record keys the driver log reads) */
       '<p><button type="submit" class="btn btn-gold">Save</button> <button type="button" class="btn btn-ghost" data-vm-cancel="1">Cancel</button></p><p class="fine" id="vm-form-err"></p></form>';
   }
@@ -8429,8 +8446,18 @@
   function vmClick(e) {
     var t = e.target.closest ? e.target.closest("button") : null; if (!t) return;
     if (t.getAttribute("data-vm-close")) { vm.screen = ""; var ov = document.getElementById("vm-screen"); if (ov) ov.remove(); return; }
-    if (t.getAttribute("data-vm-edit")) { vm.editId = t.getAttribute("data-vm-edit"); vmPaint(); return; }
+    if (t.getAttribute("data-vm-inactive") || t.getAttribute("data-vm-restore")) { /* v2.0m-o: only the inactive flag changes; nothing is deleted */
+      var iid = t.getAttribute("data-vm-inactive") || t.getAttribute("data-vm-restore"), mk = !!t.getAttribute("data-vm-inactive"), iv = vm.list[iid] || {};
+      if (!window.confirm((mk ? "Make " : "Restore ") + vmName(iv) + (mk ? " inactive? It becomes read-only and keeps all its history." : "?"))) return;
+      var inow = Date.now(), ip = { inactive: mk ? true : null, inactiveAt: mk ? inow : null, inactiveBy: mk ? godWho() : null, updatedAt: inow };
+      ip["services/" + inow + "status"] = { kind: mk ? "inactive" : "restored", date: chicagoToday(), by: godWho(), at: inow };
+      vmSave(iid, ip).catch(function (er) { alert(String(er.message || er)); }); return; }
+    if (t.getAttribute("data-vm-edit")) { if ((vm.list[t.getAttribute("data-vm-edit")] || {}).inactive) return; /* read-only */ vm.editId = t.getAttribute("data-vm-edit"); vmPaint(); return; }
     if (t.getAttribute("data-vm-cancel")) { vm.editId = ""; vmPaint(); return; }
+    if (t.getAttribute("data-vm-odo-save") && !(vm.list[t.getAttribute("data-vm-odo-save")] || {}).inactive) { /* v2.0m-o: personal vehicle current mileage, typed by Matthew, saved with the date */
+      var pid = t.getAttribute("data-vm-odo-save"), inp = document.querySelector('[data-vm-odo-in="' + pid + '"]'), pm = vmNum(inp && inp.value);
+      if (!(pm > 0)) { alert("Type the current mileage first."); return; }
+      var pn = Date.now(); vmSave(pid, { odoOverride: { miles: pm, at: pn, date: chicagoToday(), by: godWho() }, updatedAt: pn }).catch(function (er) { alert(String(er.message || er)); }); return; }
     if (t.getAttribute("data-vm-accept")) { /* v2.0i: God accepts a lower inspection odometer for this plate (logged on the record) */
       var aid = t.getAttribute("data-vm-accept"), ao = vmNum(t.getAttribute("data-vm-odo")); if (!(ao > 0)) return;
       var why = window.prompt("Accept " + vmN(ao) + " mi as the current odometer for this plate? Reason (logged):", ""); if (why == null) return;
@@ -8453,14 +8480,17 @@
   function vmSubmit(e) {
     e.preventDefault(); var f = e.target, id = f.getAttribute("data-vm-id"), err = document.getElementById("vm-form-err");
     if (!f.model.value.trim()) { err.textContent = "Enter at least the model."; return; }
-    if (id === "__new") id = ("v" + (f.year.value || "") + "-" + f.make.value + "-" + f.model.value).toLowerCase().replace(/[^a-z0-9_-]+/g, "-").slice(0, 60) + "-" + Date.now().toString(36);
-    var old = vm.list[id] || {}, now = Date.now();
-    var rec = { year: f.year.value.trim(), make: f.make.value.trim(), model: f.model.value.trim(), plate: f.plate.value.trim(), driverId: f.driverId.value,
+    var isP = !!(f.personal && f.personal.value === "1"); /* v2.0m-o */
+    if (id === "__new" || id === "__newp") id = ("v" + (f.year.value || "") + "-" + f.make.value + "-" + f.model.value).toLowerCase().replace(/[^a-z0-9_-]+/g, "-").slice(0, 60) + "-" + Date.now().toString(36);
+    var old = vm.list[id] || {}, now = Date.now(); if (old.inactive) { err.textContent = "This vehicle is inactive (read-only). Restore it first."; return; } /* v2.0m-o */
+    var rec = { year: f.year.value.trim(), make: f.make.value.trim(), model: f.model.value.trim(), plate: f.plate.value.trim(), driverId: isP ? "" : f.driverId.value,
       oil: { lastMiles: vmNum(f.oilMiles.value), lastDate: f.oilDate.value || "", interval: vmNum(f.oilInt.value) || 25000 },
       rot: { lastMiles: vmNum(f.rotMiles.value), lastDate: f.rotDate.value || "", interval: 10000 /* v2.0f fixed */ }, updatedAt: now };
     VM_EXTRA.forEach(function (r) { var k = r[0], mi = vmNum(f[k + "Miles"].value), dt = f[k + "Date"].value || "", ol = old[k] || {};
       var iv = vmNum(f[k + "Int"].value); /* v2.0m-c */
       if (mi > 0 || dt || ol.lastMiles || iv) { rec[k] = { lastMiles: mi, lastDate: dt }; if (iv > 0) rec[k].interval = iv; if (ol.lastNotes) rec[k].lastNotes = ol.lastNotes; if (mi > 0 && mi !== vmNum(ol.lastMiles)) rec["services/" + now + "k" + k] = { kind: k, date: dt, miles: mi, by: godWho(), at: now }; } }); /* v2.0m-b */
+    if (isP) { rec.personal = true; var pm = vmNum(f.curMiles.value), po = old.odoOverride || {};
+      if (pm > 0 && pm !== dmNum(po.miles)) rec.odoOverride = { miles: pm, at: now, date: chicagoToday(), by: godWho() }; }
     err.textContent = "Saving\u2026";
     vmSave(id, rec).then(function () { vm.editId = ""; vmPaint(); }).catch(function (er) { err.textContent = String(er.message || er); });
   }
