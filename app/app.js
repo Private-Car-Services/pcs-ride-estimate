@@ -20675,6 +20675,49 @@
     nudgeGps();
   }
 
+  /* v2.0m-p nav resume (Matthew 11/1): back from Apple Maps / CarPlay, turn-by-turn did not come back. iOS stops a Home Screen
+     app's watchPosition while it is hidden, but state.gpsWatch kept the old id, so followGps() never started a new watch and
+     the route stayed on the old spot. On every return: drop the old watch, start a fresh one, take one fix right away, then
+     fetch the route again from where the car is now and repaint the turn banner + map. No popup. */
+  var navResumeAt = 0;
+  function navRideOn() { try { return !!(state.meter && state.meter.status === "running") || !!schedNavTrip(); } catch (e) { return false; } }
+  function navRestartWatch() {
+    if (!navigator.geolocation) return;
+    try { if (state.gpsWatch != null) navigator.geolocation.clearWatch(state.gpsWatch); } catch (e) {}
+    state.gpsWatch = null;
+    followGps();
+  }
+  function navRouteAgain() {
+    try { if (state.meter && state.meter.status === "running" && state.meter.dest) meterRouteFetch(true); } catch (e) {}
+    try { if (schedNavTrip()) schedNavFetch(true); } catch (e) {}
+    try { if (liveMap && liveMap.invalidateSize) liveMap.invalidateSize(); } catch (e) {}
+    try { if (state.meter) meterRefreshDom(); } catch (e) {}
+    try { if (schedNavTrip()) schedNavPaint(); } catch (e) {}
+  }
+  function navResume() {
+    if (ROLE !== "driver" || !signedIn() || (typeof document !== "undefined" && document.visibilityState === "hidden")) return;
+    var now = Date.now(); if (now - navResumeAt < 1500) return; /* visibilitychange + pageshow + focus fire together */
+    navResumeAt = now;
+    navRestartWatch();
+    try { acquireWakeLock(); } catch (e) {}
+    if (!navRideOn()) return;
+    var done = false, go = function () { if (done) return; done = true; navRouteAgain(); };
+    try { navigator.geolocation.getCurrentPosition(function (pos) { onGpsFix(pos); go(); }, go, { enableHighAccuracy: true, maximumAge: 0, timeout: 6000 }); } catch (e) { go(); }
+    setTimeout(go, 6500);
+  }
+  /* watchdog: visible, on a ride, but no fix for 20 s -> the watch is dead, start it again */
+  function navWatchdog(now) {
+    if (ROLE !== "driver" || !signedIn() || document.visibilityState === "hidden" || !navRideOn()) return;
+    if (now - (Number(state.gpsAt) || 0) > 20000 && now - navResumeAt > 20000) { navResumeAt = 0; navResume(); }
+  }
+  if (typeof window !== "undefined" && typeof document !== "undefined") {
+    document.addEventListener("visibilitychange", function () { if (document.visibilityState === "visible") navResume(); });
+    window.addEventListener("pageshow", navResume);
+    window.addEventListener("focus", navResume);
+    setInterval(function () { try { navWatchdog(Date.now()); } catch (e) {} }, 5000);
+    window.__pcsNavResume = { resume: navResume, watchdog: navWatchdog, restart: navRestartWatch }; /* test/debug */
+  }
+
   document.addEventListener("DOMContentLoaded", function () {
     var sheetHost = document.createElement("div");
     sheetHost.id = "sheet";
