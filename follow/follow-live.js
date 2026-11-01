@@ -202,7 +202,7 @@
     }
     if (S.brg !== null) { var dd = ((S.brg - S.carDeg + 540) % 360) - 180; S.carDeg = Math.abs(dd) < 0.5 ? S.brg : (S.carDeg + dd * k + 360) % 360; }
     S.carAt = at; carPaint(at, S.carDeg);
-    if (S.spdLive && S.mph !== null) { /* speed number glides too */
+    if (S.spdLive && !S.paused && S.mph !== null) { /* speed number glides too */
       S.mphShown = S.mphShown == null ? S.mph : S.mphShown + (S.mph - S.mphShown) * k;
       var m = Math.round(S.mphShown); setText("fl-mph", m < 2 ? "0" : String(m)); setText("fl-mph-l", m < 2 ? "mph \u00b7 Stopped" : "mph");
     }
@@ -239,7 +239,26 @@
     if (gh !== null && gh >= 0 && gh <= 360) S.brg = gh;
     else for (var i = T.length - 2; i >= 0; i -= 1) { if (hav(T[i].p, p) >= 0.0093) { S.brg = bearing(T[i].p, p); break; } }
   }
+  function dest0(d) { return d && d.status === "picked_up"; }
   function placeName(o) { var l = o && typeof o === "object" ? txt(o.label, 120) : ""; return l.split(",")[0].trim(); }
+  /* v2.0m-p (Matthew 11/1): when the driver opens Apple Maps the iPhone pauses the web driver app's GPS. After 20 s with no
+     fresh point: keep the car at its last spot, hide the speed (never "0 mph Stopped"), say the driver is navigating, and
+     estimate the arrival: the driver's last shared route ETA (from when it was sent), or straight-line at 35 mph from the
+     last spot to the pickup / drop-off. Labeled "about". Fresh points bring the normal view back. */
+  var PAUSE_MS = 20000, FALLBACK_MPH = 35;
+  function staleEta(d, now) {
+    var e = d && d.eta, to = e && (e.to === "dest" || e.to === "pickup") ? e.to : (d && d.status === "picked_up" ? "dest" : "pickup");
+    var eAt = num(d && d.etaAt) || num(d && d.updatedAt), arr = null, miles = null, how = "";
+    if (e && num(e.min) !== null && eAt && (e.to === to || !e.to)) { arr = eAt + Math.max(0, num(e.min)) * 60000; miles = num(e.miles); how = "route"; }
+    if (arr === null || arr < now + 60000) {
+      var car = pt(d && d.pos), tg = pt(to === "dest" ? d && d.dest : d && d.pickup);
+      if (car && tg) { miles = hav(car, tg); var a2 = now + (miles / FALLBACK_MPH) * 3600000; if (arr === null || a2 > arr) { arr = a2; how = "line"; } }
+    }
+    if (arr === null) return null;
+    if (arr < now + 60000) arr = now + 60000;
+    return { to: to, arr: arr, min: Math.max(1, Math.round((arr - now) / 60000)), miles: miles, how: how };
+  }
+  if (typeof window !== "undefined") window.__pcsFollowStaleEta = staleEta;
   function bigBox(d, now, live) {
     var big = $("fl-big"); if (!big) return;
     var pAt = d.pos && num(d.pos.at), fresh = live && pAt && now - pAt <= 60000;
@@ -247,7 +266,18 @@
     var etaOk = live && e && num(e.min) !== null && num(e.miles) !== null && now - eAt <= 180000;
     big.hidden = !live;
     if (!live) return;
-    S.spdLive = !!(fresh && S.mph !== null); if (!S.spdLive) S.mphShown = null;
+    var paused = !!(pAt && now - pAt > PAUSE_MS); S.paused = paused;
+    S.spdLive = !!(fresh && !paused && S.mph !== null); if (!S.spdLive) S.mphShown = null;
+    if (paused) {
+      setText("fl-mph", ""); setText("fl-mph-l", "Your driver is navigating."); setText("fl-mph-n", "Location updates shortly.");
+      var se = staleEta(d, now), sd = se ? se.to === "dest" : !!dest0(d), st = "";
+      setText("fl-arr-k", sd ? "Arriving at the drop-off" : "Arriving at the pickup");
+      if (se) { try { st = ctTime(se.arr); } catch (x) {} }
+      setText("fl-arr-t", se && st ? "about " + st : "Updating\u2026");
+      setText("fl-arr-m", se ? (soonFired(sd ? "dest" : "pickup") && legOf(d) ? "Arriving shortly" : "about " + se.min + " min") + (se.miles !== null ? " \u00b7 " + Math.max(0, se.miles).toFixed(1) + " mi" : "") : "");
+      setText("fl-arr-to", sd ? placeName(d.dest) : placeName(d.pickup));
+      return;
+    }
     if (fresh && S.mph !== null) { var m = Math.round(S.mphShown != null ? S.mphShown : S.mph); setText("fl-mph", m < 2 ? "0" : String(m)); setText("fl-mph-l", m < 2 ? "mph \u00b7 Stopped" : "mph"); setText("fl-mph-n", "Live speed"); }
     else { setText("fl-mph", "--"); setText("fl-mph-l", "mph"); setText("fl-mph-n", pAt ? "Last updated " + Math.max(1, Math.round((now - pAt) / 60000)) + " min ago" : "Waiting for the car"); }
     var dest = e && e.to === "dest";
@@ -291,7 +321,7 @@
     var pAt = d.pos && num(d.pos.at), age = pAt ? Math.round((now - pAt) / 1000) : -1;
     var showCar = (live || d.status === "completed") && !!pt(d.pos);
     setText("fl-upd", !live ? (done ? "The car stopped sharing its location at the end of the ride." : "The car shows on the map once your driver heads out.")
-      : age < 0 ? "Waiting for the first update from the car\u2026" : age <= 20 ? "Live \u00b7 updated just now" : "Last update " + (age < 60 ? age + " s" : Math.floor(age / 60) + " min") + " ago");
+      : age < 0 ? "Waiting for the first update from the car\u2026" : age <= 20 ? "Live \u00b7 updated just now" : age < 600 ? "Your driver is navigating. Location updates shortly." : "Last update " + (age < 60 ? age + " s" : Math.floor(age / 60) + " min") + " ago");
     track(d); soonCheck(d, now); bigBox(d, now, live);
     draw(d, showCar);
   }
