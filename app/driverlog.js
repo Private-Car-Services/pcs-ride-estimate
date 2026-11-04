@@ -453,9 +453,66 @@
       return '<li class="dl-ride" style="padding:10px 12px;border-bottom:1px solid #ddd"><b>' + esc(x.type) + "</b> \u00b7 " + esc(t(x.start)) + " \u2013 " + (x.end ? esc(t(x.end)) : "now") + " \u00b7 " + mins + " min" + (x.end ? " \u00b7 " + Number(x.miles || 0).toFixed(1) + " mi" : "") + "</li>";
     }).join("") + "</ul>";
   }
-  function listHtml(days, meta) {
+  function listHtml(days, meta) { meta = meta || {};
     return currentStatus(meta) + "<p " + SEC + ">TODAY</p>" + (days[0] ? listItem(days[0], true) : "") + ridesHtml(meta) +
-      '<button type="button" id="dl-history" style="display:block;width:calc(100% - 24px);margin:12px;padding:12px;border:1px solid #2f6fe0;border-radius:8px;background:#fff;color:#2f6fe0;font-weight:700">History</button>';
+      '<button type="button" id="dl-history" style="display:block;width:calc(100% - 24px);margin:12px;padding:12px;border:1px solid #2f6fe0;border-radius:8px;background:#fff;color:#2f6fe0;font-weight:700">History</button>' + mapHtml(meta);
+  }
+  /* v2.0m-s: today's map under History. Blue = Available, green = On a ride, yellow pin = Break, gray = Off (personal). */
+  var TRK_COL = { a: "#1e63d6", r: "#1f9d3a", b: "#e0b000", o: "#8a8a8a" }, TRK_NAME = { a: "Available", r: "On a ride", b: "Break", o: "Off (personal)" };
+  function trkPts(tr) { return ((tr && tr.pts) || []).map(function (p) { return { t: tr.t0 + p[0] * 1000, lat: p[1] / 1e5, lng: p[2] / 1e5, s: p[3] }; }); }
+  function mi(a, b) { var R = 3958.8, r = Math.PI / 180, dLa = (b.lat - a.lat) * r, dLo = (b.lng - a.lng) * r, x = Math.sin(dLa / 2) * Math.sin(dLa / 2) + Math.cos(a.lat * r) * Math.cos(b.lat * r) * Math.sin(dLo / 2) * Math.sin(dLo / 2); return 2 * R * Math.asin(Math.sqrt(x)); }
+  /* runs of the same status; a run ends at the first point of the next one (so the line has no gaps) */
+  function trkRuns(pts) {
+    var runs = [], cur = null;
+    pts.forEach(function (p, i) {
+      if (!cur || cur.s !== p.s) { if (cur) { cur.pts.push(p); cur.end = p.t; } cur = { s: p.s, start: p.t, end: p.t, pts: [p], miles: 0 }; runs.push(cur); }
+      else { cur.pts.push(p); cur.end = p.t; }
+    });
+    runs.forEach(function (r) { var m = 0; for (var i = 1; i < r.pts.length; i++) { var gap = r.pts[i].t - r.pts[i - 1].t; if (gap <= 600000) m += mi(r.pts[i - 1], r.pts[i]); } r.miles = r.s === "b" ? 0 : m; });
+    return runs;
+  }
+  function trkTotals(runs) { var t = {}; runs.forEach(function (r) { var x = t[r.s] = t[r.s] || { miles: 0, min: 0 }; x.miles += r.miles; x.min += Math.max(0, Math.round((r.end - r.start) / 60000)); }); return t; }
+  function hmin(m) { return m >= 60 ? Math.floor(m / 60) + " hr " + (m % 60) + " min" : m + " min"; }
+  function mapHtml(meta) {
+    var tr = meta && meta.track; if (!tr) return "";
+    var runs = trkRuns(trkPts(tr)), tot = trkTotals(runs);
+    var dot = function (c, pin) { return '<span style="display:inline-block;width:' + (pin ? 10 : 16) + 'px;height:' + (pin ? 10 : 4) + 'px;border-radius:' + (pin ? "50%" : "2px") + ';background:' + c + ';vertical-align:middle;margin:0 4px 0 8px"></span>'; };
+    return "<p " + SEC + ">TODAY'S MAP</p>" +
+      '<div id="dl-map" style="height:300px;margin:0 12px;border:1px solid #bbb;border-radius:8px;background:#e5e5e5"></div>' +
+      (runs.length ? "" : '<p class="dl-map-empty" style="margin:6px 12px;color:#666;font-size:13px">No driving yet today.</p>') +
+      '<p class="dl-legend" style="margin:6px 4px;font-size:13px">' + dot(TRK_COL.a) + "Available" + dot(TRK_COL.r) + "On a ride" + dot(TRK_COL.b, true) + "Break" + dot(TRK_COL.o) + "Off</p>" +
+      '<p id="dl-map-tap" style="margin:4px 12px;font-size:14px;font-weight:700;min-height:18px"></p>' +
+      '<ul class="dl-map-tot" style="list-style:none;margin:0 12px;padding:0;font-size:14px">' + ["a", "r", "b", "o"].filter(function (k) { return tot[k] || k !== "o"; }).map(function (k) {
+        var x = tot[k] || { miles: 0, min: 0 };
+        return '<li style="padding:4px 0;border-bottom:1px solid #ddd">' + dot(TRK_COL[k], k === "b") + "<b>" + TRK_NAME[k] + "</b>: " + x.miles.toFixed(1) + " mi \u00b7 " + hmin(x.min) + "</li>";
+      }).join("") + "</ul>" +
+      (tr.canToggle ? '<label style="display:flex;gap:8px;align-items:center;margin:10px 12px;font-size:14px"><input type="checkbox" id="dl-personal"' + (tr.personal ? " checked" : "") + '> Track my miles when I am off (gray line)</label>' : "");
+  }
+  var mapView = null;
+  function drawMap(w, meta) {
+    var el = w.querySelector("#dl-map"), L = window.L; if (!el || !L || !meta.track) return;
+    var runs = trkRuns(trkPts(meta.track)), rides = meta.rides || [], tap = w.querySelector("#dl-map-tap");
+    var t = function (ms) { return new Date(ms).toLocaleTimeString("en-US", { timeZone: TZ, hour: "numeric", minute: "2-digit" }); };
+    var map = L.map(el, { zoomControl: true, attributionControl: true }); w._dlMap = map;
+    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom: 19, attribution: "&copy; OpenStreetMap" }).addTo(map);
+    var all = [];
+    runs.forEach(function (r) {
+      var ll = r.pts.map(function (p) { return [p.lat, p.lng]; }); all = all.concat(ll);
+      var info = function () {
+        if (r.s === "b") return "Break \u00b7 " + t(r.start) + " \u2013 " + t(r.end) + " \u00b7 0 mi";
+        var txt = TRK_NAME[r.s] + " \u00b7 " + t(r.start) + " \u2013 " + t(r.end) + " \u00b7 " + r.miles.toFixed(1) + " mi";
+        if (r.s === "r") { var hit = rides.filter(function (x) { return x.start <= r.end && (x.end || Infinity) >= r.start; })[0]; if (hit) txt = hit.type + " \u00b7 " + t(hit.start) + " \u2013 " + (hit.end ? t(hit.end) : "now") + " \u00b7 " + (hit.end ? Number(hit.miles || 0) : r.miles).toFixed(1) + " mi"; }
+        return txt;
+      };
+      var lay = r.s === "b" ? L.circleMarker(ll[0], { radius: 9, color: "#7a5d00", weight: 2, fillColor: TRK_COL.b, fillOpacity: 1 })
+        : L.polyline(ll, { color: TRK_COL[r.s], weight: 6, opacity: 0.9 });
+      lay.on("click", function () { if (tap) tap.textContent = info(); }); lay.addTo(map); lay._dlInfo = info;
+      (w._dlLayers = w._dlLayers || []).push(lay);
+    });
+    if (mapView) map.setView(mapView.c, mapView.z); /* keep the driver's zoom when the log repaints */
+    else if (all.length) map.fitBounds(all, { padding: [20, 20], maxZoom: 16 }); else map.setView([30.33, -95.48], 10);
+    map.on("moveend", function () { mapView = { c: map.getCenter(), z: map.getZoom() }; });
+    var cb = w.querySelector("#dl-personal"); if (cb && meta.onPersonal) cb.addEventListener("change", function () { meta.onPersonal(cb.checked); });
   }
   function historyHtml(days, shown) {
     var past = days.slice(1, 1 + shown);
@@ -505,6 +562,7 @@
     else w.innerHTML = bar("Logs", false) + listHtml(days, meta);
     w.setAttribute("data-mode", mode || "all");
     document.body.appendChild(w);
+    if (!day && !hm2 && mode !== "inspector") { try { drawMap(w, meta); } catch (eM) {} } /* v2.0m-s */
     try { if (!(history.state && history.state.dlOverlay)) history.pushState({ dlOverlay: 1 }, ""); } catch (eH) {} /* v74e: back gesture / button closes */
     padWire(w);
     var dform = w.querySelector("#dl-dvir-form");
@@ -569,7 +627,7 @@
     document.body.appendChild(a); a.click(); setTimeout(function () { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
     return a.download;
   }
-  function close(fromPop) { var o = document.getElementById("dl-overlay"); if (o) o.remove();
+  function close(fromPop) { var o = document.getElementById("dl-overlay"); if (o) o.remove(); mapView = null;
     if (!fromPop) { try { if (history.state && history.state.dlOverlay) { closing = true; history.back(); } } catch (e) {} } }
   var closing = false;
   if (typeof window !== "undefined" && window.addEventListener) {
@@ -624,5 +682,5 @@
     if (mk === "mdy" && (d.length > 4 || (d.length === 4 && !del))) out = d.slice(0, 2) + "/" + d.slice(2, 4) + "/" + d.slice(4);
     if (out !== t.value) t.value = out;
   }, true);
-  window.PCSDriverLog = { newerWash: newerWash, washWarnText: washWarnText, washLastText: washLastText, WASH_WARN: WASH_WARN, recView: recView, washLine: washLine, minTimeGate: minTimeGate, fmtDur: fmtDur, motionGate: motionGate, fluidsDue: fluidsDue, readDvir: readDvir, parseMdy: parseMdy, expiryState: expiryState, washState: washState, EXTRAS: DVIR_EXTRAS, items: items, DVIR: DVIR, CERT: CERT, dayHash: dayHash, snapshot: snapshot, historyHtml: historyHtml, build: build, html: html, gridSvg: gridSvg, listHtml: listHtml, detailHtml: detailHtml, csv: csv, open: open, close: close, download: download, midnight: midnight, CARRIER: CARRIER };
+  window.PCSDriverLog = { newerWash: newerWash, washWarnText: washWarnText, washLastText: washLastText, WASH_WARN: WASH_WARN, recView: recView, washLine: washLine, minTimeGate: minTimeGate, fmtDur: fmtDur, motionGate: motionGate, fluidsDue: fluidsDue, readDvir: readDvir, parseMdy: parseMdy, expiryState: expiryState, washState: washState, EXTRAS: DVIR_EXTRAS, items: items, DVIR: DVIR, CERT: CERT, dayHash: dayHash, snapshot: snapshot, historyHtml: historyHtml, build: build, html: html, gridSvg: gridSvg, listHtml: listHtml, mapHtml: mapHtml, drawMap: drawMap, ridesHtml: ridesHtml, mapReset: function () { mapView = null; }, /* v2.0m-s: God day map */ trkRuns: trkRuns, trkTotals: trkTotals, detailHtml: detailHtml, csv: csv, open: open, close: close, download: download, midnight: midnight, CARRIER: CARRIER };
 })();

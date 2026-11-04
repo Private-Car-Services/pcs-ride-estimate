@@ -864,6 +864,10 @@
   function syncOpenRideAlert() {
     qPaintDriver(); /* v72q */
     if (ROLE === "driver") showRideSoundBar(); /* v57: always, until a chime really played */
+    if (ROLE === "driver" && signedIn() && canGoOnline() && !driverCanTakeNew() && driverMidPcsRide()) { /* v2.0m-s */
+      if (openRideAlertTimer) { clearInterval(openRideAlertTimer); openRideAlertTimer = null; } closeRidePopup(); waitNoteSync(); return;
+    }
+    waitNoteSync();
     if (ROLE !== "driver" || !signedIn() || !canGoOnline() || !driverCanTakeNew()) {
       stopOpenRideAlert();
       closeRidePopup();
@@ -886,6 +890,37 @@
       }
       rideAudio.startAlert(); /* idempotent while ringing */
     }, 1400);
+  }
+
+  /* v2.0m-s (Matthew 11/4): during a PCS ride a new request still chimes and shows the rider's name + phone so he can call.
+     No Accept here (never two trips at once). The ride stays in line; the normal Accept pop-up shows it first after drop-off. */
+  var waitHeard = {}, waitTimer = null;
+  function driverMidPcsRide() {
+    if (ROLE !== "driver" || !signedIn()) return false;
+    try { if (qOffline()) return false; } catch (e) {}
+    try { return !!(meterActive() || driverMidRide() || driverRideLocked()); } catch (e) { return false; }
+  }
+  function waitNoteRides() { return driverMidPcsRide() && !driverCanTakeNew() && canGoOnline() ? alertableOpenRides() : []; }
+  function waitNoteHtml(list) {
+    return '<div style="font-weight:800;font-size:17px;margin-bottom:4px">New ride request</div>' + list.map(function (r) {
+      var info = ridePopupInfo[r.code], ph = String((info && info.phone) || r.riderPhone || "").trim();
+      if (!info) loadRidePopupInfo(r.code);
+      return '<div class="rw-row" style="margin:4px 0">' + esc(r.name || "Rider") + (ph ? ' \u00b7 <a href="tel:' + esc(ph) + '" style="color:#fff;font-weight:800">' + esc(ph) + "</a>" : "") + "</div>";
+    }).join("") + '<div style="margin:4px 0 8px">Call them. You can take this ride after your drop-off.</div>' +
+      '<button type="button" id="rw-ok" style="min-height:44px;padding:0 18px;border:0;border-radius:8px;font-weight:800">OK, stop sound</button>';
+  }
+  function waitNoteSync() {
+    var list = waitNoteRides(), el = document.getElementById("ride-wait-note");
+    if (!list.length) { if (el) el.remove(); if (waitTimer) { clearInterval(waitTimer); waitTimer = null; } return; }
+    if (!el) {
+      el = document.createElement("div"); el.id = "ride-wait-note"; el.setAttribute("role", "alert");
+      el.style.cssText = "position:fixed;left:8px;right:8px;bottom:8px;z-index:99999;background:#1f6f3a;color:#fff;border-radius:12px;padding:12px;font-size:16px;box-shadow:0 4px 16px rgba(0,0,0,.35)";
+      el.addEventListener("click", function (ev) { if (ev.target && ev.target.id === "rw-ok") { waitNoteRides().forEach(function (r) { waitHeard[r.code] = 1; }); try { rideAudio.stopAlert(); } catch (e) {} waitNoteSync(); } });
+      document.body.appendChild(el);
+    }
+    var h = waitNoteHtml(list); if (el.__h !== h) { el.innerHTML = h; el.__h = h; }
+    var ring = function () { return waitNoteRides().some(function (r) { return !waitHeard[r.code]; }) && !openRideAlertMuted(); };
+    if (ring()) { rideAudio.startAlert(); if (!waitTimer) waitTimer = setInterval(function () { if (ring()) rideAudio.startAlert(); else { try { rideAudio.stopAlert(); } catch (e) {} clearInterval(waitTimer); waitTimer = null; } }, 1400); }
   }
 
   function openRideAlertToggleHtml() {
@@ -929,7 +964,8 @@
     try { if (dvirBlock()) return false; } catch (e) {} /* v73 DVIR: unsafe defect not cleared */
     if (hosLimitReached()) return false; /* v72r hours of service: no new offers at the limit (an in-progress ride can finish) */
     if (meterActive()) return false; /* v70: busy with a metered ride */
-    if (qManualBusy()) return false; /* v72q: driver set On a ride (offers pause) */
+    /* v2.0m-s (Matthew 11/4): On a ride (PCS/Uber/Lyft/Other set by hand) no longer pauses offers. PCS rides still alert him so he
+       can call the rider and pick them up after the drop-off. */
     if (state.screen === "home") return true;
     return state.screen === "trip" && state.rideStatus === "completed";
   }
@@ -1002,11 +1038,11 @@
     getRide(code).then(function (ride) {
       if (!ride) return;
       if (!ride.code) ride.code = code;
-      var info = { photo: safePhoto(ride.riderPhoto), fareCents: null, commCents: null, passengers: ride.passengers };
+      var info = { photo: safePhoto(ride.riderPhoto), fareCents: null, commCents: null, passengers: ride.passengers, phone: String(ride.riderPhone || "") }; /* v2.0m-s: phone for the mid-ride notice */
       var est = estimateForRide(ride, null);
       if (est) { info.fareCents = est.total; info.commCents = commissionCentsFor(est); }
       ridePopupInfo[code] = info;
-      syncRidePopup();
+      syncRidePopup(); try { waitNoteSync(); } catch (e) {}
       var a = pointFrom(ride.pickupLat, ride.pickupLng);
       var b = pointFrom(ride.dropLat, ride.dropLng);
       if (!a || !b) return;
@@ -3776,7 +3812,7 @@
     Object.keys(loc).forEach(function (d) { if (/^\d{4}-\d{2}-\d{2}$/.test(d) && loc[d] && typeof loc[d] === "object") rows[d] = Object.assign({}, rows[d] || {}, loc[d]); });
     var cur = "off"; try { var hs = hosStatus(now); if (!qOffline() && hs.onShift && !qOnBreak() && !qAutoBreak()) cur = hosDrvPrev && hosDrvPrev.moving ? "drv" : "on"; } catch (e) {}
     var snaps = Object.assign({}, hist.days || {}); try { Object.assign(snaps, JSON.parse(localStorage.getItem(dlKey("days")) || "{}") || {}); } catch (e) {}
-    return { now: now, rides: (function () { try { return rtToday(); } catch (e) { return []; } })(), /* v2.0m-q */ days: Math.max(15, Number(state.dlDays) || 15), snapshots: snaps, more: function (n) { state.dlDays = n; openDriverLog("history:" + (n - 1)); }, currentStatus: cur, currentNote: qOffline() ? "Offline (logged in)" : qOnBreak() ? "On break" : qAutoBreak() ? "Break (auto, available)" : "",
+    return { now: now, rides: (function () { try { return rtToday(); } catch (e) { return []; } })(), /* v2.0m-q */ track: (function () { try { return trkToday(); } catch (e) { return null; } })(), onPersonal: function (on) { trkSetPersonal(on); }, /* v2.0m-s */ days: Math.max(15, Number(state.dlDays) || 15), snapshots: snaps, more: function (n) { state.dlDays = n; openDriverLog("history:" + (n - 1)); }, currentStatus: cur, currentNote: qOffline() ? "Offline (logged in)" : qOnBreak() ? "On break" : qAutoBreak() ? "Break (auto, available)" : "",
       fluidsDays: (function () { try { return Number(localStorage.getItem("pcs-dvir-fluids-days")) || 7; } catch (e) { return 7; } })(), /* v74: God-editable fluids interval */
       dvirItems: (function () { try { return JSON.parse(localStorage.getItem("pcs-dvir-cfg") || "null"); } catch (e) { return null; } })(), /* God-mode checklist (rides/DVIRCFG) */
       cityAt: dlCityAt, canSign: true, odoNow: state.milesStartOdo, odoCheck: dvirOdoCheck, /* v75u */ plates: (function () { try { var m = state.vmMine || {}; return Object.keys(m).map(function (k) { return normalizePlate((m[k] && m[k].plate) || ""); }).filter(Boolean); } catch (e) { return []; } })(), /* v2.0i: plate picker choices */
@@ -18924,7 +18960,7 @@
     }
     if (ROLE === "customer" && signedIn() && riderAgreed()) syncAgreementToServer();
     var homeBook = document.getElementById("home-book");
-    if (homeBook) homeBook.addEventListener("click", function () { qr.join = false; qr.pend = null; startNewBooking(); }); /* v72q: plain booking = no queue */
+    if (homeBook) homeBook.addEventListener("click", function () { qr.join = false; qr.noJoin = false; qr.pend = null; startNewBooking(); }); /* v72q: plain booking = no queue */
     var bookingHome = document.getElementById("booking-home");
     if (bookingHome) {
       bookingHome.addEventListener("click", function () {
@@ -19695,7 +19731,7 @@
   }
 
   function refreshOpenRides(force) {
-    if (ROLE !== "driver" || !signedIn() || !(driverCanTakeNew() || qBoardPollOk())) return; /* v72q */
+    if (ROLE !== "driver" || !signedIn() || !(driverCanTakeNew() || qBoardPollOk() || driverMidPcsRide())) return; /* v72q; v2.0m-s: keep checking during a PCS ride */
     if (!syncOn()) {
       state.openRides = [];
       state.openListError = "";
@@ -20556,6 +20592,7 @@
       } catch (e) {}
       try { navNoteHeading(pos); } catch (e) {} /* v72u */
       try { brkNoteMotion(state.speedMph, Date.now()); } catch (e) {} /* v72u */
+      try { trkNote(pos.coords.latitude, pos.coords.longitude, Date.now()); } catch (e) {} /* v2.0m-s day map track */
       try { autoBrkTick(Date.now()); } catch (e) {} /* v74d */
       noteAutoWait(pos); /* v57: 4:30 OK check; 5:00 stop ask; police assist if not OK */
       trackDailyMiles(pos);
@@ -20832,7 +20869,7 @@
     setInterval(function () { if (chatOpenForRole()) loadChatMessages(); }, 3000);
     setInterval(pollDriverRideCancel, 5000);
     setInterval(function () {
-      if (ROLE === "driver" && signedIn() && canGoOnline() && (driverCanTakeNew() || qBoardPollOk())) refreshOpenRides(); /* v72q */
+      if (ROLE === "driver" && signedIn() && canGoOnline() && (driverCanTakeNew() || qBoardPollOk() || driverMidPcsRide())) refreshOpenRides(); /* v72q; v2.0m-s */
     }, 3000);
     setInterval(function () {
       if (ROLE === "driver" && signedIn() && !state.hubOpen) refreshScheduledRides(false);
@@ -21050,30 +21087,20 @@
     if (ROLE !== "driver") return false;
     try { return localStorage.getItem(qBusyKey()) === "b" && !qAutoBusy() && !driverRideLocked(); } catch (e) { return false; } /* r13 */
   }
-  /* v72u (Matthew): Break only when stopped (GPS under 3 mph for 10+ s); moving over 5 mph for 10+ s ends the break
+  /* v72u (Matthew): Break only when stopped (GPS under 3 mph for 10+ s); moving over 5 mph for 30+ s in a row (v2.0m-s) ends the break
      automatically and returns to the status before Break. Moving time never counts as break (HOS still-time resets on movement). */
-  var BRK_STOP_MPH = 3, BRK_MOVE_MPH = 5, BRK_HOLD_MS = 10000;
+  var BRK_STOP_MPH = 3, BRK_MOVE_MPH = 5, BRK_HOLD_MS = 10000, BRK_END_MS = 30000; /* v2.0m-s: 30 s over 5 mph ends Break */
   var brkMotion = { stillSince: 0, fastSince: 0, lastAt: 0 };
   function brkNoteMotion(mph, now) {
     if (ROLE !== "driver") return;
-    /* v72x: also end the Break once the car has moved 150 m+ from where the Break started (works with no GPS speed at all) */
-    try {
-      if (qOnBreak() && isFinite(state.hereLat) && isFinite(state.hereLng)) {
-        if (!brkMotion.at0) brkMotion.at0 = { lat: +state.hereLat, lng: +state.hereLng };
-        else if ((function (dd) { var fr = state.speedAt && Date.now() - state.speedAt <= 20000; return dd > 0.25 || (dd > 0.093 && fr && Number(state.speedMph) > BRK_MOVE_MPH); })(haversine(brkMotion.at0, { lat: +state.hereLat, lng: +state.hereLng }))) { /* v77.24: indoor GPS drift no longer ends Break */
-          var prev0 = ""; try { prev0 = localStorage.getItem(qBusyKey() + "-prev") || ""; } catch (e) {}
-          brkMotion.at0 = null; qd.brkMsg = "Break ended: you started driving.";
-          qSetBreak(false); if (prev0 === "1" && brkLiveRide()) qSetManualBusy(true); /* v73: Available unless a real ride/meter */
-          return;
-        }
-      } else brkMotion.at0 = null;
-    } catch (e) {}
+    /* v2.0m-s (Matthew 11/4): the old 0.25 mi / 0.093 mi distance rules are gone. Break ends only after 30 s in a row over 5 mph. */
     if (mph == null || !isFinite(mph)) return;
     brkMotion.lastAt = now;
     if (mph < BRK_STOP_MPH) { if (!brkMotion.stillSince) brkMotion.stillSince = now; } else brkMotion.stillSince = 0;
     if (mph > BRK_MOVE_MPH) { if (!brkMotion.fastSince) brkMotion.fastSince = now; } else brkMotion.fastSince = 0;
     if (brkMotion.stillSince && qd.brkMsg && now - brkMotion.stillSince >= BRK_HOLD_MS) { qd.brkMsg = ""; try { render(); } catch (e) {} }
-    if (brkMotion.fastSince && now - brkMotion.fastSince >= BRK_HOLD_MS && qOnBreak()) {
+    if (brkMotion.fastSince && now - brkMotion.fastSince >= BRK_END_MS && qOnBreak()) {
+      try { trkRelabel(brkMotion.fastSince, "b", "a"); } catch (e) {} /* v2.0m-s: the driving that ended the Break is blue (business) on the map */
       var prev = ""; try { prev = localStorage.getItem(qBusyKey() + "-prev") || ""; } catch (e) {}
       qd.brkMsg = "Break ended: you started driving.";
       qSetBreak(false);
@@ -21227,6 +21254,55 @@
       rtSave(day, list);
     });
   }
+  /* v2.0m-r: type of the open ride (today, no end yet), else "On a ride"; read from storage so it survives a reload */
+  function rtLabel() { try { var l = rtToday(), x = l[l.length - 1]; return x && !x.end && RT_TYPES.indexOf(x.type) >= 0 ? x.type : "On a ride"; } catch (e) { return "On a ride"; } }
+  /* v2.0m-s (Matthew 11/4): day map track. One point every 15 s, or every 50 m (5 s min) while the app is open:
+     [sec since day start, lat*1e5, lng*1e5, status] status a=Available r=On a ride b=Break o=Offline (personal; Matthew on,
+     other drivers opt in). Local copy (draws offline) + Firebase rides/DRVRMLES/{id}/{day}/track/{chunkSec} = "t,la,ln,s;..." */
+  var TRK_OWNER = "mwragge_privatetaxiservices_net", trkBuf = [], trkLast = null, trkSentAt = 0;
+  function trkId() { var id = ""; try { if (signedIn()) { id = driverPresenceId(); localStorage.setItem("pcs-trk-last-id", id); } else id = localStorage.getItem("pcs-trk-last-id") || ""; } catch (e) {} return id; }
+  function trkPersonalOn(id) { id = id || trkId(); try { var v = localStorage.getItem("pcs-trk-personal-" + id); return v == null ? id === TRK_OWNER : v === "1"; } catch (e) { return false; } }
+  function trkSetPersonal(on) { try { localStorage.setItem("pcs-trk-personal-" + trkId(), on ? "1" : "0"); } catch (e) {} }
+  function trkStatus() {
+    if (!signedIn()) return "o";
+    try { if (qOffline()) return "o"; if (qOnBreak()) return "b"; if (qAutoBusy() || qManualBusy()) return "r"; } catch (e) {}
+    try { if (!hosShiftStart()) return "o"; } catch (e) {}
+    return "a";
+  }
+  function trkKey(id) { return "pcs-trk-" + id; }
+  function trkRead(id) { try { return JSON.parse(localStorage.getItem(trkKey(id)) || "{}") || {}; } catch (e) { return {}; } }
+  function trkDayStart(now) { var d = chicagoToday(), t = now; while (ymdChicago(t - 60000) === d) t -= 60000; return t - (t % 60000); }
+  function ymdChicago(ms) { return new Intl.DateTimeFormat("en-CA", { timeZone: "America/Chicago", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date(ms)); }
+  var trkDS = { day: "", t0: 0 };
+  function trkNote(lat, lng, now) {
+    if (ROLE !== "driver" || !isFinite(lat) || !isFinite(lng)) return;
+    var id = trkId(); if (!id) return;
+    var st = trkStatus(); if (st === "o" && !trkPersonalOn(id)) return;
+    var day = chicagoToday(); if (trkDS.day !== day) trkDS = { day: day, t0: trkDayStart(now) };
+    if (trkLast && trkLast.day === day) {
+      var dt = now - trkLast.at, dm = haversineMi(trkLast.lat, trkLast.lng, lat, lng) * 1609.34;
+      if (st === trkLast.s && !(dt >= 15000 && dm >= 10) && !(dt >= 5000 && dm >= 50) && !(dt >= 120000)) return;
+    }
+    trkLast = { day: day, at: now, lat: lat, lng: lng, s: st };
+    var p = [Math.round((now - trkDS.t0) / 1000), Math.round(lat * 1e5), Math.round(lng * 1e5), st];
+    var m = trkRead(id); (m[day] = m[day] || []).push(p);
+    Object.keys(m).sort().slice(0, -3).forEach(function (d) { delete m[d]; });
+    try { localStorage.setItem(trkKey(id), JSON.stringify(m)); } catch (e) {}
+    trkBuf.push(p);
+    if (now - trkSentAt >= 60000) trkFlush(id, day, now);
+  }
+  function trkFlush(id, day, now) {
+    if (!trkBuf.length || !signedIn()) return;
+    var pts = trkBuf, body = {}; trkBuf = []; trkSentAt = now || Date.now();
+    body["track/" + pts[0][0]] = pts.map(function (p) { return p.join(","); }).join(";");
+    try { authFetch(milesUrl(id, day), { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }).then(function (r) { if (!r.ok) trkBuf = pts.concat(trkBuf); }).catch(function () { trkBuf = pts.concat(trkBuf); }); } catch (e) { trkBuf = pts.concat(trkBuf); }
+  }
+  function trkRelabel(sinceMs, from, to) { /* v2.0m-s: re-color points from sinceMs on (local copy + not-yet-sent buffer) */
+    var id = trkId(), d = chicagoToday(), m = trkRead(id), sec = Math.floor((sinceMs - trkDS.t0) / 1000) - 1, fix = function (p) { if (p[0] >= sec && p[3] === from) p[3] = to; };
+    (m[d] || []).forEach(fix); trkBuf.forEach(fix); if (trkLast && trkLast.s === from) trkLast.s = to;
+    try { localStorage.setItem(trkKey(id), JSON.stringify(m)); } catch (e) {}
+  }
+  function trkToday() { var id = trkId(), d = chicagoToday(); if (trkDS.day !== d) trkDS = { day: d, t0: trkDayStart(Date.now()) }; return { t0: trkDS.t0, pts: (trkRead(id)[d] || []).slice(), personal: trkPersonalOn(id), canToggle: id !== TRK_OWNER }; }
   function rtToday() { return (rtRead()[chicagoToday()] || []).slice(); }
   function qQueuedOpenCount() { return (qd.order || []).length; }
   function qSortOffers(list) {
@@ -21264,7 +21340,7 @@
       '<div class="q-switch" role="radiogroup" aria-label="Your status">' +
       '<span class="q-knob" aria-hidden="true"></span>' +
       '<button type="button" role="radio" class="q-opt" id="q-set-available" aria-checked="' + (busy || brk || off ? "false" : "true") + '"' + (auto || (!tok && !off) ? " disabled" : "") + ">Available</button>" +
-      '<button type="button" role="radio" class="q-opt" id="q-set-onride" aria-checked="' + (busy ? "true" : "false") + '"' + (auto || !tok || off ? " disabled" : "") + ">On a ride</button>" +
+      '<button type="button" role="radio" class="q-opt" id="q-set-onride" aria-checked="' + (busy ? "true" : "false") + '"' + (auto || !tok || off ? " disabled" : "") + ">" + esc(busy ? rtLabel() : "On a ride") + "</button>" + /* v2.0m-r: pill shows the picked ride type */
       '<button type="button" role="radio" class="q-opt" id="q-set-break" aria-checked="' + (brk ? "true" : "false") + '"' + (lk ? lkA : auto || !tok || off ? " disabled" : "") + ">Break</button>" + /* v72y: Break always selectable (owner 7:38 AM); v73: not while Offline (already off duty) */
       '<button type="button" role="radio" class="q-opt" id="q-set-offline" aria-checked="' + (off ? "true" : "false") + '"' + (lk ? lkA : auto ? " disabled" : "") + ">Offline</button>" + /* v73 */
       "</div>" +
@@ -21284,7 +21360,7 @@
         : qAutoBreak() ? "Break (auto, available): you haven\u2019t moved for 10+ minutes, so this counts as break time from when you stopped. You are still Available and ride offers still come in. Moving or accepting a ride ends it."
         : brk ? "On break: your Break clock is running. Ride offers still come in; accepting one ends the break. 30 minutes of break resets your Break clock."
         : (busy
-          ? "Riders see that drivers are busy and can join the queue. New ride offers are paused. Slide to Available for the next rider in line."
+          ? "New PCS rides still come to you. Take them after this drop-off." /* v2.0m-s: never "paused" */
           : "Slide to On a ride whenever you are carrying a passenger, so riders can join the queue instead.")) + "</p>" +
       (qd.pubErr ? '<p class="error" id="q-pub-err">' + esc(qd.pubErr) + "</p>" : "") +
       '<div id="q-driver-queue-host">' + qDriverQueueInner() + "</div>" +
@@ -21312,12 +21388,13 @@
   function qBoardPollOk() { return ROLE === "driver" && signedIn() && state.screen === "home" && qManualBusy(); }
   function qDriverPausedHtml() {
     if (ROLE !== "driver" || !qManualBusy()) return "";
-    return '<p class="lede q-paused" id="q-paused">You are set to On a ride, so new ride offers are paused.</p>';
+    return '<p class="lede q-paused" id="q-paused">You are on a ride. New PCS rides still come to you.</p>';
   }
 
   /* ---------- rider side ---------- */
   function qAllBusy() { return !!(qr.ws && qr.ws.allBusy); }
-  function qBusyText() { return "Our drivers are busy right now"; } /* v72u: riders never see "Driver on break"; v2.0j: no driver state at all */
+  var Q_ONRIDE_TEXT = "Your driver is on a ride now. The driver will contact you as soon as the current ride is done. You are in line."; /* v2.0m-s (Matthew 11/4): riders are never blocked */
+  function qBusyText() { return Q_ONRIDE_TEXT; } /* v72u: riders never see "Driver on break"; v2.0j: no driver state at all */
   function qOwnerKey(code) { return "pcs-q-owner-" + String(code || ""); }
   function qOwnerSecret(code) { try { return localStorage.getItem(qOwnerKey(code)) || ""; } catch (e) { return ""; } }
   function qMyQueued() {
@@ -21335,11 +21412,12 @@
   function qPromptInner() {
     if (!qAllBusy()) return "";
     var onForm = state.riderView === "book";
+    if (onForm && !qr.join && !qr.noJoin) { qr.join = true; qPrepSecret(); } /* v2.0m-s: booking while he is on a ride puts you in line automatically */
     if (onForm && qr.join) {
       return (
         '<div class="card q-prompt q-joined" id="q-prompt">' +
         '<div class="status"><i></i><span>' + esc(qBusyText()) + '</span></div>' +
-        '<p class="lede">You\u2019re joining the queue for the next ride. Send your request below (pickup now) to get your place in line.</p>' +
+        '<p class="lede">You can still book. Send your request below (pickup now). It goes to your driver.</p>' +
         '<button class="btn ghost" type="button" id="q-unjoin">Don\u2019t join the queue</button>' +
         "</div>"
       );
@@ -21347,8 +21425,8 @@
     return (
       '<div class="card q-prompt" id="q-prompt">' +
       '<div class="status"><i></i><span>' + esc(qBusyText()) + '</span></div>' +
-      '<p class="lede">Join the queue and you\u2019ll get the next free driver.</p>' +
-      '<button class="btn" type="button" id="q-join">Join the queue for the next ride</button>' +
+      '<p class="lede">You can still book a ride. Your request goes to your driver.</p>' +
+      '<button class="btn" type="button" id="q-join">Book a ride</button>' +
       "</div>"
     );
   }
@@ -21489,7 +21567,7 @@
       render();
       return;
     }
-    if (t.id === "q-unjoin") { qr.join = false; qr.pend = null; qPaintHosts(); return; }
+    if (t.id === "q-unjoin") { qr.join = false; qr.noJoin = true; qr.pend = null; qPaintHosts(); return; }
     if (t.id === "q-leave") { qr.leaveConfirm = true; qPaintHosts(); return; }
     if (t.id === "q-leave-no") { qr.leaveConfirm = false; qPaintHosts(); return; }
     if (t.id === "q-leave-yes") {
