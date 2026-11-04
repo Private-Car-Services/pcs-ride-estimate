@@ -443,8 +443,18 @@
   function currentStatus(meta) { var c = (meta.currentStatus || "off"), lab = { off: "OFF DUTY", drv: "DRIVING", on: "ON DUTY", sb: "SLEEPER" }[c] || "OFF DUTY";
     return '<div class="dl-current" style="display:flex;gap:10px;align-items:center;background:#fff;padding:10px 12px;border-bottom:1px solid #ddd">' + badge(c in BADGE ? c : "off") + '<div><b class="dl-current-lab">' + lab + '</b><div style="font-size:12px;color:#666">Current Status' + (meta.currentNote ? " \u00b7 " + esc(meta.currentNote) : "") + "</div></div></div>"; }
   var SEC = 'style="background:#eee;color:#666;font-size:12px;padding:6px 12px;margin:0"';
+  /* v2.0m-q: today's rides, one per row: type, start-end, minutes, miles */
+  function ridesHtml(meta) {
+    var r = (meta && meta.rides) || []; if (!r.length) return "";
+    var now = Number(meta.now) || Date.now();
+    var t = function (ms) { return new Date(ms).toLocaleTimeString("en-US", { timeZone: TZ, hour: "numeric", minute: "2-digit" }); };
+    return "<p " + SEC + ">RIDES TODAY</p>" + '<ul class="dl-rides" style="list-style:none;margin:0;padding:0;background:#fff">' + r.map(function (x) {
+      var mins = x.end ? x.minutes : Math.round((now - x.start) / 60000);
+      return '<li class="dl-ride" style="padding:10px 12px;border-bottom:1px solid #ddd"><b>' + esc(x.type) + "</b> \u00b7 " + esc(t(x.start)) + " \u2013 " + (x.end ? esc(t(x.end)) : "now") + " \u00b7 " + mins + " min" + (x.end ? " \u00b7 " + Number(x.miles || 0).toFixed(1) + " mi" : "") + "</li>";
+    }).join("") + "</ul>";
+  }
   function listHtml(days, meta) {
-    return currentStatus(meta) + "<p " + SEC + ">TODAY</p>" + (days[0] ? listItem(days[0], true) : "") +
+    return currentStatus(meta) + "<p " + SEC + ">TODAY</p>" + (days[0] ? listItem(days[0], true) : "") + ridesHtml(meta) +
       '<button type="button" id="dl-history" style="display:block;width:calc(100% - 24px);margin:12px;padding:12px;border:1px solid #2f6fe0;border-radius:8px;background:#fff;color:#2f6fe0;font-weight:700">History</button>';
   }
   function historyHtml(days, shown) {

@@ -3776,7 +3776,7 @@
     Object.keys(loc).forEach(function (d) { if (/^\d{4}-\d{2}-\d{2}$/.test(d) && loc[d] && typeof loc[d] === "object") rows[d] = Object.assign({}, rows[d] || {}, loc[d]); });
     var cur = "off"; try { var hs = hosStatus(now); if (!qOffline() && hs.onShift && !qOnBreak() && !qAutoBreak()) cur = hosDrvPrev && hosDrvPrev.moving ? "drv" : "on"; } catch (e) {}
     var snaps = Object.assign({}, hist.days || {}); try { Object.assign(snaps, JSON.parse(localStorage.getItem(dlKey("days")) || "{}") || {}); } catch (e) {}
-    return { now: now, days: Math.max(15, Number(state.dlDays) || 15), snapshots: snaps, more: function (n) { state.dlDays = n; openDriverLog("history:" + (n - 1)); }, currentStatus: cur, currentNote: qOffline() ? "Offline (logged in)" : qOnBreak() ? "On break" : qAutoBreak() ? "Break (auto, available)" : "",
+    return { now: now, rides: (function () { try { return rtToday(); } catch (e) { return []; } })(), /* v2.0m-q */ days: Math.max(15, Number(state.dlDays) || 15), snapshots: snaps, more: function (n) { state.dlDays = n; openDriverLog("history:" + (n - 1)); }, currentStatus: cur, currentNote: qOffline() ? "Offline (logged in)" : qOnBreak() ? "On break" : qAutoBreak() ? "Break (auto, available)" : "",
       fluidsDays: (function () { try { return Number(localStorage.getItem("pcs-dvir-fluids-days")) || 7; } catch (e) { return 7; } })(), /* v74: God-editable fluids interval */
       dvirItems: (function () { try { return JSON.parse(localStorage.getItem("pcs-dvir-cfg") || "null"); } catch (e) { return null; } })(), /* God-mode checklist (rides/DVIRCFG) */
       cityAt: dlCityAt, canSign: true, odoNow: state.milesStartOdo, odoCheck: dvirOdoCheck, /* v75u */ plates: (function () { try { var m = state.vmMine || {}; return Object.keys(m).map(function (k) { return normalizePlate((m[k] && m[k].plate) || ""); }).filter(Boolean); } catch (e) { return []; } })(), /* v2.0i: plate picker choices */
@@ -21157,7 +21157,7 @@
     }
     if (!flag && now - autoBrk.since >= AUTO_BRK_STILL_MS) autoBrkSet(true, now, autoBrk.since);
   }
-  setInterval(function () { try { if (rideLockSync(Date.now())) render(); } catch (e) {} try { autoBrkTick(Date.now()); } catch (e) {} }, 30000); /* r13: ride started while Offline/Break -> On a ride */
+  setInterval(function () { try { rtTick(); } catch (e) {} try { if (rideLockSync(Date.now())) render(); } catch (e) {} try { autoBrkTick(Date.now()); } catch (e) {} }, 30000); /* r13: ride started while Offline/Break -> On a ride */
   function qAutoBusy() {
     if (ROLE !== "driver" || !signedIn()) return false;
     var st = String(state.rideStatus || "").toLowerCase();
@@ -21184,11 +21184,50 @@
     try { autoBrkClear(); } catch (e) {} /* v74d: any manual status change ends the auto-break */
     if (ROLE !== "driver") return;
     try { if (on) localStorage.setItem(qBusyKey(), "1"); else localStorage.removeItem(qBusyKey()); } catch (e) {}
-    qd.lastPub = null;
+    qd.lastPub = null; qd.rtMenu = false;
+    try { rtTick(); } catch (e) {} /* v2.0m-q */
     render();
     try { syncOpenRideAlert(); } catch (e) {}
     try { refreshOpenRides(true); } catch (e) {}
   }
+  /* v2.0m-q (Matthew 11/4): "On a ride" drop-down: PCS / Uber / Lyft / Other. Each ride is saved with its type, start, end and
+     miles (from the app's tracked miles) at rides/DRVRMLES/{driver}/{day}/rideSegments, and listed on the driver's Logs. */
+  var RT_TYPES = ["PCS", "Uber", "Lyft", "Other"];
+  function rtKey() { var id = ""; try { id = driverPresenceId(); } catch (e) {} return "pcs-ride-segs-" + id; }
+  function rtRead() { try { return JSON.parse(localStorage.getItem(rtKey()) || "{}") || {}; } catch (e) { return {}; } }
+  function rtMiles() { try { return Number(milesTodayTotal()) || 0; } catch (e) { return 0; } }
+  function rtMenuHtml() { /* plain drop-down right under the On a ride button (2nd of 4) */
+    return '<div class="q-rt-menu" id="q-rt-menu" role="menu" style="margin:2px 0 6px 25%;width:25%;min-width:120px;background:#fff;border:1px solid #bbb;border-radius:8px;box-shadow:0 4px 12px rgba(0,0,0,.25);overflow:hidden">' +
+      RT_TYPES.map(function (k, i) { return '<button type="button" role="menuitem" class="q-rt-pick" data-rt="' + k + '" style="display:block;width:100%;text-align:left;background:#fff;color:#111;border:0;' + (i ? "border-top:1px solid #ddd;" : "") + 'padding:10px 12px;font-size:16px;min-height:44px">' + k + "</button>"; }).join("") + "</div>";
+  }
+  function rtSave(day, list) {
+    var m = rtRead(); m[day] = list;
+    Object.keys(m).sort().slice(0, -10).forEach(function (d) { delete m[d]; });
+    try { localStorage.setItem(rtKey(), JSON.stringify(m)); } catch (e) {}
+    try { authFetch(milesUrl(driverPresenceId(), day), { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ rideSegments: list }) }).catch(function () {}); } catch (e) {}
+  }
+  function rtStart(type, now) {
+    if (RT_TYPES.indexOf(type) < 0) return;
+    now = now || Date.now(); rtTick(now, true);
+    var day = chicagoToday(), m = rtRead(), list = (m[day] || []).slice();
+    list.push({ type: type, start: now, startMiles: rtMiles() });
+    rtSave(day, list);
+  }
+  /* closes the open ride when status is no longer On a ride (or force) */
+  function rtTick(now, force) {
+    if (ROLE !== "driver") return;
+    now = now || Date.now();
+    var m = rtRead();
+    Object.keys(m).forEach(function (day) {
+      var list = m[day] || [], last = list[list.length - 1];
+      if (!last || last.end) return;
+      if (!force && qManualBusy() && !qOnBreak() && day === chicagoToday()) return;
+      var mi = rtMiles() - (Number(last.startMiles) || 0);
+      list = list.slice(); list[list.length - 1] = Object.assign({}, last, { end: now, minutes: Math.round((now - last.start) / 60000), miles: Math.max(0, Math.round(mi * 10) / 10) });
+      rtSave(day, list);
+    });
+  }
+  function rtToday() { return (rtRead()[chicagoToday()] || []).slice(); }
   function qQueuedOpenCount() { return (qd.order || []).length; }
   function qSortOffers(list) {
     var order = qd.order || [];
@@ -21229,6 +21268,7 @@
       '<button type="button" role="radio" class="q-opt" id="q-set-break" aria-checked="' + (brk ? "true" : "false") + '"' + (lk ? lkA : auto || !tok || off ? " disabled" : "") + ">Break</button>" + /* v72y: Break always selectable (owner 7:38 AM); v73: not while Offline (already off duty) */
       '<button type="button" role="radio" class="q-opt" id="q-set-offline" aria-checked="' + (off ? "true" : "false") + '"' + (lk ? lkA : auto ? " disabled" : "") + ">Offline</button>" + /* v73 */
       "</div>" +
+      (qd.rtMenu && !auto && tok && !off ? rtMenuHtml() : "") + /* v2.0m-q: ride type drop-down */
       (tok || off ? "" : qDriverAuthHtml()) +
       (qd.brkMsg ? '<p class="fine" id="q-break-msg" role="alert" style="color:#b91c1c;font-weight:700">' + esc(qd.brkMsg) + "</p>" : "") +
       (qd.brkMsg ? washAskHtml() : "") + /* v77.9 */
@@ -21414,8 +21454,9 @@
     if (want) qPaintHosts();
   }
   function qClick(ev) {
-    var t = ev.target && ev.target.closest ? ev.target.closest("#q-join,#q-unjoin,#q-leave,#q-leave-yes,#q-leave-no,#q-set-available,#q-set-onride,#q-set-break,#q-set-offline,#q-auth-go") : null;
+    var t = ev.target && ev.target.closest ? ev.target.closest(".q-rt-pick,#q-join,#q-unjoin,#q-leave,#q-leave-yes,#q-leave-no,#q-set-available,#q-set-onride,#q-set-break,#q-set-offline,#q-auth-go") : null;
     if (!t || t.disabled) return;
+    if (t.classList && t.classList.contains("q-rt-pick")) { qd.rtMenu = false; rtStart(t.getAttribute("data-rt")); if (!qManualBusy() || qOnBreak()) qSetManualBusy(true); else render(); return; } /* v2.0m-q */
     if (t.id === "q-auth-go") {
       var pass = (document.getElementById("q-auth-pass") || {}).value || "";
       if (!pass) { qd.authErr = "Enter your driver password."; render(); return; }
@@ -21435,7 +21476,7 @@
     }
     if (t.id === "q-set-available" && VM_BLOCK_BREAK_TO_ONLINE && (qManualBusy() || qOnBreak()) && vmBlocksNow().length) { qd.brkMsg = vmBlockMsg(); render(); return; } /* v2.0f Harry r1 #6 (flag pending Matthew) */
     if (t.id === "q-set-available") { if (qOffline()) { qSetOffline(false); return; } if (qManualBusy() || qOnBreak()) qSetManualBusy(false); return; }
-    if (t.id === "q-set-onride") { if (!qManualBusy() || qOnBreak()) qSetManualBusy(true); return; }
+    if (t.id === "q-set-onride") { qd.rtMenu = !qd.rtMenu; render(); return; } /* v2.0m-q: open the PCS / Uber / Lyft / Other drop-down */
     /* v2.0l item 8: the gap question buttons are removed with the pop-up */
     if (t.id === "q-set-break") { if (!qOnBreak()) { if (brkStoppedOk(Date.now())) { qd.brkMsg = ""; qSetBreak(true); } else { qd.brkMsg = "Pull over and stop to start a break"; render(); } } return; }
     if (t.id === "q-join") {
