@@ -9865,7 +9865,7 @@
     var host = document.getElementById("god-dvir-alerts");
     if (!host) { host = document.createElement("div"); host.id = "god-dvir-alerts"; var m = document.querySelector("main") || document.body; m.insertBefore(host, m.firstChild); }
     var f = state.dvirFlags || [];
-    var mi = state.dvirMiss || [];
+    var mi = []; /* v2.0m-t (Matthew): no missed post-trip banner; the late post-trip + stop time is in the driver log */
     host.innerHTML = (mi.length ? '<div class="card god-dvir-missed" style="border:2px solid #b91c1c;background:#2a1212;color:#fff;padding:10px;margin:8px 0"><b>Missed post-trip inspection</b>' + mi.map(function (x) {
         return '<div style="border-top:1px solid #733;padding:6px 0">' + esc(gqName(x.driver) || x.name || x.driver) + " \u00b7 shift " + esc(x.day) + " ended without a post-trip. Flag for review; the driver\u2019s next login still starts with a pre-trip." +
           '<br><button type="button" class="btn god-dvir-dismiss" data-dvir-dismiss="' + esc("miss|" + x.key) + '"' + DSM_BTN + ">Dismiss</button></div>"; }).join("") +
