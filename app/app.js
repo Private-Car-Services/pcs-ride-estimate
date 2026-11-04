@@ -3527,7 +3527,7 @@
       ? "Matthew declined this driver account. You cannot go online or accept rides."
       : (st === "fired"
         ? "This driver account was fired. Contact Private Car Services to be rehired."
-        : "Your sign-up is pending. Matthew must Approve you in God mode before you can see open rides or go online.");
+        : "You can\u2019t drive yet. Finish your driver application first."); /* v2.0m-t (Matthew) */
     return (
       '<div class="card approval-gate">' +
       '<p class="tag">' + esc(title) + "</p>" +
@@ -3848,7 +3848,7 @@
           var o = document.getElementById("dl-overlay"); if (o) o.remove(); qSetOffline(false); }, 300); }
         if (k === "post" && state.availAfterMissed === d) { state.availAfterMissed = null; /* v74b: missed post-trip done -> resolve the flag, then today's pre-trip */
           var mm = dlRec("missed"); if (mm[d]) { mm[d].resolvedAt = Date.now(); try { localStorage.setItem(dlKey("missed"), JSON.stringify(mm)); } catch (e) {} }
-          if (syncOn()) { var rz = { resolvedAt: Date.now(), resolvedBy: "late post-trip" }; authFetch(databaseURL() + "/rides/DRVRHSLG/" + encodeURIComponent(driverPresenceId()) + "/missedPost/" + d + ".json", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(rz) }).catch(function () {});
+          if (syncOn()) { var rz = { resolvedAt: Date.now(), resolvedBy: "late post-trip", stoppedAt: rec.stoppedAt || null, stopTime: rec.stopTime || null }; authFetch(databaseURL() + "/rides/DRVRHSLG/" + encodeURIComponent(driverPresenceId()) + "/missedPost/" + d + ".json", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(rz) }).catch(function () {});
             authFetch(databaseURL() + "/rides/DVRMSSNG/" + encodeURIComponent(driverPresenceId() + "_" + d) + ".json", { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(rz) }).catch(function () {}); }
           setTimeout(function () { var o = document.getElementById("dl-overlay"); if (o) o.remove(); availFlow(); }, 300); }
         if (k === "post" && state.logoutAfterPost) { state.logoutAfterPost = false; setTimeout(function () { driverLogoutStart(rec); }, 300); } },
@@ -4070,7 +4070,7 @@
       if (dvirBlock()) { qd.brkMsg = availBlockMsg(dvirBlock()); render(); return; }
       if (vmBlocksNow().length) { qd.brkMsg = vmBlockMsg(); render(); return; } /* v2.0f maintenance hard block */
       var md = missedPostDay();
-      if (md && false) { state.availAfterMissed = md; /* v75 (Matthew): a missed post-trip never blocks going Available; God mode still sees the flag */ state.availAfterPre = false; qd.brkMsg = "You ended the " + md + " shift without a post-trip inspection. Complete it now, then today\u2019s pre-trip, to go Available."; render(); openDriverLog("day:" + md + ":insp-post"); return; }
+      if (md) { state.availAfterMissed = md; /* v2.0m-t (Matthew): hard block, all drivers, no skip: missed post-trip first, then today's pre-trip */ state.availAfterPre = false; qd.brkMsg = "You did not do the post-trip for your shift on " + md + ". Do it now. Then do today\u2019s pre-trip."; render(); openDriverLog("day:" + md + ":insp-post"); return; }
       if (!preTripDoneToday()) { state.availAfterPre = true; qd.brkMsg = "Complete today\u2019s pre-trip inspection to go Available."; render(); openDriverLog("day:" + dlToday() + ":insp"); return; }
       var vb = vehAvailBlocks();
       if (vb.length) {
@@ -4246,11 +4246,14 @@
     /* v2.0c (Matthew 10/23, on the highway): a fresh login / wiped storage must not re-ask a pre-trip the server already has.
        Check Firebase first; open the pre-trip only when the server has no open shift with today's clean pre-trip. */
     /* v2.0c r2 (Harry): 8 s cap + reject/throw handling; the pre-trip opens exactly once if the server can't confirm */
-    var done = false, go = function (ok) { if (done) return; done = true; if (ok) { try { render(); } catch (e) {} return; } setTimeout(function () { openDriverLog("day:" + dlToday() + ":insp"); }, 50); };
+    var done = false, go = function (ok) { if (done) return; done = true; /* v2.0m-t: a missed post-trip comes first, before any pre-trip */
+      var md0 = null; try { md0 = missedPostDay(); } catch (e) {} if (md0) { state.availAfterMissed = md0; state.availAfterPre = false; setTimeout(function () { openDriverLog("day:" + md0 + ":insp-post"); }, 50); return; }
+      if (ok) { try { render(); } catch (e) {} return; } setTimeout(function () { openDriverLog("day:" + dlToday() + ":insp"); }, 50); };
     setTimeout(function () { go(false); }, 8000);
     var rest = function () { try { serverShiftRestore().then(go, function () { go(false); }); } catch (e) { go(false); } };
     /* v2.0h: same plate (the CONFIRMED vehicle) already inspected today (Chicago, server clock) -> no pre-trip */
-    srvClockSync().then(function () { try { if (preTripState().ok) { go(true); return; } } catch (e) {} rest(); }, rest);
+    var dr = function () { try { return dvirRefresh().catch(function () {}); } catch (e) { return Promise.resolve(); } };
+    dr().then(function () { return srvClockSync(); }).then(function () { try { if (preTripState().ok) { go(true); return; } } catch (e) {} rest(); }, rest);
   }
   /* v2.0i: login-gate vehicle confirm. Profile car first, other assigned plates, or type a rental plate. */
   function vehPickOpen() {
@@ -21265,9 +21268,11 @@
   function trkSetPersonal(on) { try { localStorage.setItem("pcs-trk-personal-" + trkId(), on ? "1" : "0"); } catch (e) {} }
   function trkStatus() {
     if (!signedIn()) return "o";
-    try { if (qOffline()) return "o"; if (qOnBreak()) return "b"; if (qAutoBusy() || qManualBusy()) return "r"; } catch (e) {}
-    try { if (!hosShiftStart()) return "o"; } catch (e) {}
-    return "a";
+    /* v2.0m-u (Matthew 11/4): nothing driven while the shift is open is personal. Gray only after the shift ends / logout.
+       Offline "pause" with the shift open = Available (business). */
+    var open = false; try { open = !!hosShiftStart(); } catch (e) {}
+    try { if (qOffline()) return open ? "a" : "o"; if (qOnBreak()) return "b"; if (qAutoBusy() || qManualBusy()) return "r"; } catch (e) {}
+    return open ? "a" : "o";
   }
   function trkKey(id) { return "pcs-trk-" + id; }
   function trkRead(id) { try { return JSON.parse(localStorage.getItem(trkKey(id)) || "{}") || {}; } catch (e) { return {}; } }

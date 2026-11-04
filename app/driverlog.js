@@ -294,6 +294,14 @@
   function expiryState(v, now) { var t = parseMdy(v); if (t == null) return ""; now = now || Date.now(); var end = t + 86400000; if (end <= now) return "expired"; if (end - now <= 30 * 86400000) return "soon"; return "ok"; }
   function myShow(v) { v = String(v || ""); var a = /^(\d{4})-(\d{2})$/.exec(v); if (a) return a[2] + "/" + a[1]; var b = /^(\d{1,2})\/\d{1,2}\/(\d{4})$/.exec(v); return b ? ("0" + b[1]).slice(-2) + "/" + b[2] : v; }
   function ansText(it, x) { if (!x) return "\u2014"; if (it.type === "date") return (it.monthYear ? myShow(x.date) : x.date) || "\u2014"; return x.answer || "\u2014"; }
+  /* v2.0m-t: "HH:MM" on shift day d (Chicago) -> ms. Before 6 AM = after midnight (next day). Never in the future. */
+  function stopTimeAt(d, hhmm) {
+    var m = /^(\d{1,2}):(\d{2})$/.exec(String(hhmm || "")); if (!m || !/^\d{4}-\d{2}-\d{2}$/.test(d)) return null;
+    var h = +m[1], mi = +m[2]; if (h > 23 || mi > 59) return null;
+    var ds = h < 6 ? addDays(d, 1) : d, base = Date.UTC(+ds.slice(0, 4), +ds.slice(5, 7) - 1, +ds.slice(8, 10), h, mi), t = null;
+    [5, 6].forEach(function (off) { var c = base + off * 3600000; if (t == null && ymd(c) === ds && new Date(c).toLocaleTimeString("en-GB", { timeZone: TZ, hour: "2-digit", minute: "2-digit" }) === ("0" + h).slice(-2) + ":" + m[2]) t = c; });
+    return t != null && t <= Date.now() ? t : null;
+  }
   function inspHtml(day, meta, kind) {
     var DVIR = items(meta);
     kind = kind === "post" ? "post" : "pre";
@@ -304,6 +312,7 @@
       rec = recView(rec, kind, meta); /* v76g: today's car-wash rule */
       var keys = Object.keys(rec.items || {}), prevG = "", WASH_CSS = { remind: "background:#e8f8ec;color:#0b3d23;border:2px solid #2e9d4f", info: "background:#fff4e0;color:#5c3a00;border:2px solid #d9a441", block: "background:#fde8e8;color:#8b1414;border:2px solid #b91c1c" };
       return head + '<div class="dl-dvir-done" style="background:#fff;padding:12px;font-size:14px;color:#222"><p><b>' + (kind === "pre" ? "Pre-trip" : "Post-trip") + " inspection</b> \u00b7 " + esc(clock(rec.at)) + " \u00b7 Odometer " + esc(rec.odometer) + "</p>" +
+        (rec.late && rec.stoppedAt ? '<p class="dl-dvir-late" style="margin:4px 0;color:#8a4b00;font-weight:700">Late post-trip \u00b7 stopped driving at ' + esc(clock(rec.stoppedAt)) + "</p>" : "") + /* v2.0m-t */
         (rec.startedAt ? '<p class="dl-dvir-dur" style="margin:4px 0;color:#555">Started ' + esc(clock(rec.startedAt)) + " \u00b7 finished " + esc(clock(rec.finishedAt)) + " \u00b7 took " + fmtDur(rec.durationSec) + "</p>" : "") +
         (rec.wash ? '<p class="dl-dvir-wash dl-dvir-wash-' + rec.wash.level + '" style="' + WASH_CSS[rec.wash.level] + ';border-radius:8px;padding:6px 10px;font-weight:700">' + esc(rec.wash.text) + "</p>" : "") +
         ((rec.blocks || []).length ? '<p class="dl-dvir-blocks" style="color:#b91c1c;font-weight:700">' + (kind === "post" ? "For God mode before the next shift" + (rec.cleared ? " (cleared by " + esc(rec.cleared.by || "") + ")" : "") : "Blocked from Available until God mode " + (rec.cleared ? "cleared it (" + esc(rec.cleared.by || "") + ")" : "clears it")) + ": " + rec.blocks.map(function (b) { return esc(b.label) + (b.why === "photo" ? " (photo approval)" : b.why !== "defect" ? " (" + esc(b.why) + ")" : ""); }).join(", ") + "</p>" : "") +
@@ -348,6 +357,7 @@
         return '<label style="display:block;margin-top:8px">Vehicle plate inspected <input type="text" name="plate" id="dl-dvir-plate" list="dl-dvir-plates" autocomplete="off" autocapitalize="characters" spellcheck="false" maxlength="10" value="' + esc(pv) + '" style="width:140px;text-transform:uppercase"></label>' +
           '<datalist id="dl-dvir-plates">' + pls.map(function (p) { return '<option value="' + esc(p) + '">'; }).join("") + "</datalist>" +
           '<p class="fine" style="margin:2px 0 0;font-size:12px;color:#555">Driving a different car (e.g. a rental)? Change the plate. That inspection then counts only for that plate.</p>'; })() +
+      (kind === "post" && meta.inspDay === day.day ? '<label class="dl-stop-time" style="display:block;margin-top:8px;font-weight:700">What time did you stop driving last night? <input type="time" name="stopTime" id="dl-stop-time" required style="min-height:40px;font-size:16px"></label>' : "") + /* v2.0m-t: late post-trip */
       '<label style="display:block;margin-top:8px">' + (kind === "pre" ? "Odometer (opening odometer for this shift)" : "Odometer (ending odometer for this shift)") + ' <input type="text" inputmode="none" pattern="[0-9]*" name="odometer" id="dl-dvir-odo" data-odopad-in="1" autocomplete="off" autocorrect="off" spellcheck="false" maxlength="7" value="' + esc(kind === "pre" && meta.odoNow != null && isFinite(Number(meta.odoNow)) ? String(Math.floor(Number(meta.odoNow))) : "") + '" style="width:140px"></label>' +
       odoPadHtml() + /* v75z: big on-screen number pad (iPadOS ignores inputmode="numeric" and opens the full keyboard) */
       '<p style="margin:10px 0 4px">Driver signature</p><canvas id="dl-sig-pad" width="680" height="140" style="width:100%;height:140px;touch-action:none;display:block;background:#fafafa"></canvas><div style="border-top:1px solid #333"></div>' +
@@ -596,6 +606,8 @@
         if (f.__startedAt && Date.now() - f.__startedAt < f.__minMs) { err.textContent = "Take at least " + Math.round(f.__minMs / 1000) + " seconds to inspect the vehicle (" + Math.ceil((f.__startedAt + f.__minMs - Date.now()) / 1000) + " s left)."; return; }
         if (odoRaw && !/^\d+$/.test(odoRaw)) { err.textContent = "Odometer: whole miles only (no decimal point)."; return; } /* v74 */
         if (!(odo > 0)) { err.textContent = "Enter the odometer reading."; return; }
+        var stopIn = f.querySelector("#dl-stop-time"), stopAt = null; /* v2.0m-t: late post-trip needs the stop time */
+        if (stopIn) { stopAt = stopTimeAt(day.day, stopIn.value); if (stopAt == null) { err.textContent = "Enter the time you stopped driving."; return; } }
         var dvPlate = f.plate ? String(f.plate.value || "").toUpperCase().replace(/[^A-Z0-9]/g, "") : String((meta.vehicle && meta.vehicle.plate) || "").toUpperCase().replace(/[^A-Z0-9]/g, ""); /* v2.0i */
         if (!dvPlate) { err.textContent = "Enter the plate of the vehicle you inspected."; return; }
         if (typeof meta.odoCheck === "function") { var oErr = ""; try { oErr = meta.odoCheck(f.getAttribute("data-kind"), odo, dvPlate) || ""; } catch (eO) {} if (oErr) { err.textContent = oErr; return; } } /* v75u: same floor rule as the shift odometer */
@@ -605,7 +617,7 @@
         readDvir(f, meta).then(function (r) { r.motion = mo.seen ? "verified" : "unverified"; if (f.__startedAt) { r.startedAt = f.__startedAt; r.finishedAt = Date.now(); r.durationSec = Math.round((r.finishedAt - r.startedAt) / 1000); } if (mo.seen) r.maxMph = Math.round(mo.max); if (r.error) { err.textContent = r.error; t.disabled = false; return; }
           var ft = r.items && r.items.fulltank; /* v74b (Matthew): tank not full at post-trip -> reminder pop-up, OK acknowledged + logged */
           if (ft && ft.noteFlag && ft.fuel) { if (!f.__fuelAck) { t.disabled = false; fuelPopup(function () { f.__fuelAck = Date.now(); t.click(); }); return; } ft.fuelAckAt = f.__fuelAck; ft.fuelMsg = FUEL_MSG; }
-          var kind = f.getAttribute("data-kind"); meta.onDvir(day.day, kind, Object.assign(r, { kind: kind, day: day.day, at: Date.now(), odometer: odo, plate: dvPlate, sig: pad.toDataURL("image/png"), driver: meta.driver || "", vehicle: meta.vehicle || {} }));
+          var kind = f.getAttribute("data-kind"); meta.onDvir(day.day, kind, Object.assign(r, stopAt != null ? { late: true, stopTime: stopIn.value, stoppedAt: stopAt } : {}, { kind: kind, day: day.day, at: Date.now(), odometer: odo, plate: dvPlate, sig: pad.toDataURL("image/png"), driver: meta.driver || "", vehicle: meta.vehicle || {} }));
           open(days, meta, "day:" + day.day + ":insp" + (kind === "post" ? "-post" : "")); });
         return;
       }
@@ -682,5 +694,5 @@
     if (mk === "mdy" && (d.length > 4 || (d.length === 4 && !del))) out = d.slice(0, 2) + "/" + d.slice(2, 4) + "/" + d.slice(4);
     if (out !== t.value) t.value = out;
   }, true);
-  window.PCSDriverLog = { newerWash: newerWash, washWarnText: washWarnText, washLastText: washLastText, WASH_WARN: WASH_WARN, recView: recView, washLine: washLine, minTimeGate: minTimeGate, fmtDur: fmtDur, motionGate: motionGate, fluidsDue: fluidsDue, readDvir: readDvir, parseMdy: parseMdy, expiryState: expiryState, washState: washState, EXTRAS: DVIR_EXTRAS, items: items, DVIR: DVIR, CERT: CERT, dayHash: dayHash, snapshot: snapshot, historyHtml: historyHtml, build: build, html: html, gridSvg: gridSvg, listHtml: listHtml, mapHtml: mapHtml, drawMap: drawMap, ridesHtml: ridesHtml, mapReset: function () { mapView = null; }, /* v2.0m-s: God day map */ trkRuns: trkRuns, trkTotals: trkTotals, detailHtml: detailHtml, csv: csv, open: open, close: close, download: download, midnight: midnight, CARRIER: CARRIER };
+  window.PCSDriverLog = { newerWash: newerWash, washWarnText: washWarnText, washLastText: washLastText, WASH_WARN: WASH_WARN, recView: recView, washLine: washLine, minTimeGate: minTimeGate, fmtDur: fmtDur, motionGate: motionGate, fluidsDue: fluidsDue, readDvir: readDvir, parseMdy: parseMdy, expiryState: expiryState, washState: washState, EXTRAS: DVIR_EXTRAS, items: items, DVIR: DVIR, CERT: CERT, dayHash: dayHash, snapshot: snapshot, historyHtml: historyHtml, build: build, html: html, gridSvg: gridSvg, listHtml: listHtml, mapHtml: mapHtml, drawMap: drawMap, ridesHtml: ridesHtml, mapReset: function () { mapView = null; }, stopTimeAt: function (d, v) { return stopTimeAt(d, v); }, /* v2.0m-s: God day map */ trkRuns: trkRuns, trkTotals: trkTotals, detailHtml: detailHtml, csv: csv, open: open, close: close, download: download, midnight: midnight, CARRIER: CARRIER };
 })();
