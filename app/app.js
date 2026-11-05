@@ -4063,6 +4063,19 @@
     var bl = (bk && bk.blocks || []).map(function (b) { return b.label + (b.why === "photo" ? " (photo waiting for God approval)" : b.why !== "defect" ? " (" + b.why + ")" : ""); }).join(", ");
     return "Unsafe vehicle defect reported" + (bl ? ": " + bl : "") + ". You can\u2019t go Available until God mode clears it." + (bk && bk.rejected ? " God mode rejected the photo: " + bk.rejected.reason + ". Do a new inspection with a new photo." : ""); }
   /* v74b: a missed post-trip (flagged by the Worker's midnight check) must be completed first, then today's pre-trip */
+  /* v2.0m-x (Matthew 11/05): visible blocking popup for a missed inspection. No dismiss: the only button opens the late form. */
+  function missedInspMMDDYY(d) { var m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(d || "")); return m ? m[2] + "/" + m[3] + "/" + m[1].slice(2) : String(d || ""); }
+  function missedInspPopup(md, kind) {
+    var old = document.getElementById("pcs-missed-insp"); if (old) old.remove();
+    var w = document.createElement("div"); w.id = "pcs-missed-insp"; w.setAttribute("role", "alertdialog"); w.setAttribute("aria-modal", "true");
+    w.style.cssText = "position:fixed;inset:0;z-index:2147482000;background:rgba(0,0,0,.75);display:flex;align-items:center;justify-content:center;padding:16px;";
+    var b = document.createElement("div"); b.style.cssText = "background:#fff;color:#111;border:3px solid #c62828;border-radius:12px;max-width:420px;width:100%;padding:18px;text-align:center;font:16px system-ui,-apple-system,sans-serif;";
+    var t = document.createElement("div"); t.style.cssText = "font-weight:800;color:#c62828;margin-bottom:8px;"; t.textContent = "Warning, you cannot logon until this missing (pre/post trip) inspection is completed";
+    var dt = document.createElement("div"); dt.style.cssText = "font-weight:700;margin-bottom:14px;"; dt.textContent = "For date (" + missedInspMMDDYY(md) + ")";
+    var go = document.createElement("button"); go.type = "button"; go.textContent = "Do inspection now"; go.style.cssText = "width:100%;min-height:48px;background:#c62828;color:#fff;border:0;border-radius:10px;font:700 16px system-ui,-apple-system,sans-serif;";
+    go.addEventListener("click", function () { w.remove(); openDriverLog("day:" + md + ":" + (kind || "insp-post")); });
+    b.appendChild(t); b.appendChild(dt); b.appendChild(go); w.appendChild(b); document.body.appendChild(w);
+  }
   function missedPostDay() { var m = dlRec("missed"), ds = Object.keys(m).filter(function (d) { var x = m[d]; if (!x || !x.at || x.resolvedAt) return false; var p = dlDvirRec(d, "post"); return !(p && Number(p.at) >= Number(x.at)); }).sort(); return ds[0] || null; }
   function availFlow() {
     qd.washAsk = false; /* v77.9 */
@@ -4070,7 +4083,7 @@
       if (dvirBlock()) { qd.brkMsg = availBlockMsg(dvirBlock()); render(); return; }
       if (vmBlocksNow().length) { qd.brkMsg = vmBlockMsg(); render(); return; } /* v2.0f maintenance hard block */
       var md = missedPostDay();
-      if (md) { state.availAfterMissed = md; /* v2.0m-t (Matthew): hard block, all drivers, no skip: missed post-trip first, then today's pre-trip */ state.availAfterPre = false; qd.brkMsg = "You did not do the post-trip for your shift on " + md + ". Do it now. Then do today\u2019s pre-trip."; render(); openDriverLog("day:" + md + ":insp-post"); return; }
+      if (md) { state.availAfterMissed = md; /* v2.0m-t (Matthew): hard block, all drivers, no skip: missed post-trip first, then today's pre-trip */ state.availAfterPre = false; qd.brkMsg = "You did not do the post-trip for your shift on " + md + ". Do it now. Then do today\u2019s pre-trip."; render(); missedInspPopup(md, "insp-post"); return; }
       if (!preTripDoneToday()) { state.availAfterPre = true; qd.brkMsg = "Complete today\u2019s pre-trip inspection to go Available."; render(); openDriverLog("day:" + dlToday() + ":insp"); return; }
       var vb = vehAvailBlocks();
       if (vb.length) {
@@ -4247,7 +4260,7 @@
        Check Firebase first; open the pre-trip only when the server has no open shift with today's clean pre-trip. */
     /* v2.0c r2 (Harry): 8 s cap + reject/throw handling; the pre-trip opens exactly once if the server can't confirm */
     var done = false, go = function (ok) { if (done) return; done = true; /* v2.0m-t: a missed post-trip comes first, before any pre-trip */
-      var md0 = null; try { md0 = missedPostDay(); } catch (e) {} if (md0) { state.availAfterMissed = md0; state.availAfterPre = false; setTimeout(function () { openDriverLog("day:" + md0 + ":insp-post"); }, 50); return; }
+      var md0 = null; try { md0 = missedPostDay(); } catch (e) {} if (md0) { state.availAfterMissed = md0; state.availAfterPre = false; setTimeout(function () { missedInspPopup(md0, "insp-post"); }, 50); return; }
       if (ok) { try { render(); } catch (e) {} return; } setTimeout(function () { openDriverLog("day:" + dlToday() + ":insp"); }, 50); };
     setTimeout(function () { go(false); }, 8000);
     var rest = function () { try { serverShiftRestore().then(go, function () { go(false); }); } catch (e) { go(false); } };
