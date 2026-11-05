@@ -467,8 +467,8 @@
     return currentStatus(meta) + "<p " + SEC + ">TODAY</p>" + (days[0] ? listItem(days[0], true) : "") + ridesHtml(meta) +
       '<button type="button" id="dl-history" style="display:block;width:calc(100% - 24px);margin:12px;padding:12px;border:1px solid #2f6fe0;border-radius:8px;background:#fff;color:#2f6fe0;font-weight:700">History</button>' + mapHtml(meta);
   }
-  /* v2.0m-s: today's map under History. Blue = Available, green = On a ride, yellow pin = Break, gray = Off (personal). */
-  var TRK_COL = { a: "#1e63d6", r: "#1f9d3a", b: "#e0b000", o: "#8a8a8a" }, TRK_NAME = { a: "Available", r: "On a ride", b: "Break", o: "Off (personal)" };
+  /* v2.0m-s: today's map under History. Blue = Available, green = On a ride, yellow pin = Break, gray = Off duty / en route. */
+  var TRK_COL = { a: "#1e63d6", r: "#1f9d3a", b: "#e0b000", o: "#8a8a8a" }, TRK_NAME = { a: "Available", r: "On a ride", b: "Break", o: "Off duty / en route" };
   function trkPts(tr) { return ((tr && tr.pts) || []).map(function (p) { return { t: tr.t0 + p[0] * 1000, lat: p[1] / 1e5, lng: p[2] / 1e5, s: p[3] }; }); }
   function mi(a, b) { var R = 3958.8, r = Math.PI / 180, dLa = (b.lat - a.lat) * r, dLo = (b.lng - a.lng) * r, x = Math.sin(dLa / 2) * Math.sin(dLa / 2) + Math.cos(a.lat * r) * Math.cos(b.lat * r) * Math.sin(dLo / 2) * Math.sin(dLo / 2); return 2 * R * Math.asin(Math.sqrt(x)); }
   /* runs of the same status; a run ends at the first point of the next one (so the line has no gaps) */
@@ -490,13 +490,13 @@
     return "<p " + SEC + ">TODAY'S MAP</p>" +
       '<div id="dl-map" style="height:300px;margin:0 12px;border:1px solid #bbb;border-radius:8px;background:#e5e5e5"></div>' +
       (runs.length ? "" : '<p class="dl-map-empty" style="margin:6px 12px;color:#666;font-size:13px">No driving yet today.</p>') +
-      '<p class="dl-legend" style="margin:6px 4px;font-size:13px">' + dot(TRK_COL.a) + "Available" + dot(TRK_COL.r) + "On a ride" + dot(TRK_COL.b, true) + "Break" + dot(TRK_COL.o) + "Off</p>" +
+      '<p class="dl-legend" style="margin:6px 4px;font-size:13px">' + dot(TRK_COL.a) + "Available" + dot(TRK_COL.r) + "On a ride" + dot(TRK_COL.b, true) + "Break" + dot(TRK_COL.o) + "Off duty / en route</p>" +
       '<p id="dl-map-tap" style="margin:4px 12px;font-size:14px;font-weight:700;min-height:18px"></p>' +
       '<ul class="dl-map-tot" style="list-style:none;margin:0 12px;padding:0;font-size:14px">' + ["a", "r", "b", "o"].filter(function (k) { return tot[k] || k !== "o"; }).map(function (k) {
         var x = tot[k] || { miles: 0, min: 0 };
         return '<li style="padding:4px 0;border-bottom:1px solid #ddd">' + dot(TRK_COL[k], k === "b") + "<b>" + TRK_NAME[k] + "</b>: " + x.miles.toFixed(1) + " mi \u00b7 " + hmin(x.min) + "</li>";
       }).join("") + "</ul>" +
-      (tr.canToggle ? '<label style="display:flex;gap:8px;align-items:center;margin:10px 12px;font-size:14px"><input type="checkbox" id="dl-personal"' + (tr.personal ? " checked" : "") + '> Track my miles when I am off (gray line)</label>' : "");
+      (tr.canToggle ? '<label style="display:flex;gap:8px;align-items:center;margin:10px 12px;font-size:14px"><input type="checkbox" id="dl-personal"' + (tr.personal ? " checked" : "") + '> Track off-duty / en route miles (gray line)</label>' : "");
   }
   var mapView = null;
   function drawMap(w, meta) {
