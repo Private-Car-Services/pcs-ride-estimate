@@ -70,7 +70,7 @@
       '<b style="flex:1 1 100%">Driver day map (view only)</b>' +
       '<select id="gm-driver" style="flex:1;min-height:40px;color:#111;background:#fff"><option value="">Loading drivers\u2026</option></select>' +
       '<input id="gm-day" type="date" value="' + ymd(Date.now()) + '" style="min-height:40px;color:#111;background:#fff">' +
-      '<button type="button" id="gm-close" style="min-height:40px">Close</button></div><div id="gm-out" style="padding-bottom:20px"></div>';
+      '<button type="button" id="gm-close" style="min-height:40px;padding:0 14px;border-radius:8px;border:1px solid #fff;background:#fff;color:#193819;font-weight:700">Close</button></div><div id="gm-out" style="padding-bottom:20px"></div>';
     document.body.appendChild(ov);
     var sel = ov.querySelector("#gm-driver"), dayEl = ov.querySelector("#gm-day"), go = function () { if (sel.value && dayEl.value) show(sel.value, dayEl.value); };
     driverIds().then(function (ids) {
