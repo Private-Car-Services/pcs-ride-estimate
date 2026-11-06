@@ -9826,9 +9826,22 @@
     if (!no) return t;
     return t + " Invoice #" + no;
   }
+  /* Narrow embedded ride bar is tighter than the full-screen map bar. Shrink only enough to stay one centered line; 16px floor stays readable. Wide full-screen bar stays 22px. */
+  function rideBillLabelFitCss() {
+    return "#rfs-bar,#meter-running,#meter-paid{container-type:inline-size}" +
+      ".pcs-bill-label{font-size:clamp(16px,calc(6.35cqw - 1px),22px);text-align:center}";
+  }
+  function rideBillLabelStyle() {
+    if (typeof document === "undefined" || document.getElementById("pcs-bill-label-fit")) return;
+    var st = document.createElement("style");
+    st.id = "pcs-bill-label-fit";
+    st.textContent = rideBillLabelFitCss();
+    (document.head || document.documentElement).appendChild(st);
+  }
   function rideBillLabelHtml(k, id, no) {
     var t = rideBillText(k, no); if (!t) return "";
-    return '<p class="pcs-bill-label is-' + k + '" id="' + esc(id || "ride-bill-label") + '" role="status" style="margin:8px auto;max-width:100%;box-sizing:border-box;text-align:center;font-size:22px;font-weight:900;color:#fff;background:#0b3d23;border:2px solid #b8f0c8;border-radius:12px;padding:8px 12px">' + esc(t) + "</p>";
+    rideBillLabelStyle();
+    return '<p class="pcs-bill-label is-' + k + '" id="' + esc(id || "ride-bill-label") + '" role="status" style="margin:8px auto;max-width:100%;box-sizing:border-box;text-align:center;font-weight:900;color:#fff;background:#0b3d23;border:2px solid #b8f0c8;border-radius:12px;padding:8px 12px">' + esc(t) + "</p>";
   }
   function meterBillKind(M) { return meterShown(M) ? "" : rideBillKind(M && M.schedId ? schedFind(M.schedId) : null, M); }
   function meterBillInvoiceNo(M) {
@@ -9836,7 +9849,7 @@
     try { if (M && M.schedId) r = schedFind(M.schedId); } catch (e) {}
     return rideInvoiceNoFrom(r, M);
   }
-  if (typeof window !== "undefined") window.__pcsV20lBill = { kind: rideBillKind, text: rideBillText, label: rideBillLabelHtml, invoiceNo: rideInvoiceDisplayNo, from: rideInvoiceNoFrom };
+  if (typeof window !== "undefined") window.__pcsV20lBill = { kind: rideBillKind, text: rideBillText, label: rideBillLabelHtml, invoiceNo: rideInvoiceDisplayNo, from: rideInvoiceNoFrom, fit: rideBillLabelFitCss };
   function meterInvInfo(M) { return rideInvoiceInfo(M && M.schedId ? schedFind(M.schedId) : null, M); }
   function meterInvRefresh(M) { /* live: the 15-min Square sync / refreshScheduledRides flips the badge without a re-render */
     if (typeof document === "undefined" || meterShown(M)) return;

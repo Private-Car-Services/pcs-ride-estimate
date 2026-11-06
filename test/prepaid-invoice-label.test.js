@@ -97,3 +97,19 @@ test("missing or uninvoiced prepaid rides stay Prepaid ride with no invoice suff
   assert.equal(bill.text("", "000555"), "");
   assert.equal(bill.label("invoiced", "ride-bill-label", "000555").indexOf("Invoice #"), -1);
 });
+
+test("invoice line stays one centered line without clipping", function () {
+  const css = bill.fit();
+  const html = bill.label("prepaid", "meter-bill-label", "000555");
+  assert.equal((html.match(/<p /g) || []).length, 1);
+  assert.ok(html.indexOf("Prepaid ride Invoice #000555") >= 0);
+  assert.ok(html.indexOf("text-align:center") >= 0);
+  assert.equal(html.indexOf("font-size:22px"), -1);
+  assert.equal(html.indexOf("white-space:nowrap"), -1);
+  assert.equal(html.indexOf("overflow:hidden"), -1);
+  assert.equal(html.indexOf("text-overflow"), -1);
+  assert.ok(css.indexOf("clamp(16px,calc(6.35cqw - 1px),22px)") >= 0);
+  assert.ok(css.indexOf("#rfs-bar") >= 0 && css.indexOf("#meter-running") >= 0);
+  assert.equal(css.indexOf("nowrap"), -1);
+  assert.equal(css.indexOf("overflow"), -1);
+});
