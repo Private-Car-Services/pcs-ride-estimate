@@ -21249,39 +21249,49 @@
     try { localStorage.setItem(rtKey(), JSON.stringify(m)); } catch (e) {}
     try { authFetch(milesUrl(driverPresenceId(), day), { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ rideSegments: list }) }).catch(function () {}); } catch (e) {}
   }
-  function rtStart(type, now) {
+  function rtStart(type, now, extra) {
     if (RT_TYPES.indexOf(type) < 0) return;
     now = now || Date.now(); rtTick(now, true);
     var day = chicagoToday(), m = rtRead(), list = (m[day] || []).slice();
-    list.push({ type: type, start: now, startMiles: rtMiles() });
+    var seg = { type: type, start: now, startMiles: rtMiles() };
+    if (extra && extra.assigned) { seg.assigned = true; seg.rideId = String(extra.rideId || ""); }
+    list.push(seg);
     rtSave(day, list);
   }
-  /* v2.0m-ac: an assigned PCS ride (accepted trip, scheduled ride, or meter) records PCS by itself.
-     Does not read GPS tracks and does not relabel an already-open PCS segment. */
-  function rtEnsurePcs(now) {
-    var DL = window.PCSDriverLog;
-    if (!DL || ROLE !== "driver" || !signedIn()) return;
-    var open = null;
-    try { var list = rtToday(), last = list[list.length - 1]; if (last && !last.end) open = last; } catch (e) {}
-    if (!DL.pcsAutoRecord(!!qAutoBusy(), open)) return;
-    rtStart("PCS", now || Date.now());
+  /* Live assigned ride only: accepted/started trip, scheduled trip not done, or a meter that is still running.
+     Ended/unpaid meter, a finished status, and a ride lock with no live trip are not a new PCS recording. */
+  function assignedRideId() {
+    if (ROLE !== "driver" || !signedIn()) return "";
+    var st = String(state.rideStatus || "").toLowerCase();
+    if (state.screen === "trip" && (st === "accepted" || st === "started")) return "ride:" + String(state.driverCode || state.code || "trip");
+    try { var t = schedTripNow(); if (t && t.id && t.phase !== "done") return "sched:" + t.id; } catch (e) {}
+    try { var M = state.meter; if (M && M.status === "running" && M.code) return "meter:" + M.code; } catch (e2) {}
+    return "";
   }
-  /* closes the open ride when status is no longer On a ride (or force) */
+  /* v2.0m-ac: fold today's segments from the live assigned ride. Leftover manual busy does not keep assigned PCS open. */
+  function rtEnsurePcs(now) { rtTick(now, false); }
+  /* closes the open ride when that segment should end (or force). Today's assigned PCS is folded here. */
   function rtTick(now, force) {
     if (ROLE !== "driver") return;
     now = now || Date.now();
-    var m = rtRead();
+    var DL = window.PCSDriverLog, m = rtRead(), today = chicagoToday();
     Object.keys(m).forEach(function (day) {
+      if (!force && day === today && DL && DL.foldRideSegments) return;
       var list = m[day] || [], last = list[list.length - 1];
       if (!last || last.end) return;
-      var stay = window.PCSDriverLog && PCSDriverLog.rideSegmentStaysOpen
-        ? PCSDriverLog.rideSegmentStaysOpen({ force: !!force, manualBusy: qManualBusy(), autoBusy: qAutoBusy(), onBreak: qOnBreak(), offline: qOffline(), sameDay: day === chicagoToday() })
-        : (!force && qManualBusy() && !qOnBreak() && day === chicagoToday());
+      var stay = DL && DL.rideSegmentStaysOpen
+        ? DL.rideSegmentStaysOpen({ force: !!force || day !== today, manualBusy: qManualBusy(), autoBusy: qAutoBusy(), autoLive: false, assigned: !!last.assigned, type: last.type, onBreak: qOnBreak(), offline: qOffline(), sameDay: day === today })
+        : (!force && qManualBusy() && !qOnBreak() && day === today);
       if (stay) return;
       var mi = rtMiles() - (Number(last.startMiles) || 0);
       list = list.slice(); list[list.length - 1] = Object.assign({}, last, { end: now, minutes: Math.round((now - last.start) / 60000), miles: Math.max(0, Math.round(mi * 10) / 10) });
       rtSave(day, list);
     });
+    if (force || !DL || !DL.foldRideSegments) return;
+    var id = ""; try { id = assignedRideId(); } catch (e) {}
+    var cur = (rtRead()[today] || []).slice();
+    var next = DL.foldRideSegments(cur, { manualBusy: qManualBusy(), autoBusy: qAutoBusy(), autoLive: !!id, rideId: id, onBreak: qOnBreak(), offline: qOffline(), sameDay: true, miles: rtMiles() }, now);
+    if (JSON.stringify(next) !== JSON.stringify(cur)) rtSave(today, next);
   }
   /* v2.0m-r: type of the open ride (today, no end yet), else "On a ride"; read from storage so it survives a reload */
   function rtLabel() { try { var l = rtToday(), x = l[l.length - 1]; return x && !x.end && RT_TYPES.indexOf(x.type) >= 0 ? x.type : "On a ride"; } catch (e) { return "On a ride"; } }

@@ -483,18 +483,62 @@
   }
   /* List and tap share this label. Empty stored type stays "On a ride" (not PCS, not invented Other). */
   function rideDisplay(raw) { return rideTypeCanon(raw) || (String(raw == null ? "" : raw).replace(/^\s+|\s+$/g, "") || "On a ride"); }
-  /* Assigned PCS work (app trip, scheduled ride, or meter) records PCS once. An open PCS segment is left alone.
-     An open Uber/Lyft/Other is not treated as the assigned ride: the caller starts PCS. Never reads track colors. */
+  /* Assigned PCS records once while a live assigned ride id is active. An open PCS segment is left alone.
+     The same ride id, after that assigned segment has already been closed, does not start another.
+     Never reads track colors. Boolean form pcsAutoRecord(true, openSeg) remains for callers without a ride id. */
   function pcsAutoRecord(autoBusy, openSeg) {
-    if (!autoBusy) return false;
+    var autoLive = !!autoBusy, rideId = "", closedRideId = "";
+    if (autoBusy && typeof autoBusy === "object") {
+      openSeg = autoBusy.openSeg;
+      autoLive = !!autoBusy.autoLive;
+      rideId = String(autoBusy.rideId || "");
+      closedRideId = String(autoBusy.closedRideId || "");
+    }
+    if (!autoLive) return false;
+    if (rideId && closedRideId && rideId === closedRideId) return false;
     if (openSeg && !openSeg.end && rideTypeCanon(openSeg.type) === "PCS") return false;
     return true;
   }
-  /* Keep a stored segment open only while today is still On a ride (manual choice or assigned PCS). */
+  /* Manual Uber/Lyft/Other/PCS stays open while that manual choice is still on.
+     An assigned PCS segment stays open only while its assigned ride is still live (autoLive).
+     A leftover manual-busy flag must not keep assigned PCS recording after the assigned ride ends. */
   function rideSegmentStaysOpen(o) {
     o = o || {};
     if (o.force || !o.sameDay || o.onBreak || o.offline) return false;
+    if (o.assigned) return !!o.autoLive;
     return !!(o.manualBusy || o.autoBusy);
+  }
+  /* Today's segment list: close when the open segment should end, then start assigned PCS when a new live ride needs it.
+     force only closes. Starting assigned PCS also closes a still-open manual Uber/Lyft/Other at that instant. */
+  function foldRideSegments(list, flags, now) {
+    list = (list || []).slice();
+    flags = flags || {};
+    now = Number(now) || 0;
+    function closeAt(i) {
+      var open = list[i];
+      var mi = (Number(flags.miles) || 0) - (Number(open.startMiles) || 0);
+      list[i] = Object.assign({}, open, {
+        end: now,
+        minutes: Math.max(0, Math.round((now - open.start) / 60000)),
+        miles: Math.max(0, Math.round(mi * 10) / 10)
+      });
+    }
+    var last = list[list.length - 1];
+    var open = last && !last.end ? last : null;
+    if (open && !rideSegmentStaysOpen({
+      force: !!flags.force, manualBusy: !!flags.manualBusy, autoBusy: !!flags.autoBusy, autoLive: !!flags.autoLive,
+      assigned: !!open.assigned, type: open.type, onBreak: !!flags.onBreak, offline: !!flags.offline, sameDay: flags.sameDay !== false
+    })) {
+      closeAt(list.length - 1);
+      open = null;
+    }
+    if (flags.force) return list;
+    var closed = list[list.length - 1];
+    var closedRideId = closed && closed.end && closed.assigned ? String(closed.rideId || "") : "";
+    if (!pcsAutoRecord({ autoLive: !!flags.autoLive, openSeg: open, rideId: flags.rideId || "", closedRideId: closedRideId })) return list;
+    if (open) closeAt(list.length - 1);
+    list.push({ type: "PCS", start: now, startMiles: Number(flags.miles) || 0, assigned: true, rideId: String(flags.rideId || "") });
+    return list;
   }
   function trkPts(tr) { return ((tr && tr.pts) || []).map(function (p) { return { t: tr.t0 + p[0] * 1000, lat: p[1] / 1e5, lng: p[2] / 1e5, s: p[3] }; }); }
   function mi(a, b) { var R = 3958.8, r = Math.PI / 180, dLa = (b.lat - a.lat) * r, dLo = (b.lng - a.lng) * r, x = Math.sin(dLa / 2) * Math.sin(dLa / 2) + Math.cos(a.lat * r) * Math.cos(b.lat * r) * Math.sin(dLo / 2) * Math.sin(dLo / 2); return 2 * R * Math.asin(Math.sqrt(x)); }
@@ -609,7 +653,7 @@
     return "<p " + SEC + ">TODAY'S MAP</p>" +
       '<div id="dl-map" style="height:300px;margin:0 12px;border:1px solid #bbb;border-radius:8px;background:#fbfbfb"></div>' +
       (runs.length ? "" : '<p class="dl-map-empty" style="margin:6px 12px;color:#666;font-size:13px">No driving yet today.</p>') +
-      '<p class="dl-legend" style="margin:6px 4px;font-size:13px">' + dot(TRK_COL.a) + "Available" + dot(TRK_COL.r) + "On a ride" + dot(TRK_COL.b, true) + "Break" + dot(TRK_COL.o) + "Off duty / en route</p>" +
+      '<p class="dl-legend" style="margin:6px 4px;font-size:13px">' + dot(TRIP_COL.PCS) + "PCS" + dot(TRIP_COL.Uber) + "Uber/Lyft" + dot(TRIP_COL.Other) + "Other" + dot(TRK_COL.a) + "Available" + dot(TRK_COL.b, true) + "Break" + dot(TRK_COL.o) + "Off duty / en route</p>" +
       '<p id="dl-map-tap" style="margin:4px 12px;font-size:14px;font-weight:700;min-height:18px"></p>' +
       '<ul class="dl-map-tot" style="list-style:none;margin:0 12px;padding:0;font-size:14px">' + ["a", "r", "b", "o"].filter(function (k) { return tot[k] || k !== "o"; }).map(function (k) {
         var x = tot[k] || { miles: 0, min: 0 };
@@ -853,5 +897,5 @@
     if (mk === "mdy" && (d.length > 4 || (d.length === 4 && !del))) out = d.slice(0, 2) + "/" + d.slice(2, 4) + "/" + d.slice(4);
     if (out !== t.value) t.value = out;
   }, true);
-  window.PCSDriverLog = { newerWash: newerWash, washWarnText: washWarnText, washLastText: washLastText, WASH_WARN: WASH_WARN, recView: recView, washLine: washLine, minTimeGate: minTimeGate, fmtDur: fmtDur, motionGate: motionGate, fluidsDue: fluidsDue, readDvir: readDvir, parseMdy: parseMdy, expiryState: expiryState, washState: washState, EXTRAS: DVIR_EXTRAS, items: items, DVIR: DVIR, CERT: CERT, dayHash: dayHash, snapshot: snapshot, historyHtml: historyHtml, build: build, html: html, gridSvg: gridSvg, listHtml: listHtml, mapHtml: mapHtml, drawMap: drawMap, ridesHtml: ridesHtml, mapReset: function () { mapView = null; }, stopTimeAt: function (d, v) { return stopTimeAt(d, v); }, /* v2.0m-s: God day map */ trkRuns: trkRuns, trkTotals: trkTotals, trkPts: trkPts, trkDisplayRuns: trkDisplayRuns, runColor: runColor, runLabel: runLabel, rideTypeCanon: rideTypeCanon, rideDisplay: rideDisplay, pcsAutoRecord: pcsAutoRecord, rideSegmentStaysOpen: rideSegmentStaysOpen, historyMapSpec: historyMapSpec, historyMapStyle: historyMapStyle, trackLayers: trackLayers, trackGeo: trackGeo, detailHtml: detailHtml, csv: csv, open: open, close: close, download: download, midnight: midnight, CARRIER: CARRIER };
+  window.PCSDriverLog = { newerWash: newerWash, washWarnText: washWarnText, washLastText: washLastText, WASH_WARN: WASH_WARN, recView: recView, washLine: washLine, minTimeGate: minTimeGate, fmtDur: fmtDur, motionGate: motionGate, fluidsDue: fluidsDue, readDvir: readDvir, parseMdy: parseMdy, expiryState: expiryState, washState: washState, EXTRAS: DVIR_EXTRAS, items: items, DVIR: DVIR, CERT: CERT, dayHash: dayHash, snapshot: snapshot, historyHtml: historyHtml, build: build, html: html, gridSvg: gridSvg, listHtml: listHtml, mapHtml: mapHtml, drawMap: drawMap, ridesHtml: ridesHtml, mapReset: function () { mapView = null; }, stopTimeAt: function (d, v) { return stopTimeAt(d, v); }, /* v2.0m-s: God day map */ trkRuns: trkRuns, trkTotals: trkTotals, trkPts: trkPts, trkDisplayRuns: trkDisplayRuns, runColor: runColor, runLabel: runLabel, rideTypeCanon: rideTypeCanon, rideDisplay: rideDisplay, pcsAutoRecord: pcsAutoRecord, rideSegmentStaysOpen: rideSegmentStaysOpen, foldRideSegments: foldRideSegments, historyMapSpec: historyMapSpec, historyMapStyle: historyMapStyle, trackLayers: trackLayers, trackGeo: trackGeo, detailHtml: detailHtml, csv: csv, open: open, close: close, download: download, midnight: midnight, CARRIER: CARRIER };
 })();
