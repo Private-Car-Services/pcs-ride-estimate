@@ -9808,13 +9808,35 @@
     if (String(r.prepaidInvoiceNo || r.invoiceNo || (q && (q.number || q.invoiceNumber)) || "").trim()) return "invoiced";
     return "";
   }
-  function rideBillText(k) { return k === "prepaid" ? "Prepaid ride" : k === "invoiced" ? "Invoiced ride" : ""; }
-  function rideBillLabelHtml(k, id) {
-    var t = rideBillText(k); if (!t) return "";
+  /* Display only. Keeps leading zeros. Strips one leading "Invoice #" or "#" so the line does not repeat them. */
+  function rideInvoiceDisplayNo(raw) {
+    var s = String(raw == null ? "" : raw).replace(/^\s+|\s+$/g, "");
+    if (!s) return "";
+    s = s.replace(/^invoice\s*#?\s*/i, "").replace(/^#\s*/, "").replace(/^\s+|\s+$/g, "");
+    return s;
+  }
+  function rideInvoiceNoFrom(r, M) {
+    var info = rideInvoiceInfo(r || {}, M);
+    return rideInvoiceDisplayNo(info && info.invoiceNo);
+  }
+  function rideBillText(k, no) {
+    var t = k === "prepaid" ? "Prepaid ride" : k === "invoiced" ? "Invoiced ride" : "";
+    if (t !== "Prepaid ride") return t;
+    no = rideInvoiceDisplayNo(no);
+    if (!no) return t;
+    return t + " Invoice #" + no;
+  }
+  function rideBillLabelHtml(k, id, no) {
+    var t = rideBillText(k, no); if (!t) return "";
     return '<p class="pcs-bill-label is-' + k + '" id="' + esc(id || "ride-bill-label") + '" role="status" style="margin:8px auto;max-width:100%;box-sizing:border-box;text-align:center;font-size:22px;font-weight:900;color:#fff;background:#0b3d23;border:2px solid #b8f0c8;border-radius:12px;padding:8px 12px">' + esc(t) + "</p>";
   }
   function meterBillKind(M) { return meterShown(M) ? "" : rideBillKind(M && M.schedId ? schedFind(M.schedId) : null, M); }
-  if (typeof window !== "undefined") window.__pcsV20lBill = { kind: rideBillKind, text: rideBillText, label: rideBillLabelHtml };
+  function meterBillInvoiceNo(M) {
+    var r = null;
+    try { if (M && M.schedId) r = schedFind(M.schedId); } catch (e) {}
+    return rideInvoiceNoFrom(r, M);
+  }
+  if (typeof window !== "undefined") window.__pcsV20lBill = { kind: rideBillKind, text: rideBillText, label: rideBillLabelHtml, invoiceNo: rideInvoiceDisplayNo, from: rideInvoiceNoFrom };
   function meterInvInfo(M) { return rideInvoiceInfo(M && M.schedId ? schedFind(M.schedId) : null, M); }
   function meterInvRefresh(M) { /* live: the 15-min Square sync / refreshScheduledRides flips the badge without a re-render */
     if (typeof document === "undefined" || meterShown(M)) return;
@@ -10675,7 +10697,7 @@
   function rfsBarHtml(M) {
     var f = meterFare(M), t = meterTollInfo(M), pp = M.prepaid;
     var shown = meterShown(M);
-    var html = (shown ? "" : rideBillLabelHtml(meterBillKind(M), "rfs-bill-label")) + '<div class="rfs-row">' + (shown ? '<div class="rfs-fare" id="rfs-fare" aria-label="Meter fare">' + meterMoneyShown(M, f.sub) + "</div>" : "") +
+    var html = (shown ? "" : rideBillLabelHtml(meterBillKind(M), "rfs-bill-label", meterBillInvoiceNo(M))) + '<div class="rfs-row">' + (shown ? '<div class="rfs-fare" id="rfs-fare" aria-label="Meter fare">' + meterMoneyShown(M, f.sub) + "</div>" : "") +
       '<div class="rfs-stats"><span><b id="rfs-miles">' + f.miles.toFixed(2) + "</b> mi</span><span><b id=\"rfs-time\">" + meterClock(Date.now() - M.startedAt) + "</b></span>" +
       (shown ? '<span class="rfs-tier" id="rfs-tier">' + esc(M.tierLabel || "Meter") + (M.taxRate ? " \u00b7 tax at the end" : "") + "</span>" : "") + "</div></div>" + rideEstHtml(M, "rfs-est");
     if (pp && shown) html += '<p class="rfs-paid" id="rfs-paid">\u2713 ' + esc(prepaidBadgeText(pp)) + " \u00b7 balance $0.00</p>";
@@ -16202,7 +16224,7 @@
       if (P.prepaid) return ( /* v75v */
         '<section id="meter-paid">' + meterTestTag(M) +
         '<p class="tag">Ride ' + esc(M.code) + "</p>" +
-        rideBillLabelHtml("prepaid", "meter-bill-label") + prepaidBadgeHtml(M.prepaid, "meter-paid-prepaid") +
+        rideBillLabelHtml("prepaid", "meter-bill-label", M.prepaid && M.prepaid.invoiceNo) + prepaidBadgeHtml(M.prepaid, "meter-paid-prepaid") +
         '<p class="meter-paid" id="meter-paid-amount">' + (P.status === "invoice_pending" ? "Invoice sent, waiting on Square" : "Paid: Square verified") + "</p>" +
         '<p class="meter-sub" id="meter-paid-detail">Nothing to collect from the rider.</p>' + /* v2.0l r3: no $ on a prepaid ride */
         '<p class="fine">Miles and time were kept for the record. A tip from the rider is welcome and stays yours.</p>' +
@@ -16288,7 +16310,7 @@
       (meterShown(M) ? prepaidBadgeHtml(M.prepaid, "meter-prepaid-badge") + /* v75v */
       '<p class="meter-fare" id="meter-fare" aria-live="off">' + meterMoneyShown(M, f.sub) + "</p>" +
       '<p class="meter-sub">Meter' + (M.minCents > M.baseCents ? " · " + money(M.minCents) + " minimum" : "") + (M.taxRate ? " · tax added at the end" : "") + "</p>"
-        : rideBillLabelHtml(meterBillKind(M), "meter-bill-label")) + /* v2.0a: no fare on a non-metered ride */
+        : rideBillLabelHtml(meterBillKind(M), "meter-bill-label", meterBillInvoiceNo(M))) + /* v2.0a: no fare on a non-metered ride */
       (!meterShown(M) ? "" : /* v2.0d.5 r3: miles / time / slow min / mph are the meter: metered rides only */
       '<div class="meter-grid"><div><b id="meter-miles">' + f.miles.toFixed(2) + "</b><span>Miles</span></div>" +
       '<div><b id="meter-time">' + meterClock(Date.now() - M.startedAt) + "</b><span>Time</span></div>" +

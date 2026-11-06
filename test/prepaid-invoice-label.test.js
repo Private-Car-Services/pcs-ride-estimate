@@ -1,0 +1,99 @@
+/* Display-only: "Prepaid ride" gains " Invoice #<number>" when that trip has an invoice number. */
+const assert = require("assert");
+const fs = require("fs");
+const path = require("path");
+const vm = require("vm");
+const test = require("node:test");
+
+function el() {
+  return {
+    style: {},
+    classList: { add: function () {}, remove: function () {}, contains: function () { return false; }, toggle: function () {} },
+    appendChild: function () {},
+    addEventListener: function () {},
+    setAttribute: function () {},
+    getAttribute: function () { return ""; },
+    removeAttribute: function () {}
+  };
+}
+
+function loadApp() {
+  const sandbox = {
+    console: console, Date: Date, Math: Math, Intl: Intl, JSON: JSON, Promise: Promise,
+    Number: Number, String: String, Object: Object, Array: Array, isFinite: isFinite, parseInt: parseInt,
+    RegExp: RegExp, Error: Error, encodeURIComponent: encodeURIComponent, decodeURIComponent: decodeURIComponent,
+    setTimeout: function () { return 0; }, clearTimeout: function () {},
+    setInterval: function () { return 0; }, clearInterval: function () {},
+    requestAnimationFrame: function () { return 0; }, cancelAnimationFrame: function () {},
+    navigator: { userAgent: "test", share: null, geolocation: null, maxTouchPoints: 0, language: "en-US" },
+    location: { search: "", hostname: "localhost", href: "http://localhost/app/driver/", protocol: "http:", hash: "", pathname: "/app/driver/", replace: function () {} },
+    history: { pushState: function () {}, replaceState: function () {}, back: function () {}, state: null },
+    localStorage: { getItem: function () { return null; }, setItem: function () {}, removeItem: function () {} },
+    sessionStorage: { getItem: function () { return null; }, setItem: function () {}, removeItem: function () {} },
+    addEventListener: function () {},
+    removeEventListener: function () {},
+    fetch: function () { return Promise.resolve({ ok: false, status: 0, text: function () { return Promise.resolve(""); }, json: function () { return Promise.resolve(null); } }); },
+    document: {
+      readyState: "complete",
+      currentScript: { src: "" },
+      visibilityState: "visible",
+      getElementById: function () { return null; },
+      querySelector: function () { return null; },
+      querySelectorAll: function () { return []; },
+      addEventListener: function () {},
+      createElement: el,
+      body: el(),
+      head: el(),
+      documentElement: el()
+    }
+  };
+  sandbox.window = sandbox;
+  vm.createContext(sandbox);
+  vm.runInContext(fs.readFileSync(path.join(__dirname, "../app/app.js"), "utf8"), sandbox, { filename: "app/app.js" });
+  return sandbox.__pcsV20lBill;
+}
+
+const bill = loadApp();
+
+test("prepaid ride with an invoice number appends Invoice # and keeps leading zeros", function () {
+  assert.equal(bill.text("prepaid", "000555"), "Prepaid ride Invoice #000555");
+  assert.equal(bill.text("prepaid", "#000555"), "Prepaid ride Invoice #000555");
+  assert.equal(bill.text("prepaid", "Invoice #000555"), "Prepaid ride Invoice #000555");
+  assert.equal(bill.text("prepaid", "Invoice 000555"), "Prepaid ride Invoice #000555");
+  assert.equal(bill.text("prepaid", "  Invoice #  000555  "), "Prepaid ride Invoice #000555");
+  const row = { prepaid: true, prepaidInvoiceNo: "000555" };
+  assert.equal(bill.from(row, null), "000555");
+  assert.equal(bill.text("prepaid", bill.from(row, null)), "Prepaid ride Invoice #000555");
+  const html = bill.label("prepaid", "rfs-bill-label", "000555");
+  assert.ok(html.indexOf("Prepaid ride Invoice #000555") >= 0);
+  assert.equal(html.indexOf("Invoice #Invoice"), -1);
+  assert.equal(html.indexOf("##"), -1);
+  assert.ok(html.indexOf('id="rfs-bill-label"') >= 0);
+});
+
+test("invoice number is read from ride metadata and escaped on the same line", function () {
+  assert.equal(bill.from({ invoiceNo: "000555" }, null), "000555");
+  assert.equal(bill.from({ sqInvoice: { invoiceNumber: "000210" } }, null), "000210");
+  assert.equal(bill.from({ sqInvoice: { number: "000210" } }, null), "000210");
+  assert.equal(bill.from({}, { prepaid: { invoiceNo: "000088" } }), "000088");
+  assert.equal(bill.from({ prepaidInvoiceNo: "000555", invoiceNo: "999" }, null), "000555");
+  const html = bill.label("prepaid", "meter-bill-label", "000555<script>");
+  assert.ok(html.indexOf("Prepaid ride Invoice #000555&lt;script&gt;") >= 0);
+  assert.equal(html.indexOf("<script>"), -1);
+  assert.equal((html.match(/<p /g) || []).length, 1);
+});
+
+test("missing or uninvoiced prepaid rides stay Prepaid ride with no invoice suffix", function () {
+  ["", "   ", "#", "Invoice #", "Invoice #   ", null, undefined].forEach(function (raw) {
+    assert.equal(bill.invoiceNo(raw), "");
+    assert.equal(bill.text("prepaid", raw), "Prepaid ride");
+    const html = bill.label("prepaid", "meter-bill-label", raw);
+    assert.ok(html.indexOf(">Prepaid ride</p>") >= 0);
+    assert.equal(html.indexOf("Invoice"), -1);
+  });
+  assert.equal(bill.from({}, null), "");
+  assert.equal(bill.from({ prepaid: true }, null), "");
+  assert.equal(bill.text("invoiced", "000555"), "Invoiced ride");
+  assert.equal(bill.text("", "000555"), "");
+  assert.equal(bill.label("invoiced", "ride-bill-label", "000555").indexOf("Invoice #"), -1);
+});
