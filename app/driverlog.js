@@ -460,15 +460,42 @@
     var t = function (ms) { return new Date(ms).toLocaleTimeString("en-US", { timeZone: TZ, hour: "numeric", minute: "2-digit" }); };
     return "<p " + SEC + ">RIDES TODAY</p>" + '<ul class="dl-rides" style="list-style:none;margin:0;padding:0;background:#fff">' + r.map(function (x) {
       var mins = x.end ? x.minutes : Math.round((now - x.start) / 60000);
-      return '<li class="dl-ride" style="padding:10px 12px;border-bottom:1px solid #ddd"><b>' + esc(x.type) + "</b> \u00b7 " + esc(t(x.start)) + " \u2013 " + (x.end ? esc(t(x.end)) : "now") + " \u00b7 " + mins + " min" + (x.end ? " \u00b7 " + Number(x.miles || 0).toFixed(1) + " mi" : "") + "</li>";
+      return '<li class="dl-ride" style="padding:10px 12px;border-bottom:1px solid #ddd"><b>' + esc(rideDisplay(x.type)) + "</b> \u00b7 " + esc(t(x.start)) + " \u2013 " + (x.end ? esc(t(x.end)) : "now") + " \u00b7 " + mins + " min" + (x.end ? " \u00b7 " + Number(x.miles || 0).toFixed(1) + " mi" : "") + "</li>";
     }).join("") + "</ul>";
   }
   function listHtml(days, meta) { meta = meta || {};
     return currentStatus(meta) + "<p " + SEC + ">TODAY</p>" + (days[0] ? listItem(days[0], true) : "") + ridesHtml(meta) +
       '<button type="button" id="dl-history" style="display:block;width:calc(100% - 24px);margin:12px;padding:12px;border:1px solid #2f6fe0;border-radius:8px;background:#fff;color:#2f6fe0;font-weight:700">History</button>' + mapHtml(meta);
   }
-  /* v2.0m-s: today's map under History. Blue = Available, green = On a ride, yellow pin = Break, gray = Off duty / en route. */
+  /* v2.0m-s: today's map under History. Blue = Available, green = On a ride, yellow pin = Break, gray = Off duty / en route.
+     v2.0m-ac: a stored ride segment recolors only the On a ride points it covers (PCS blue, Uber/Lyft green, Other amber).
+     A green track with no stored PCS/Uber/Lyft/Other type stays "On a ride". Nothing here invents a type from the track. */
   var TRK_COL = { a: "#1e63d6", r: "#1f9d3a", b: "#e0b000", o: "#8a8a8a" }, TRK_NAME = { a: "Available", r: "On a ride", b: "Break", o: "Off duty / en route" };
+  var TRIP_COL = { PCS: "#1e63d6", Uber: "#1f9d3a", Lyft: "#1f9d3a", Other: "#c27a12" };
+  var TRIP_PX = 6, TRIP_UNDER_PX = 8; /* approved 6px stroke; white underlay is width + 2 */
+  function rideTypeCanon(raw) {
+    var s = String(raw == null ? "" : raw).replace(/^\s+|\s+$/g, "").toLowerCase();
+    if (s === "pcs") return "PCS";
+    if (s === "uber") return "Uber";
+    if (s === "lyft") return "Lyft";
+    if (s === "other") return "Other";
+    return "";
+  }
+  /* List and tap share this label. Empty stored type stays "On a ride" (not PCS, not invented Other). */
+  function rideDisplay(raw) { return rideTypeCanon(raw) || (String(raw == null ? "" : raw).replace(/^\s+|\s+$/g, "") || "On a ride"); }
+  /* Assigned PCS work (app trip, scheduled ride, or meter) records PCS once. An open PCS segment is left alone.
+     An open Uber/Lyft/Other is not treated as the assigned ride: the caller starts PCS. Never reads track colors. */
+  function pcsAutoRecord(autoBusy, openSeg) {
+    if (!autoBusy) return false;
+    if (openSeg && !openSeg.end && rideTypeCanon(openSeg.type) === "PCS") return false;
+    return true;
+  }
+  /* Keep a stored segment open only while today is still On a ride (manual choice or assigned PCS). */
+  function rideSegmentStaysOpen(o) {
+    o = o || {};
+    if (o.force || !o.sameDay || o.onBreak || o.offline) return false;
+    return !!(o.manualBusy || o.autoBusy);
+  }
   function trkPts(tr) { return ((tr && tr.pts) || []).map(function (p) { return { t: tr.t0 + p[0] * 1000, lat: p[1] / 1e5, lng: p[2] / 1e5, s: p[3] }; }); }
   function mi(a, b) { var R = 3958.8, r = Math.PI / 180, dLa = (b.lat - a.lat) * r, dLo = (b.lng - a.lng) * r, x = Math.sin(dLa / 2) * Math.sin(dLa / 2) + Math.cos(a.lat * r) * Math.cos(b.lat * r) * Math.sin(dLo / 2) * Math.sin(dLo / 2); return 2 * R * Math.asin(Math.sqrt(x)); }
   /* runs of the same status; a run ends at the first point of the next one (so the line has no gaps) */
@@ -481,6 +508,98 @@
     runs.forEach(function (r) { var m = 0; for (var i = 1; i < r.pts.length; i++) { var gap = r.pts[i].t - r.pts[i - 1].t; if (gap <= 600000) m += mi(r.pts[i - 1], r.pts[i]); } r.miles = r.s === "b" ? 0 : m; });
     return runs;
   }
+  function rideCovering(rides, t) {
+    var hit = null;
+    (rides || []).forEach(function (x) {
+      if (!x || !(Number(x.start) > 0)) return;
+      var end = Number(x.end) > 0 ? Number(x.end) : Infinity;
+      if (Number(x.start) <= t && t <= end) hit = x;
+    });
+    return hit;
+  }
+  /* On a ride points pick up a stored segment. Other statuses stay themselves. No stored type -> no trip color. */
+  function trkDisplayRuns(pts, rides) {
+    var runs = [], cur = null;
+    function cls(p) {
+      var ride = p.s === "r" ? rideCovering(rides, p.t) : null;
+      var type = ride ? rideTypeCanon(ride.type) : "";
+      return { s: p.s, type: type, ride: ride, key: p.s + "|" + type + "|" + (ride ? ride.start : "") };
+    }
+    (pts || []).forEach(function (p) {
+      var k = cls(p);
+      if (!cur || cur.key !== k.key) {
+        if (cur) { cur.pts.push(p); cur.end = p.t; }
+        cur = { s: k.s, type: k.type, ride: k.ride, key: k.key, start: p.t, end: p.t, pts: [p], miles: 0 };
+        runs.push(cur);
+      } else { cur.pts.push(p); cur.end = p.t; }
+    });
+    runs.forEach(function (r) { var m = 0; for (var i = 1; i < r.pts.length; i++) { var gap = r.pts[i].t - r.pts[i - 1].t; if (gap <= 600000) m += mi(r.pts[i - 1], r.pts[i]); } r.miles = r.s === "b" ? 0 : m; });
+    return runs;
+  }
+  function runColor(run) { return (run && run.type && TRIP_COL[run.type]) || TRK_COL[run.s] || TRK_COL.o; }
+  function runLabel(run, fmt) {
+    fmt = fmt || function (ms) { return new Date(ms).toLocaleTimeString("en-US", { timeZone: TZ, hour: "numeric", minute: "2-digit" }); };
+    if (!run) return "";
+    if (run.s === "b") return "Break \u00b7 " + fmt(run.start) + " \u2013 " + fmt(run.end) + " \u00b7 0 mi";
+    if (run.ride) {
+      var hit = run.ride, miles = hit.end ? Number(hit.miles || 0) : run.miles;
+      return rideDisplay(hit.type) + " \u00b7 " + fmt(hit.start) + " \u2013 " + (hit.end ? fmt(hit.end) : "now") + " \u00b7 " + miles.toFixed(1) + " mi";
+    }
+    return (TRK_NAME[run.s] || "On a ride") + " \u00b7 " + fmt(run.start) + " \u2013 " + fmt(run.end) + " \u00b7 " + run.miles.toFixed(1) + " mi";
+  }
+  function thinPx(stops) { var e = ["interpolate", ["linear"], ["zoom"]]; stops.forEach(function (s) { e.push(s[0], s[1]); }); return e; }
+  /* Daily history basemap only. Real OpenStreetMap vector streets, no live-traffic raster, no Google tile swap. */
+  function historyMapSpec() {
+    return {
+      maxZoom: 19, minZoom: 3, traffic: false, provider: "openfreemap",
+      background: "#fbfbfb", roadColor: "#111111", roadMaxPx: 1.5,
+      streetLabelMinZoom: 14, streetLabelColor: "#222222",
+      tripPx: TRIP_PX, underlayPx: TRIP_UNDER_PX, underlayColor: "#ffffff",
+      tiles: "https://tiles.openfreemap.org/planet",
+      glyphs: "https://tiles.openfreemap.org/fonts/{fontstack}/{range}.pbf",
+      colors: { PCS: TRIP_COL.PCS, Uber: TRIP_COL.Uber, Lyft: TRIP_COL.Lyft, Other: TRIP_COL.Other, a: TRK_COL.a, r: TRK_COL.r, b: TRK_COL.b, o: TRK_COL.o }
+    };
+  }
+  function historyMapStyle() {
+    var spec = historyMapSpec(), road = spec.roadColor, line = ["LineString", "MultiLineString"];
+    var roads = ["motorway", "trunk", "primary", "secondary", "tertiary", "minor", "service", "busway"];
+    var geom = ["match", ["geometry-type"], line, true, false];
+    function roadLayer(id, classes, width, minzoom) {
+      return { id: id, type: "line", source: "openmaptiles", "source-layer": "transportation", minzoom: minzoom,
+        filter: ["all", geom, ["match", ["get", "class"], classes, true, false]],
+        layout: { "line-cap": "round", "line-join": "round" },
+        paint: { "line-color": road, "line-width": thinPx(width), "line-opacity": 1 } };
+    }
+    return {
+      version: 8,
+      sources: { openmaptiles: { type: "vector", url: spec.tiles } },
+      glyphs: spec.glyphs,
+      layers: [
+        { id: "background", type: "background", paint: { "background-color": spec.background } },
+        { id: "water", type: "fill", source: "openmaptiles", "source-layer": "water", paint: { "fill-color": "#e7eef2" } },
+        { id: "park", type: "fill", source: "openmaptiles", "source-layer": "park", paint: { "fill-color": "#f4f5f3" } },
+        { id: "building", type: "fill", source: "openmaptiles", "source-layer": "building", minzoom: 15, paint: { "fill-color": "#f7f7f5", "fill-outline-color": "#e4e4e2" } },
+        roadLayer("road-major", ["motorway", "trunk", "primary", "secondary", "tertiary"], [[6, 0.45], [12, 0.8], [16, 1.1], [19, 1.45]], 6),
+        roadLayer("road-minor", ["minor", "service", "busway"], [[13, 0.35], [16, 0.7], [19, 1.15]], 13),
+        { id: "road-name", type: "symbol", source: "openmaptiles", "source-layer": "transportation_name", minzoom: spec.streetLabelMinZoom,
+          filter: ["all", geom, ["match", ["get", "class"], roads, true, false]],
+          layout: { "symbol-placement": "line", "text-field": ["coalesce", ["get", "name_en"], ["get", "name"]], "text-font": ["Noto Sans Regular"], "text-size": ["interpolate", ["linear"], ["zoom"], 14, 12, 17, 15, 19, 16] },
+          paint: { "text-color": spec.streetLabelColor, "text-halo-color": "#ffffff", "text-halo-width": 1.5 } },
+        { id: "place-name", type: "symbol", source: "openmaptiles", "source-layer": "place", minzoom: 8,
+          filter: ["match", ["get", "class"], ["city", "town", "village"], true, false],
+          layout: { "text-field": ["coalesce", ["get", "name_en"], ["get", "name"]], "text-font": ["Noto Sans Regular"], "text-size": 13 },
+          paint: { "text-color": "#222222", "text-halo-color": "#ffffff", "text-halo-width": 1.4 } }
+      ]
+    };
+  }
+  function trackLayers() {
+    var round = { "line-cap": "round", "line-join": "round" };
+    return [
+      { id: "dl-under", type: "line", source: "dl-track", layout: round, paint: { "line-color": "#ffffff", "line-width": TRIP_UNDER_PX, "line-opacity": 1 } },
+      { id: "dl-stroke", type: "line", source: "dl-track", layout: round, paint: { "line-color": ["get", "color"], "line-width": TRIP_PX, "line-opacity": 1 } },
+      { id: "dl-break", type: "circle", source: "dl-break", paint: { "circle-radius": 9, "circle-color": TRK_COL.b, "circle-stroke-color": "#7a5d00", "circle-stroke-width": 2 } }
+    ];
+  }
   function trkTotals(runs) { var t = {}; runs.forEach(function (r) { var x = t[r.s] = t[r.s] || { miles: 0, min: 0 }; x.miles += r.miles; x.min += Math.max(0, Math.round((r.end - r.start) / 60000)); }); return t; }
   function hmin(m) { return m >= 60 ? Math.floor(m / 60) + " hr " + (m % 60) + " min" : m + " min"; }
   function mapHtml(meta) {
@@ -488,7 +607,7 @@
     var runs = trkRuns(trkPts(tr)), tot = trkTotals(runs);
     var dot = function (c, pin) { return '<span style="display:inline-block;width:' + (pin ? 10 : 16) + 'px;height:' + (pin ? 10 : 4) + 'px;border-radius:' + (pin ? "50%" : "2px") + ';background:' + c + ';vertical-align:middle;margin:0 4px 0 8px"></span>'; };
     return "<p " + SEC + ">TODAY'S MAP</p>" +
-      '<div id="dl-map" style="height:300px;margin:0 12px;border:1px solid #bbb;border-radius:8px;background:#e5e5e5"></div>' +
+      '<div id="dl-map" style="height:300px;margin:0 12px;border:1px solid #bbb;border-radius:8px;background:#fbfbfb"></div>' +
       (runs.length ? "" : '<p class="dl-map-empty" style="margin:6px 12px;color:#666;font-size:13px">No driving yet today.</p>') +
       '<p class="dl-legend" style="margin:6px 4px;font-size:13px">' + dot(TRK_COL.a) + "Available" + dot(TRK_COL.r) + "On a ride" + dot(TRK_COL.b, true) + "Break" + dot(TRK_COL.o) + "Off duty / en route</p>" +
       '<p id="dl-map-tap" style="margin:4px 12px;font-size:14px;font-weight:700;min-height:18px"></p>' +
@@ -499,29 +618,69 @@
       (tr.canToggle ? '<label style="display:flex;gap:8px;align-items:center;margin:10px 12px;font-size:14px"><input type="checkbox" id="dl-personal"' + (tr.personal ? " checked" : "") + '> Track off-duty / en route miles (gray line)</label>' : "");
   }
   var mapView = null;
-  function drawMap(w, meta) {
-    var el = w.querySelector("#dl-map"), L = window.L; if (!el || !L || !meta.track) return;
-    var runs = trkRuns(trkPts(meta.track)), rides = meta.rides || [], tap = w.querySelector("#dl-map-tap");
-    var t = function (ms) { return new Date(ms).toLocaleTimeString("en-US", { timeZone: TZ, hour: "numeric", minute: "2-digit" }); };
-    var map = L.map(el, { zoomControl: true, attributionControl: true }); w._dlMap = map;
-    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom: 19, attribution: "&copy; OpenStreetMap" }).addTo(map);
-    var all = [];
-    runs.forEach(function (r) {
-      var ll = r.pts.map(function (p) { return [p.lat, p.lng]; }); all = all.concat(ll);
-      var info = function () {
-        if (r.s === "b") return "Break \u00b7 " + t(r.start) + " \u2013 " + t(r.end) + " \u00b7 0 mi";
-        var txt = TRK_NAME[r.s] + " \u00b7 " + t(r.start) + " \u2013 " + t(r.end) + " \u00b7 " + r.miles.toFixed(1) + " mi";
-        if (r.s === "r") { var hit = rides.filter(function (x) { return x.start <= r.end && (x.end || Infinity) >= r.start; })[0]; if (hit) txt = hit.type + " \u00b7 " + t(hit.start) + " \u2013 " + (hit.end ? t(hit.end) : "now") + " \u00b7 " + (hit.end ? Number(hit.miles || 0) : r.miles).toFixed(1) + " mi"; }
-        return txt;
-      };
-      var lay = r.s === "b" ? L.circleMarker(ll[0], { radius: 9, color: "#7a5d00", weight: 2, fillColor: TRK_COL.b, fillOpacity: 1 })
-        : L.polyline(ll, { color: TRK_COL[r.s], weight: 6, opacity: 0.9 });
-      lay.on("click", function () { if (tap) tap.textContent = info(); }); lay.addTo(map); lay._dlInfo = info;
-      (w._dlLayers = w._dlLayers || []).push(lay);
+  function ensureMapLibre() {
+    var d = document;
+    if (!d.getElementById("dl-maplibre-css")) {
+      var css = d.createElement("link"); css.id = "dl-maplibre-css"; css.rel = "stylesheet";
+      css.href = "https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css";
+      (d.head || d.documentElement).appendChild(css);
+    }
+    if (window.maplibregl) return Promise.resolve(window.maplibregl);
+    if (window.__dlMlPromise) return window.__dlMlPromise;
+    window.__dlMlPromise = new Promise(function (res, rej) {
+      var s = d.createElement("script");
+      s.src = "https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js";
+      s.onload = function () { window.maplibregl ? res(window.maplibregl) : rej(new Error("map")); };
+      s.onerror = function () { rej(new Error("map")); };
+      (d.head || d.documentElement).appendChild(s);
     });
-    if (mapView) map.setView(mapView.c, mapView.z); /* keep the driver's zoom when the log repaints */
-    else if (all.length) map.fitBounds(all, { padding: [20, 20], maxZoom: 16 }); else map.setView([30.33, -95.48], 10);
-    map.on("moveend", function () { mapView = { c: map.getCenter(), z: map.getZoom() }; });
+    return window.__dlMlPromise;
+  }
+  function trackGeo(runs) {
+    var lines = [], breaks = [], bounds = [];
+    runs.forEach(function (r) {
+      var label = runLabel(r);
+      if (r.s === "b") {
+        var p = r.pts[0]; if (!p) return;
+        breaks.push({ type: "Feature", properties: { label: label }, geometry: { type: "Point", coordinates: [p.lng, p.lat] } });
+        bounds.push([p.lng, p.lat]);
+        return;
+      }
+      if (r.pts.length < 2) return;
+      lines.push({ type: "Feature", properties: { label: label, color: runColor(r) }, geometry: { type: "LineString", coordinates: r.pts.map(function (p) { bounds.push([p.lng, p.lat]); return [p.lng, p.lat]; }) } });
+    });
+    return { lines: { type: "FeatureCollection", features: lines }, breaks: { type: "FeatureCollection", features: breaks }, bounds: bounds };
+  }
+  function drawMap(w, meta) {
+    var el = w.querySelector("#dl-map"); if (!el || !meta || !meta.track || typeof document === "undefined") return;
+    if (w._dlMap && w._dlMap.remove) { try { w._dlMap.remove(); } catch (e0) {} }
+    var hold = { map: null, dead: false };
+    w._dlMap = { remove: function () { hold.dead = true; if (hold.map) { try { hold.map.remove(); } catch (e1) {} hold.map = null; } }, getMap: function () { return hold.map; } };
+    var runs = trkDisplayRuns(trkPts(meta.track), meta.rides || []), geo = trackGeo(runs), spec = historyMapSpec(), tap = w.querySelector("#dl-map-tap");
+    ensureMapLibre().then(function (ml) {
+      if (hold.dead || !document.body || !document.body.contains(el)) return;
+      var map = new ml.Map({ container: el, style: historyMapStyle(), minZoom: spec.minZoom, maxZoom: spec.maxZoom, attributionControl: true, fadeDuration: 0 });
+      hold.map = map;
+      map.addControl(new ml.NavigationControl({ showCompass: false }), "top-right");
+      map.on("load", function () {
+        if (hold.dead) return;
+        map.addSource("dl-track", { type: "geojson", data: geo.lines });
+        map.addSource("dl-break", { type: "geojson", data: geo.breaks });
+        trackLayers().forEach(function (layer) { map.addLayer(layer); });
+        var showTap = function (e) { var f = e.features && e.features[0]; if (tap && f && f.properties) tap.textContent = f.properties.label || ""; };
+        map.on("click", "dl-stroke", showTap);
+        map.on("click", "dl-break", showTap);
+        if (mapView) map.jumpTo({ center: mapView.c, zoom: mapView.z });
+        else if (geo.bounds.length > 1) {
+          var b = geo.bounds.reduce(function (a, p) { return [[Math.min(a[0][0], p[0]), Math.min(a[0][1], p[1])], [Math.max(a[1][0], p[0]), Math.max(a[1][1], p[1])]]; }, [[geo.bounds[0][0], geo.bounds[0][1]], [geo.bounds[0][0], geo.bounds[0][1]]]);
+          if (b[0][0] === b[1][0] && b[0][1] === b[1][1]) map.jumpTo({ center: b[0], zoom: 16 });
+          else map.fitBounds(b, { padding: 20, maxZoom: 16, duration: 0 });
+        } else if (geo.bounds.length === 1) map.jumpTo({ center: geo.bounds[0], zoom: 16 });
+        else map.jumpTo({ center: [-95.48, 30.33], zoom: 10 });
+        map.on("moveend", function () { var c = map.getCenter(); mapView = { c: [c.lng, c.lat], z: map.getZoom() }; });
+        map.once("idle", function () { try { el.dispatchEvent(new CustomEvent("dl-map-ready")); } catch (eR) {} });
+      });
+    }).catch(function () {});
     var cb = w.querySelector("#dl-personal"); if (cb && meta.onPersonal) cb.addEventListener("change", function () { meta.onPersonal(cb.checked); });
   }
   function historyHtml(days, shown) {
@@ -694,5 +853,5 @@
     if (mk === "mdy" && (d.length > 4 || (d.length === 4 && !del))) out = d.slice(0, 2) + "/" + d.slice(2, 4) + "/" + d.slice(4);
     if (out !== t.value) t.value = out;
   }, true);
-  window.PCSDriverLog = { newerWash: newerWash, washWarnText: washWarnText, washLastText: washLastText, WASH_WARN: WASH_WARN, recView: recView, washLine: washLine, minTimeGate: minTimeGate, fmtDur: fmtDur, motionGate: motionGate, fluidsDue: fluidsDue, readDvir: readDvir, parseMdy: parseMdy, expiryState: expiryState, washState: washState, EXTRAS: DVIR_EXTRAS, items: items, DVIR: DVIR, CERT: CERT, dayHash: dayHash, snapshot: snapshot, historyHtml: historyHtml, build: build, html: html, gridSvg: gridSvg, listHtml: listHtml, mapHtml: mapHtml, drawMap: drawMap, ridesHtml: ridesHtml, mapReset: function () { mapView = null; }, stopTimeAt: function (d, v) { return stopTimeAt(d, v); }, /* v2.0m-s: God day map */ trkRuns: trkRuns, trkTotals: trkTotals, detailHtml: detailHtml, csv: csv, open: open, close: close, download: download, midnight: midnight, CARRIER: CARRIER };
+  window.PCSDriverLog = { newerWash: newerWash, washWarnText: washWarnText, washLastText: washLastText, WASH_WARN: WASH_WARN, recView: recView, washLine: washLine, minTimeGate: minTimeGate, fmtDur: fmtDur, motionGate: motionGate, fluidsDue: fluidsDue, readDvir: readDvir, parseMdy: parseMdy, expiryState: expiryState, washState: washState, EXTRAS: DVIR_EXTRAS, items: items, DVIR: DVIR, CERT: CERT, dayHash: dayHash, snapshot: snapshot, historyHtml: historyHtml, build: build, html: html, gridSvg: gridSvg, listHtml: listHtml, mapHtml: mapHtml, drawMap: drawMap, ridesHtml: ridesHtml, mapReset: function () { mapView = null; }, stopTimeAt: function (d, v) { return stopTimeAt(d, v); }, /* v2.0m-s: God day map */ trkRuns: trkRuns, trkTotals: trkTotals, trkPts: trkPts, trkDisplayRuns: trkDisplayRuns, runColor: runColor, runLabel: runLabel, rideTypeCanon: rideTypeCanon, rideDisplay: rideDisplay, pcsAutoRecord: pcsAutoRecord, rideSegmentStaysOpen: rideSegmentStaysOpen, historyMapSpec: historyMapSpec, historyMapStyle: historyMapStyle, trackLayers: trackLayers, trackGeo: trackGeo, detailHtml: detailHtml, csv: csv, open: open, close: close, download: download, midnight: midnight, CARRIER: CARRIER };
 })();

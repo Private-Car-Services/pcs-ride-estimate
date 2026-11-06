@@ -21200,7 +21200,7 @@
     }
     if (!flag && now - autoBrk.since >= AUTO_BRK_STILL_MS) autoBrkSet(true, now, autoBrk.since);
   }
-  setInterval(function () { try { rtTick(); } catch (e) {} try { if (rideLockSync(Date.now())) render(); } catch (e) {} try { autoBrkTick(Date.now()); } catch (e) {} }, 30000); /* r13: ride started while Offline/Break -> On a ride */
+  setInterval(function () { try { rtTick(); } catch (e) {} try { rtEnsurePcs(); } catch (e) {} try { if (rideLockSync(Date.now())) render(); } catch (e) {} try { autoBrkTick(Date.now()); } catch (e) {} }, 30000); /* r13: ride started while Offline/Break -> On a ride */
   function qAutoBusy() {
     if (ROLE !== "driver" || !signedIn()) return false;
     var st = String(state.rideStatus || "").toLowerCase();
@@ -21256,6 +21256,16 @@
     list.push({ type: type, start: now, startMiles: rtMiles() });
     rtSave(day, list);
   }
+  /* v2.0m-ac: an assigned PCS ride (accepted trip, scheduled ride, or meter) records PCS by itself.
+     Does not read GPS tracks and does not relabel an already-open PCS segment. */
+  function rtEnsurePcs(now) {
+    var DL = window.PCSDriverLog;
+    if (!DL || ROLE !== "driver" || !signedIn()) return;
+    var open = null;
+    try { var list = rtToday(), last = list[list.length - 1]; if (last && !last.end) open = last; } catch (e) {}
+    if (!DL.pcsAutoRecord(!!qAutoBusy(), open)) return;
+    rtStart("PCS", now || Date.now());
+  }
   /* closes the open ride when status is no longer On a ride (or force) */
   function rtTick(now, force) {
     if (ROLE !== "driver") return;
@@ -21264,7 +21274,10 @@
     Object.keys(m).forEach(function (day) {
       var list = m[day] || [], last = list[list.length - 1];
       if (!last || last.end) return;
-      if (!force && qManualBusy() && !qOnBreak() && day === chicagoToday()) return;
+      var stay = window.PCSDriverLog && PCSDriverLog.rideSegmentStaysOpen
+        ? PCSDriverLog.rideSegmentStaysOpen({ force: !!force, manualBusy: qManualBusy(), autoBusy: qAutoBusy(), onBreak: qOnBreak(), offline: qOffline(), sameDay: day === chicagoToday() })
+        : (!force && qManualBusy() && !qOnBreak() && day === chicagoToday());
+      if (stay) return;
       var mi = rtMiles() - (Number(last.startMiles) || 0);
       list = list.slice(); list[list.length - 1] = Object.assign({}, last, { end: now, minutes: Math.round((now - last.start) / 60000), miles: Math.max(0, Math.round(mi * 10) / 10) });
       rtSave(day, list);
@@ -21524,6 +21537,7 @@
   function qAfterRender() {
     if (ROLE === "driver") {
       if (!signedIn()) return;
+      try { rtEnsurePcs(); } catch (e) {}
       try { if (state.milesEndPrompt || odometerGatePending() || !canGoOnline()) { qd.lastPub = null; return; } } catch (e) {}
       var busy = qDriverBusy();
       var key = (qToken() ? "t" : "n") + (qOnBreak() ? "b" : "") + (busy ? 1 : 0);

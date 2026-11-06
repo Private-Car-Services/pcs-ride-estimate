@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>history map</title>
+  <style>
+    html, body { margin: 0; background: #f2f2f2; }
+    #host { max-width: 420px; margin: 0 auto; }
+  </style>
+</head>
+<body>
+  <div id="host"></div>
+  <script src="../app/driverlog.js"></script>
+  <script>
+    fetch("synthetic-willis-route.json").then(function (r) { return r.json(); }).then(function (coords) {
+      var DL = window.PCSDriverLog;
+      var t0 = Date.UTC(2026, 10, 6, 15, 0, 0);
+      var cuts = [
+        [0, 12, "a", ""],
+        [12, 32, "r", "PCS"],
+        [32, 48, "r", "Uber"],
+        [48, 62, "r", "Lyft"],
+        [62, 74, "r", "Other"],
+        [74, 76, "b", ""],
+        [76, coords.length, "o", ""]
+      ];
+      var pts = [], rides = [];
+      cuts.forEach(function (c) {
+        var a = c[0], b = Math.min(c[1], coords.length), s = c[2], type = c[3];
+        if (b <= a) return;
+        if (type) rides.push({ type: type, start: t0 + a * 15000, end: t0 + (b - 1) * 15000, minutes: Math.round((b - a) * 15 / 60), miles: Math.round((b - a) * 0.12 * 10) / 10 });
+        for (var i = a; i < b; i++) {
+          var p = coords[i];
+          pts.push([i * 15, Math.round(p[1] * 1e5), Math.round(p[0] * 1e5), s]);
+        }
+      });
+      var mid = coords[Math.floor((12 + 32) / 2)] || coords[0];
+      window.__pcsStreet = [mid[0], mid[1]];
+      var meta = { now: t0 + coords.length * 15000, rides: rides, track: { t0: t0, pts: pts, personal: false, canToggle: false } };
+      var host = document.getElementById("host");
+      host.innerHTML = DL.ridesHtml(meta) + DL.mapHtml(meta);
+      var mapEl = host.querySelector("#dl-map");
+      mapEl.style.height = "560px";
+      mapEl.addEventListener("dl-map-ready", function () { mapEl.dataset.ready = mapEl.dataset.ready || "overview"; });
+      DL.drawMap(host, meta);
+    }).catch(function (e) { document.body.dataset.err = String(e && e.message || e); });
+  </script>
+</body>
+</html>
