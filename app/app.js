@@ -4368,8 +4368,18 @@
     });
     if (changed) try { localStorage.setItem(dlKey("days"), JSON.stringify(m)); } catch (e) {}
   }
+  var rtInLog = false;
+  function rtRefreshLog() {
+    if (rtInLog || typeof document === "undefined") return;
+    var o = document.getElementById("dl-overlay");
+    if (!o || !o.getAttribute("data-mode") || o.querySelector("#dl-dvir-form, #dl-sig-pad")) return;
+    rtInLog = true;
+    try { openDriverLog(o.getAttribute("data-mode"), true); } catch (e) {}
+    rtInLog = false;
+  }
   function openDriverLog(mode, repaintOnly) {
     if (!window.PCSDriverLog) return;
+    if (!rtInLog) { rtInLog = true; try { rtTick(); } catch (e) {} rtInLog = false; }
     if (repaintOnly) { var d0 = driverLogData(); d0.inspDay = state.availAfterMissed || null; var days0 = window.PCSDriverLog.build(d0); window.PCSDriverLog.open(days0, d0, mode); return; }
     try { dvirCfgPull(); } catch (e) {} /* God-mode checklist for the next inspection */
     var paint = function () { var d = driverLogData(); d.inspDay = state.availAfterMissed || null; var days = window.PCSDriverLog.build(d); dlSaveDays(days); window.PCSDriverLog.open(days, d, mode); };
@@ -21326,7 +21336,7 @@
     var id = ""; try { id = assignedRideId(); } catch (e) {}
     var cur = (rtRead()[today] || []).slice();
     var next = DL.foldRideSegments(cur, { manualBusy: qManualBusy(), autoBusy: qAutoBusy(), autoLive: !!id, rideId: id, onBreak: qOnBreak(), offline: qOffline(), sameDay: true, miles: rtMiles() }, now);
-    if (JSON.stringify(next) !== JSON.stringify(cur)) rtSave(today, next);
+    if (JSON.stringify(next) !== JSON.stringify(cur)) { rtSave(today, next); try { rtRefreshLog(); } catch (e) {} }
   }
   /* v2.0m-r: type of the open ride (today, no end yet), else "On a ride"; read from storage so it survives a reload */
   function rtLabel() { try { var l = rtToday(), x = l[l.length - 1]; return x && !x.end && RT_TYPES.indexOf(x.type) >= 0 ? x.type : "On a ride"; } catch (e) { return "On a ride"; } }
@@ -21340,9 +21350,17 @@
   function trkStatus() {
     if (!signedIn()) return "o";
     /* v2.0m-u (Matthew 11/4): nothing driven while the shift is open is personal. Gray only after the shift ends / logout.
-       Offline "pause" with the shift open = Available (business). */
-    var open = false; try { open = !!hosShiftStart(); } catch (e) {}
-    try { if (qOffline()) return open ? "a" : "o"; if (qOnBreak()) return "b"; if (qAutoBusy() || qManualBusy()) return "r"; } catch (e) {}
+       Offline "pause" with the shift open = Available (business).
+       A live assigned PCS ride records On a ride even if the slider is still Break, Offline, or Available. */
+    var open = false, assigned = false, offline = false, brk = false, manual = false, auto = false;
+    try { open = !!hosShiftStart(); } catch (e) {}
+    try { assigned = !!assignedRideId(); } catch (e) {}
+    try { offline = qOffline(); brk = qOnBreak(); manual = qManualBusy(); auto = qAutoBusy(); } catch (e) {}
+    if (window.PCSDriverLog && window.PCSDriverLog.trackLetter) return window.PCSDriverLog.trackLetter({ signedIn: true, assignedLive: assigned, shiftOpen: open, offline: offline, onBreak: brk, manualBusy: manual, autoBusy: auto });
+    if (assigned) return "r";
+    if (offline) return open ? "a" : "o";
+    if (brk) return "b";
+    if (auto || manual) return "r";
     return open ? "a" : "o";
   }
   function trkKey(id) { return "pcs-trk-" + id; }
@@ -21630,7 +21648,7 @@
       return;
     }
     if (t.id === "q-set-available" && VM_BLOCK_BREAK_TO_ONLINE && (qManualBusy() || qOnBreak()) && vmBlocksNow().length) { qd.brkMsg = vmBlockMsg(); render(); return; } /* v2.0f Harry r1 #6 (flag pending Matthew) */
-    if (t.id === "q-set-available") { if (qOffline()) { qSetOffline(false); return; } if (qManualBusy() || qOnBreak()) qSetManualBusy(false); return; }
+    if (t.id === "q-set-available") { if (qOffline()) { qSetOffline(false); return; } if (qManualBusy() || qOnBreak()) qSetManualBusy(false); else try { rtTick(); } catch (e) {} return; }
     if (t.id === "q-set-onride") { qd.rtMenu = !qd.rtMenu; render(); return; } /* v2.0m-q: open the PCS / Uber / Lyft / Other drop-down */
     /* v2.0l item 8: the gap question buttons are removed with the pop-up */
     if (t.id === "q-set-break") { if (!qOnBreak()) { if (brkStoppedOk(Date.now())) { qd.brkMsg = ""; qSetBreak(true); } else { qd.brkMsg = "Pull over and stop to start a break"; render(); } } return; }

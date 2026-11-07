@@ -74,15 +74,17 @@ test("assigned PCS records itself; an open PCS segment is not started again", fu
   assert.equal(DL.pcsAutoRecord(false, { type: "Uber" }), false);
 });
 
-test("a segment stays open for manual or assigned On a ride, and closes on break, offline, or another day", function () {
+test("a manual segment stays open only while that choice is on, and a live assigned PCS ride stays open through break and en route", function () {
   const stay = loadScript("app/driverlog.js").PCSDriverLog.rideSegmentStaysOpen;
   assert.equal(stay({ sameDay: true, manualBusy: true }), true);
-  assert.equal(stay({ sameDay: true, autoBusy: true }), true);
+  assert.equal(stay({ sameDay: true, autoBusy: true }), false);
   assert.equal(stay({ sameDay: true }), false);
-  assert.equal(stay({ sameDay: true, autoBusy: true, onBreak: true }), false);
+  assert.equal(stay({ sameDay: true, manualBusy: true, onBreak: true }), false);
   assert.equal(stay({ sameDay: true, manualBusy: true, offline: true }), false);
-  assert.equal(stay({ sameDay: false, autoBusy: true }), false);
-  assert.equal(stay({ sameDay: true, autoBusy: true, force: true }), false);
+  assert.equal(stay({ sameDay: false, manualBusy: true }), false);
+  assert.equal(stay({ sameDay: true, manualBusy: true, force: true }), false);
+  assert.equal(stay({ sameDay: true, assigned: true, autoLive: true, onBreak: true, offline: true, manualBusy: false }), true);
+  assert.equal(stay({ sameDay: true, assigned: true, autoLive: false, manualBusy: true, autoBusy: true }), false);
 });
 
 test("legacy untagged green tracks are not classified PCS", function () {
@@ -262,6 +264,58 @@ test("manual Uber, Lyft, or Other then assigned PCS then end does not keep later
   assert.equal(DL2.rideSegmentStaysOpen({ sameDay: true, assigned: true, manualBusy: true, autoBusy: true, autoLive: false, type: "PCS" }), false);
 });
 
+
+test("Available closes an open Uber timer and does not invent PCS; a live PCS ride splits Uber then closes", function () {
+  const DL = loadScript("app/driverlog.js").PCSDriverLog;
+  const t0 = 1700000000000;
+  const tPcs = t0 + 60000;
+  const tEnd = t0 + 120000;
+  const avail = DL.foldRideSegments(
+    [{ type: "Uber", start: t0, startMiles: 0 }],
+    { manualBusy: false, autoBusy: true, autoLive: false, rideId: "", onBreak: false, offline: false, sameDay: true, miles: 1 },
+    tPcs
+  );
+  assert.equal(avail.length, 1);
+  assert.equal(avail[0].type, "Uber");
+  assert.equal(avail[0].end, tPcs);
+  assert.equal(avail.some(function (s) { return s.type === "PCS"; }), false);
+  ["break", "offline", "available"].forEach(function (mode) {
+    const started = DL.foldRideSegments(
+      [{ type: "Uber", start: t0, startMiles: 0 }],
+      { manualBusy: mode === "available" ? false : true, autoBusy: false, autoLive: true, rideId: "meter:723TJGU8", sameDay: true, miles: 2, onBreak: mode === "break", offline: mode === "offline" },
+      tPcs
+    );
+    assert.equal(started[0].type, "Uber");
+    assert.equal(started[0].end, tPcs);
+    assert.equal(started[1].type, "PCS");
+    assert.equal(started[1].assigned, true);
+    assert.equal(started[1].rideId, "meter:723TJGU8");
+    assert.ok(!started[1].end);
+    const done = DL.foldRideSegments(started, { manualBusy: true, autoBusy: true, autoLive: false, rideId: "", onBreak: false, offline: false, sameDay: true, miles: 3 }, tEnd);
+    assert.equal(done.length, 2);
+    assert.equal(done[1].end, tEnd);
+    assert.equal(done.filter(function (s) { return !s.end; }).length, 0);
+  });
+  const pts = [
+    { t: tPcs, lat: 30.1, lng: -95.1, s: "b" },
+    { t: tPcs + 1000, lat: 30.2, lng: -95.2, s: "o" },
+    { t: tPcs + 2000, lat: 30.3, lng: -95.3, s: "r" }
+  ];
+  const runs = DL.trkDisplayRuns(pts, [{ type: "PCS", start: tPcs, end: tEnd, assigned: true, rideId: "meter:723TJGU8" }]);
+  const by = {};
+  runs.forEach(function (r) { by[r.s] = r; });
+  assert.equal(by.b.type, "");
+  assert.equal(DL.runColor(by.b), "#e0b000");
+  assert.equal(by.o.type, "");
+  assert.equal(DL.runColor(by.o), "#8a8a8a");
+  assert.equal(by.r.type, "PCS");
+  assert.equal(DL.runColor(by.r), "#1e63d6");
+  const letter = DL.trackLetter;
+  assert.equal(letter({ signedIn: true, assignedLive: true, onBreak: true, offline: true, shiftOpen: true, manualBusy: false }), "r");
+  assert.equal(letter({ signedIn: true, assignedLive: false, onBreak: true, shiftOpen: true }), "b");
+  assert.equal(letter({ signedIn: true, assignedLive: false, offline: true, shiftOpen: false }), "o");
+  assert.equal(letter({ signedIn: true, assignedLive: false, shiftOpen: true }), "a");
+});
 test("God day view keeps a missing stored type blank and does not call it PCS", function () {
   const box = loadScript("app/driverlog.js");
   const god = loadScript("god/godmap.js");

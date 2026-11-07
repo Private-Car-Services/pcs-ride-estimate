@@ -499,14 +499,28 @@
     if (openSeg && !openSeg.end && rideTypeCanon(openSeg.type) === "PCS") return false;
     return true;
   }
-  /* Manual Uber/Lyft/Other/PCS stays open while that manual choice is still on.
-     An assigned PCS segment stays open only while its assigned ride is still live (autoLive).
-     A leftover manual-busy flag must not keep assigned PCS recording after the assigned ride ends. */
+  /* Manual Uber/Lyft/Other/PCS stays open only while that manual choice is still on.
+     A live assigned PCS ride stays open through Break, Offline / en route, and Available.
+     After that ride id ends, the assigned segment closes. A stale auto-busy flag must not
+     keep a manual timer running, and a leftover manual-busy flag must not keep assigned PCS open. */
   function rideSegmentStaysOpen(o) {
     o = o || {};
-    if (o.force || !o.sameDay || o.onBreak || o.offline) return false;
-    if (o.assigned) return !!o.autoLive;
-    return !!(o.manualBusy || o.autoBusy);
+    if (o.force || !o.sameDay) return false;
+    if (o.assigned && o.autoLive) return true;
+    if (o.onBreak || o.offline) return false;
+    if (o.assigned) return false;
+    return !!o.manualBusy;
+  }
+  /* GPS status letter. A live assigned ride is On a ride even if the slider still says
+     Break, Offline / en route, or Available. Stored letters are not rewritten. */
+  function trackLetter(f) {
+    f = f || {};
+    if (!f.signedIn) return "o";
+    if (f.assignedLive) return "r";
+    if (f.offline) return f.shiftOpen ? "a" : "o";
+    if (f.onBreak) return "b";
+    if (f.manualBusy || f.autoBusy) return "r";
+    return f.shiftOpen ? "a" : "o";
   }
   /* Today's segment list: close when the open segment should end, then start assigned PCS when a new live ride needs it.
      force only closes. Starting assigned PCS also closes a still-open manual Uber/Lyft/Other at that instant. */
@@ -897,5 +911,5 @@
     if (mk === "mdy" && (d.length > 4 || (d.length === 4 && !del))) out = d.slice(0, 2) + "/" + d.slice(2, 4) + "/" + d.slice(4);
     if (out !== t.value) t.value = out;
   }, true);
-  window.PCSDriverLog = { newerWash: newerWash, washWarnText: washWarnText, washLastText: washLastText, WASH_WARN: WASH_WARN, recView: recView, washLine: washLine, minTimeGate: minTimeGate, fmtDur: fmtDur, motionGate: motionGate, fluidsDue: fluidsDue, readDvir: readDvir, parseMdy: parseMdy, expiryState: expiryState, washState: washState, EXTRAS: DVIR_EXTRAS, items: items, DVIR: DVIR, CERT: CERT, dayHash: dayHash, snapshot: snapshot, historyHtml: historyHtml, build: build, html: html, gridSvg: gridSvg, listHtml: listHtml, mapHtml: mapHtml, drawMap: drawMap, ridesHtml: ridesHtml, mapReset: function () { mapView = null; }, stopTimeAt: function (d, v) { return stopTimeAt(d, v); }, /* v2.0m-s: God day map */ trkRuns: trkRuns, trkTotals: trkTotals, trkPts: trkPts, trkDisplayRuns: trkDisplayRuns, runColor: runColor, runLabel: runLabel, rideTypeCanon: rideTypeCanon, rideDisplay: rideDisplay, pcsAutoRecord: pcsAutoRecord, rideSegmentStaysOpen: rideSegmentStaysOpen, foldRideSegments: foldRideSegments, historyMapSpec: historyMapSpec, historyMapStyle: historyMapStyle, trackLayers: trackLayers, trackGeo: trackGeo, detailHtml: detailHtml, csv: csv, open: open, close: close, download: download, midnight: midnight, CARRIER: CARRIER };
+  window.PCSDriverLog = { newerWash: newerWash, washWarnText: washWarnText, washLastText: washLastText, WASH_WARN: WASH_WARN, recView: recView, washLine: washLine, minTimeGate: minTimeGate, fmtDur: fmtDur, motionGate: motionGate, fluidsDue: fluidsDue, readDvir: readDvir, parseMdy: parseMdy, expiryState: expiryState, washState: washState, EXTRAS: DVIR_EXTRAS, items: items, DVIR: DVIR, CERT: CERT, dayHash: dayHash, snapshot: snapshot, historyHtml: historyHtml, build: build, html: html, gridSvg: gridSvg, listHtml: listHtml, mapHtml: mapHtml, drawMap: drawMap, ridesHtml: ridesHtml, mapReset: function () { mapView = null; }, stopTimeAt: function (d, v) { return stopTimeAt(d, v); }, /* v2.0m-s: God day map */ trkRuns: trkRuns, trkTotals: trkTotals, trkPts: trkPts, trkDisplayRuns: trkDisplayRuns, runColor: runColor, runLabel: runLabel, rideTypeCanon: rideTypeCanon, rideDisplay: rideDisplay, pcsAutoRecord: pcsAutoRecord, rideSegmentStaysOpen: rideSegmentStaysOpen, foldRideSegments: foldRideSegments, trackLetter: trackLetter, historyMapSpec: historyMapSpec, historyMapStyle: historyMapStyle, trackLayers: trackLayers, trackGeo: trackGeo, detailHtml: detailHtml, csv: csv, open: open, close: close, download: download, midnight: midnight, CARRIER: CARRIER };
 })();
