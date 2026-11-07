@@ -28,7 +28,8 @@
   function ridesOf(raw) {
     var list = Array.isArray(raw) ? raw : (raw && typeof raw === "object" ? Object.keys(raw).map(function (k) { return raw[k]; }) : []);
     return list.filter(function (x) { return x && Number(x.start) > 0; }).map(function (x) {
-      return { type: String(x.type || "Other"), start: Number(x.start), end: Number(x.end) || 0, minutes: Number(x.minutes) || 0, miles: Number(x.miles) || 0 };
+      /* v2.0m-ac: keep a missing type blank. Do not invent Other or PCS. */
+      return { type: x.type == null ? "" : String(x.type), start: Number(x.start), end: Number(x.end) || 0, minutes: Number(x.minutes) || 0, miles: Number(x.miles) || 0 };
     }).sort(function (a, b) { return a.start - b.start; });
   }
   function metaOf(row, day, now) { row = row || {}; return { now: now || Date.now(), track: trackOf(row.track, day), rides: ridesOf(row.rideSegments) }; }

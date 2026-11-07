@@ -9808,13 +9808,48 @@
     if (String(r.prepaidInvoiceNo || r.invoiceNo || (q && (q.number || q.invoiceNumber)) || "").trim()) return "invoiced";
     return "";
   }
-  function rideBillText(k) { return k === "prepaid" ? "Prepaid ride" : k === "invoiced" ? "Invoiced ride" : ""; }
-  function rideBillLabelHtml(k, id) {
-    var t = rideBillText(k); if (!t) return "";
-    return '<p class="pcs-bill-label is-' + k + '" id="' + esc(id || "ride-bill-label") + '" role="status" style="margin:8px auto;max-width:100%;box-sizing:border-box;text-align:center;font-size:22px;font-weight:900;color:#fff;background:#0b3d23;border:2px solid #b8f0c8;border-radius:12px;padding:8px 12px">' + esc(t) + "</p>";
+  /* Display only. Keeps leading zeros. Strips one leading "Invoice #" or "#" so the line does not repeat them. */
+  function rideInvoiceDisplayNo(raw) {
+    var s = String(raw == null ? "" : raw).replace(/^\s+|\s+$/g, "");
+    if (!s) return "";
+    s = s.replace(/^invoice\s*#?\s*/i, "").replace(/^#\s*/, "").replace(/^\s+|\s+$/g, "");
+    return s;
+  }
+  function rideInvoiceNoFrom(r, M) {
+    var info = rideInvoiceInfo(r || {}, M);
+    return rideInvoiceDisplayNo(info && info.invoiceNo);
+  }
+  function rideBillText(k, no) {
+    var t = k === "prepaid" ? "Prepaid ride" : k === "invoiced" ? "Invoiced ride" : "";
+    if (t !== "Prepaid ride") return t;
+    no = rideInvoiceDisplayNo(no);
+    if (!no) return t;
+    return t + " Invoice #" + no;
+  }
+  /* Narrow embedded ride bar is tighter than the full-screen map bar. Shrink only enough to stay one centered line; 16px floor stays readable. Wide full-screen bar stays 22px. */
+  function rideBillLabelFitCss() {
+    return "#rfs-bar,#meter-running,#meter-paid{container-type:inline-size}" +
+      ".pcs-bill-label{font-size:clamp(16px,calc(6.35cqw - 1px),22px);text-align:center}";
+  }
+  function rideBillLabelStyle() {
+    if (typeof document === "undefined" || document.getElementById("pcs-bill-label-fit")) return;
+    var st = document.createElement("style");
+    st.id = "pcs-bill-label-fit";
+    st.textContent = rideBillLabelFitCss();
+    (document.head || document.documentElement).appendChild(st);
+  }
+  function rideBillLabelHtml(k, id, no) {
+    var t = rideBillText(k, no); if (!t) return "";
+    rideBillLabelStyle();
+    return '<p class="pcs-bill-label is-' + k + '" id="' + esc(id || "ride-bill-label") + '" role="status" style="margin:8px auto;max-width:100%;box-sizing:border-box;text-align:center;font-weight:900;color:#fff;background:#0b3d23;border:2px solid #b8f0c8;border-radius:12px;padding:8px 12px">' + esc(t) + "</p>";
   }
   function meterBillKind(M) { return meterShown(M) ? "" : rideBillKind(M && M.schedId ? schedFind(M.schedId) : null, M); }
-  if (typeof window !== "undefined") window.__pcsV20lBill = { kind: rideBillKind, text: rideBillText, label: rideBillLabelHtml };
+  function meterBillInvoiceNo(M) {
+    var r = null;
+    try { if (M && M.schedId) r = schedFind(M.schedId); } catch (e) {}
+    return rideInvoiceNoFrom(r, M);
+  }
+  if (typeof window !== "undefined") window.__pcsV20lBill = { kind: rideBillKind, text: rideBillText, label: rideBillLabelHtml, invoiceNo: rideInvoiceDisplayNo, from: rideInvoiceNoFrom, fit: rideBillLabelFitCss };
   function meterInvInfo(M) { return rideInvoiceInfo(M && M.schedId ? schedFind(M.schedId) : null, M); }
   function meterInvRefresh(M) { /* live: the 15-min Square sync / refreshScheduledRides flips the badge without a re-render */
     if (typeof document === "undefined" || meterShown(M)) return;
@@ -10675,7 +10710,7 @@
   function rfsBarHtml(M) {
     var f = meterFare(M), t = meterTollInfo(M), pp = M.prepaid;
     var shown = meterShown(M);
-    var html = (shown ? "" : rideBillLabelHtml(meterBillKind(M), "rfs-bill-label")) + '<div class="rfs-row">' + (shown ? '<div class="rfs-fare" id="rfs-fare" aria-label="Meter fare">' + meterMoneyShown(M, f.sub) + "</div>" : "") +
+    var html = (shown ? "" : rideBillLabelHtml(meterBillKind(M), "rfs-bill-label", meterBillInvoiceNo(M))) + '<div class="rfs-row">' + (shown ? '<div class="rfs-fare" id="rfs-fare" aria-label="Meter fare">' + meterMoneyShown(M, f.sub) + "</div>" : "") +
       '<div class="rfs-stats"><span><b id="rfs-miles">' + f.miles.toFixed(2) + "</b> mi</span><span><b id=\"rfs-time\">" + meterClock(Date.now() - M.startedAt) + "</b></span>" +
       (shown ? '<span class="rfs-tier" id="rfs-tier">' + esc(M.tierLabel || "Meter") + (M.taxRate ? " \u00b7 tax at the end" : "") + "</span>" : "") + "</div></div>" + rideEstHtml(M, "rfs-est");
     if (pp && shown) html += '<p class="rfs-paid" id="rfs-paid">\u2713 ' + esc(prepaidBadgeText(pp)) + " \u00b7 balance $0.00</p>";
@@ -16202,7 +16237,7 @@
       if (P.prepaid) return ( /* v75v */
         '<section id="meter-paid">' + meterTestTag(M) +
         '<p class="tag">Ride ' + esc(M.code) + "</p>" +
-        rideBillLabelHtml("prepaid", "meter-bill-label") + prepaidBadgeHtml(M.prepaid, "meter-paid-prepaid") +
+        rideBillLabelHtml("prepaid", "meter-bill-label", M.prepaid && M.prepaid.invoiceNo) + prepaidBadgeHtml(M.prepaid, "meter-paid-prepaid") +
         '<p class="meter-paid" id="meter-paid-amount">' + (P.status === "invoice_pending" ? "Invoice sent, waiting on Square" : "Paid: Square verified") + "</p>" +
         '<p class="meter-sub" id="meter-paid-detail">Nothing to collect from the rider.</p>' + /* v2.0l r3: no $ on a prepaid ride */
         '<p class="fine">Miles and time were kept for the record. A tip from the rider is welcome and stays yours.</p>' +
@@ -16288,7 +16323,7 @@
       (meterShown(M) ? prepaidBadgeHtml(M.prepaid, "meter-prepaid-badge") + /* v75v */
       '<p class="meter-fare" id="meter-fare" aria-live="off">' + meterMoneyShown(M, f.sub) + "</p>" +
       '<p class="meter-sub">Meter' + (M.minCents > M.baseCents ? " · " + money(M.minCents) + " minimum" : "") + (M.taxRate ? " · tax added at the end" : "") + "</p>"
-        : rideBillLabelHtml(meterBillKind(M), "meter-bill-label")) + /* v2.0a: no fare on a non-metered ride */
+        : rideBillLabelHtml(meterBillKind(M), "meter-bill-label", meterBillInvoiceNo(M))) + /* v2.0a: no fare on a non-metered ride */
       (!meterShown(M) ? "" : /* v2.0d.5 r3: miles / time / slow min / mph are the meter: metered rides only */
       '<div class="meter-grid"><div><b id="meter-miles">' + f.miles.toFixed(2) + "</b><span>Miles</span></div>" +
       '<div><b id="meter-time">' + meterClock(Date.now() - M.startedAt) + "</b><span>Time</span></div>" +
@@ -21200,7 +21235,7 @@
     }
     if (!flag && now - autoBrk.since >= AUTO_BRK_STILL_MS) autoBrkSet(true, now, autoBrk.since);
   }
-  setInterval(function () { try { rtTick(); } catch (e) {} try { if (rideLockSync(Date.now())) render(); } catch (e) {} try { autoBrkTick(Date.now()); } catch (e) {} }, 30000); /* r13: ride started while Offline/Break -> On a ride */
+  setInterval(function () { try { rtTick(); } catch (e) {} try { rtEnsurePcs(); } catch (e) {} try { if (rideLockSync(Date.now())) render(); } catch (e) {} try { autoBrkTick(Date.now()); } catch (e) {} }, 30000); /* r13: ride started while Offline/Break -> On a ride */
   function qAutoBusy() {
     if (ROLE !== "driver" || !signedIn()) return false;
     var st = String(state.rideStatus || "").toLowerCase();
@@ -21249,26 +21284,49 @@
     try { localStorage.setItem(rtKey(), JSON.stringify(m)); } catch (e) {}
     try { authFetch(milesUrl(driverPresenceId(), day), { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ rideSegments: list }) }).catch(function () {}); } catch (e) {}
   }
-  function rtStart(type, now) {
+  function rtStart(type, now, extra) {
     if (RT_TYPES.indexOf(type) < 0) return;
     now = now || Date.now(); rtTick(now, true);
     var day = chicagoToday(), m = rtRead(), list = (m[day] || []).slice();
-    list.push({ type: type, start: now, startMiles: rtMiles() });
+    var seg = { type: type, start: now, startMiles: rtMiles() };
+    if (extra && extra.assigned) { seg.assigned = true; seg.rideId = String(extra.rideId || ""); }
+    list.push(seg);
     rtSave(day, list);
   }
-  /* closes the open ride when status is no longer On a ride (or force) */
+  /* Live assigned ride only: accepted/started trip, scheduled trip not done, or a meter that is still running.
+     Ended/unpaid meter, a finished status, and a ride lock with no live trip are not a new PCS recording. */
+  function assignedRideId() {
+    if (ROLE !== "driver" || !signedIn()) return "";
+    var st = String(state.rideStatus || "").toLowerCase();
+    if (state.screen === "trip" && (st === "accepted" || st === "started")) return "ride:" + String(state.driverCode || state.code || "trip");
+    try { var t = schedTripNow(); if (t && t.id && t.phase !== "done") return "sched:" + t.id; } catch (e) {}
+    try { var M = state.meter; if (M && M.status === "running" && M.code) return "meter:" + M.code; } catch (e2) {}
+    return "";
+  }
+  /* v2.0m-ac: fold today's segments from the live assigned ride. Leftover manual busy does not keep assigned PCS open. */
+  function rtEnsurePcs(now) { rtTick(now, false); }
+  /* closes the open ride when that segment should end (or force). Today's assigned PCS is folded here. */
   function rtTick(now, force) {
     if (ROLE !== "driver") return;
     now = now || Date.now();
-    var m = rtRead();
+    var DL = window.PCSDriverLog, m = rtRead(), today = chicagoToday();
     Object.keys(m).forEach(function (day) {
+      if (!force && day === today && DL && DL.foldRideSegments) return;
       var list = m[day] || [], last = list[list.length - 1];
       if (!last || last.end) return;
-      if (!force && qManualBusy() && !qOnBreak() && day === chicagoToday()) return;
+      var stay = DL && DL.rideSegmentStaysOpen
+        ? DL.rideSegmentStaysOpen({ force: !!force || day !== today, manualBusy: qManualBusy(), autoBusy: qAutoBusy(), autoLive: false, assigned: !!last.assigned, type: last.type, onBreak: qOnBreak(), offline: qOffline(), sameDay: day === today })
+        : (!force && qManualBusy() && !qOnBreak() && day === today);
+      if (stay) return;
       var mi = rtMiles() - (Number(last.startMiles) || 0);
       list = list.slice(); list[list.length - 1] = Object.assign({}, last, { end: now, minutes: Math.round((now - last.start) / 60000), miles: Math.max(0, Math.round(mi * 10) / 10) });
       rtSave(day, list);
     });
+    if (force || !DL || !DL.foldRideSegments) return;
+    var id = ""; try { id = assignedRideId(); } catch (e) {}
+    var cur = (rtRead()[today] || []).slice();
+    var next = DL.foldRideSegments(cur, { manualBusy: qManualBusy(), autoBusy: qAutoBusy(), autoLive: !!id, rideId: id, onBreak: qOnBreak(), offline: qOffline(), sameDay: true, miles: rtMiles() }, now);
+    if (JSON.stringify(next) !== JSON.stringify(cur)) rtSave(today, next);
   }
   /* v2.0m-r: type of the open ride (today, no end yet), else "On a ride"; read from storage so it survives a reload */
   function rtLabel() { try { var l = rtToday(), x = l[l.length - 1]; return x && !x.end && RT_TYPES.indexOf(x.type) >= 0 ? x.type : "On a ride"; } catch (e) { return "On a ride"; } }
@@ -21524,6 +21582,7 @@
   function qAfterRender() {
     if (ROLE === "driver") {
       if (!signedIn()) return;
+      try { rtEnsurePcs(); } catch (e) {}
       try { if (state.milesEndPrompt || odometerGatePending() || !canGoOnline()) { qd.lastPub = null; return; } } catch (e) {}
       var busy = qDriverBusy();
       var key = (qToken() ? "t" : "n") + (qOnBreak() ? "b" : "") + (busy ? 1 : 0);
