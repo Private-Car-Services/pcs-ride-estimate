@@ -328,6 +328,28 @@ test("God day view keeps a missing stored type blank and does not call it PCS", 
   assert.equal((html.match(/<b>PCS<\/b>/g) || []).length, 1);
 });
 
+
+test("v2.0m-ad is the update phones on v2.0m-ac will accept", function () {
+  const box = loadScript("app/version.js");
+  assert.equal(box.PCS_APP_VERSION, "v2.0m-ad");
+  assert.ok(box.pcsVersionCmp("v2.0m-ad", "v2.0m-ac") >= 0);
+  assert.notEqual(box.PCS_APP_VERSION, "v2.0m-ac");
+  const pages = {
+    "app/driver/index.html": ["../version.js?v=2.0m-ad", "../driverlog.js?v=2.0m-ad", "../app.js?v=2.0m-ad"],
+    "app/index.html": ["version.js?v=2.0m-ad", "app.js?v=2.0m-ad"],
+    "god/index.html": ["../app/version.js?v=2.0m-ad", "../app/driverlog.js?v=2.0m-ad", "./godmap.js?v=2.0m-ad"]
+  };
+  Object.keys(pages).forEach(function (rel) {
+    const html = fs.readFileSync(path.join(root, rel), "utf8");
+    pages[rel].forEach(function (src) { assert.ok(html.indexOf(src) >= 0, rel + " " + src); });
+    assert.equal(html.indexOf("2.0m-ac"), -1, rel);
+  });
+  const driverSw = fs.readFileSync(path.join(root, "app/driver/sw-driver.js"), "utf8");
+  const godSw = fs.readFileSync(path.join(root, "god/sw.js"), "utf8");
+  assert.equal(driverSw.indexOf("caches"), -1);
+  assert.ok(godSw.indexOf("No page caching") >= 0);
+  assert.equal(godSw.indexOf("caches"), -1);
+});
 test("live navigation maps still swap to Google traffic; the history style does not", function () {
   const calls = [];
   const L = { tileLayer: function (url, opts) { calls.push(url); return { url: url, opts: opts || {}, on: function () { return this; }, setUrl: function () {} }; } };
