@@ -10171,14 +10171,20 @@
     return schedPatch(id, { stops: t ? [t] : [], stopsGeo: t ? [{ address: t, lat: isCoord(lat) ? +lat : null, lng: isCoord(lng) ? +lng : null }] : [], stopsEdited: true, stopsEditedBy: "driver", stopsEditedAt: Date.now() });
   }
   var schedGeoCache = {};
+  /* A found point is remembered. A miss is not: the next Head to pickup tries again. */
+  function schedGeoHit(text) {
+    var hit = schedGeoCache[String(text || "").trim()];
+    return hit && isCoord(hit.lat) && isCoord(hit.lng) ? hit : null;
+  }
   function schedGeocode(text) {
     text = String(text || "").trim();
     if (text.length < 5) return Promise.resolve(null);
-    if (schedGeoCache[text] !== undefined) return Promise.resolve(schedGeoCache[text]);
+    var hit = schedGeoHit(text);
+    if (hit) return Promise.resolve(hit);
     return meterPlaces("/geocode", { address: text.slice(0, 200) }, 7000).then(function (d) {
       var p = d && d.place;
       var pt = p && isCoord(p.lat) && isCoord(p.lng) ? { lat: +p.lat, lng: +p.lng } : null;
-      schedGeoCache[text] = pt;
+      if (pt) schedGeoCache[text] = pt;
       return pt;
     });
   }
@@ -11500,16 +11506,26 @@
     remain: navRemain, dist: navFmtDist, firstName: navFirstName, arrOn: function () { return navArrOn(); }, leg: function () { return navTestLeg(); }, orient: function () { return navOrient(); },
     setLimit: function (L) { navLimit = L; }, setRoute: function (R) { schedNavRoute = R; }, paint: function () { navTestPaint(); },
     here: function (lat, lng) { if (navTestOn()) { state.hereLat = lat; state.hereLng = lng; } }, arrShow: function (v) { if (navTestOn()) navArrShow(!!v); }, ride: function (r) { if (navTestOn() && r && r.id && !schedFind(r.id)) state.scheduledRides = (state.scheduledRides || []).concat([r]); } }; /* test hooks (do nothing with the flag off) */
+  /* Same pane and SVG renderer as the meter route (pcsRoute, above the tiles). */
+  function schedRouteLineOpts(approx, renderer) {
+    return {
+      casing: { color: "#0B3D91", weight: 11, opacity: 0.9, lineCap: "round", lineJoin: "round", className: "sched-route-casing", pane: "pcsRoute", renderer: renderer, interactive: false },
+      line: { color: "#1E88FF", weight: 7, opacity: 1, lineCap: "round", lineJoin: "round", dashArray: approx ? "8 10" : null, className: "sched-route", pane: "pcsRoute", renderer: renderer, interactive: false }
+    };
+  }
   function schedNavLayers(bounds) {
     var t = schedNavTrip(), R = schedNavRoute;
     if (!t || !state.boardMarkers || !window.L || !R || R.id !== t.id) return;
     if (R.line && R.line.length > 1) {
-      state.boardMarkers.addLayer(window.L.polyline(R.line, { color: "#0B3D91", weight: 11, opacity: 0.9, lineCap: "round", className: "sched-route-casing", interactive: false }));
-      state.boardMarkers.addLayer(window.L.polyline(R.line, { color: "#1E88FF", weight: 7, opacity: 1, lineCap: "round", dashArray: R.approx ? "8 10" : null, className: "sched-route", interactive: false }));
+      var rr = (typeof meterRoutePane === "function" ? meterRoutePane() : null) || undefined;
+      var o = schedRouteLineOpts(!!R.approx, rr);
+      state.boardMarkers.addLayer(window.L.polyline(R.line, o.casing));
+      state.boardMarkers.addLayer(window.L.polyline(R.line, o.line));
     }
     state.boardMarkers.addLayer(window.L.marker([+R.to.lat, +R.to.lng], { icon: pinIcon("Pickup", "pin-pickup"), zIndexOffset: 400 }));
     bounds.push([+R.to.lat, +R.to.lng]);
   }
+  if (typeof window !== "undefined") window.__pcsPickupRoute = { lineOpts: schedRouteLineOpts, geocode: function (t) { return schedGeocode(t); }, hit: schedGeoHit };
   function schedNavUrl(text, lat, lng) {
     var exact = isCoord(lat) && isCoord(lng);
     var dest = exact ? (+lat).toFixed(6) + "," + (+lng).toFixed(6) : String(text || "");
