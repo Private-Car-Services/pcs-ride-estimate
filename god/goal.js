@@ -40,7 +40,7 @@
   var GS_KEY = "pcsGoalSyncTest";
   function gsFlag() { try { var m = /[?&]goalsync=([01])\b/.exec(String((typeof location !== "undefined" && location.search) || "")); if (m) { if (m[1] === "1") localStorage.setItem(GS_KEY, "1"); else localStorage.removeItem(GS_KEY); } return localStorage.getItem(GS_KEY) === "1"; } catch (e) { return false; } }
   var GS = gsFlag();
-  var KEYED = ["settings", "adj", "dayHrs"] /* v77.13b: per-day hours on shift + $/hr */, SKIP = { entries: 1, _sync: 1 };
+  var KEYED = ["settings", "adj", "dayHrs", "fuel"] /* fuel stays out of the income totals */, SKIP = { entries: 1, _sync: 1 };
   function gsSet(on) { GS = !!on; if (GS) SKIP.pin = 1; else delete SKIP.pin; } /* v76h: the 4-digit PIN stays on each device (never synced) */
   gsSet(GS);
   function hsh(x) { var s = JSON.stringify(x === undefined ? null : x), h = 5381; for (var i = 0; i < s.length; i++) h = ((h * 33) ^ s.charCodeAt(i)) >>> 0; return h.toString(36) + s.length.toString(36); }
@@ -159,6 +159,8 @@
   /* ---------- lock ---------- */
   /* v75t: number pad on every money/number box. decimal = dollars (keypad with a point), numeric = whole counts (days left, PIN). */
   function numPad(root) { if (!root || !root.querySelectorAll) return 0; var n = 0; [].forEach.call(root.querySelectorAll("input"), function (el) {
+    if (el.getAttribute("data-fuel") === "gal") { el.type = "text"; el.setAttribute("inputmode", "decimal"); el.setAttribute("autocomplete", "off"); kpMark(el, false); el.setAttribute("data-kp", "g"); el.removeAttribute("data-reg"); n++; return; }
+    if (el.getAttribute("data-fuel") === "odo") { el.type = "text"; el.setAttribute("inputmode", "numeric"); el.setAttribute("autocomplete", "off"); kpMark(el, true); n++; return; }
     if ((el.readOnly && !kpHold(el)) || /^(password|checkbox|radio|date|time|file|hidden)$/.test(el.type) && !(el.type === "password" && el.getAttribute("inputmode") === "numeric")) return;
     var im = el.getAttribute("inputmode"), whole = el.id === "gl-s-days" || im === "numeric", money = whole || im === "decimal" || el.type === "number";
     if (!money) return; if (el.type === "number") el.type = "text";
@@ -206,7 +208,7 @@
     else if (k === "bs") { if (s === en && s > 0) s--; nv = v.slice(0, s) + v.slice(en); }
     else { if (k === "." && (whole || v.slice(0, s).concat(v.slice(en)).indexOf(".") >= 0)) return; nv = v.slice(0, s) + k + v.slice(en);
       if (k === "." && s === 0) { nv = "0" + nv; s++; }
-      var dp = nv.indexOf("."); if (dp >= 0 && nv.length - dp - 1 > 2) return;
+      var dp = nv.indexOf("."), maxDp = el.getAttribute("data-kp") === "g" ? 3 : 2; if (dp >= 0 && nv.length - dp - 1 > maxDp) return;
       var ml = parseInt(el.getAttribute("maxlength"), 10); if (ml > 0 && nv.length > ml) return; s++; }
     el.value = nv; try { el.setSelectionRange(s, s); } catch (e) {} kpFire(el); }
   function kpPair(el) {
@@ -507,10 +509,94 @@
     h += ". Weekly " + $m(c.weekGoal) + " \u2212 week income before today " + $m(c.wBefore, true) + " = " + $m(c.weekGoal == null ? null : Math.max(0, c.weekGoal - c.wBefore), true) + (c.offToday ? "; today is Sunday and Sunday is off this week, so today\u2019s goal is $0.00 (turn on Working Sunday to make the week remaining today\u2019s goal)" : " \u00f7 " + (c.dLeft == null ? "?" : dWord(c.dLeft)) + " left" + wkWord(c) + " = today " + $m(c.dailyAuto, true)) + (c.dayOv != null ? "; you typed today " + $m(c.dayOv, true) + ", so that is used" : "") + ".</p>";
     if (mg != null && c.mBefore > mg) h += '<p class="err">October income before this week (' + $m(c.mBefore) + ') is already more than the monthly goal, so the weekly auto shows $0. If that number looks too big, open Adjustments and check the list for an entry counted twice.</p>';
     return h; }
+  /* Matthew's Goal page only. Fuel is not income and is not offered on a driver screen. */
+  /* Local Central date and 24-hour time: 2026-11-08 08:55 CT is 11/8/26 and 0855. */
+  function fuelWhen(ms) {
+    var fmt;
+    try { fmt = new Intl.DateTimeFormat("en-US", { timeZone: "America/Chicago", year: "2-digit", month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit", hourCycle: "h23" }); } catch (e) { return { date: "", time: "" }; }
+    var g = {};
+    fmt.formatToParts(new Date(ms)).forEach(function (p) { if (p.type !== "literal") g[p.type] = p.value; });
+    var hour = String(g.hour || "").replace(/\D/g, ""), minute = String(g.minute || "").replace(/\D/g, "");
+    if (hour.length === 1) hour = "0" + hour;
+    if (hour === "24") hour = "00";
+    if (minute.length === 1) minute = "0" + minute;
+    return { date: String(Number(g.month)) + "/" + String(Number(g.day)) + "/" + String(g.year || ""), time: hour + minute };
+  }
+  var FUEL_OWNER_EMAIL = "mwragge78@gmail.com";
+  function fuelForMatthew() {
+    try {
+      var k = JSON.parse(localStorage.getItem("pcs-god-keep-v1") || "null");
+      return !!(k && String(k.email || "").trim().toLowerCase() === FUEL_OWNER_EMAIL);
+    } catch (e) { return false; }
+  }
+  function fuelRows(book) {
+    var f = book || {}, rows = [];
+    Object.keys(f).forEach(function (k) { if (k.indexOf("log_") === 0 && f[k] && typeof f[k] === "object") rows.push(Object.assign({ id: k }, f[k])); });
+    rows.sort(function (a, b) { return (Number(a.at) || 0) - (Number(b.at) || 0); });
+    return rows;
+  }
+  function fuelPrevOdo(book) {
+    var rows = fuelRows(book);
+    if (rows.length) return Math.round(Number(rows[rows.length - 1].odo));
+    var seed = book && book.seed;
+    return seed && isFinite(+seed.odo) ? Math.round(+seed.odo) : null;
+  }
+  function fuelMath(prev, odo, gallons, price) {
+    if ([prev, odo, gallons, price].some(function (v) { return String(v == null ? "" : v).trim() === "" || !isFinite(+v); })) return { ok: false, miles: null, mpg: null, tank: null, ppm: null };
+    prev = Math.round(Number(prev)); odo = Math.round(Number(odo));
+    gallons = Math.round(Number(gallons) * 1000) / 1000; price = Math.round(Number(price) * 100) / 100;
+    var miles = odo - prev;
+    if (!(prev >= 0) || !(odo > prev) || !(gallons > 0) || !(price >= 0)) return { ok: false, miles: isFinite(miles) ? miles : null, mpg: null, tank: null, ppm: null };
+    var mpg = Math.round((miles / gallons) * 100) / 100;
+    return { ok: true, prev: prev, odo: odo, gallons: gallons, price: price, miles: miles, mpg: mpg, tank: Math.round(mpg * 22 * 100) / 100, ppm: Math.round((price / miles) * 100) / 100 };
+  }
+  function fuelFmt(m) {
+    if (!m || !m.ok) return { miles: "", mpg: "", tank: "", ppm: "" };
+    return { miles: String(m.miles), mpg: m.mpg.toFixed(2), tank: m.tank.toFixed(2), ppm: "$" + m.ppm.toFixed(2) };
+  }
+  function fuelHtml() {
+    if (!fuelForMatthew()) return "";
+    var book = (D && D.fuel) || {}, prev = fuelPrevOdo(book), rows = fuelRows(book);
+    var box = "background:#fff;color:#0b2a12;border:2px solid #1f8a3b;border-radius:10px;padding:8px;font-size:18px";
+    var head = '<section class="card" id="gl-fuel"><b class="t">Fuel</b><p class="fine" id="gl-fuel-when">Date and time are saved automatically.</p>';
+    if (prev == null) return head + '<label class="fine">Starting odometer <input id="gl-fuel-odo" data-fuel="odo" type="text" inputmode="numeric" autocomplete="off" aria-label="Starting odometer" style="' + box + ';width:160px"></label> <button type="button" class="btn" id="gl-fuel-seed">Save starting odometer</button><p class="fine" id="gl-fuel-msg"></p></section>';
+    var last = rows.length ? rows[rows.length - 1] : null, shown = last ? fuelFmt(fuelMath(last.prev, last.odo, last.gallons, last.price)) : fuelFmt(null);
+    return head + '<p class="fine">Previous odometer <b id="gl-fuel-prev">' + prev + "</b> locked</p>" +
+      '<label class="fine">Price <input id="gl-fuel-price" type="text" inputmode="decimal" autocomplete="off" aria-label="Fuel price" placeholder="0.00" style="' + box + ';width:120px"></label> ' +
+      '<label class="fine">Current odometer <input id="gl-fuel-odo" data-fuel="odo" type="text" inputmode="numeric" autocomplete="off" aria-label="Current odometer" style="' + box + ';width:140px"></label> ' +
+      '<label class="fine">Gallons <input id="gl-fuel-gal" data-fuel="gal" type="text" inputmode="decimal" autocomplete="off" aria-label="Gallons" placeholder="0.000" style="' + box + ';width:120px"></label> ' +
+      '<button type="button" class="btn" id="gl-fuel-save">Save fill</button><p class="fine" id="gl-fuel-msg"></p>' +
+      '<p id="gl-fuel-out">Miles <b id="gl-fuel-miles">' + shown.miles + '</b> · MPG <b id="gl-fuel-mpg">' + shown.mpg + '</b> · Miles per tank <b id="gl-fuel-tank">' + shown.tank + '</b> · Price per mile <b id="gl-fuel-ppm">' + shown.ppm + "</b></p>" +
+      (rows.length ? "<ul>" + rows.slice(-8).reverse().map(function (r) { var f = fuelFmt(fuelMath(r.prev, r.odo, r.gallons, r.price)); return "<li>" + esc(r.date + " " + r.time) + " · $" + Number(r.price).toFixed(2) + " · odo " + r.odo + " · " + Number(r.gallons).toFixed(3) + " gal · " + f.miles + " mi · " + f.mpg + " mpg</li>"; }).join("") + "</ul>" : "") +
+      "</section>";
+  }
+  function fuelPreview() {
+    var prev = fuelPrevOdo((D && D.fuel) || {}), price = document.getElementById("gl-fuel-price"), odo = document.getElementById("gl-fuel-odo"), gal = document.getElementById("gl-fuel-gal");
+    if (!price || !odo || !gal) return;
+    var m = fuelMath(prev, odo.value, gal.value, price.value), f = fuelFmt(m);
+    ["miles", "mpg", "tank", "ppm"].forEach(function (k) { var el = document.getElementById("gl-fuel-" + k); if (el) el.textContent = f[k]; });
+  }
+  function fuelSaveSeed() {
+    if (!fuelForMatthew()) return;
+    var el = document.getElementById("gl-fuel-odo"), msg = document.getElementById("gl-fuel-msg"), odo = Math.round(Number(el && el.value));
+    if (!(odo >= 0) || String(el && el.value || "").trim() === "") { if (msg) msg.textContent = "Enter the starting odometer."; return; }
+    D.fuel = D.fuel || {}; D.fuel.seed = { odo: odo, at: Date.now() }; save(); paint();
+  }
+  function fuelSaveFill() {
+    if (!fuelForMatthew()) return;
+    var msg = document.getElementById("gl-fuel-msg"), prev = fuelPrevOdo(D.fuel || {});
+    var m = fuelMath(prev, document.getElementById("gl-fuel-odo").value, document.getElementById("gl-fuel-gal").value, document.getElementById("gl-fuel-price").value);
+    if (!m.ok) { if (msg) msg.textContent = "Current odometer has to be above the previous one, with gallons and a price."; return; }
+    var at = Date.now(), when = fuelWhen(at);
+    D.fuel = D.fuel || {}; D.fuel["log_" + at] = { at: at, date: when.date, time: when.time, prev: m.prev, odo: m.odo, gallons: m.gallons, price: m.price };
+    save(); paint();
+  }
+  if (typeof window !== "undefined") window.__pcsGoalFuel = { math: fuelMath, fmt: fuelFmt, when: fuelWhen, prev: fuelPrevOdo, rows: fuelRows, owner: fuelForMatthew };
   function paint() { paint.editK = null; /* v2.0d.4 r2 (Harry): every redraw rebuilds the add row as "Add", so no edit may survive it */
     if (snapToday()) save(); /* first open after midnight, or once goals are set */
     var c = calc(), s = D.settings, h = "";
     h += '<div id="gl-top">' + topHtml(c) + '</div>';
+    h += fuelHtml();
     function f(id, l, v) { return '<label><span class="fine">' + l + '</span><input id="' + id + '" type="text" ' + (id === "gl-s-days" ? 'inputmode="numeric" pattern="[0-9]*"' : 'inputmode="decimal"') + ' autocomplete="off" value="' + esc(v == null ? "" : v) + '" style="width:130px"></label>'; }
     function o(id, l, v, tag) { return '<div class="gl-ov" style="display:inline-block;margin:4px 8px 4px 0;position:relative;z-index:2"><span class="fine" style="display:block">' + l + ' <b id="' + tag + '" style="color:var(--lite)"></b></span><input id="' + id + '" class="gl-ovin" type="text" inputmode="decimal" enterkeyhint="done" autocomplete="off" autocorrect="off" spellcheck="false" placeholder="auto" aria-label="' + esc(l) + ' (blank = auto)" value="' + esc(v == null ? "" : v) + '" style="width:130px"></div>'; }
     h += '<form class="card" id="gl-f-set"><b class="t">Goals</b><br>' + f("gl-s-year", "Year goal $", s.year) + o("gl-s-month", "Monthly goal $", s.monthOv, "gl-t-month") + o("gl-s-week", "Weekly goal $", s.weekOv, "gl-t-week") + o("gl-s-day", "Set today\u2019s goal $ (today only)", s.dayOvDate === c.t ? s.dayOv : null, "gl-t-day") + f("gl-s-days", "Days left in week", c.dLeft) + f("gl-s-wround", "Round weekly up to $ (e.g. 100)", s.weekRound) + '<div style="display:inline-block;margin:6px 10px 6px 0"><span class="fine" style="display:block">Work days: Mon\u2013Sat (6 a week)</span><span class="fine" style="display:block;font-size:15px">Use the big \u201cWorking Sunday\u201d switch at the top for a 7-day week.</span></div>' + f("gl-s-uber", "Uber week goal $", s.uber) +
@@ -682,6 +768,13 @@
     Array.prototype.forEach.call(document.querySelectorAll("#gl-screen .gl-ovin"), function (el) { el.readOnly = false; el.disabled = false; el.removeAttribute("readonly"); el.removeAttribute("disabled");
       el.addEventListener("touchend", function () { if (document.activeElement !== el) el.focus(); }); });
     bindRest();
+    bindFuel();
+  }
+  function bindFuel() {
+    var seed = document.getElementById("gl-fuel-seed"), saveB = document.getElementById("gl-fuel-save");
+    if (seed) seed.onclick = fuelSaveSeed;
+    if (saveB) saveB.onclick = fuelSaveFill;
+    ["gl-fuel-price", "gl-fuel-odo", "gl-fuel-gal"].forEach(function (id) { var el = document.getElementById(id); if (el) el.addEventListener("input", fuelPreview); });
   }
   /* v76j: flip Working Sunday for this week; the auto day count + today's goal are recalculated right away (a typed Days left for today is cleared) */
   function sunToggle() { var s = D.settings = D.settings || {}, c0 = calc(), on = s.workSunDate !== c0.sun;
@@ -786,7 +879,7 @@
     idb().then(function () { lockNow(); }).catch(function () { app.innerHTML = '<p class="err">This browser cannot store the ledger (private browsing?).</p>'; });
   }
   function glClose() { paint.dayPick = null; kpClose(); kpEl = null; if (D && dek) { try { stamp(D); } catch (e) {} } dek = null; D = null; SY.pw = ""; clearTimeout(SY.t); app = null; var ov = document.getElementById("gl-screen"); if (ov) ov.remove(); }
-  if (typeof module !== "undefined" && module.exports) module.exports = { stamp: stamp, merge: merge, packVault: packVault, unpackVault: unpackVault, sealData: sealData, openData: openData, openWithPassword: openWithPassword, kek: kek, wrap: wrap, setYearTotal: setYearTotal, _get: function () { return D; }, migrate: migrate, applySets: applySets, derived: derived, mtd: mtd, _set: function (d) { D = d; }, calc: calc, ytdTotal: ytdTotal, ADJ: ADJ, weeksLeft: weeksLeft, numPad: numPad, kpPress: kpPress, kpBtn: kpBtn, glOpen: glOpen, weekEarned: weekEarned, weekBar: weekBar, sunLine: sunLine, sunToggleHtml: sunToggleHtml, sunToggle: sunToggle, fix76j: fix76j, snapToday: snapToday, howAll: howAll, howToday: howToday, topHtml: topHtml, paint: paint, gsSet: gsSet, gsOn: function () { return GS; }, gsLineTxt: gsLineTxt, syncNow: syncNow, _SY: SY, _dek: function () { return dek; }, _setDek: function (k) { dek = k; }, adoptRemote: adoptRemote, godLink: godLink, syncAtTxt: syncAtTxt, gsBarHtml: gsBarHtml, restoreScreen: restoreScreen, lockNow: lockNow, firstRun: firstRun, pinScreen: pinScreen, _setApp: function (a) { app = a; } };
+  if (typeof module !== "undefined" && module.exports) module.exports = { stamp: stamp, merge: merge, packVault: packVault, unpackVault: unpackVault, sealData: sealData, openData: openData, openWithPassword: openWithPassword, kek: kek, wrap: wrap, setYearTotal: setYearTotal, _get: function () { return D; }, migrate: migrate, applySets: applySets, derived: derived, mtd: mtd, _set: function (d) { D = d; }, calc: calc, ytdTotal: ytdTotal, ADJ: ADJ, weeksLeft: weeksLeft, numPad: numPad, kpPress: kpPress, kpBtn: kpBtn, glOpen: glOpen, weekEarned: weekEarned, weekBar: weekBar, sunLine: sunLine, sunToggleHtml: sunToggleHtml, sunToggle: sunToggle, fix76j: fix76j, snapToday: snapToday, howAll: howAll, howToday: howToday, topHtml: topHtml, paint: paint, gsSet: gsSet, gsOn: function () { return GS; }, gsLineTxt: gsLineTxt, syncNow: syncNow, _SY: SY, _dek: function () { return dek; }, _setDek: function (k) { dek = k; }, adoptRemote: adoptRemote, godLink: godLink, syncAtTxt: syncAtTxt, gsBarHtml: gsBarHtml, restoreScreen: restoreScreen, lockNow: lockNow, firstRun: firstRun, pinScreen: pinScreen, _setApp: function (a) { app = a; }, saveLocal: function () { return save(true); } };
   window.__pcsGoalOpen = glOpen; window.__pcsGoalSyncOn = function () { return GS; }; window.__pcsGoalGodLink = godLink; window.__pcsGoalClose = glClose; window.__pcsGoalFirstRun = firstRun; window.__pcsGoalPinScreen = pinScreen;
   document.addEventListener("click", function (e) { var t = e.target.closest ? e.target.closest("[data-god-menu=goal]") : null; if (t) { e.stopPropagation(); glOpen(); } }, true);
 })();
