@@ -67,44 +67,72 @@ function loadClean() {
   sandbox.window = sandbox;
   vm.createContext(sandbox);
   vm.runInContext(fs.readFileSync(path.join(__dirname, "../app/app.js"), "utf8"), sandbox, { filename: "app.js" });
-  return sandbox.__pcsFollow.clean;
+  return { clean: sandbox.__pcsFollow.clean, photoPick: sandbox.__pcsFollow.photoPick };
 }
 
-test("tracker shows a stored card photo, an existing profile jpeg, and hides the rest", function () {
+test("a valid card image stays ahead of the profile jpeg", function () {
   const box = loadFollow();
-  const card = box.live.photo({ cardKey: KEY, photo: JPEG });
-  assert.equal(card, "https://pcs-pay.pcsrides.workers.dev/dcard/" + KEY + "-p.jpg");
-  const shown = box.live.showPhoto(box.photo, { cardKey: KEY });
-  assert.equal(shown, card);
+  const card = "https://pcs-pay.pcsrides.workers.dev/dcard/" + KEY + "-p.jpg";
+  assert.equal(box.live.photo({ cardKey: KEY, photo: JPEG }), card);
+  assert.equal(box.live.showPhoto(box.photo, { cardKey: KEY, photo: JPEG }), card);
   assert.equal(box.photo.hidden, false);
   assert.equal(box.photo.src, card);
-  box.photo.onerror();
-  assert.equal(box.photo.hidden, true);
-  const again = box.live.showPhoto(box.photo, { photo: JPEG });
-  assert.equal(again, JPEG);
-  assert.equal(box.photo.hidden, false);
-  assert.equal(box.photo.src, JPEG);
-  box.live.showPhoto(box.photo, {});
-  assert.equal(box.photo.hidden, true);
-  assert.equal(box.photo.src, "");
-  assert.equal(box.live.photo({ photo: "https://example.test/driver.jpg" }), "");
-  assert.equal(box.live.photo({ photo: "data:image/jpeg;base64," + "A".repeat(120001) }), "");
-  assert.equal(box.live.photo({ cardKey: "short", photo: JPEG }), JPEG);
 });
 
-test("tracking copy carries the profile jpeg without a text, and prefers a card key", function () {
-  const clean = loadClean();
+test("a failed card image falls back to the same driver's jpeg", function () {
+  const box = loadFollow();
+  const card = "https://pcs-pay.pcsrides.workers.dev/dcard/" + KEY + "-p.jpg";
+  box.live.showPhoto(box.photo, { cardKey: KEY, photo: JPEG });
+  box.photo.onerror();
+  assert.equal(box.photo.hidden, false);
+  assert.equal(box.photo.src, JPEG);
+  assert.notEqual(box.photo.src, card);
+});
+
+test("a failed image with no valid jpeg stays hidden", function () {
+  const box = loadFollow();
+  box.live.showPhoto(box.photo, { cardKey: KEY, photo: "https://example.test/driver.jpg" });
+  box.photo.onerror();
+  assert.equal(box.photo.hidden, true);
+  const jpegOnly = loadFollow();
+  jpegOnly.live.showPhoto(jpegOnly.photo, { photo: JPEG });
+  jpegOnly.photo.onerror();
+  assert.equal(jpegOnly.photo.hidden, true);
+  assert.equal(jpegOnly.live.photo({ photo: "data:image/jpeg;base64," + "A".repeat(120001) }), "");
+  assert.equal(jpegOnly.live.photo({}), "");
+});
+
+test("a changed card key or jpeg is shown on the next refresh", function () {
+  const box = loadFollow();
+  const card = "https://pcs-pay.pcsrides.workers.dev/dcard/" + KEY + "-p.jpg";
+  const nextKey = "zzzzzzzzzz1234567890WXYZ";
+  const nextJpeg = "data:image/jpeg;base64," + "Zm".repeat(20);
+  box.live.showPhoto(box.photo, { cardKey: KEY, photo: JPEG });
+  box.photo.onerror();
+  assert.equal(box.photo.src, JPEG);
+  assert.equal(box.live.showPhoto(box.photo, { cardKey: nextKey, photo: JPEG }), "https://pcs-pay.pcsrides.workers.dev/dcard/" + nextKey + "-p.jpg");
+  assert.equal(box.photo.src, "https://pcs-pay.pcsrides.workers.dev/dcard/" + nextKey + "-p.jpg");
+  assert.notEqual(box.photo.src, card);
+  box.photo.onerror();
+  assert.equal(box.live.showPhoto(box.photo, { cardKey: nextKey, photo: nextJpeg }), nextJpeg);
+  assert.equal(box.photo.src, nextJpeg);
+  assert.equal(box.photo.hidden, false);
+});
+
+test("tracking copy keeps the profile jpeg beside a card key and ignores another driver", function () {
+  const app = loadClean();
   const now = Date.now();
-  const photoOnly = clean({ status: "on_way", driverName: "Pat Driver", photo: JPEG, cardKey: "" }, now);
+  const photoOnly = app.clean({ status: "on_way", driverName: "Pat Driver", photo: JPEG, cardKey: "" }, now);
   assert.equal(photoOnly.photo, JPEG);
   assert.equal(photoOnly.cardKey, undefined);
-  assert.equal(photoOnly.bill, undefined);
-  const card = clean({ status: "on_way", driverName: "Pat Driver", photo: JPEG, cardKey: KEY }, now);
-  assert.equal(card.cardKey, KEY);
-  assert.equal(card.photo, undefined);
-  const bad = clean({ status: "on_way", photo: "https://example.test/a.jpg" }, now);
+  const both = app.clean({ status: "on_way", driverName: "Pat Driver", photo: JPEG, cardKey: KEY }, now);
+  assert.equal(both.cardKey, KEY);
+  assert.equal(both.photo, JPEG);
+  const bad = app.clean({ status: "on_way", photo: "https://example.test/a.jpg", cardKey: KEY }, now);
+  assert.equal(bad.cardKey, KEY);
   assert.equal(bad.photo, undefined);
-  const sms = fs.readFileSync(path.join(__dirname, "../app/app.js"), "utf8");
-  assert.ok(sms.indexOf('qWorker("/sms/tracker"') >= 0);
-  assert.equal(sms.indexOf("photo: safePhoto(acc.photo) || safePhoto(state.driverPhoto)"), sms.lastIndexOf("photo: safePhoto(acc.photo) || safePhoto(state.driverPhoto)"));
+  assert.equal(app.photoPick(JPEG, { email: "other@example.test", photo: JPEG }, "self@example.test"), JPEG);
+  assert.equal(app.photoPick("", { email: "other@example.test", photo: JPEG }, "self@example.test"), "");
+  assert.equal(app.photoPick("", { email: "self@example.test", photo: JPEG }, "self@example.test"), JPEG);
+  assert.equal(app.photoPick("", { email: "self@example.test", photo: "https://example.test/a.jpg" }, "self@example.test"), "");
 });

@@ -10930,7 +10930,7 @@
     var df = folFirst(o.driverName); if (df) out.driverFirst = df;
     var car = folCar(o.car); if (car) out.car = car;
     if (/^[A-Za-z0-9_-]{24}$/.test(String(o.cardKey || ""))) out.cardKey = String(o.cardKey); /* v77.3b: random key of the driver's picture card (photo shown on /follow/); never the driver id */
-    else { var ph = safePhoto(o.photo); if (ph) out.photo = ph; } /* existing profile jpeg only when no picture-card key is stored; never a web address */
+    var ph = safePhoto(o.photo); if (ph) out.photo = ph; /* same driver's profile jpeg stays available if that card image fails; never a web address */
     var pk = folPlace(o.pickup); if (pk) out.pickup = pk;
     var dr = folPlace(o.dest); if (dr) out.dest = dr;
     var sx = folStopsOut(o.stops); if (sx) out.stops = sx; /* v76g */
@@ -11046,11 +11046,36 @@
   }
   function folMyId(r) { return String(r && r.assignedDriverId || "").toLowerCase().replace(/[^a-z0-9]/g, "_").replace(/^_+|_+$/g, "").slice(0, 48); }
   /* every ride this driver can share: God-board rides assigned to me (any phase) + the app ride on screen */
+  function followDriverPhoto(localPhoto, remote, selfEmail) { /* pure: local jpeg wins; a remote jpeg only when its email is this driver's */
+    var local = safePhoto(localPhoto);
+    if (local) return local;
+    if (!remote || typeof remote !== "object") return "";
+    var self = String(selfEmail || "").trim().toLowerCase();
+    var got = String(remote.email || "").trim().toLowerCase();
+    if (!self || !got || got !== self) return "";
+    return safePhoto(remote.photo);
+  }
+  var folPhotoWait = { email: "", photo: "", until: 0 };
+  function folProfilePhoto() {
+    var acc = readDriverAccount() || {};
+    var local = safePhoto(acc.photo) || safePhoto(state.driverPhoto);
+    if (local) return local;
+    var email = String(acc.email || (typeof readSession === "function" ? readSession() : "") || "").trim().toLowerCase();
+    if (!email || driverIdForEmail(email) !== driverPresenceId()) return "";
+    if (folPhotoWait.email === email && (folPhotoWait.photo || Date.now() < folPhotoWait.until)) return folPhotoWait.photo || "";
+    folPhotoWait.email = email; folPhotoWait.until = Date.now() + 60000;
+    fetchDriverProfile(email).then(function (row) {
+      if (driverIdForEmail(email) !== driverPresenceId()) return;
+      var ph = followDriverPhoto("", row, email);
+      if (ph) folPhotoWait.photo = ph;
+    }).catch(function () {});
+    return folPhotoWait.photo || "";
+  }
   function folDriverCtxs() {
     if (ROLE !== "driver" || fol.off || !syncOn()) return [];
     var out = [], me = driverPresenceId(), M = state.meter, trip = schedTripNow(), here = folHere();
     var acc = readDriverAccount() || {};
-    var base = { driverName: acc.name || state.driverName || "", car: acc, cardKey: folCardKey(), photo: safePhoto(acc.photo) || safePhoto(state.driverPhoto) }; /* picture-card key if already stored; otherwise the profile jpeg on this phone */
+    var base = { driverName: acc.name || state.driverName || "", car: acc, cardKey: folCardKey(), photo: folProfilePhoto() }; /* this driver's jpeg only; card key still displays first */
     (state.scheduledRides || []).forEach(function (r) {
       if (!r || !r.id || folMyId(r) !== me || !FOL_KEY_RE.test("c_" + r.id)) return;
       var st = r.status === "cancelled" || r.status === "deleted" ? "cancelled" : r.status === "completed" ? "completed" : "assigned";
@@ -11305,7 +11330,7 @@
     setInterval(function () { try { folFastTick(); } catch (e) {} }, 500); /* v76f: checks twice a second, sends at most once a second */
     setInterval(function () { try { folSweep(); } catch (e) {} }, 60000);
     setTimeout(function () { try { folSweep(); } catch (e) {} }, 5000);
-    window.__pcsFollow = { bizMsg: folBizMsg, bizSend: folBizSend, autoMsg: folAutoMsg, clean: folClean, token: folNewToken, link: folLink, sms: folSmsHref, msg: folDriverMsg, riderMsg: folRiderMsg, e164: folPhoneE164,
+    window.__pcsFollow = { bizMsg: folBizMsg, bizSend: folBizSend, autoMsg: folAutoMsg, clean: folClean, token: folNewToken, link: folLink, sms: folSmsHref, msg: folDriverMsg, riderMsg: folRiderMsg, e164: folPhoneE164, photoPick: followDriverPhoto,
       ctxs: function () { return folDriverCtxs(); }, rider: function () { return folRiderCtx(); }, state: fol, fast: function () { folFastTick(); }, posOut: folPosOut, tick: function () { if (ROLE === "driver") folDriverTick(); else folRiderTick(); },
       sweep: function () { folSweep(); }, mine: folMine, route: folRoute, schedStops: folSchedStops, sig: folSig }; /* test hooks */
   }

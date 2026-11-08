@@ -67,21 +67,32 @@
   function photoSrc(k) { /* pure (tested): only a 24-char card key, only our Worker */
     return /^[A-Za-z0-9_-]{24}$/.test(String(k || "")) ? "https://pcs-pay.pcsrides.workers.dev/dcard/" + k + "-p.jpg" : "";
   }
-  function trackerPhotoSrc(d) { /* card jpeg when its key is on the copy; otherwise the driver's existing profile jpeg. No other addresses. */
-    d = d || {};
-    var card = photoSrc(d.cardKey);
-    if (card) return card;
-    var p = typeof d.photo === "string" ? d.photo : "";
+  function profileJpeg(d) {
+    var p = d && typeof d.photo === "string" ? d.photo : "";
     return /^data:image\/jpeg;base64,[A-Za-z0-9+/=]+$/.test(p) && p.length <= 120000 ? p : "";
+  }
+  function trackerPhotoSrc(d) { /* card jpeg first; the profile jpeg is only the standby. No other addresses. */
+    d = d || {};
+    return photoSrc(d.cardKey) || profileJpeg(d);
   }
   function applyTrackerPhoto(ph, d) {
     if (!ph) return "";
-    var src = trackerPhotoSrc(d);
-    if (ph.__s !== src) {
-      ph.__s = src;
-      if (src) { ph.onerror = function () { ph.hidden = true; }; ph.src = src; ph.hidden = false; }
-      else { ph.src = ""; ph.hidden = true; }
-    }
+    var card = photoSrc(d && d.cardKey), jpeg = profileJpeg(d);
+    if (ph.__card !== card) { ph.__card = card; ph.__cardFailed = false; }
+    var src = card && !ph.__cardFailed ? card : jpeg;
+    if (ph.__s === src) return src;
+    ph.__s = src;
+    if (!src) { ph.src = ""; ph.hidden = true; return ""; }
+    ph.onerror = function () {
+      if (src === card && jpeg && !ph.__cardFailed) {
+        ph.__cardFailed = true; ph.__s = jpeg;
+        ph.onerror = function () { ph.hidden = true; };
+        ph.src = jpeg; ph.hidden = false;
+        return;
+      }
+      ph.hidden = true;
+    };
+    ph.src = src; ph.hidden = false;
     return src;
   }
   function carText(c) {
