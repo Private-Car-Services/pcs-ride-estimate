@@ -76,10 +76,11 @@ test("a bare invoice number is not labeled paid or unpaid and gets no link", fun
   assert.equal(pub.receiptUrl, undefined);
   assert.equal(pub.invoiceNo, "000554");
   const shown = live.bill({ status: "picked_up", bill: "invoiced", invoiceNo: "000554" });
-  assert.equal(shown.label, "Invoiced ride");
+  assert.equal(shown.label, "Invoice #000554");
   assert.equal(shown.link, null);
-  assert.equal(shown.gap, "no-verified-payment");
-  assert.equal(shown.label.indexOf("000554"), -1);
+  assert.equal(shown.gap, "number-only");
+  assert.equal(shown.label.indexOf("paid"), -1);
+  assert.equal(shown.label.indexOf("unpaid"), -1);
 });
 
 test("verified paid and unpaid rows publish only a matching Square link", function () {
@@ -103,12 +104,13 @@ test("verified paid and unpaid rows publish only a matching Square link", functi
   assert.equal(owedShown.link.href, PAY);
   assert.equal(owedShown.link.text, "Pay invoice");
   const noLink = live.bill({ bill: "invoiced", pay: "unpaid", invoiceNo: "000574" });
-  assert.equal(noLink.label, "Invoiced ride");
+  assert.equal(noLink.label, "Invoice #000574");
   assert.equal(noLink.link, null);
-  assert.equal(noLink.gap, "unpaid-without-pay-url");
+  assert.equal(noLink.gap, "number-only");
+  assert.equal(noLink.label.indexOf("unpaid"), -1);
   const noReceipt = live.bill({ bill: "invoiced", pay: "paid", invoiceNo: "000210" });
-  assert.equal(noReceipt.label, "Invoiced ride");
-  assert.equal(noReceipt.gap, "paid-without-receipt");
+  assert.equal(noReceipt.label, "Invoice #000210");
+  assert.equal(noReceipt.gap, "number-only");
   assert.equal(noReceipt.label.indexOf("paid"), -1);
 });
 
@@ -121,5 +123,6 @@ test("partial, refund, and non-Square links are not a paid or unpaid href", func
   assert.equal(evil.payUrl, undefined);
   const script = live.bill({ bill: "invoiced", pay: "unpaid", invoiceNo: "000574", payUrl: "javascript:alert(1)" });
   assert.equal(script.link, null);
-  assert.equal(script.label, "Invoiced ride");
+  assert.equal(script.label, "Invoice #000574");
+  assert.equal(script.label.indexOf("unpaid"), -1);
 });

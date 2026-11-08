@@ -29,12 +29,12 @@
     var st = document.createElement("style"); st.id = "fl-style";
     st.textContent = "#fl-live{background:#f0fdf4;color:#0b3d23;border:3px solid #2e9d4f;border-radius:16px;padding:12px}" +
       "#fl-live p{color:#0b3d23}.fl-status{display:block;margin:0 0 8px;padding:10px 12px;border-radius:12px;background:#0b6b3a;color:#fff !important;font-size:21px;font-weight:900;text-align:center}" +
-      ".fl-under{display:flex;align-items:flex-start;gap:8px;margin:0 0 6px}.fl-under-main{flex:1 1 auto;min-width:0}#fl-bill a{color:#0b3d23;font-weight:900;text-decoration:underline}" +
+      ".fl-under{display:flex;align-items:flex-start;gap:8px;margin:0 0 6px}.fl-under-main{flex:1 1 auto;min-width:0}#fl-call a{color:#0b3d23;font-weight:900;text-decoration:underline}" +
       ".fl-drv{display:flex;align-items:center;gap:10px;background:#0b3d23;color:#f3ead2;border:2px solid #d4b15a;border-radius:14px;padding:6px 10px;margin:0}#fl-live .fl-drv .fl-who,#fl-live .fl-drv .fl-car{color:#f3ead2}.fl-photo{width:64px;height:64px;border-radius:50%;object-fit:cover;border:3px solid #d4b15a;flex:none;background:#20371d}.fl-drv-t{min-width:0}.fl-drv .fl-plate{color:#0b3d23}" +
       ".fl-who{font-size:18px;font-weight:800;margin:4px 0}.fl-car{font-size:16px;font-weight:700;margin:2px 0 8px}.fl-plate{display:inline-block;background:#fff;border:2px solid #0b3d23;border-radius:8px;padding:0 8px;margin-left:4px;font-weight:900;letter-spacing:.06em}" +
       "#fl-map{height:62vh;min-height:340px;border-radius:14px;margin:6px 0 10px;border:2px solid #0b3d23}" +
       ".fl-eta{font-size:19px;font-weight:900;text-align:center;margin:6px 0}.fl-row{margin:3px 0;font-size:16px}.fl-row b{display:inline-block;min-width:44px}" +
-      ".fl-upd{font-size:13px;text-align:center;margin:6px 0 0}.fl-call{display:block;margin:10px 0 0;min-height:52px;line-height:52px;text-align:center;border-radius:12px;background:#bef1c6;color:#0b3d23 !important;border:3px solid #2e9d4f;font-size:19px;font-weight:900;text-decoration:none}" +
+      ".fl-upd{font-size:13px;text-align:center;margin:6px 0 0}.fl-call{display:block;margin:10px 0 0;min-height:52px;line-height:52px;text-align:center;border-radius:12px;background:#bef1c6;color:#0b3d23 !important;border:3px solid #2e9d4f;font-size:19px;font-weight:900;text-decoration:none}#fl-call[hidden]{display:none}" +
       ".fl-big{display:grid;grid-template-columns:1fr 1.4fr;gap:8px;margin:8px 0}.fl-spd,.fl-arr{background:#fff;border:3px solid #2e9d4f;border-radius:14px;padding:8px;text-align:center;color:#0b3d23}" +
       ".fl-spd b{display:block;font-size:46px;line-height:1.05;font-weight:900;font-variant-numeric:tabular-nums}.fl-spd span{display:block;font-size:15px;font-weight:800}.fl-spd small{display:block;font-size:12px;font-weight:700}" +
       ".fl-arr .k{display:block;font-size:15px;font-weight:800}.fl-arr b{display:block;font-size:34px;line-height:1.1;font-weight:900}.fl-arr span{display:block;font-size:16px;font-weight:800}.fl-arr small{display:block;font-size:13px;font-weight:700}" +
@@ -103,7 +103,7 @@
   function shell() {
     style();
     app.innerHTML = '<div class="card" id="fl-live"><p class="fl-status" id="fl-status" role="status" aria-live="polite"></p>' +
-      '<div class="fl-under" id="fl-under"><div class="fl-under-main"><p class="fl-bill" id="fl-bill" hidden style="margin:0 0 8px;padding:6px 10px;border-radius:12px;border:2px solid #0b6b3a;background:#fff;color:#0b3d23;font-size:19px;font-weight:900;text-align:center"></p>' +
+      '<div class="fl-under" id="fl-under"><div class="fl-under-main">' +
       '<div class="fl-drv" id="fl-drv"><div class="fl-drv-t"><p class="fl-who" id="fl-who"></p><p class="fl-car" id="fl-car"></p></div></div></div>' +
       '<img class="fl-photo" id="fl-photo" alt="Your PCS driver" hidden width="64" height="64"></div>' +
       '<div class="fl-big" id="fl-big" hidden><div class="fl-spd" id="fl-spd"><b id="fl-mph">--</b><span id="fl-mph-l">mph</span><small id="fl-mph-n"></small></div>' +
@@ -112,7 +112,7 @@
       '<div id="fl-map" role="img" aria-label="Map with the car, the pickup and the drop-off"></div>' +
       '<p class="fl-row" id="fl-from"></p><div id="fl-stops"></div><p class="fl-row" id="fl-to"></p>' +
       '<p class="fl-upd" id="fl-upd"></p><p class="error" id="fl-net" role="status"></p>' +
-      '<a class="fl-call" id="fl-call" href="' + PCS_TEL + '">Questions? Call PCS ' + PCS_PHONE + "</a></div>";
+      '<p class="fl-call" id="fl-call" hidden></p></div>';
     if (window.L) {
       S.map = window.L.map("fl-map", { zoomControl: true, attributionControl: true, zoomSnap: 0.25, zoomDelta: 1 }).setView([29.76, -95.37], 11);
       /* v76g: the viewer touched the map (drag, pinch, wheel, the +/- buttons): auto-zoom waits 10 s, then picks up again */
@@ -342,14 +342,15 @@
     var legacy = d.bill === "invoiced" ? "Invoiced ride" : d.bill === "prepaid" ? "Prepaid ride" : "";
     if (pay === "paid" && no && receipt) return { label: "Invoice #" + no + " \u2013 paid", link: { href: receipt, text: "View receipt", id: "fl-receipt" }, show: true, gap: "" };
     if (pay === "unpaid" && no && payUrl) return { label: "Invoice #" + no + " \u2013 unpaid", link: { href: payUrl, text: "Pay invoice", id: "fl-pay" }, show: true, gap: "" };
+    if (no) return { label: "Invoice #" + no, link: null, show: true, gap: "number-only" };
     var gap = "";
     if (pay === "paid" && !receipt) gap = "paid-without-receipt";
     else if (pay === "unpaid" && !payUrl) gap = "unpaid-without-pay-url";
-    else if (no || legacy) gap = "no-verified-payment";
-    return { label: legacy, link: null, show: !!legacy, gap: gap };
+    else if (legacy) gap = "no-verified-payment";
+    return { label: "", link: null, show: false, gap: gap };
   }
   function paintBill(d) {
-    var el = $("fl-bill"); if (!el) return;
+    var el = $("fl-call"); if (!el) return;
     var m = billBarModel(d);
     if (!m.show) { el.hidden = true; if (el.textContent) el.textContent = ""; return; }
     if (m.link) {

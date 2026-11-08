@@ -73,6 +73,27 @@ function ride(id, extra) {
   return Object.assign({ id: id, assignedDriverId: "driver", status: "assigned", rider: "Rahual", riderPhone: "555-0100", receiptUrl: "https://evil.example/receipt", invoicePayUrl: "https://evil.example/pay", prepaidInvoiceNo: "000999", sqInvoice: { paid: true, status: "PAID" } }, extra || {});
 }
 
+test("the rider phone stays, and the business call line is not in those cards", function () {
+  const src = fs.readFileSync(path.join(__dirname, "../app/app.js"), "utf8");
+  const rider = src.slice(src.indexOf("function schedRiderLineHtml"), src.indexOf("function rideLineRide"));
+  assert.ok(rider.indexOf("href=\\\"tel:") >= 0);
+  assert.equal(rider.indexOf("slot ?"), -1);
+  ["function cardNeededHtml", "function cardSheetEl", "function payAfterRideHtmlInner"].forEach(function (name) {
+    const at = src.indexOf(name);
+    assert.ok(at > 0, name);
+  });
+  const cards = src.slice(src.indexOf("function cardNeededHtml"), src.indexOf("function paymentStatusCard")) +
+    src.slice(src.indexOf("function openCardStep"), src.indexOf("function mountSquareCard")) +
+    src.slice(src.indexOf("function payAfterRideHtmlInner"), src.indexOf("function payLaterNote"));
+  assert.equal(cards.indexOf("Questions? Call"), -1);
+  assert.equal(cards.indexOf("936-261-7878"), -1);
+  const live = fs.readFileSync(path.join(__dirname, "../follow/follow-live.js"), "utf8");
+  const shell = live.slice(live.indexOf("function shell"), live.indexOf("function draw"));
+  assert.equal(shell.indexOf("Questions? Call"), -1);
+  assert.equal(shell.indexOf("fl-bill"), -1);
+  assert.ok(shell.indexOf('id="fl-call"') > shell.indexOf('id="fl-upd"'));
+});
+
 const follow = loadApp();
 const live = loadFollow();
 

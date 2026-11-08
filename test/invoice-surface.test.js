@@ -27,9 +27,9 @@ const fullCss = quotedCss(appSrc.slice(appSrc.indexOf("function schedFullStyle")
 
 function lineHtml(ride) {
   if (ride === "574") {
-    return '<p id="sched-rider-line" class="pcs-ride-line" style="margin:0;min-height:44px;box-sizing:border-box;padding:8px 10px;background:#fff;color:#1a1a1a;border-radius:10px;font-size:16px;font-weight:700;line-height:1.35;white-space:normal;overflow:visible">Rider: Mike Camara · Invoice #000574 – paid · <a id="sched-inv-link" href="https://squareup.com/receipt/preview/EXAMPLE574">View receipt</a></p>';
+    return '<p id="sched-rider-line" class="pcs-ride-line" style="margin:0;min-height:44px;box-sizing:border-box;padding:8px 10px;background:#fff;color:#1a1a1a;border-radius:10px;font-size:16px;font-weight:700;line-height:1.35;white-space:normal;overflow:visible">Rider: Mike Camara · <a id="sched-rider-phone" href="tel:5550102">555-0102</a></p>';
   }
-  return '<p id="sched-rider-line" class="pcs-ride-line" style="margin:0;min-height:44px;box-sizing:border-box;padding:8px 10px;background:#fff;color:#1a1a1a;border-radius:10px;font-size:16px;font-weight:700;line-height:1.35;white-space:normal;overflow:visible">Rider: Rahual · Invoice #000554 – unpaid · <a id="sched-inv-link" href="https://app.squareup.com/pay-invoice/invtmp:example-554">Pay invoice</a></p>';
+  return '<p id="sched-rider-line" class="pcs-ride-line" style="margin:0;min-height:44px;box-sizing:border-box;padding:8px 10px;background:#fff;color:#1a1a1a;border-radius:10px;font-size:16px;font-weight:700;line-height:1.35;white-space:normal;overflow:visible">Rider: Rahual · <a id="sched-rider-phone" href="tel:5550100">555-0100</a></p>';
 }
 
 function controls() {
@@ -127,7 +127,11 @@ function page(mode, ride) {
       vw: window.innerWidth,
       mapH: st ? Math.round(st.getBoundingClientRect().height) : 0,
       line: probe("sched-rider-line"),
-      link: probe("sched-inv-link"),
+      link: probe("sched-rider-phone"),
+      questions: ["home-chrome", "home-map-stage", "sched-sec", "meter-split-run"].some(function (id) {
+        var el = document.getElementById(id);
+        return !!(el && (el.innerText || "").indexOf("Questions? Call") >= 0);
+      }),
       end: probe("rfs-end"),
       meterEnd: probe("meter-end"),
       follow: probe("map-mode-toggle"),
@@ -236,7 +240,9 @@ test("the rider line is on screen in pickup and active, normal and fullscreen", 
       assert.equal(g.line.inView, true, name + " line off screen " + JSON.stringify(g.line));
       assert.equal(g.line.self, true, name + " tap missed the line " + JSON.stringify(g.line));
       assert.ok(g.line.h >= 44 && g.line.h <= 88, name + " line height " + g.line.h);
-      assert.equal(g.link.self, true, name + " link not hittable " + JSON.stringify(g.link));
+      assert.equal(g.questions, false, name + " still shows the business call line");
+      assert.equal(g.link.self, true, name + " rider phone not hittable " + JSON.stringify(g.link));
+      assert.ok(String(g.link.text).indexOf("555-") === 0, name + " rider phone text " + g.link.text);
       ["follow", "north", "zoom", "center"].forEach(function (k) {
         if (!g[k] || !g[k].present) return;
         assert.equal(g[k].self, true, name + " " + k + " covered " + JSON.stringify(g[k]));

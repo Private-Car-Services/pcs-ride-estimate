@@ -6421,6 +6421,30 @@
     );
   }
 
+  /* Same spot as the old "Questions? Call" business line. A paid or unpaid word and a link
+     come only from a fresh Square read. A known invoice number with no read is the number alone.
+     No number: the line is gone. The rider's own phone is not this line. */
+  function questionSlotHtml() {
+    var share = { invoiceNo: "", pay: "", url: "" };
+    try {
+      var ride = typeof currentRide === "function" ? currentRide() : null;
+      if (ride && ride.id && typeof invoiceShareFromWorker === "function") share = invoiceShareFromWorker(verInv[ride.id]);
+    } catch (e) {}
+    if (share.pay && share.url && /^\d{1,20}$/.test(share.invoiceNo)) {
+      return '<p class="fine" id="pcs-question-slot">Invoice #' + esc(share.invoiceNo) + " \u2013 " + share.pay + ' \u00b7 <a id="pcs-question-link" href="' + esc(share.url) + '" target="_blank" rel="noopener">' + (share.pay === "paid" ? "View receipt" : "Pay invoice") + "</a></p>";
+    }
+    var no = "";
+    try {
+      if (state.prepaidInvoice && state.prepaidInvoice.invoiceNo) no = String(state.prepaidInvoice.invoiceNo);
+      else {
+        var row = typeof currentRide === "function" ? currentRide() : null;
+        no = String((row && (row.prepaidInvoiceNo || row.invoiceNo)) || "");
+      }
+    } catch (e2) {}
+    no = no.replace(/^#/, "").replace(/\s+/g, "");
+    if (!/^\d{1,20}$/.test(no)) return "";
+    return '<p class="fine" id="pcs-question-slot">Invoice #' + esc(no) + "</p>";
+  }
   function cardNeededHtml() {
     var requested = String(state.cardStatus || "") === "link_requested";
     var testing = testSkipPayEnabled();
@@ -6436,7 +6460,7 @@
         ? '<button class="btn ghost" type="button" id="skip-pay-btn">Skip for testing</button>' +
           '<p class="fine">Testing only · no real Square charge.</p>'
         : "") +
-      '<p class="fine">Questions? Call <a href="tel:' + BUSINESS_PHONE + '">' + esc(BUSINESS_PHONE) + "</a>.</p>" +
+      questionSlotHtml() +
       "</div>"
     );
   }
@@ -6543,11 +6567,11 @@
         '<div class="sheet" role="dialog" aria-modal="true" aria-labelledby="card-title">' + head +
         '<h3 id="card-title">Card setup</h3>' +
         '<p class="lede">Card setup inside the app is being finalized. Tap below and the Private Car Services office will send you a secure Square card link for this ride.</p>' +
-        '<p class="fine">Add your card so you can pay and tip after drop-off. Questions? Call <a href="tel:' +
-        BUSINESS_PHONE + '">' + esc(BUSINESS_PHONE) + "</a>.</p>" +
+        '<p class="fine">Add your card so you can pay and tip after drop-off.</p>' +
+        questionSlotHtml() +
         '<p class="error" id="sq-card-error" role="alert"></p>' +
         (requested
-          ? '<p class="fine"><strong>Got it \u2014 we\u2019ll send your secure card link shortly.</strong> The office was notified. Questions? Call ' + esc(BUSINESS_PHONE) + ".</p>"
+          ? '<p class="fine"><strong>Got it \u2014 we\u2019ll send your secure card link shortly.</strong> The office was notified.</p>'
           : '<button class="btn" type="button" id="card-link-request">Send me the secure card link</button>') +
         '<button class="btn secondary" type="button" id="card-sheet-close">Close</button>' +
         "</div>";
@@ -6854,7 +6878,7 @@
         '<p class="fine">Your receipt is also in History.</p></div>';
     }
     if (state.cardStatus === "owner_ok" && !state.hasCardOnFile) {
-      return '<div class="card payment-card" id="pay-after"><p class="tag">Payment</p><p class="lede">Payment is handled by Private Car Services. Questions? Call ' + esc(BUSINESS_PHONE) + ".</p></div>";
+      return '<div class="card payment-card" id="pay-after"><p class="tag">Payment</p><p class="lede">Payment is handled by Private Car Services.</p>' + questionSlotHtml() + "</div>";
     }
     if (!state.finalFareCents) {
       return '<div class="card payment-card" id="pay-after"><p class="tag">Pay after the ride</p><p class="lede">Getting the final fare from your driver\u2026</p></div>';
@@ -6907,7 +6931,7 @@
       (state.payConfirm && !state.payBusy ? payConfirmHtml()
         : '<button class="btn' + (failed && useSaved ? " secondary" : "") + '" type="button" id="pay-now-btn" data-failed="' + (failed && useSaved ? "1" : "0") + '"' +
           (state.payBusy || !tipReady() ? " disabled" : "") + ">" + esc(payBtnLabel(failed && useSaved)) + "</button>") +
-      '<p class="fine">Questions about the fare? Call <a href="tel:' + BUSINESS_PHONE + '">' + esc(BUSINESS_PHONE) + "</a> before you pay.</p>" +
+      questionSlotHtml() +
       (state.payBusy ? "" : '<button class="btn secondary" type="button" id="pay-later-btn">Pay later · back to Home</button>' +
         '<p class="fine" id="pay-later-note">' + esc(payLaterNote()) + "</p>") +
       "</div>"
@@ -9885,9 +9909,9 @@
     if (!m || !/(^|\.)squareup(sandbox)?\.com$|(^|\.)square\.link$/i.test(m[1])) return "";
     return s;
   }
-  /* Replaces the rider phone text on the existing rider line. No new row.
+  /* Invoice text for a caller that already has a place to put it. The rider line keeps the rider phone.
      Full "Invoice # – paid/unpaid" plus a link only when both the verified word and a Square URL exist.
-     Partial, refund, or a missing URL keeps the number only. No invoice number: caller keeps the phone. */
+     Partial, refund, or a missing URL keeps the number only. */
   function rideLivePay(r, M) {
     var live = null;
     try {
@@ -10673,10 +10697,8 @@
   }
   function schedRiderLineHtml(r) {
     r = r || {};
-    var slot = "";
-    try { slot = rideInvoiceSlotHtml(r, null); } catch (e) { slot = ""; }
-    var phone = slot ? "" : (r.riderPhone ? " \u00b7 <a href=\"tel:" + esc(r.riderPhone) + "\" style=\"color:#0b3d23;font-weight:700\">" + esc(r.riderPhone) + "</a>" : "");
-    return "<p id=\"sched-rider-line\" class=\"pcs-ride-line\" style=\"margin:0;min-height:44px;box-sizing:border-box;padding:8px 10px;background:#fff;color:#1a1a1a;border-radius:10px;font-size:16px;font-weight:700;line-height:1.35;white-space:normal;overflow:visible\"><strong style=\"" + SCHED_LBL + "\">Rider:</strong> " + esc(r.rider || "\u2014") + (slot || phone) + "</p>";
+    var phone = r.riderPhone ? " \u00b7 <a href=\"tel:" + esc(r.riderPhone) + "\" style=\"color:#0b3d23;font-weight:700\">" + esc(r.riderPhone) + "</a>" : "";
+    return "<p id=\"sched-rider-line\" class=\"pcs-ride-line\" style=\"margin:0;min-height:44px;box-sizing:border-box;padding:8px 10px;background:#fff;color:#1a1a1a;border-radius:10px;font-size:16px;font-weight:700;line-height:1.35;white-space:normal;overflow:visible\"><strong style=\"" + SCHED_LBL + "\">Rider:</strong> " + esc(r.rider || "\u2014") + phone + "</p>";
   }
   function rideLineRide() {
     var M = state.meter;

@@ -152,7 +152,9 @@ test("the synthetic driver photo stays under the green bar and off the map contr
           if (!el) return;
           el.addEventListener("click", function (e) { e.preventDefault(); el.dataset.n = "1"; });
         });
-        var bill = document.getElementById("fl-bill");
+        var bill = document.getElementById("fl-call");
+        if (document.getElementById("fl-bill")) throw new Error("extra bill row");
+        if (document.body.textContent.indexOf("Questions? Call") >= 0) throw new Error("business call line remains");
         var a = bill.querySelector("a");
         var photo = document.getElementById("fl-photo").getBoundingClientRect();
         var status = document.getElementById("fl-status").getBoundingClientRect();
@@ -189,7 +191,7 @@ test("the synthetic driver photo stays under the green bar and off the map contr
     const payClick = await send("Runtime.evaluate", { expression: "document.getElementById('fl-pay').dataset.n", returnByValue: true }, sid);
     assert.equal(payClick.result.result.value, "1");
     const unknown = await showBill("bare", "tracker-white-unknown.png");
-    assert.equal(unknown.text, "Invoiced ride");
+    assert.equal(unknown.text, "Invoice #000554");
     assert.equal(unknown.href, "");
     assert.equal(unknown.text.indexOf("unpaid"), -1);
     assert.equal(unknown.text.indexOf("paid"), -1);
