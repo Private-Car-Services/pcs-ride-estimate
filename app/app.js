@@ -9705,6 +9705,9 @@
       trip: raw.trip && typeof raw.trip === "object" ? raw.trip : null,
       prepaid: raw.prepaid === true, prepaidAmountCents: raw.prepaidAmountCents != null && isFinite(+raw.prepaidAmountCents) ? Math.round(+raw.prepaidAmountCents) : null, /* v75v */
       prepaidTaxCents: raw.prepaidTaxCents != null && isFinite(+raw.prepaidTaxCents) ? Math.round(+raw.prepaidTaxCents) : null, prepaidInvoiceNo: String(raw.prepaidInvoiceNo || ""),
+      payState: raw.payState ? String(raw.payState) : "", invoiceStatus: raw.invoiceStatus ? String(raw.invoiceStatus) : "",
+      sqInvoice: raw.sqInvoice && typeof raw.sqInvoice === "object" ? raw.sqInvoice : null,
+      receiptUrl: raw.receiptUrl ? String(raw.receiptUrl) : "", invoicePayUrl: raw.invoicePayUrl ? String(raw.invoicePayUrl) : "",
       rideCommissionPct: raw.rideCommissionPct != null && raw.rideCommissionPct !== "" && isFinite(+raw.rideCommissionPct) ? Math.round(+raw.rideCommissionPct) : null, /* v76d */
       rateOverride: rateOvOf(raw), /* v76j contract rate (God mode only) */
       meterCode: raw.meterCode ? String(raw.meterCode) : ""
@@ -10946,6 +10949,12 @@
     var out = { v: 1, status: st, kind: o.kind === "sched" ? "sched" : "app", updatedAt: now };
     if (st === "ended" || st === "stopped") { out.endedAt = Number(o.endedAt) || now; return out; }
     if (o.bill === "invoiced" || o.bill === "prepaid") out.bill = o.bill; /* v2.0l r3: a plain word only ("Invoiced ride" / "Prepaid ride"), never an amount */
+    if (o.pay === "paid" || o.pay === "unpaid") out.pay = o.pay;
+    var invNo = String(o.invoiceNo || "").replace(/^#/, "").replace(/\s+/g, "");
+    if (/^\d{1,20}$/.test(invNo)) out.invoiceNo = invNo;
+    var recUrl = trackerSquareUrl(o.receiptUrl), payUrl = trackerSquareUrl(o.payUrl);
+    if (o.pay === "paid" && recUrl) out.receiptUrl = recUrl;
+    if (o.pay === "unpaid" && payUrl) out.payUrl = payUrl;
     var df = folFirst(o.driverName); if (df) out.driverFirst = df;
     var car = folCar(o.car); if (car) out.car = car;
     if (/^[A-Za-z0-9_-]{24}$/.test(String(o.cardKey || ""))) out.cardKey = String(o.cardKey); /* v77.3b: random key of the driver's picture card (photo shown on /follow/); never the driver id */
@@ -11033,7 +11042,44 @@
     folWrite(folMapUrl(k), "DELETE");
     folRedraw();
   }
-  function folSig(c) { return JSON.stringify([c.bill || "", c.status, c.pos ? [c.pos.lat, c.pos.lng] : 0, c.eta || 0, c.pickup || 0, c.dest || 0, c.car || 0, c.driverFirst || "", c.cardKey || "", folPhotoSig(c.photo), c.route ? c.route.length + ":" + c.route[c.route.length - 1] : 0, c.stops || 0]); }
+  function trackerSquareUrl(v) {
+    var s = String(v || "").trim();
+    if (!s || s.length > 300 || /[\s<>"']/.test(s)) return "";
+    var m = /^https:\/\/([^\/?#:]+)(?:[\/?#]|$)/i.exec(s);
+    if (!m || !/(^|\.)squareup(sandbox)?\.com$|(^|\.)square\.link$/i.test(m[1])) return "";
+    return s;
+  }
+  function trackerInvoiceNo(r) {
+    r = r || {};
+    var q = r.sqInvoice && typeof r.sqInvoice === "object" ? r.sqInvoice : null;
+    var s = String(r.prepaidInvoiceNo || r.invoiceNo || (q && (q.invoiceNumber || q.number)) || "").replace(/^#/, "").replace(/\s+/g, "");
+    return /^\d{1,20}$/.test(s) ? s : "";
+  }
+  /* Paid only from a Square paid/PAID record with nothing still due. Unpaid only from an explicit not-paid Square status,
+     invoiceStatus UNPAID, or payState invoice_pending. Partial, refund, and a bare invoice number stay blank. */
+  function trackerPayFacts(r) {
+    r = r || {};
+    var q = r.sqInvoice && typeof r.sqInvoice === "object" ? r.sqInvoice : null;
+    var st = String((q && q.status) || "").toUpperCase();
+    var invSt = String(r.invoiceStatus || "").toUpperCase();
+    var no = trackerInvoiceNo(r);
+    if (/PARTIAL|REFUND/.test(st) || /PARTIAL|REFUND/.test(invSt) || st === "CANCELED" || st === "CANCELLED") return { pay: "", invoiceNo: no };
+    if (q && isFinite(+q.amountDueCents) && +q.amountDueCents > 0) return { pay: "", invoiceNo: no };
+    if ((q && q.paid === true) || st === "PAID" || invSt === "PAID") return { pay: "paid", invoiceNo: no };
+    if ((q && q.paid === false) || /^(UNPAID|SENT|SCHEDULED|DRAFT|VIEWED|PAYMENT_PENDING)$/.test(st) || invSt === "UNPAID" || r.payState === "invoice_pending") return { pay: "unpaid", invoiceNo: no };
+    return { pay: "", invoiceNo: no };
+  }
+  function trackerPayUrl(r) {
+    r = r || {};
+    var q = r.sqInvoice && typeof r.sqInvoice === "object" ? r.sqInvoice : null;
+    return trackerSquareUrl(r.invoicePayUrl || r.payUrl || (q && (q.payUrl || q.publicUrl)) || "");
+  }
+  function trackerReceiptUrl(r) {
+    r = r || {};
+    var q = r.sqInvoice && typeof r.sqInvoice === "object" ? r.sqInvoice : null;
+    return trackerSquareUrl(r.receiptUrl || (q && q.receiptUrl) || "");
+  }
+  function folSig(c) { return JSON.stringify([c.bill || "", c.pay || "", c.invoiceNo || "", c.receiptUrl || "", c.payUrl || "", c.status, c.pos ? [c.pos.lat, c.pos.lng] : 0, c.eta || 0, c.pickup || 0, c.dest || 0, c.car || 0, c.driverFirst || "", c.cardKey || "", folPhotoSig(c.photo), c.route ? c.route.length + ":" + c.route[c.route.length - 1] : 0, c.stops || 0]); }
   function folHere() {
     if (!isCoord(state.hereLat) || !isCoord(state.hereLng)) return null;
     var at = Number(state.gpsAt) || 0;
@@ -11128,7 +11174,8 @@
         if (e && !e.pending) eta = { to: "dest", miles: e.miles, min: e.min };
         if (meterRoute && meterRoute.line) route = meterRoute.line;
       }
-      out.push(Object.assign({ key: "c_" + r.id, kind: "sched", bill: rideBillKind(r, onMeter ? M : null), status: st, phone: r.riderPhone, pickup: pickup, dest: dest, stops: stops, eta: eta, route: route, pos: here }, base));
+      var payFacts = trackerPayFacts(r);
+      out.push(Object.assign({ key: "c_" + r.id, kind: "sched", bill: rideBillKind(r, onMeter ? M : null), pay: payFacts.pay, invoiceNo: payFacts.invoiceNo, receiptUrl: payFacts.pay === "paid" ? trackerReceiptUrl(r) : "", payUrl: payFacts.pay === "unpaid" ? trackerPayUrl(r) : "", status: st, phone: r.riderPhone, pickup: pickup, dest: dest, stops: stops, eta: eta, route: route, pos: here }, base));
     });
     var code = state.screen === "trip" ? String(state.driverCode || readDriverCode() || "") : "";
     if (code && FOL_KEY_RE.test("r_" + code)) {
@@ -11363,7 +11410,7 @@
     setInterval(function () { try { folFastTick(); } catch (e) {} }, 500); /* v76f: checks twice a second, sends at most once a second */
     setInterval(function () { try { folSweep(); } catch (e) {} }, 60000);
     setTimeout(function () { try { folSweep(); } catch (e) {} }, 5000);
-    window.__pcsFollow = { bizMsg: folBizMsg, bizSend: folBizSend, autoMsg: folAutoMsg, clean: folClean, token: folNewToken, link: folLink, sms: folSmsHref, msg: folDriverMsg, riderMsg: folRiderMsg, e164: folPhoneE164, photoPick: followDriverPhoto,
+    window.__pcsFollow = { bizMsg: folBizMsg, bizSend: folBizSend, autoMsg: folAutoMsg, clean: folClean, payFacts: trackerPayFacts, token: folNewToken, link: folLink, sms: folSmsHref, msg: folDriverMsg, riderMsg: folRiderMsg, e164: folPhoneE164, photoPick: followDriverPhoto,
       ctxs: function () { return folDriverCtxs(); }, publish: function (rides) { if (rides) state.scheduledRides = rides; return folDriverCtxs().map(function (c) { return folClean(Object.assign({}, c), Date.now()); }); }, holdPhoto: function (v) { state.driverPhoto = v || ""; }, rider: function () { return folRiderCtx(); }, state: fol, fast: function () { folFastTick(); }, posOut: folPosOut, tick: function () { if (ROLE === "driver") folDriverTick(); else folRiderTick(); },
       sweep: function () { folSweep(); }, mine: folMine, route: folRoute, schedStops: folSchedStops, sig: folSig }; /* test hooks */
   }
