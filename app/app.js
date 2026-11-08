@@ -11014,7 +11014,7 @@
     folWrite(folMapUrl(k), "DELETE");
     folRedraw();
   }
-  function folSig(c) { return JSON.stringify([c.bill || "", c.status, c.pos ? [c.pos.lat, c.pos.lng] : 0, c.eta || 0, c.pickup || 0, c.dest || 0, c.car || 0, c.driverFirst || "", c.cardKey || "", c.photo ? c.photo.length : 0, c.route ? c.route.length + ":" + c.route[c.route.length - 1] : 0, c.stops || 0]); }
+  function folSig(c) { return JSON.stringify([c.bill || "", c.status, c.pos ? [c.pos.lat, c.pos.lng] : 0, c.eta || 0, c.pickup || 0, c.dest || 0, c.car || 0, c.driverFirst || "", c.cardKey || "", folPhotoSig(c.photo), c.route ? c.route.length + ":" + c.route[c.route.length - 1] : 0, c.stops || 0]); }
   function folHere() {
     if (!isCoord(state.hereLat) || !isCoord(state.hereLng)) return null;
     var at = Number(state.gpsAt) || 0;
@@ -11055,21 +11055,35 @@
     if (!self || !got || got !== self) return "";
     return safePhoto(remote.photo);
   }
-  var folPhotoWait = { email: "", photo: "", until: 0 };
+  function folPhotoSig(p) { /* content, not length: two different jpegs of the same size must publish on the next change */
+    if (!p) return 0;
+    var h = 5381, i;
+    for (i = 0; i < p.length; i += 1) h = ((h * 33) ^ p.charCodeAt(i)) >>> 0;
+    return h.toString(36) + ":" + p.length;
+  }
+  var folPhotoWait = { email: "", photo: "", until: 0, gen: 0 };
   function folProfilePhoto() {
+    var session = String(readSession() || "").trim().toLowerCase();
+    if (!session || driverIdForEmail(session) !== driverPresenceId()) {
+      folPhotoWait = { email: "", photo: "", until: 0, gen: folPhotoWait.gen + 1 };
+      return "";
+    }
+    if (folPhotoWait.email !== session) folPhotoWait = { email: session, photo: "", until: 0, gen: folPhotoWait.gen + 1 };
     var acc = readDriverAccount() || {};
-    var local = safePhoto(acc.photo) || safePhoto(state.driverPhoto);
-    if (local) return local;
-    var email = String(acc.email || (typeof readSession === "function" ? readSession() : "") || "").trim().toLowerCase();
-    if (!email || driverIdForEmail(email) !== driverPresenceId()) return "";
-    if (folPhotoWait.email === email && (folPhotoWait.photo || Date.now() < folPhotoWait.until)) return folPhotoWait.photo || "";
-    folPhotoWait.email = email; folPhotoWait.until = Date.now() + 60000;
-    fetchDriverProfile(email).then(function (row) {
-      if (driverIdForEmail(email) !== driverPresenceId()) return;
-      var ph = followDriverPhoto("", row, email);
-      if (ph) folPhotoWait.photo = ph;
+    var accountEmail = String(acc.email || "").trim().toLowerCase();
+    var local = accountEmail === session ? safePhoto(acc.photo) : "";
+    if (local) return local; /* leftover state.driverPhoto is not this account */
+    if (folPhotoWait.photo) return folPhotoWait.photo;
+    if (Date.now() < folPhotoWait.until) return "";
+    var gen = folPhotoWait.gen;
+    folPhotoWait.until = Date.now() + 60000;
+    fetchDriverProfile(session).then(function (row) {
+      if (folPhotoWait.gen !== gen || folPhotoWait.email !== session) return;
+      if (String(readSession() || "").trim().toLowerCase() !== session) return;
+      if (driverIdForEmail(session) !== driverPresenceId()) return;
+      folPhotoWait.photo = followDriverPhoto("", row, session) || "";
     }).catch(function () {});
-    return folPhotoWait.photo || "";
+    return "";
   }
   function folDriverCtxs() {
     if (ROLE !== "driver" || fol.off || !syncOn()) return [];
@@ -11331,7 +11345,7 @@
     setInterval(function () { try { folSweep(); } catch (e) {} }, 60000);
     setTimeout(function () { try { folSweep(); } catch (e) {} }, 5000);
     window.__pcsFollow = { bizMsg: folBizMsg, bizSend: folBizSend, autoMsg: folAutoMsg, clean: folClean, token: folNewToken, link: folLink, sms: folSmsHref, msg: folDriverMsg, riderMsg: folRiderMsg, e164: folPhoneE164, photoPick: followDriverPhoto,
-      ctxs: function () { return folDriverCtxs(); }, rider: function () { return folRiderCtx(); }, state: fol, fast: function () { folFastTick(); }, posOut: folPosOut, tick: function () { if (ROLE === "driver") folDriverTick(); else folRiderTick(); },
+      ctxs: function () { return folDriverCtxs(); }, publish: function (rides) { if (rides) state.scheduledRides = rides; return folDriverCtxs().map(function (c) { return folClean(Object.assign({}, c), Date.now()); }); }, holdPhoto: function (v) { state.driverPhoto = v || ""; }, rider: function () { return folRiderCtx(); }, state: fol, fast: function () { folFastTick(); }, posOut: folPosOut, tick: function () { if (ROLE === "driver") folDriverTick(); else folRiderTick(); },
       sweep: function () { folSweep(); }, mine: folMine, route: folRoute, schedStops: folSchedStops, sig: folSig }; /* test hooks */
   }
   if (typeof window !== "undefined" && typeof location !== "undefined") try { var ntq = /[?&]navtest=([01])\b/.exec(location.search || ""); if (ntq) { if (ntq[1] === "1") localStorage.setItem(NAVTEST_KEY, "1"); else localStorage.removeItem(NAVTEST_KEY); } } catch (e) {} /* v75y */
