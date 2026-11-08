@@ -9836,6 +9836,11 @@
     if (!no) return t;
     return t + " Invoice #" + no;
   }
+  function schedPickupStatusText(r) {
+    var bill = "";
+    try { bill = rideBillText(rideBillKind(r || {}, null), rideInvoiceNoFrom(r || {}, null)); } catch (e) { bill = ""; }
+    return bill ? "I\u2019m at the pickup \u00b7 " + bill : "I\u2019m at the pickup";
+  }
   function schedMapBillHtml(r, id) { return rideBillLabelHtml(rideBillKind(r, null), id || "sched-bill-label", rideInvoiceNoFrom(r, null)); }
   /* Narrow embedded ride bar is tighter than the full-screen map bar. Shrink only enough to stay one centered line; 16px floor stays readable. Wide full-screen bar stays 22px. */
   function rideBillLabelFitCss() {
@@ -9860,7 +9865,7 @@
     try { if (M && M.schedId) r = schedFind(M.schedId); } catch (e) {}
     return rideInvoiceNoFrom(r, M);
   }
-  if (typeof window !== "undefined") window.__pcsV20lBill = { kind: rideBillKind, text: rideBillText, label: rideBillLabelHtml, invoiceNo: rideInvoiceDisplayNo, from: rideInvoiceNoFrom, fit: rideBillLabelFitCss, map: schedMapBillHtml };
+  if (typeof window !== "undefined") window.__pcsV20lBill = { kind: rideBillKind, text: rideBillText, label: rideBillLabelHtml, invoiceNo: rideInvoiceDisplayNo, from: rideInvoiceNoFrom, fit: rideBillLabelFitCss, map: schedMapBillHtml, pickupLine: schedPickupStatusText };
   function meterInvInfo(M) { return rideInvoiceInfo(M && M.schedId ? schedFind(M.schedId) : null, M); }
   function meterInvRefresh(M) { /* live: the 15-min Square sync / refreshScheduledRides flips the badge without a re-render */
     if (typeof document === "undefined" || meterShown(M)) return;
@@ -10493,22 +10498,35 @@
   }
   function schedMapBillPlace(bot) {
     if (!bot || typeof document === "undefined") return;
-    var t = schedNavTrip(), r = t ? schedFind(t.id) : null, html = schedMapBillHtml(r);
     var host = bot.querySelector ? bot.querySelector("#sched-bill-host") : null;
-    if (!host) { host = document.createElement("div"); host.id = "sched-bill-host"; if (bot.firstChild && bot.insertBefore) bot.insertBefore(host, bot.firstChild); else if (bot.appendChild) bot.appendChild(host); else return; }
-    if (host.__h !== html) { host.innerHTML = html; host.__h = html; }
+    if (host && host.remove) host.remove(); /* no second row above the buttons */
+    var btn = bot.querySelector ? bot.querySelector("#sched-fs-arrived") : null;
+    if (!btn) return;
+    var t = schedNavTrip(), r = t ? schedFind(t.id) : null, text = schedPickupStatusText(r);
+    if (btn.textContent !== text) btn.textContent = text;
+    if (btn.getAttribute && btn.getAttribute("aria-label") !== text) btn.setAttribute("aria-label", text);
+  }
+  function schedFsMeasure() {
+    var stage = document.getElementById("home-map-stage");
+    if (!stage || !stage.style || !stage.style.setProperty) return;
+    var bot = document.getElementById("sched-fs-bottom"), top = document.getElementById("sched-fs-top");
+    if (bot && bot.offsetHeight) stage.style.setProperty("--sched-fs-bar", bot.offsetHeight + "px");
+    if (top && top.offsetHeight) stage.style.setProperty("--sched-fs-top", top.offsetHeight + "px");
   }
   function schedFullStyle() {
     if (document.getElementById("pcs-fullmap-style")) return;
     var st = document.createElement("style"); st.id = "pcs-fullmap-style";
     st.textContent = "#home-map-stage.pcs-fullmap{position:fixed !important;left:0;right:0;top:0;bottom:0;width:100vw;height:100vh !important;height:100dvh !important;margin:0 !important;z-index:2147482000;background:#0b3d23;border-radius:0}" +
       "#home-map-stage.pcs-fullmap .map-caption{display:none}" +
-      "#home-map-stage.pcs-fullmap .nav-toggle{bottom:172px !important}#home-map-stage.pcs-fullmap .nav-recenter{bottom:216px !important}" +
+      "#home-map-stage.pcs-fullmap .nav-toggle{bottom:calc(var(--pcs-safe-bottom, env(safe-area-inset-bottom, 0px)) + 22px + var(--sched-fs-bar, 148px) + 14px) !important;z-index:1004;pointer-events:auto}" +
+      "#home-map-stage.pcs-fullmap .nav-recenter{bottom:calc(var(--pcs-safe-bottom, env(safe-area-inset-bottom, 0px)) + 22px + var(--sched-fs-bar, 148px) + 62px) !important;z-index:1004;pointer-events:auto}" +
+      "#home-map-stage.pcs-fullmap .leaflet-top.leaflet-left{top:calc(var(--pcs-safe-top, env(safe-area-inset-top, 0px)) + var(--sched-fs-top, 96px) + 12px) !important;left:calc(var(--pcs-safe-left, env(safe-area-inset-left, 0px)) + 10px) !important;z-index:1005;pointer-events:auto}" +
+      "#home-map-stage.pcs-fullmap .leaflet-control-zoom a{width:44px;height:44px;line-height:44px;font-size:22px;pointer-events:auto}" +
       "#sched-fs-open{position:absolute;left:8px;top:8px;z-index:1002;width:auto;min-height:52px;margin:0;padding:10px 16px;font-size:18px;font-weight:800;border-radius:12px;border:2px solid #0b3d23;background:#d1fae5;color:#0b3d23;box-shadow:0 2px 6px rgba(0,0,0,.35);cursor:pointer}" +
       "#home-map-stage.pcs-fullmap #sched-fs-open{display:none}" +
-      "#sched-fs-top{position:absolute;left:8px;right:8px;top:8px;top:calc(env(safe-area-inset-top,0px) + 8px);z-index:1002}#sched-fs-top #sched-turn-fs{margin:0;box-shadow:0 2px 8px rgba(0,0,0,.4)}" +
-      "#sched-fs-bottom{position:absolute;left:8px;right:8px;bottom:22px;bottom:calc(env(safe-area-inset-bottom,0px) + 22px);z-index:1002}" +
-      "#sched-fs-arrived{display:block;width:100%;min-height:62px;font-size:22px;font-weight:800;background:#0b6b3a;color:#fff;border:2px solid #fff;border-radius:14px;margin:0 0 8px;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.4)}" +
+      "#sched-fs-top{position:absolute;left:max(8px, calc(var(--pcs-safe-left, env(safe-area-inset-left, 0px)) + 8px));right:max(8px, calc(var(--pcs-safe-right, env(safe-area-inset-right, 0px)) + 8px));top:calc(var(--pcs-safe-top, env(safe-area-inset-top, 0px)) + 8px);z-index:1002}#sched-fs-top #sched-turn-fs{margin:0;box-shadow:0 2px 8px rgba(0,0,0,.4)}" +
+      "#sched-fs-bottom{position:absolute;left:max(8px, calc(var(--pcs-safe-left, env(safe-area-inset-left, 0px)) + 8px));right:max(8px, calc(var(--pcs-safe-right, env(safe-area-inset-right, 0px)) + 8px));bottom:calc(var(--pcs-safe-bottom, env(safe-area-inset-bottom, 0px)) + 22px);z-index:1002;pointer-events:none}#sched-fs-bottom button{pointer-events:auto}" +
+      "#sched-fs-arrived{display:block;width:100%;min-height:62px;font-size:clamp(15px,2.2vw,22px);font-weight:800;background:#0b6b3a;color:#fff;border:2px solid #fff;border-radius:14px;margin:0 0 8px;padding:0 12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.4)}" +
       "#sched-fs-close{display:block;width:100%;min-height:58px;font-size:21px;font-weight:800;background:#d1fae5;color:#0b3d23;border:3px solid #0b3d23;border-radius:14px;margin:0;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.4)}";
     document.head.appendChild(st);
   }
@@ -10559,6 +10577,7 @@
       }
       if (navTestOn()) navTestBottom(bot); /* v75y test flag */
       else schedMapBillPlace(bot);
+      schedFsMeasure();
       fsMphPlace(stage, (navTestOn() ? 262 : 172) + "px"); /* v76b: MPH badge */
     } else { if (top) top.remove(); if (bot) bot.remove(); fsMphDrop(stage); }
     if (full !== was) {
@@ -11654,13 +11673,15 @@
       if (onMeter) actions = '<p style="margin:8px 0;color:#0b3d23;font-weight:800">' + (meterShown(M) ? "Ride in progress on the meter above. Change the drop-off there any time." : "Ride in progress above. Change the drop-off there any time.") + '</p>' + drvCancelBtnHtml("sched", r.id); /* r13 */
       else if (inTrip) {
         var nav = schedNavUrl(r.pickup, r.pickupLat, r.pickupLng);
-        actions = schedMapBillHtml(r, "sched-card-bill") + '<div class="sched-trip" id="sched-trip" style="background:#ecfdf5;border:2px solid #0b6b3a;border-radius:12px;padding:10px;margin:8px 0">' +
-          '<p style="margin:0 0 6px;font-weight:800;color:#0b3d23">' + (trip.phase === "arrived" ? "You're at the pickup" : "On the way to the pickup") + "</p>" +
+        var billLine = rideBillText(rideBillKind(r, null), rideInvoiceNoFrom(r, null));
+        var wayLine = (trip.phase === "arrived" ? "You\u2019re at the pickup" : "On the way to the pickup") + (billLine ? " \u00b7 " + billLine : "");
+        actions = '<div class="sched-trip" id="sched-trip" style="background:#ecfdf5;border:2px solid #0b6b3a;border-radius:12px;padding:10px;margin:8px 0">' +
+          '<p style="margin:0 0 6px;font-weight:800;color:#0b3d23">' + esc(wayLine) + "</p>" +
           (trip.phase === "arrived" ? "" : navButtonPcsHtml() + schedTurnHtml()) + /* v2.0m-c: Navigate to pickup */ /* v75s: in-app turn-by-turn on the map below */
           (trip.phase === "arrived"
             ? '<button type="button" id="sched-begin" data-sched-id="' + esc(r.id) + '" style="' + SCHED_BTN_BIG + '">Rider is in \u2013 start the ride</button>' +
               (navTestOn() ? '<button type="button" id="sched-arr-open" style="' + SCHED_BTN_2 + '">Show the arrival screen</button>' : "") /* v75y test flag */
-            : '<button type="button" id="sched-arrived" data-sched-id="' + esc(r.id) + '" style="' + SCHED_BTN_BIG + '">I\u2019m at the pickup</button>') +
+            : '<button type="button" id="sched-arrived" data-sched-id="' + esc(r.id) + '" style="' + SCHED_BTN_BIG + '">' + esc(schedPickupStatusText(r)) + "</button>") +
           (nav ? '<p style="margin:6px 0 0;text-align:right"><a id="sched-nav-pickup" href="' + esc(nav) + '"' + (/^maps:/.test(nav) ? "" : ' target="_blank" rel="noopener"') + ' style="color:#0b3d23;font-size:14px;font-weight:700;text-decoration:underline">Open in Apple Maps (optional)</a></p>' : "") +
           (trip.phase === "arrived" ? "" : '<button type="button" id="sched-trip-stop" data-sched-id="' + esc(r.id) + '" style="' + SCHED_BTN_2 + '">Stop heading to pickup</button>') + /* r13e */
           '<button type="button" id="sched-trip-back" style="' + SCHED_BTN_2 + '">Back to the list (ride stays scheduled)</button>' +

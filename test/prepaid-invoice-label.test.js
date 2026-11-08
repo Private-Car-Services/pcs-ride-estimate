@@ -118,6 +118,22 @@ test("invoiced and prepaid rides both show the saved number on the same green li
   assert.equal(bill.kind(row, null), "invoiced");
 });
 
+test("the pickup status keeps Invoice #000574 on the same line and does not add a map row", function () {
+  const row = { prepaid: true, prepaidInvoiceNo: "000574" };
+  assert.equal(bill.pickupLine(row), "I\u2019m at the pickup \u00b7 Prepaid ride Invoice #000574");
+  assert.equal(bill.pickupLine({ prepaidInvoiceNo: "000574" }), "I\u2019m at the pickup \u00b7 Invoiced ride Invoice #000574");
+  assert.equal(bill.pickupLine({ prepaid: true }), "I\u2019m at the pickup \u00b7 Prepaid ride");
+  assert.equal(bill.pickupLine({}), "I\u2019m at the pickup");
+  const src = fs.readFileSync(path.join(__dirname, "../app/app.js"), "utf8");
+  const place = src.slice(src.indexOf("function schedMapBillPlace"), src.indexOf("function schedFsMeasure"));
+  assert.match(place, /host\.remove/);
+  assert.doesNotMatch(place, /insertBefore/);
+  assert.match(place, /sched-fs-arrived/);
+  assert.match(src, /nav-toggle\{bottom:calc\(var\(--pcs-safe-bottom/);
+  assert.match(src, /leaflet-top\.leaflet-left\{top:calc\(var\(--pcs-safe-top/);
+  assert.doesNotMatch(src.slice(src.indexOf("function schedFullStyle"), src.indexOf("function schedFullResize")), /nav-toggle\{bottom:172px/);
+});
+
 test("invoice line stays one centered line without clipping", function () {
   const css = bill.fit();
   const html = bill.label("prepaid", "meter-bill-label", "000555");
