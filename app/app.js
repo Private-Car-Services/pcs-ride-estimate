@@ -9890,6 +9890,9 @@
      Partial, refund, or a missing URL keeps the number only. No invoice number: caller keeps the phone. */
   function rideInvoiceSlotHtml(r, M) {
     r = r || {};
+    var live = null;
+    try { live = squareInvoiceLink(r.sqLive || (M && M.sqLive) || (typeof verInv !== "undefined" && r.id && verInv[r.id] && verInv[r.id].square)); } catch (e) { live = null; }
+    if (live && live.pay && live.url && live.link) return " \u00b7 Invoice #" + esc(live.invoiceNo) + " \u2013 " + live.pay + " \u00b7 <a id=\"sched-inv-link\" href=\"" + esc(live.url) + "\" target=\"_blank\" rel=\"noopener\">" + esc(live.link) + "</a>";
     var no = rideInvoiceNoFrom(r, M);
     if (!no) return "";
     var q = r.sqInvoice && typeof r.sqInvoice === "object" ? r.sqInvoice : null;
@@ -9897,11 +9900,29 @@
     if (/PARTIAL|REFUND|CANCEL/.test(st) || (q && isFinite(+q.amountDueCents) && +q.amountDueCents > 0)) return " \u00b7 Invoice #" + esc(no);
     var w = "";
     try { w = ridePayWord(r, M); } catch (e) { w = ""; }
-    var receipt = rideSquareHttps(r.receiptUrl || (q && q.receiptUrl) || "");
-    var pay = rideSquareHttps(rideCustomerPayUrl(r));
+    var receipt = rideSquareHttps(r.receiptUrl || (q && (q.receipt_url || q.receiptUrl)) || "");
+    var pay = rideSquareHttps(r.invoicePayUrl || r.payUrl || (q && (q.public_url || q.publicUrl || q.payUrl)) || "");
     if (w === "paid" && receipt) return " \u00b7 Invoice #" + esc(no) + " \u2013 paid \u00b7 <a id=\"sched-inv-link\" href=\"" + esc(receipt) + "\" target=\"_blank\" rel=\"noopener\">View receipt</a>";
     if (w === "unpaid" && pay) return " \u00b7 Invoice #" + esc(no) + " \u2013 unpaid \u00b7 <a id=\"sched-inv-link\" href=\"" + esc(pay) + "\" target=\"_blank\" rel=\"noopener\">Pay invoice</a>";
     return " \u00b7 Invoice #" + esc(no);
+  }
+  /* A live Square read, not a saved prepaid flag. Paid uses the completed payment receipt. Unpaid uses the invoice pay page.
+     A pay-page URL is never treated as a receipt. Partial, refund, or no URL returns no link. */
+  function squareInvoiceLink(live) {
+    if (!live || typeof live !== "object") return null;
+    var no = String(live.invoiceNumber || live.number || live.invoiceNo || "").replace(/^#/, "").replace(/\s+/g, "");
+    if (!/^\d{1,20}$/.test(no)) return null;
+    var status = String(live.status || "").toUpperCase();
+    var payments = Array.isArray(live.payments) ? live.payments : [];
+    var refunded = /PARTIAL|REFUND|CANCEL/.test(status) || payments.some(function (p) { return p && (Number(p.refundedCents) > 0 || /REFUND/.test(String(p.status || ""))); });
+    if (refunded) return { invoiceNo: no, pay: "", url: "", link: "" };
+    var completed = payments.filter(function (p) { return p && String(p.status || "").toUpperCase() === "COMPLETED" && !(Number(p.refundedCents) > 0); });
+    var receipt = "";
+    completed.forEach(function (p) { var u = rideSquareHttps(p.receipt_url || p.receiptUrl || ""); if (u) receipt = u; });
+    var payUrl = rideSquareHttps(live.public_url || live.publicUrl || "");
+    if (status === "PAID" && completed.length && receipt) return { invoiceNo: no, pay: "paid", url: receipt, link: "View receipt" };
+    if (status === "UNPAID" && !completed.length && payUrl) return { invoiceNo: no, pay: "unpaid", url: payUrl, link: "Pay invoice" };
+    return { invoiceNo: no, pay: "", url: "", link: "" };
   }
   function schedMapBillHtml(r, id) { return rideBillLabelHtml(rideBillKind(r, null), id || "sched-bill-label", rideInvoiceNoFrom(r, null)); }
   /* Narrow embedded ride bar is tighter than the full-screen map bar. Shrink only enough to stay one centered line; 16px floor stays readable. Wide full-screen bar stays 22px. */
@@ -9927,7 +9948,7 @@
     try { if (M && M.schedId) r = schedFind(M.schedId); } catch (e) {}
     return rideInvoiceNoFrom(r, M);
   }
-  if (typeof window !== "undefined") window.__pcsV20lBill = { kind: rideBillKind, text: rideBillText, label: rideBillLabelHtml, invoiceNo: rideInvoiceDisplayNo, from: rideInvoiceNoFrom, fit: rideBillLabelFitCss, map: schedMapBillHtml, pickupLine: schedPickupStatusText, pay: ridePayWord, bar: rideMapBillText, payUrl: rideCustomerPayUrl, slot: rideInvoiceSlotHtml };
+  if (typeof window !== "undefined") window.__pcsV20lBill = { kind: rideBillKind, text: rideBillText, label: rideBillLabelHtml, invoiceNo: rideInvoiceDisplayNo, from: rideInvoiceNoFrom, fit: rideBillLabelFitCss, map: schedMapBillHtml, pickupLine: schedPickupStatusText, pay: ridePayWord, bar: rideMapBillText, payUrl: rideCustomerPayUrl, slot: rideInvoiceSlotHtml, square: squareInvoiceLink };
   function meterInvInfo(M) { return rideInvoiceInfo(M && M.schedId ? schedFind(M.schedId) : null, M); }
   function meterInvRefresh(M) { /* live: the 15-min Square sync / refreshScheduledRides flips the badge without a re-render */
     if (typeof document === "undefined" || meterShown(M)) return;
@@ -10028,7 +10049,7 @@
       state.scheduledError = "";
       state.scheduledLoadedAt = Date.now(); /* r13c */
       try { var meD = driverPresenceId(); verDiscFetch((rows || []).filter(function (r) { return r && schedIdNorm(r.assignedDriverId) === meD && r.status !== "completed"; }).map(function (r) { return r.id; })); } catch (e) {} /* r3 D1 */
-      try { var meI = driverPresenceId(); verInvFetch((rows || []).filter(function (r) { return r && schedIdNorm(r.assignedDriverId) === meI && r.prepaid === true && r.status !== "completed"; }).map(function (r) { return r.id; })); } catch (e) {} /* v77.11 r2 */
+      try { var meI = driverPresenceId(); verInvFetch((rows || []).filter(function (r) { return r && schedIdNorm(r.assignedDriverId) === meI && r.status !== "completed" && r.status !== "cancelled" && r.status !== "canceled" && String(r.prepaidInvoiceNo || r.invoiceNo || "").replace(/\s+/g, ""); }).map(function (r) { return r.id; })); } catch (e) {} /* read-only worker invoice; canceled rows are not copied */
       try { /* v73: PCS (God mode) canceled a scheduled ride assigned to me -> tell the driver once */
         var me = driverPresenceId();
         (rows || []).forEach(function (r) {

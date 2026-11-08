@@ -82,6 +82,27 @@ test("paid and unpaid words follow an actual payment record", function () {
   assert.equal(bill.slot({ prepaidInvoiceNo: "000574", payState: "invoice_pending" }).indexOf("href"), -1);
 });
 
+test("a live Square read picks the pay page or the receipt, and a saved flag does not", function () {
+  const unpaid = { invoiceNumber: "000554", status: "UNPAID", public_url: "https://app.squareup.com/pay-invoice/invtmp:example-554", payments: [], orderState: "OPEN" };
+  const paid = { invoiceNumber: "000574", status: "PAID", public_url: "https://app.squareup.com/pay-invoice/invtmp:example-574", payments: [{ status: "COMPLETED", refundedCents: null, receipt_url: "https://squareup.com/receipt/preview/EXAMPLE" }] };
+  const u = bill.square(unpaid), p = bill.square(paid);
+  assert.equal(u.pay, "unpaid");
+  assert.equal(u.link, "Pay invoice");
+  assert.equal(u.url, unpaid.public_url);
+  assert.equal(p.pay, "paid");
+  assert.equal(p.link, "View receipt");
+  assert.equal(p.url, paid.payments[0].receipt_url);
+  assert.notEqual(p.url, paid.public_url);
+  assert.equal(bill.square({ invoiceNumber: "000574", status: "PAID", public_url: paid.public_url, payments: [{ status: "COMPLETED", refundedCents: 100, receipt_url: paid.payments[0].receipt_url }] }).pay, "");
+  assert.equal(bill.pay({ prepaid: false, prepaidInvoiceNo: "000574", prepaidVia: "square_invoice" }), "");
+  const shown = bill.slot({ prepaidInvoiceNo: "000554", sqLive: unpaid });
+  assert.ok(shown.indexOf("Invoice #000554") >= 0 && shown.indexOf("unpaid") >= 0 && shown.indexOf("Pay invoice") >= 0);
+  assert.ok(shown.indexOf(unpaid.public_url) >= 0);
+  const shownPaid = bill.slot({ prepaidInvoiceNo: "000999", sqLive: paid });
+  assert.ok(shownPaid.indexOf("Invoice #000574") >= 0 && shownPaid.indexOf("View receipt") >= 0);
+  assert.equal(shownPaid.indexOf(paid.public_url), -1);
+});
+
 test("the ride map bar does not add a second invoice row", function () {
   const rfs = appSrc.slice(appSrc.indexOf("function rfsBarHtml"), appSrc.indexOf("function rfsBarClick"));
   const place = appSrc.slice(appSrc.indexOf("function schedMapBillPlace"), appSrc.indexOf("function schedFsMeasure"));
