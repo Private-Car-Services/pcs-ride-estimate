@@ -175,8 +175,11 @@
     d.innerHTML = '<div class="kp-top"><button type="button" data-k="sys" class="kp-sm">Use iPad keyboard</button><span id="gl-kp-lbl"></span><button type="button" data-k="clr" class="kp-sm kp-clr">Clear</button></div><div class="kp-g">' +
       ["1","2","3","4","5","6","7","8","9",".","0","bs"].map(function (k) { return '<button type="button" data-k="' + k + '"' + (k === "bs" ? ' aria-label="Delete">\u232b' : ">" + k) + "</button>"; }).join("") +
       '</div><button type="button" data-k="done" class="kp-done">Done</button>';
-    d.addEventListener("pointerdown", function (e) { e.preventDefault(); }); d.addEventListener("mousedown", function (e) { e.preventDefault(); });
-    d.addEventListener("click", function (e) { var b = e.target.closest ? e.target.closest("button[data-k]") : null; if (b) kpPress(b.getAttribute("data-k")); });
+    d.addEventListener("pointerdown", function (e) { var b = kpBtn(e); if (b) e.preventDefault(); });
+    d.addEventListener("mousedown", function (e) { var b = kpBtn(e); if (b) e.preventDefault(); });
+    /* A cancelled pointerdown does not always produce a click (iPhone). Count the key on pointerup, and ignore the click that follows the same tap. */
+    d.addEventListener("pointerup", function (e) { var b = kpBtn(e); if (!b || (e.pointerType === "mouse" && e.button !== 0)) return; b.__kpUp = Date.now(); kpPress(b.getAttribute("data-k")); });
+    d.addEventListener("click", function (e) { var b = kpBtn(e); if (!b || (b.__kpUp && Date.now() - b.__kpUp < 700)) return; kpPress(b.getAttribute("data-k")); });
     kpEl = d; return d; }
   /* v75x (Matthew): cash-register money boxes: digits fill from the cents, 9,6,2,5 -> 96.25; Delete drops the last digit; first key after opening a box starts a new amount */
   function regFmt(v) { var dg = String(v == null ? "" : v).replace(/\D/g, "").replace(/^0+/, ""); if (!dg) return ""; if (dg.length > 7) dg = dg.slice(0, 7); return (Number(dg) / 100).toFixed(2); }
@@ -186,7 +189,9 @@
   if (typeof document !== "undefined") document.addEventListener("input", function (e) { var t = e.target; if (!t || !t.getAttribute || t.getAttribute("data-reg") !== "1" || t.__regIn) return;
     var f = regFmt(t.value); if (t.value !== f) { t.value = f; try { t.setSelectionRange(f.length, f.length); } catch (x) {} } }, true);
   window.__pcsGoalRegFmt = regFmt; window.__pcsGoalRegKey = regKey; /* test hooks */
+  window.__pcsKpBtn = kpBtn;
   function kpFire(el) { el.dispatchEvent(new Event("input", { bubbles: true })); }
+  function kpBtn(e) { var t = e && e.target; if (!t) return null; if (t.closest) { var b = t.closest("button[data-k]"); if (b) return b; } var p = t.parentElement; return p && p.closest ? p.closest("button[data-k]") : null; }
   function kpPress(k) { var el = kpCur; if (k === "done") { if (el) el.dispatchEvent(new Event("change", { bubbles: true })); var fm = el && el.form && /^gl-f-(pin|unlock)$/.test(el.form.id) ? el.form : null; kpClose(); if (fm) lockSubmit(fm); return; }
     if (k === "sys") { try { localStorage.setItem(KP_KEY, "1"); } catch (e) {} var c = kpCur; kpClose(); kpRefresh(); if (c) { c.blur(); setTimeout(function () { c.focus(); }, 30); } return; }
     if (!el) return; if (el.getAttribute("data-reg") === "1" && k !== ".") return regKey(el, k); if (el.getAttribute("data-reg") === "1") return; var v = el.value, s = el.selectionStart, en = el.selectionEnd; if (s == null || el.type === "password") { s = en = v.length; }
@@ -217,7 +222,10 @@
   /* v76d: one submit at a time for the lock forms (Done, 4th digit and Unlock all land here) */
   var lockBusy = false;
   function lockSubmit(fm) { if (lockBusy || !fm) return; if (fm.requestSubmit) fm.requestSubmit(); else fm.dispatchEvent(new Event("submit", { cancelable: true })); }
-  function lockWire(fm, inp) { [].forEach.call(fm.querySelectorAll("button[type=submit]"), function (b) { b.addEventListener("pointerdown", function (e) { e.preventDefault(); }); b.addEventListener("mousedown", function (e) { e.preventDefault(); }); });
+  function lockWire(fm, inp) { [].forEach.call(fm.querySelectorAll("button[type=submit]"), function (b) {
+    b.addEventListener("pointerdown", function (e) { e.preventDefault(); }); b.addEventListener("mousedown", function (e) { e.preventDefault(); });
+    b.addEventListener("pointerup", function (e) { if (e.pointerType === "mouse" && e.button !== 0) return; b.__kpUp = Date.now(); lockSubmit(fm); });
+  });
     if (inp) { inp.setAttribute("enterkeyhint", "go"); setTimeout(function () { try { inp.focus(); } catch (e) {} }, 0); } }
   function shell(inner, msg) { kpClose(); lockBusy = false; app.innerHTML = '<div class="lock card"><h1>Monthly Goal</h1>' + inner + '<p class="err" id="gl-err">' + (msg || "") + "</p></div>"; numPad(app); return document.getElementById("gl-err"); }
   function lockNow(msg) { dek = null; D = null; SY.pw = ""; clearTimeout(SY.t); if (!app) return; kvGet("vault").then(function (v) { if (!v) return GS || godTok() ? restoreScreen() : firstRun(); pinValid().then(function (p) { if (p) pinScreen(p, msg); else pwScreen(msg); }); }); }
@@ -733,7 +741,7 @@
     idb().then(function () { lockNow(); }).catch(function () { app.innerHTML = '<p class="err">This browser cannot store the ledger (private browsing?).</p>'; });
   }
   function glClose() { kpClose(); kpEl = null; if (D && dek) { try { stamp(D); } catch (e) {} } dek = null; D = null; SY.pw = ""; clearTimeout(SY.t); app = null; var ov = document.getElementById("gl-screen"); if (ov) ov.remove(); }
-  if (typeof module !== "undefined" && module.exports) module.exports = { stamp: stamp, merge: merge, packVault: packVault, unpackVault: unpackVault, sealData: sealData, openData: openData, openWithPassword: openWithPassword, kek: kek, wrap: wrap, setYearTotal: setYearTotal, _get: function () { return D; }, migrate: migrate, applySets: applySets, derived: derived, mtd: mtd, _set: function (d) { D = d; }, calc: calc, ytdTotal: ytdTotal, ADJ: ADJ, weeksLeft: weeksLeft, numPad: numPad, kpPress: kpPress, glOpen: glOpen, weekEarned: weekEarned, weekBar: weekBar, sunLine: sunLine, sunToggleHtml: sunToggleHtml, sunToggle: sunToggle, fix76j: fix76j, snapToday: snapToday, howAll: howAll, howToday: howToday, topHtml: topHtml, gsSet: gsSet, gsOn: function () { return GS; }, gsLineTxt: gsLineTxt, syncNow: syncNow, _SY: SY, _dek: function () { return dek; }, _setDek: function (k) { dek = k; }, adoptRemote: adoptRemote, godLink: godLink, syncAtTxt: syncAtTxt, gsBarHtml: gsBarHtml, restoreScreen: restoreScreen, lockNow: lockNow, _setApp: function (a) { app = a; } };
+  if (typeof module !== "undefined" && module.exports) module.exports = { stamp: stamp, merge: merge, packVault: packVault, unpackVault: unpackVault, sealData: sealData, openData: openData, openWithPassword: openWithPassword, kek: kek, wrap: wrap, setYearTotal: setYearTotal, _get: function () { return D; }, migrate: migrate, applySets: applySets, derived: derived, mtd: mtd, _set: function (d) { D = d; }, calc: calc, ytdTotal: ytdTotal, ADJ: ADJ, weeksLeft: weeksLeft, numPad: numPad, kpPress: kpPress, kpBtn: kpBtn, glOpen: glOpen, weekEarned: weekEarned, weekBar: weekBar, sunLine: sunLine, sunToggleHtml: sunToggleHtml, sunToggle: sunToggle, fix76j: fix76j, snapToday: snapToday, howAll: howAll, howToday: howToday, topHtml: topHtml, gsSet: gsSet, gsOn: function () { return GS; }, gsLineTxt: gsLineTxt, syncNow: syncNow, _SY: SY, _dek: function () { return dek; }, _setDek: function (k) { dek = k; }, adoptRemote: adoptRemote, godLink: godLink, syncAtTxt: syncAtTxt, gsBarHtml: gsBarHtml, restoreScreen: restoreScreen, lockNow: lockNow, _setApp: function (a) { app = a; } };
   window.__pcsGoalOpen = glOpen; window.__pcsGoalSyncOn = function () { return GS; }; window.__pcsGoalGodLink = godLink; window.__pcsGoalClose = glClose;
   document.addEventListener("click", function (e) { var t = e.target.closest ? e.target.closest("[data-god-menu=goal]") : null; if (t) { e.stopPropagation(); glOpen(); } }, true);
 })();
