@@ -233,7 +233,7 @@
     b.addEventListener("pointerdown", function (e) { e.preventDefault(); }); b.addEventListener("mousedown", function (e) { e.preventDefault(); });
     b.addEventListener("pointerup", function (e) { if (e.pointerType === "mouse" && e.button !== 0) return; b.__kpUp = Date.now(); lockSubmit(fm); });
   });
-    if (inp) { inp.setAttribute("enterkeyhint", "go"); setTimeout(function () { try { inp.focus(); } catch (e) {} }, 0); } }
+    if (inp) { inp.setAttribute("enterkeyhint", "go"); if (!kpHold(inp)) setTimeout(function () { try { inp.focus(); } catch (e) {} }, 0); } }
   function shell(inner, msg) { kpClose(); lockBusy = false; app.innerHTML = '<div class="lock card"><h1>Monthly Goal</h1>' + inner + '<p class="err" id="gl-err">' + (msg || "") + "</p></div>"; numPad(app); return document.getElementById("gl-err"); }
   function lockNow(msg) { dek = null; D = null; SY.pw = ""; clearTimeout(SY.t); if (!app) return; kvGet("vault").then(function (v) { if (!v) return GS || godTok() ? restoreScreen() : firstRun(); pinValid().then(function (p) { if (p) pinScreen(p, msg); else pwScreen(msg); }); }); }
   function firstRun(msg) {
@@ -242,7 +242,7 @@
       '<form id="gl-f-set"><p><input type="password" id="gl-pw1" autocomplete="new-password" placeholder="New password" style="width:100%"></p><p><input type="password" id="gl-pw2" autocomplete="new-password" placeholder="Repeat password" style="width:100%"></p>' +
       '<p><input type="password" id="gl-pin1" inputmode="numeric" maxlength="4" autocomplete="off" placeholder="4-digit PIN" style="width:48%"> <input type="password" id="gl-pin2" inputmode="numeric" maxlength="4" autocomplete="off" placeholder="Repeat PIN" style="width:48%"></p>' +
       '<button class="btn" type="submit">Set password &amp; PIN</button>' + (GS || godTok() ? ' <button class="btn ghost" type="button" id="gl-b-rest">Restore from backup</button>' : '') + '</form>', msg);
-    var pin1 = document.getElementById("gl-pin1"); if (pin1 && kpOn()) kpShow(pin1); /* first-run PIN boxes are inputmode none; show the pad even when opening focus is rejected */
+    var pin1 = document.getElementById("gl-pin1"); if (pin1) kpShow(pin1); /* open on the first PIN; a saved iPad-keyboard choice must not hide this pad */
     var rb0 = document.getElementById("gl-b-rest"); if (rb0) rb0.onclick = function () { restoreScreen(); };
     document.getElementById("gl-f-set").onsubmit = function (e) { e.preventDefault();
       var a = val("gl-pw1"), b = val("gl-pw2"), p1 = val("gl-pin1"), p2 = val("gl-pin2");
@@ -270,7 +270,7 @@
       '<button class="btn" type="submit">Unlock</button> <button class="btn ghost" type="button" id="gl-b-usepw">Use password</button></form>', msg || (left < PIN_TRIES ? left + " tries left" : ""));
     document.getElementById("gl-b-usepw").onclick = function () { pwScreen(); };
     var pinEl = document.getElementById("gl-pin"), pinFm = document.getElementById("gl-f-pin"); lockWire(pinFm, pinEl);
-    if (pinEl && kpOn()) kpShow(pinEl); /* show the 9-key pad with the PIN screen; do not wait for a delayed focus */
+    if (pinEl) kpShow(pinEl); /* pad is up before any focus; do not focus the PIN box */
     pinEl.addEventListener("input", function () { pinEl.value = pinEl.value.replace(/\D/g, "").slice(0, 4); if (pinEl.value.length === 4) lockSubmit(pinFm); }); /* v76d: 4th digit unlocks */
     pinFm.onsubmit = function (e) { e.preventDefault(); if (lockBusy) return; var pin = val("gl-pin"); if (!/^\d{4}$/.test(pin)) { err.textContent = "4 digits."; return; } lockBusy = true;
       err.textContent = "Unlocking\u2026";

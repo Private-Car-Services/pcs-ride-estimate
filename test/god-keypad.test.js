@@ -75,10 +75,15 @@ function loadGoal(opts) {
     createElement: el,
     querySelector() { return null; }
   };
+  const timers = [];
+  const frames = [];
   const sandbox = {
     console, Date, Math, JSON, Number, String, Object, Array, Promise, RegExp, Error, parseInt, isFinite,
     Event: function Event(type) { this.type = type; },
-    setTimeout() { return 0; }, clearTimeout() {}, setInterval() { return 0; }, clearInterval() {},
+    setTimeout(fn) { if (opts && opts.queueTimers && typeof fn === "function") { timers.push(fn); return timers.length; } return 0; },
+    clearTimeout() {}, setInterval() { return 0; }, clearInterval() {},
+    requestAnimationFrame(fn) { if (opts && opts.queueTimers && typeof fn === "function") { frames.push(fn); return frames.length; } return 0; },
+    cancelAnimationFrame() {},
     document: doc, localStorage: { getItem() { return null; }, setItem() {}, removeItem() {} },
     location: { search: "", hostname: "localhost", href: "http://localhost/god/" },
     navigator: { userAgent: "test" },
@@ -90,7 +95,13 @@ function loadGoal(opts) {
   sandbox.window = sandbox;
   vm.createContext(sandbox);
   vm.runInContext(fs.readFileSync(path.join(__dirname, "../god/goal.js"), "utf8"), sandbox, { filename: "god/goal.js" });
-  return { sandbox, doc, nodes };
+  async function flush() {
+    await Promise.resolve();
+    frames.splice(0).forEach(function (fn) { fn(0); });
+    timers.splice(0).forEach(function (fn) { fn(); });
+    await Promise.resolve();
+  }
+  return { sandbox, doc, nodes, flush };
 }
 
 function openPad(box, kind) {
@@ -350,4 +361,51 @@ test("ride total and tip total use the cents pad after an iPad tap even if the a
   const noteTap = { target: note, cancelable: true, prevented: false, preventDefault() { this.prevented = true; } };
   (ov._l.touchstart || []).forEach(function (fn) { fn(noteTap); });
   assert.equal(noteTap.prevented, false);
+});
+
+test("first-run and unlock PIN screens open the pad before any tap when the iPad keyboard was saved", async function () {
+  const { sandbox, doc, flush } = loadGoal({ queueTimers: true });
+  sandbox.localStorage.getItem = function (k) { return k === "pcsGoalSysKb" ? "1" : null; };
+  sandbox.__pcsGoalOpen();
+  sandbox.__pcsGoalFirstRun();
+  const pin1 = doc.getElementById("gl-pin1");
+  const pin2 = doc.getElementById("gl-pin2");
+  const pad = doc.getElementById("gl-kp");
+  assert.equal(pad.style.display, "block");
+  assert.ok(String(pad.className).indexOf("whole") >= 0);
+  assert.ok(String(pad.className).indexOf("hold") >= 0);
+  assert.equal(pin1.readOnly, true);
+  assert.equal(pin2.readOnly, true);
+  assert.equal(pin1.getAttribute("inputmode"), "none");
+  assert.equal(pin2.getAttribute("inputmode"), "none");
+  assert.equal(doc.getElementById("gl-pw1").getAttribute("data-kp"), null);
+  await flush();
+  assert.equal(pin1._focusCalls || 0, 0);
+  assert.equal(pin2._focusCalls || 0, 0);
+  assert.equal(pad.style.display, "block");
+  ["0", "1", "2", "3"].forEach(function (k) { press(pad, k, "up"); press(pad, k, "click"); });
+  assert.equal(pin1.value, "0123");
+  const ov = doc.getElementById("gl-screen");
+  ov._l.pointerdown.forEach(function (fn) { fn({ target: pin2, cancelable: true, pointerType: "touch", button: 0, preventDefault() {} }); });
+  await flush();
+  assert.equal(pin2._focusCalls || 0, 0);
+  assert.equal(pad.style.display, "block");
+  press(pad, "9", "up");
+  assert.equal(pin2.value, "9");
+  assert.equal(pin1.value, "0123");
+  sandbox.__pcsGoalPinScreen({ fails: 0, exp: Date.now() + 3600000 });
+  const pin = doc.getElementById("gl-pin");
+  const unlock = doc.getElementById("gl-kp");
+  assert.equal(unlock.style.display, "block");
+  assert.ok(String(unlock.className).indexOf("whole") >= 0);
+  assert.equal(pin.readOnly, true);
+  assert.equal(pin.getAttribute("inputmode"), "none");
+  assert.equal(pin.getAttribute("maxlength"), "4");
+  await flush();
+  assert.equal(pin._focusCalls || 0, 0);
+  assert.equal(unlock.style.display, "block");
+  ["0", "1", "2", "3"].forEach(function (k) { press(unlock, k, "up"); press(unlock, k, "click"); });
+  assert.equal(pin.value, "0123");
+  press(unlock, "9", "up");
+  assert.equal(pin.value, "0123");
 });
