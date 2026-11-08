@@ -58,7 +58,7 @@ function page(mode, ride) {
     .leaflet-top{position:absolute;z-index:1000}.leaflet-left{left:0}.leaflet-top.leaflet-left{top:0}
     .leaflet-control-zoom a{display:block;width:44px;height:44px;background:#fff;color:#111;text-align:center;line-height:44px;text-decoration:none}
     .map-stage.board-map{min-height:360px;background:#0b3d23}
-    .map-stage.board-map #live-map{min-height:360px;height:100%}
+    .map-stage.board-map #live-map{position:absolute;inset:0;z-index:1;min-height:0;height:100%}
     #meter-split-run .map-stage.board-map{height:46vh;height:46dvh;min-height:240px}
     #meter-split-run .meter-map-col:has(#sched-rider-line) .map-stage.board-map{height:calc(46vh - 52px);height:calc(46dvh - 52px);min-height:188px;overflow:hidden}
     #meter-split-run .meter-map-col:has(#sched-rider-line) #live-map{min-height:0}
@@ -100,6 +100,15 @@ function page(mode, ride) {
       if (rbar) rfs.style.setProperty("--rfs-bar", rbar.offsetHeight + "px");
       reserve(rfs, "rfs-bar", "#live-map");
     }
+    ["map-mode-toggle", "map-orient-toggle", "map-recenter"].forEach(function (id) {
+      var el = document.getElementById(id);
+      if (!el) return;
+      el.dataset.clicks = "0";
+      el.dataset.touches = "0";
+      el.addEventListener("click", function () { el.dataset.clicks = String(Number(el.dataset.clicks) + 1); });
+      el.addEventListener("touchend", function () { el.dataset.touches = String(Number(el.dataset.touches) + 1); });
+      el.addEventListener("pointerup", function (e) { if (e.pointerType === "touch") el.dataset.touches = String(Number(el.dataset.touches) + 1); });
+    });
     function probe(id) {
       var el = document.getElementById(id);
       if (!el) return { present: false };
@@ -193,6 +202,25 @@ test("the rider line is on screen in pickup and active, normal and fullscreen", 
             if (!report) await wait(150);
           }
           const got = JSON.parse(report);
+          if (mode === "active" && ride === "554") {
+            const ids = { follow: "map-mode-toggle", north: "map-orient-toggle", center: "map-recenter" };
+            got.clicks = {};
+            for (const key of Object.keys(ids)) {
+              const p = got[key];
+              assert.ok(p && p.self, name + " " + key + " is not the element under the point " + JSON.stringify(p));
+              await send("Input.dispatchMouseEvent", { type: "mouseMoved", x: p.x, y: p.y }, sid);
+              await send("Input.dispatchMouseEvent", { type: "mousePressed", x: p.x, y: p.y, button: "left", clickCount: 1 }, sid);
+              await send("Input.dispatchMouseEvent", { type: "mouseReleased", x: p.x, y: p.y, button: "left", clickCount: 1 }, sid);
+              const touchStart = await send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x: p.x, y: p.y, radiusX: 1, radiusY: 1, id: 1 }] }, sid);
+              const touchEnd = await send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] }, sid);
+              assert.ok(!touchStart.error && !touchEnd.error, name + " " + key + " touch dispatch failed " + JSON.stringify(touchStart.error || touchEnd.error));
+              const counted = await send("Runtime.evaluate", { expression: "(function(){var el=document.getElementById(" + JSON.stringify(ids[key]) + ");return el.dataset.clicks+'|'+el.dataset.touches;})()", returnByValue: true }, sid);
+              got.clicks[key] = counted.result && counted.result.result ? counted.result.result.value : "";
+              const parts = String(got.clicks[key]).split("|");
+              assert.ok(Number(parts[0]) >= 1, name + " " + key + " mouse click was not registered " + got.clicks[key]);
+              assert.ok(Number(parts[1]) >= 1, name + " " + key + " touch was not registered " + got.clicks[key]);
+            }
+          }
           out[name] = got;
           const shot = await send("Page.captureScreenshot", { format: "png", captureBeyondViewport: false, clip: { x: 0, y: 0, width: size[0], height: size[1], scale: 1 } }, sid);
           fs.writeFileSync("/opt/cursor/artifacts/surface-" + name + ".png", Buffer.from(shot.result.data, "base64"));

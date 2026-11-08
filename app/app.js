@@ -10160,13 +10160,20 @@
     if (!ids.length || !tk) return Promise.resolve(verInv);
     return qWorker("/driver/invoice", { token: tk, rideIds: ids }).then(function (d) {
       verInvTake(ids, (d && d.invoices) || {}); return verInv;
-    }, function () { return verInv; });
+    }, function () { (ids || []).forEach(function (id) { verInvDropLink(id); }); return verInv; });
   }
   /* The driver read is /driver/invoice with the driver token only. A row is kept only for a ride this call asked for.
      Nested square (status, public_url, payments) is the trusted link source. God tokens are never added. */
+  function verInvDropLink(id) {
+    var prev = verInv[id] && typeof verInv[id] === "object" ? verInv[id] : {};
+    verInv[id] = { invoiceNo: prev.invoiceNo || "", amountCents: prev.amountCents, taxCents: prev.taxCents, paid: prev.paid === true, at: prev.at, stale: true, fetchedAt: 0 };
+  }
   function verInvTake(ids, got) {
     var allow = {};
     (ids || []).forEach(function (id) { if (id) allow[id] = 1; });
+    Object.keys(allow).forEach(function (id) {
+      if (!got || !Object.prototype.hasOwnProperty.call(got, id) || !got[id] || typeof got[id] !== "object") verInvDropLink(id);
+    });
     Object.keys(got || {}).forEach(function (id) {
       if (!allow[id]) return;
       var row = got[id] && typeof got[id] === "object" ? got[id] : null;
@@ -17609,7 +17616,7 @@
       /* v72t (Matthew): back to the pre-v72s single column; while driving the MAP is at the TOP with the next turn on it */
       "#meter-split-run>.meter-map-col{order:-1}" +
       "#meter-split-run .map-stage.board-map{height:46vh;height:46dvh;min-height:240px}#meter-split-run .map-stage.board-map #live-map,#meter-split-run .map-stage.board-map .leaflet-container{min-height:240px}" +
-      "#meter-split-run .meter-map-col:has(#sched-rider-line) .map-stage.board-map{height:calc(46vh - 52px);height:calc(46dvh - 52px);min-height:188px;overflow:hidden}#meter-split-run .meter-map-col:has(#sched-rider-line) .map-stage.board-map #live-map,#meter-split-run .meter-map-col:has(#sched-rider-line) .map-stage.board-map .leaflet-container{min-height:0}" +
+      "#meter-split-run .meter-map-col:has(#sched-rider-line) .map-stage.board-map{height:calc(46vh - 52px);height:calc(46dvh - 52px);min-height:188px;overflow:visible}#meter-split-run .meter-map-col:has(#sched-rider-line) .map-stage.board-map #live-map,#meter-split-run .meter-map-col:has(#sched-rider-line) .map-stage.board-map .leaflet-container{position:absolute;left:0;right:0;top:0;bottom:0;z-index:1;min-height:0}#meter-map-stage .nav-toggle,#meter-map-stage .nav-recenter,#home-map-stage .nav-toggle,#home-map-stage .nav-recenter{z-index:1100;pointer-events:auto}" +
       ".meter-turn{position:absolute;left:8px;right:8px;top:8px;z-index:500;background:#20371d;color:#cdeccd;border-radius:10px;padding:8px 12px;font-weight:800;font-size:18px;line-height:1.25;box-shadow:0 2px 8px rgba(0,0,0,.35)}" +
       ".meter-turn small{display:block;font-weight:600;font-size:13px;opacity:.85}" +
       ".meter-topstack{position:absolute;left:8px;right:8px;top:8px;z-index:900;display:flex;flex-direction:column;align-items:flex-end;gap:6px;pointer-events:none}" +

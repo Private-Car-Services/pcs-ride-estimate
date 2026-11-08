@@ -105,7 +105,7 @@ test("an in-ride payment changes the authorized share from pay to receipt", asyn
   assert.equal(pub.payUrl, PAY);
   assert.equal(pub.receiptUrl, undefined);
   assert.equal(pub.riderPhone, undefined);
-  assert.equal(live.bill(pub).link.text, "Pay now");
+  assert.equal(live.bill(pub).link.text, "Pay invoice");
   phase = "PAID";
   await read();
   pub = follow.publish([mine])[0];
@@ -169,4 +169,22 @@ test("another driver, another ride, a ride change, and a canceled ride do not le
   assert.equal(JSON.stringify(pubs).indexOf("555-0100"), -1);
   assert.equal(JSON.stringify(pubs).indexOf("evil.example"), -1);
   assert.equal(posts[posts.length - 1][0], "ride-c");
+});
+
+test("a response that omits the ride drops the receipt it had", async function () {
+  const mine = ride("ride-omit");
+  follow.publish([mine]);
+  await follow.refresh({
+    rideId: "ride-omit", token: "driver-token", driverId: "driver",
+    post: function () { return Promise.resolve({ ok: true, invoices: { "ride-omit": row("PAID") } }); }
+  });
+  assert.equal(follow.publish([mine])[0].receiptUrl, RECEIPT);
+  await follow.refresh({
+    rideId: "ride-omit", token: "driver-token", driverId: "driver",
+    post: function () { return Promise.resolve({ ok: true, invoices: {} }); }
+  });
+  const pub = follow.publish([mine])[0];
+  assert.equal(pub.receiptUrl, undefined);
+  assert.equal(pub.payUrl, undefined);
+  assert.equal(pub.pay, undefined);
 });

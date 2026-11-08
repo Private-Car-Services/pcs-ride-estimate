@@ -182,7 +182,7 @@ test("the synthetic driver photo stays under the green bar and off the map contr
     const paidClick = await send("Runtime.evaluate", { expression: "document.getElementById('fl-receipt').dataset.n", returnByValue: true }, sid);
     assert.equal(paidClick.result.result.value, "1");
     const owed = await showBill("unpaid", "tracker-white-unpaid.png");
-    assert.equal(owed.text, "Invoice #000574 – unpaid · Pay now");
+    assert.equal(owed.text, "Invoice #000574 – unpaid · Pay invoice");
     assert.equal(owed.href, "https://squareup.com/pay-invoice/inv574");
     assert.equal(owed.id, "fl-pay");
     await send("Runtime.evaluate", { expression: "document.getElementById('fl-pay').click()", returnByValue: true }, sid);

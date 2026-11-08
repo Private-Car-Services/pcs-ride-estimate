@@ -101,7 +101,7 @@ test("verified paid and unpaid rows publish only a matching Square link", functi
   const owedShown = live.bill(owedPub);
   assert.equal(owedShown.label, "Invoice #000574 – unpaid");
   assert.equal(owedShown.link.href, PAY);
-  assert.equal(owedShown.link.text, "Pay now");
+  assert.equal(owedShown.link.text, "Pay invoice");
   const noLink = live.bill({ bill: "invoiced", pay: "unpaid", invoiceNo: "000574" });
   assert.equal(noLink.label, "Invoiced ride");
   assert.equal(noLink.link, null);
