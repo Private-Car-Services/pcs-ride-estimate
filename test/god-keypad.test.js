@@ -148,15 +148,15 @@ test("a PIN tap types one digit and does not double it", function () {
   assert.equal(input.value, "1234");
 });
 
-test("v2.0m-ag is what a phone on v2.0m-af is offered", function () {
+test("v2.0m-ah is what a phone on v2.0m-ag is offered", function () {
   const { sandbox } = loadGoal();
   const version = fs.readFileSync(path.join(__dirname, "../app/version.js"), "utf8");
-  assert.ok(version.indexOf('var APP_VERSION = "v2.0m-ag"') >= 0);
+  assert.ok(version.indexOf('var APP_VERSION = "v2.0m-ah"') >= 0);
   const pages = {
-    "app/driver/index.html": "version.js?v=2.0m-ag",
-    "app/index.html": "version.js?v=2.0m-ag",
-    "god/index.html": "goal.js?v=2.0m-ag",
-    "meter/index.html": "version.js?v=2.0m-ag"
+    "app/driver/index.html": "version.js?v=2.0m-ah",
+    "app/index.html": "version.js?v=2.0m-ah",
+    "god/index.html": "goal.js?v=2.0m-ah",
+    "meter/index.html": "version.js?v=2.0m-ah"
   };
   Object.keys(pages).forEach(function (rel) {
     const html = fs.readFileSync(path.join(__dirname, "..", rel), "utf8");
@@ -250,4 +250,104 @@ test("a price box stays closed until it is tapped", function () {
   const pad = doc.getElementById("gl-kp");
   assert.equal(pad.style.display, "block");
   assert.ok(String(pad.className).indexOf("whole") < 0);
+});
+
+/* WebKit order on iPad: touchstart, pointerdown, focusin, then pointerup on a key. */
+function webkitTap(ov, el) {
+  const ev = { target: el, cancelable: true, pointerType: "touch", button: 0, prevented: false, preventDefault() { this.prevented = true; } };
+  (ov._l.touchstart || []).forEach(function (fn) { fn(ev); });
+  (ov._l.pointerdown || []).forEach(function (fn) { fn(ev); });
+  (ov._l.focusin || []).forEach(function (fn) { fn({ target: el }); });
+  return ev;
+}
+
+test("the real PIN screen blocks the iPad keyboard and keeps a leading zero", function () {
+  const { sandbox, doc } = loadGoal();
+  const saved = [];
+  sandbox.localStorage.setItem = function () { saved.push("set"); };
+  sandbox.__pcsGoalOpen();
+  sandbox.__pcsGoalPinScreen({ fails: 0, exp: Date.now() + 3600000 });
+  const app = doc.getElementById("gl-app");
+  assert.equal(String(app._html).indexOf("autofocus"), -1);
+  const pin = doc.getElementById("gl-pin");
+  assert.equal(String(app._html).indexOf('id="gl-pw"'), -1);
+  assert.equal(pin.readOnly, true);
+  assert.equal(pin.getAttribute("inputmode"), "none");
+  assert.equal(pin.getAttribute("data-kp"), "w");
+  assert.equal(pin.getAttribute("data-reg"), null);
+  assert.equal(pin.getAttribute("maxlength"), "4");
+  const ov = doc.getElementById("gl-screen");
+  const ev = webkitTap(ov, pin);
+  assert.equal(ev.prevented, true);
+  const pad = doc.getElementById("gl-kp");
+  assert.equal(pad.style.display, "block");
+  assert.ok(String(pad.className).indexOf("whole") >= 0);
+  assert.ok(String(pad.className).indexOf("hold") >= 0);
+  ["0", "1", "2", "3"].forEach(function (k) { press(pad, k, "up"); press(pad, k, "click"); });
+  assert.equal(pin.value, "0123");
+  press(pad, "9", "up");
+  assert.equal(pin.value, "0123");
+  press(pad, "sys", "up");
+  assert.equal(pad.style.display, "block");
+  assert.equal(saved.length, 0);
+  assert.equal(pin.readOnly, true);
+  assert.equal(pin.getAttribute("inputmode"), "none");
+});
+
+test("ride total and tip total use the cents pad after an iPad tap even if the alphabet keyboard was chosen before", function () {
+  const { sandbox, doc } = loadGoal();
+  sandbox.localStorage.getItem = function (k) { return k === "pcsGoalSysKb" ? "1" : null; };
+  const saved = [];
+  sandbox.localStorage.setItem = function () { saved.push("set"); };
+  sandbox.__pcsGoalOpen();
+  const ov = doc.getElementById("gl-screen");
+  function field(id, mode, label) {
+    const el = doc.createElement("input");
+    el.id = id;
+    el.type = "text";
+    if (mode) el.setAttribute("inputmode", mode);
+    if (label) el.setAttribute("aria-label", label);
+    ov.appendChild(el);
+    return el;
+  }
+  const ride = field("gl-q-amt", "decimal", "Ride amount");
+  const tip = field("gl-q-tip", "decimal", "Tip (optional)");
+  const note = field("gl-q-note", "", "Note (optional)");
+  const god = doc.createElement("input");
+  god.id = "gl-gpin";
+  god.type = "password";
+  god.setAttribute("inputmode", "numeric");
+  ov.appendChild(god);
+  sandbox.__pcsNumPad(ov);
+  assert.equal(ride.readOnly, true);
+  assert.equal(tip.readOnly, true);
+  assert.equal(ride.getAttribute("inputmode"), "none");
+  assert.equal(tip.getAttribute("inputmode"), "none");
+  assert.equal(ride.getAttribute("data-kp"), "d");
+  assert.equal(ride.getAttribute("data-reg"), "1");
+  assert.equal(tip.getAttribute("data-reg"), "1");
+  assert.equal(note.getAttribute("data-kp"), null);
+  assert.notEqual(note.readOnly, true);
+  assert.notEqual(god.readOnly, true);
+  const rideTap = webkitTap(ov, ride);
+  assert.equal(rideTap.prevented, true);
+  const pad = doc.getElementById("gl-kp");
+  assert.equal(pad.style.display, "block");
+  assert.ok(String(pad.className).indexOf("whole") < 0);
+  assert.ok(String(pad.className).indexOf("hold") >= 0);
+  ["9", "6", "2", "5"].forEach(function (k) { press(pad, k, "up"); press(pad, k, "click"); });
+  assert.equal(ride.value, "96.25");
+  press(pad, ".", "up");
+  assert.equal(ride.value, "96.25");
+  webkitTap(ov, tip);
+  ["1", "0", "0"].forEach(function (k) { press(pad, k, "up"); });
+  assert.equal(tip.value, "1.00");
+  assert.equal(ride.value, "96.25");
+  press(pad, "sys", "up");
+  assert.equal(pad.style.display, "block");
+  assert.equal(saved.length, 0);
+  assert.equal(tip.readOnly, true);
+  const noteTap = { target: note, cancelable: true, prevented: false, preventDefault() { this.prevented = true; } };
+  (ov._l.touchstart || []).forEach(function (fn) { fn(noteTap); });
+  assert.equal(noteTap.prevented, false);
 });
