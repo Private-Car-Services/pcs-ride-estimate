@@ -19,7 +19,14 @@ function loadGoal() {
       addEventListener(t, fn) { this._l = this._l || {}; (this._l[t] = this._l[t] || []).push(fn); },
       dispatchEvent(ev) { ev.target = ev.target || this; (this._l && this._l[ev.type] || []).forEach(function (fn) { fn(ev); }); return true; },
       querySelector(sel) { return walk(this, sel); },
-      querySelectorAll() { return []; },
+      querySelectorAll(sel) {
+        const out = [];
+        (function visit(n) {
+          if (n !== node && sel === "input" && n.tag === "input") out.push(n);
+          (n.children || []).forEach(visit);
+        })(node);
+        return out;
+      },
       closest(sel) { let n = this; while (n) { if (match(n, sel)) return n; n = n.parentNode; } return null; },
       contains(n) { let x = n; while (x) { if (x === this) return true; x = x.parentNode; } return false; },
       focus() { let n = this; const ev = { type: "focusin", target: this }; while (n) { (n._l && n._l.focusin || []).forEach(function (fn) { fn(ev); }); n = n.parentNode; } },
@@ -153,4 +160,61 @@ test("v2.0m-ae is what a phone on v2.0m-ad is offered", function () {
   const btn = { tag: "button", attrs: { "data-k": "1" }, closest(sel) { return sel.indexOf("button") >= 0 ? btn : null; } };
   text.parentElement = btn;
   assert.equal(sandbox.__pcsKpBtn({ target: text }).attrs["data-k"], "1");
+});
+
+test("ledger PIN pad is visible without delayed focus, and a tap opens it", function () {
+  const { sandbox, doc } = loadGoal();
+  sandbox.__pcsGoalOpen();
+  const ov = doc.getElementById("gl-screen");
+  const pin = doc.createElement("input");
+  pin.id = "gl-pin";
+  pin.type = "password";
+  pin.setAttribute("inputmode", "numeric");
+  ov.appendChild(pin);
+  assert.ok(sandbox.__pcsNumPad(ov) >= 1);
+  assert.equal(pin.getAttribute("inputmode"), "none");
+  assert.equal(pin.getAttribute("data-kp"), "w");
+  const before = doc.getElementById("gl-kp");
+  assert.ok(!before || before.style.display !== "block");
+  sandbox.__pcsKpShow(pin);
+  const opened = doc.getElementById("gl-kp");
+  assert.equal(opened.style.display, "block");
+  assert.ok(String(opened.className).indexOf("whole") >= 0);
+});
+
+test("tapping the PIN opens the pad when focus never arrived", function () {
+  const { sandbox, doc } = loadGoal();
+  sandbox.__pcsGoalOpen();
+  const ov = doc.getElementById("gl-screen");
+  const pin = doc.createElement("input");
+  pin.id = "gl-pin";
+  pin.type = "password";
+  pin.setAttribute("inputmode", "numeric");
+  ov.appendChild(pin);
+  sandbox.__pcsNumPad(ov);
+  assert.ok(ov._l && ov._l.pointerdown && ov._l.pointerdown.length);
+  ov._l.pointerdown.forEach(function (fn) { fn({ target: pin, preventDefault: function () {} }); });
+  const pad = doc.getElementById("gl-kp");
+  assert.equal(pad.style.display, "block");
+  assert.ok(String(pad.className).indexOf("whole") >= 0);
+});
+
+test("a price box stays closed until it is tapped", function () {
+  const { sandbox, doc } = loadGoal();
+  sandbox.__pcsGoalOpen();
+  const ov = doc.getElementById("gl-screen");
+  const price = doc.createElement("input");
+  price.id = "gl-q-amt";
+  price.type = "text";
+  price.setAttribute("inputmode", "decimal");
+  ov.appendChild(price);
+  sandbox.__pcsNumPad(ov);
+  assert.equal(price.getAttribute("data-kp"), "d");
+  assert.equal(price.getAttribute("data-reg"), "1");
+  const before = doc.getElementById("gl-kp");
+  assert.ok(!before || before.style.display !== "block");
+  ov._l.pointerdown.forEach(function (fn) { fn({ target: price, preventDefault: function () {} }); });
+  const pad = doc.getElementById("gl-kp");
+  assert.equal(pad.style.display, "block");
+  assert.ok(String(pad.className).indexOf("whole") < 0);
 });

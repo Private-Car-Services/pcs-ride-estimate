@@ -190,6 +190,8 @@
     var f = regFmt(t.value); if (t.value !== f) { t.value = f; try { t.setSelectionRange(f.length, f.length); } catch (x) {} } }, true);
   window.__pcsGoalRegFmt = regFmt; window.__pcsGoalRegKey = regKey; /* test hooks */
   window.__pcsKpBtn = kpBtn;
+  window.__pcsNumPad = numPad;
+  window.__pcsKpShow = kpShow;
   function kpFire(el) { el.dispatchEvent(new Event("input", { bubbles: true })); }
   function kpBtn(e) { var t = e && e.target; if (!t) return null; if (t.closest) { var b = t.closest("button[data-k]"); if (b) return b; } var p = t.parentElement; return p && p.closest ? p.closest("button[data-k]") : null; }
   function kpPress(k) { var el = kpCur; if (k === "done") { if (el) el.dispatchEvent(new Event("change", { bubbles: true })); var fm = el && el.form && /^gl-f-(pin|unlock)$/.test(el.form.id) ? el.form : null; kpClose(); if (fm) lockSubmit(fm); return; }
@@ -214,7 +216,7 @@
     if (kpCur) { try { kpCur.blur(); } catch (e) {} } kpCur = null; }
   function kpWire(ov) { kpEl = null; kpCur = null;
     ov.addEventListener("focusin", function (e) { var t = e.target; if (t && t.getAttribute && t.getAttribute("data-kp")) kpShow(t); });
-    ov.addEventListener("pointerdown", function (e) { var t = e.target; if (!kpCur) return; if (kpEl && kpEl.contains(t)) return; if (t && t.getAttribute && t.getAttribute("data-kp")) return kpShow(t); if (t && t.closest && t.closest("button")) return; /* v76d: let the button's click land first; it closes the pad itself */ kpClose(); }, true);
+    ov.addEventListener("pointerdown", function (e) { var t = e.target; if (t && t.getAttribute && t.getAttribute("data-kp")) { kpShow(t); return; } /* a tap on the PIN or amount opens the pad even if focus was refused */ if (!kpCur) return; if (kpEl && kpEl.contains(t)) return; if (t && t.closest && t.closest("button")) return; /* v76d: let the button's click land first; it closes the pad itself */ kpClose(); }, true);
     ov.addEventListener("click", function (e) { var t = e.target; if (kpCur && t && t.closest && t.closest("button") && !(kpEl && kpEl.contains(t))) setTimeout(kpClose, 0); });
     ov.addEventListener("keydown", function (e) { if (kpCur && e.key === "Escape" && e.target === kpCur) kpClose(); });
     var tg = document.createElement("button"); tg.type = "button"; tg.id = "gl-kb-tog"; tg.onclick = function () { try { localStorage.removeItem(KP_KEY); } catch (e) {} kpRefresh(); }; ov.appendChild(tg); kpRefresh(); }
@@ -262,6 +264,7 @@
       '<button class="btn" type="submit">Unlock</button> <button class="btn ghost" type="button" id="gl-b-usepw">Use password</button></form>', msg || (left < PIN_TRIES ? left + " tries left" : ""));
     document.getElementById("gl-b-usepw").onclick = function () { pwScreen(); };
     var pinEl = document.getElementById("gl-pin"), pinFm = document.getElementById("gl-f-pin"); lockWire(pinFm, pinEl);
+    if (pinEl && kpOn()) kpShow(pinEl); /* show the 9-key pad with the PIN screen; do not wait for a delayed focus */
     pinEl.addEventListener("input", function () { pinEl.value = pinEl.value.replace(/\D/g, "").slice(0, 4); if (pinEl.value.length === 4) lockSubmit(pinFm); }); /* v76d: 4th digit unlocks */
     pinFm.onsubmit = function (e) { e.preventDefault(); if (lockBusy) return; var pin = val("gl-pin"); if (!/^\d{4}$/.test(pin)) { err.textContent = "4 digits."; return; } lockBusy = true;
       err.textContent = "Unlocking\u2026";
