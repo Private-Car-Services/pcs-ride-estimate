@@ -1,13 +1,15 @@
-/* Proposed response for the existing POST /driver/invoice handler.
-   This is not a Worker and it is not a deploy. The only Worker text available
-   is a sanitized historical v2.0m-t staged copy. It is not proven to be live.
-   Do not ship that copy. Apply this only after the current Worker source is identified.
+/* Proposed addition to the existing POST /driver/invoice handler.
+   Proposal only. Not a Worker and not a deploy. The sanitized historical
+   v2.0m-t copy is not proven to be the live source.
 
-   Historical handler, after driverFromToken and the assigned-driver check:
-     out[id] = k ? { invoiceNo, amountCents, taxCents: k.amountTaxCents, paid: k.paid === true, at: k.at } : null
-   That KV row is a snapshot from the God link. It has a paid boolean and a status
-   string, and it has no public_url and no payment receipt. /sq/invoice is God-only
-   and returns godToken. This response does not call it and does not copy paid.
+   The historical object stays, including paid:
+     { invoiceNo, amountCents, taxCents: amountTaxCents, paid: paid === true, at }
+   verifiedPrepaid reads invoiceNo, amountCents, and taxCents. paid stays for
+   any reader that already has it. The new paid/unpaid link reads only square,
+   which is a fresh Square response for the invoice number stored on this ride.
+   A stored paid flag never selects the link. There is no cache in this module:
+   every call asks Square again, so a payment during the ride can replace the
+   pay page with the receipt on the next authorized read.
 */
 "use strict";
 
@@ -30,69 +32,82 @@ function refundedCents(p) {
   return isFinite(+money) ? Math.round(+money) : 0;
 }
 
-/* live is one Square invoice read for the KV invoice number. A different number is ignored. */
+function paymentMatches(p, wantNo) {
+  if (!p || typeof p !== "object") return false;
+  var n = invoiceNoOf(p.invoiceNumber || p.invoice_number || "");
+  return !n || n === wantNo;
+}
+
+/* Fresh Square invoice for the linked number only. Extra fields are not copied. */
 function squareForLinkedInvoice(wantNo, live) {
   wantNo = invoiceNoOf(wantNo);
   if (!/^\d{1,20}$/.test(wantNo) || !live || typeof live !== "object") return null;
   var no = invoiceNoOf(live.invoiceNumber || live.invoice_number || live.number);
   if (no !== wantNo) return null;
   var status = String(live.status || "").toUpperCase();
-  if (!/^(PAID|UNPAID|PARTIALLY_PAID|REFUNDED|CANCELED|CANCELLED)$/.test(status)) return null;
-  var payments = Array.isArray(live.payments) ? live.payments : [];
-  var refunded = /PARTIAL|REFUND|CANCEL/.test(status) || payments.some(function (p) {
-    return p && (refundedCents(p) > 0 || /REFUND/.test(String(p.status || "")));
+  if (!status) return null;
+  var payments = (Array.isArray(live.payments) ? live.payments : []).filter(function (p) { return paymentMatches(p, wantNo); });
+  var blocked = /PARTIAL|REFUND|CANCEL|DRAFT|UNKNOWN|SCHEDULED/.test(status) || payments.some(function (p) {
+    return refundedCents(p) > 0 || /REFUND/.test(String(p.status || ""));
   });
   var completed = payments.filter(function (p) {
-    return p && String(p.status || "").toUpperCase() === "COMPLETED" && !(refundedCents(p) > 0);
+    return String(p.status || "").toUpperCase() === "COMPLETED" && !(refundedCents(p) > 0);
   });
   var receipt = "";
   completed.forEach(function (p) { var u = squareHostOk(p.receipt_url || p.receiptUrl); if (u) receipt = u; });
   var payUrl = squareHostOk(live.public_url || live.publicUrl);
   var square = { invoiceNumber: wantNo, status: status, public_url: "", payments: [] };
-  if (!refunded && status === "PAID" && completed.length && receipt) square.payments = [{ status: "COMPLETED", refundedCents: 0, receipt_url: receipt }];
-  else if (!refunded && status === "UNPAID" && !completed.length && payUrl) square.public_url = payUrl;
+  if (blocked) return square;
+  if (status === "PAID" && completed.length === payments.length && completed.length && receipt) {
+    square.payments = [{ status: "COMPLETED", refundedCents: 0, receipt_url: receipt }];
+    return square;
+  }
+  if (status === "UNPAID" && !completed.length && payUrl) {
+    square.public_url = payUrl;
+    return square;
+  }
   return square;
 }
 
-/* Keeps the amount fields the driver app already reads. Drops the stored paid flag. */
+/* Original handler fields, unchanged, plus square when a fresh read matches. */
 function driverInvoiceView(kv, live) {
   if (!kv || typeof kv !== "object") return null;
-  var no = invoiceNoOf(kv.invoiceNo);
-  if (!/^\d{1,20}$/.test(no)) return null;
   var out = {
-    invoiceNo: no,
-    amountCents: isFinite(+kv.amountCents) ? Math.round(+kv.amountCents) : null,
-    taxCents: isFinite(+kv.amountTaxCents) ? Math.round(+kv.amountTaxCents) : (isFinite(+kv.taxCents) ? Math.round(+kv.taxCents) : null),
-    at: isFinite(+kv.at) ? Math.round(+kv.at) : 0
+    invoiceNo: kv.invoiceNo,
+    amountCents: kv.amountCents,
+    taxCents: kv.amountTaxCents,
+    paid: kv.paid === true,
+    at: kv.at
   };
-  var square = squareForLinkedInvoice(no, live);
+  var square = squareForLinkedInvoice(kv.invoiceNo, live);
   if (square) out.square = square;
   return out;
 }
 
-/* Fields the driver may place on the existing unguessable follow share. Not a lookup. */
+/* Link text for the new UI. view.paid is intentionally unread. */
 function followShareInvoice(view) {
   var sq = view && view.square;
-  var no = invoiceNoOf((sq && sq.invoiceNumber) || (view && view.invoiceNo));
-  if (!/^\d{1,20}$/.test(no)) return { invoiceNo: "", pay: "", url: "" };
-  var receipt = sq && sq.payments && sq.payments[0] && squareHostOk(sq.payments[0].receipt_url);
-  if (sq && sq.status === "PAID" && receipt) return { invoiceNo: no, pay: "paid", url: receipt };
-  if (sq && sq.status === "UNPAID" && squareHostOk(sq.public_url)) return { invoiceNo: no, pay: "unpaid", url: sq.public_url };
+  var no = invoiceNoOf(sq && sq.invoiceNumber);
+  if (!sq || !/^\d{1,20}$/.test(no)) return { invoiceNo: "", pay: "", url: "" };
+  var receipt = sq.payments && sq.payments[0] && squareHostOk(sq.payments[0].receipt_url);
+  if (sq.status === "PAID" && receipt) return { invoiceNo: no, pay: "paid", url: receipt };
+  if (sq.status === "UNPAID" && squareHostOk(sq.public_url)) return { invoiceNo: no, pay: "unpaid", url: sq.public_url };
   return { invoiceNo: no, pay: "", url: "" };
 }
 
-/* Same loop as the historical handler. Deps are injected. input.invoiceNo is never read. */
+/* Same ownership loop as the historical handler. Square is asked on every call. */
 async function driverInvoiceBody(input, driverId, deps) {
-  if (!driverId) { var err = new Error("driver token required"); err.status = 401; throw err; }
-  if (input && (Object.prototype.hasOwnProperty.call(input, "godToken") || Object.prototype.hasOwnProperty.call(input, "godPassword"))) {
+  if (!input || !input.token || !driverId) { var err = new Error("driver token required"); err.status = 401; throw err; }
+  if (Object.prototype.hasOwnProperty.call(input, "godToken") || Object.prototype.hasOwnProperty.call(input, "godPassword")) {
     var denied = new Error("god auth is not accepted on /driver/invoice"); denied.status = 400; throw denied;
   }
-  var ids = (Array.isArray(input && input.rideIds) ? input.rideIds : []).map(String).slice(0, 30);
+  var ids = (Array.isArray(input.rideIds) ? input.rideIds : []).map(String).slice(0, 30);
   var invoices = {};
   for (var i = 0; i < ids.length; i++) {
     var id = ids[i];
     var row = await deps.ride(id);
     if (!row || String(row.assignedDriverId || "") !== String(driverId)) continue;
+    if (row.id && String(row.id) !== id) continue;
     var kv = await deps.kv(id);
     if (!kv) { invoices[id] = null; continue; }
     var live = null;
@@ -102,10 +117,22 @@ async function driverInvoiceBody(input, driverId, deps) {
   return { ok: true, invoices: invoices };
 }
 
+/* One fresh read for the rides in this request, then the share fields for each.
+   Called again after the customer pays. Nothing is written here. */
+async function refreshAuthorizedShare(input, driverId, deps) {
+  var body = await driverInvoiceBody(input, driverId, deps);
+  var shares = {};
+  Object.keys(body.invoices).forEach(function (id) {
+    if (body.invoices[id]) shares[id] = followShareInvoice(body.invoices[id]);
+  });
+  return { body: body, shares: shares };
+}
+
 module.exports = {
   squareHostOk: squareHostOk,
   squareForLinkedInvoice: squareForLinkedInvoice,
   driverInvoiceView: driverInvoiceView,
   followShareInvoice: followShareInvoice,
-  driverInvoiceBody: driverInvoiceBody
+  driverInvoiceBody: driverInvoiceBody,
+  refreshAuthorizedShare: refreshAuthorizedShare
 };
