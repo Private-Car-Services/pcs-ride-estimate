@@ -40,18 +40,18 @@ function controls() {
 
 function page(mode, ride) {
   const line = lineHtml(ride);
-  const card = '<section id="sched-sec"><button type="button" id="sched-sec-head" style="display:block;width:100%;height:44px">Scheduled rides</button><div id="sched-sec-body"><article class="card" style="padding:12px"><div id="sched-rider-home">' + (mode === "pickup" ? line : "") + '</div><button type="button" id="sched-arrived" style="display:block;width:100%;height:58px;margin-top:8px">I’m at the pickup</button></article></div></section>';
+  const card = '<section id="sched-sec"><button type="button" id="sched-sec-head" style="display:block;width:100%;height:44px">Scheduled rides</button><div id="sched-sec-body"><article class="card" style="padding:12px"><div id="sched-rider-home">' + (mode === "pickup" || mode === "pickup-fs" ? line : "") + '</div><p id="sched-pickup-detail" style="margin:8px 0;min-height:44px;background:#fff">Pickup: 10 Estancia Dr</p><button type="button" id="sched-arrived" style="display:block;width:100%;height:58px;margin-top:8px">I’m at the pickup</button></article></div></section>';
   const home = mode === "active" || mode === "active-fs" ? "" : (
     '<div id="home-chrome" style="height:96px;background:#102418;color:#fff;padding:8px">Available</div>' +
     '<div id="home-map-stage" class="map-stage board-map home-map' + (mode === "pickup-fs" ? " pcs-fullmap" : "") + '" style="background:#0b3d23;position:relative">' +
     '<div id="live-map" style="background:#14301c"></div>' +
-    (mode === "pickup-fs" ? controls() + '<div id="sched-fs-bottom">' + line + '<button type="button" id="sched-fs-arrived" class="pcs-map-green">I’m at the pickup</button><button type="button" id="sched-fs-close">Close map</button></div>' : '<p class="map-caption">You are here</p>') +
+    (mode === "pickup-fs" ? controls() + '<div id="sched-fs-bottom"><button type="button" id="sched-fs-arrived" class="pcs-map-green">I’m at the pickup</button><button type="button" id="sched-fs-close">Close map</button></div>' : '<p class="map-caption">You are here</p>') +
     "</div>" + card);
   const active = mode === "active" || mode === "active-fs" ? (
     '<div class="meter-split" id="meter-split-run"><div class="meter-map-col"><div id="meter-map-stage" class="map-stage board-map' + (mode === "active-fs" ? " pcs-rfs" : "") + '" style="background:#0b3d23;position:relative">' +
     '<div id="live-map" style="background:#14301c"></div>' + controls() +
-    (mode === "active-fs" ? '<div id="rfs-bar">' + line + '<div class="rfs-row"><span>1.20 mi</span></div><div class="rfs-actions"><button type="button" class="rfs-end" id="rfs-end">End ride</button><button type="button" class="rfs-close" id="rfs-close">Close map</button></div></div>' : "") +
-    '</div><div id="meter-ride-line">' + (mode === "active" ? line : "") + '</div></div><section id="meter-running"><button type="button" id="meter-end">End ride</button></section></div>'
+    (mode === "active-fs" ? '<div id="rfs-bar"><div class="rfs-row"><span>1.20 mi</span></div><div class="rfs-actions"><button type="button" class="rfs-end" id="rfs-end">End ride</button><button type="button" class="rfs-close" id="rfs-close">Close map</button></div></div>' : "") +
+    '</div></div><section id="meter-running"><div id="sched-rider-home">' + line + '</div><p id="sched-pickup-detail" style="margin:8px 0;min-height:44px;background:#fff">Pickup: 10 Estancia Dr</p><button type="button" id="meter-end">End ride</button></section></div>'
   ) : "";
   return `<!doctype html><html><head><meta charset="utf-8"><style>
     html,body{margin:0;background:#08140c;color:#111}
@@ -132,6 +132,11 @@ function page(mode, ride) {
         var el = document.getElementById(id);
         return !!(el && (el.innerText || "").indexOf("Questions? Call") >= 0);
       }),
+      titleOnMap: ["sched-fs-bottom", "rfs-bar", "meter-ride-line", "home-map-stage", "meter-map-stage"].some(function (id) {
+        var el = document.getElementById(id);
+        return !!(el && ((el.innerText || "").indexOf("Pick up Shaye Camara from 10 Estonia") >= 0 || el.querySelector("#sched-rider-line")));
+      }),
+      pickup: probe("sched-pickup-detail"),
       end: probe("rfs-end"),
       meterEnd: probe("meter-end"),
       follow: probe("map-mode-toggle"),
@@ -236,17 +241,20 @@ test("the rider line is on screen in pickup and active, normal and fullscreen", 
       const g = out[name];
       assert.ok(g, name);
       assert.ok(Math.abs(g.vh - (name.indexOf("portrait") >= 0 ? 1024 : 768)) < 80, name + " viewport " + g.vh);
-      assert.equal(g.line.present, true, name + " line missing");
-      assert.equal(g.line.inView, true, name + " line off screen " + JSON.stringify(g.line));
-      assert.equal(g.line.self, true, name + " tap missed the line " + JSON.stringify(g.line));
-      assert.ok(g.line.h >= 44 && g.line.h <= 88, name + " line height " + g.line.h);
       assert.equal(g.questions, false, name + " still shows the business call line");
-      assert.equal(g.link.self, true, name + " rider phone not hittable " + JSON.stringify(g.link));
-      assert.ok(String(g.link.text).indexOf("555-") === 0, name + " rider phone text " + g.link.text);
+      assert.equal(g.titleOnMap, false, name + " pickup title is on the map bottom");
+      if (name.indexOf("-fs-") < 0) {
+        assert.equal(g.line.present, true, name + " rider line missing from the ride card");
+        assert.equal(g.line.inView, true, name + " rider line off screen " + JSON.stringify(g.line));
+        assert.equal(g.link.self, true, name + " rider phone not hittable " + JSON.stringify(g.link));
+        assert.ok(String(g.link.text).indexOf("555-") === 0, name + " rider phone text " + g.link.text);
+        assert.equal(g.pickup.self, true, name + " pickup detail covered " + JSON.stringify(g.pickup));
+        assert.ok(String(g.pickup.text).indexOf("10 Estancia") >= 0, name + " pickup detail " + g.pickup.text);
+      }
       ["follow", "north", "zoom", "center"].forEach(function (k) {
         if (!g[k] || !g[k].present) return;
         assert.equal(g[k].self, true, name + " " + k + " covered " + JSON.stringify(g[k]));
-        assert.equal(overlap(g.line, g[k]), false, name + " line covers " + k);
+        if (name.indexOf("-fs-") < 0) assert.equal(overlap(g.line, g[k]), false, name + " line covers " + k);
       });
       ["end", "meterEnd", "arrived", "closeFs", "closeRide", "cardBtn"].forEach(function (k) {
         if (k === "cardBtn" && name.indexOf("pickup-") !== 0) return;
@@ -255,7 +263,7 @@ test("the rider line is on screen in pickup and active, normal and fullscreen", 
         if (!g[k] || !g[k].present) return;
         assert.equal(g[k].inView, true, name + " " + k + " off screen");
         assert.equal(g[k].self, true, name + " " + k + " covered " + JSON.stringify(g[k]));
-        assert.equal(overlap(g.line, g[k]), false, name + " line covers " + k);
+        if (name.indexOf("-fs-") < 0) assert.equal(overlap(g.line, g[k]), false, name + " line covers " + k);
       });
     }
     ["pickup", "pickup-fs", "active", "active-fs"].forEach(function (mode) {
@@ -263,8 +271,11 @@ test("the rider line is on screen in pickup and active, normal and fullscreen", 
       check(mode + "-574-portrait");
       check(mode + "-554-landscape");
     });
-    const heights = ["pickup", "pickup-fs", "active", "active-fs"].map(function (mode) { return out[mode + "-554-portrait"].line.h; });
-    assert.ok(Math.max.apply(null, heights) - Math.min.apply(null, heights) <= 24, "line heights diverged " + heights.join(","));
+    ["pickup-fs-554-portrait", "active-fs-554-portrait", "pickup-fs-554-landscape", "active-fs-554-landscape"].forEach(function (name) {
+      const g = out[name];
+      const bottom = name.indexOf("pickup") === 0 ? g.arrived : g.end;
+      assert.equal(bottom.self, true, name + " bottom control covered " + JSON.stringify(bottom));
+    });
     ws.close();
   } finally {
     session.chrome.kill("SIGKILL");

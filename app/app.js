@@ -10814,7 +10814,6 @@
       }
       if (navTestOn()) navTestBottom(bot); /* v75y test flag */
       else schedMapBillPlace(bot);
-      rideLineHold(bot);
       schedFsMeasure();
       fsMphPlace(stage, (navTestOn() ? 262 : 172) + "px"); /* v76b: MPH badge */
     } else { rideLineHome(); if (top) top.remove(); if (bot) bot.remove(); fsMphDrop(stage); }
@@ -11059,14 +11058,7 @@
     if (full) {
       if (!bar) { bar = document.createElement("div"); bar.id = "rfs-bar"; bar.setAttribute("role", "region"); bar.setAttribute("aria-label", "Meter"); navStopTouch(bar); bar.addEventListener("click", rfsBarClick); stage.appendChild(bar); }
       var sig = rfsSig(M);
-      if (bar.__sig !== sig) {
-        bar.__sig = sig;
-        var kept = document.getElementById("sched-rider-line");
-        if (kept && kept.parentNode) kept.parentNode.removeChild(kept);
-        bar.innerHTML = rfsBarHtml(M);
-        if (kept) bar.insertBefore(kept, bar.firstChild);
-        else rideLineHold(bar);
-      } else rideLineHold(bar);
+      if (bar.__sig !== sig) { bar.__sig = sig; bar.innerHTML = rfsBarHtml(M); }
       fsMphPlace(stage, (bar.getBoundingClientRect && stage.getBoundingClientRect ? Math.round(stage.getBoundingClientRect().bottom - bar.getBoundingClientRect().top + 12) : ((bar.offsetHeight || 148) + 34)) + "px");
     } else { rideLineHome(); if (bar) bar.remove(); fsMphDrop(stage); }
     if (full !== was) {
@@ -16698,7 +16690,7 @@
       '<div id="live-map" role="img" aria-label="Map: you during the metered ride"></div>' +
       '<div class="meter-topstack" id="meter-topstack">' + meterTurnHtml() + /* v72t: next turn right on the map; v72u: ETA on its own line below it */
       '<button type="button" class="meter-eta-chip' + (state.meter && state.meter.dest ? " has-dest" : "") + '" id="meter-eta-chip"' + (meterEtaBoxHtml(state.meter).indexOf("display:none") === -1 ? ' style="display:none"' : "") + ">" + esc(meterChipText(state.meter)) + "</button>" + meterEtaBoxHtml(state.meter) + "</div>" + /* v71; v77.8 big ETA box */
-      "</div>" + '<div id="meter-ride-line">' + (function () { var row = null; try { row = state.meter && state.meter.schedId ? schedFind(state.meter.schedId) : null; } catch (e) {} return row && row.status !== "cancelled" && row.status !== "canceled" ? schedRiderLineHtml(row) : ""; })() + "</div>" + /* v2.0d.5 r3 (Matthew iPad 712px): the caption sat inside the map under Full screen; now below the map, never over its buttons,
+      "</div>" + /* v2.0d.5 r3 (Matthew iPad 712px): the caption sat inside the map under Full screen; now below the map, never over its buttons,
          and only on a ride started as Metered (a scheduled / invoiced ride also runs a trip session but is not metered) */
       (meterShown(state.meter) ? '<p class="map-caption meter-map-caption" id="meter-map-caption">' + (meterKindOf(state.meter) === "comparison" ? "You · comparison ride" : "You · metered ride") /* v2.0m-g */ + "</p>" : "") + meterEstLineHtml() + "</div></div>" + /* v72u: estimate under the map during the ride too */
       (isFinite(state.hereLat) ? "" : '<p class="fine">Allow location so the map can show where you are.</p>') +

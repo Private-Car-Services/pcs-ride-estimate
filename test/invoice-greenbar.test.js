@@ -124,8 +124,10 @@ test("the driver invoice read keeps only the asked ride", function () {
   const stranger = bill.slot({ id: "ride-574", prepaidInvoiceNo: "000574" });
   assert.equal(stranger.indexOf("View receipt"), -1);
   assert.equal(stranger.indexOf("paid"), -1);
-  assert.ok(appSrc.indexOf("rideLineHold(bot)") >= 0);
-  assert.ok(appSrc.indexOf('id="meter-ride-line"') >= 0);
+  assert.equal(appSrc.indexOf("rideLineHold(bot)"), -1);
+  assert.equal(appSrc.indexOf('id="meter-ride-line"'), -1);
+  const riderFn = appSrc.slice(appSrc.indexOf("function schedRiderLineHtml"), appSrc.indexOf("function rideLineRide"));
+  assert.ok(riderFn.indexOf("href=\\\"tel:") >= 0);
   assert.ok(appSrc.indexOf("stage.clientHeight - reserve") >= 0);
 });
 
