@@ -168,10 +168,11 @@
     el.setAttribute("autocomplete", "off"); el.setAttribute("autocorrect", "off"); el.setAttribute("spellcheck", "false"); kpMark(el, whole); n++; }); return n; }
   /* v75u: big on-screen 9-key pad (iPadOS has none). Boxes marked by numPad get data-kp="d" (dollars, has a point) or "w" (whole: days, PIN).
      inputmode="none" does not stop iPad Safari from opening the full alphabet keyboard on a focused text or PIN box.
-     v2.0m-ah: the ledger PIN and the ride and tip totals stay read-only and always use this pad, even if "Use iPad keyboard" was saved. */
+     v2.0m-ah: the ledger PIN and the ride and tip totals stay read-only and always use this pad, even if "Use iPad keyboard" was saved.
+     v2.0m-an: the same pad holds every typed fuel box (starting odometer, price, current odometer, gallons). */
   var KP_KEY = "pcsGoalSysKb", kpEl = null, kpCur = null;
   function kpOn() { try { return localStorage.getItem(KP_KEY) !== "1"; } catch (e) { return true; } }
-  function kpHold(el) { var id = el && el.id; return id === "gl-pin" || id === "gl-pin1" || id === "gl-pin2" || id === "gl-q-amt" || id === "gl-q-tip"; }
+  function kpHold(el) { var id = el && el.id; return id === "gl-pin" || id === "gl-pin1" || id === "gl-pin2" || id === "gl-q-amt" || id === "gl-q-tip" || id === "gl-fuel-odo" || id === "gl-fuel-price" || id === "gl-fuel-gal"; }
   function kpMark(el, whole) { el.setAttribute("data-kp", whole ? "w" : "d"); if (!whole && el.type !== "password") el.setAttribute("data-reg", "1"); else el.removeAttribute("data-reg");
     if (kpHold(el) || kpOn()) el.setAttribute("inputmode", "none"); else el.setAttribute("inputmode", whole ? "numeric" : "decimal"); if (kpHold(el)) el.readOnly = true; }
   function kpRefresh() { var ov = document.getElementById("gl-screen"); if (!ov) return; [].forEach.call(ov.querySelectorAll("input[data-kp]"), function (el) {
@@ -547,8 +548,8 @@
     gallons = Math.round(Number(gallons) * 1000) / 1000; price = Math.round(Number(price) * 100) / 100;
     var miles = odo - prev;
     if (!(prev >= 0) || !(odo > prev) || !(gallons > 0) || !(price >= 0)) return { ok: false, miles: isFinite(miles) ? miles : null, mpg: null, tank: null, ppm: null };
-    var mpg = Math.round((miles / gallons) * 100) / 100;
-    return { ok: true, prev: prev, odo: odo, gallons: gallons, price: price, miles: miles, mpg: mpg, tank: Math.round(mpg * 22 * 100) / 100, ppm: Math.round((price / miles) * 100) / 100 };
+    var mpg = miles / gallons;
+    return { ok: true, prev: prev, odo: odo, gallons: gallons, price: price, miles: miles, mpg: mpg, tank: mpg * 22, ppm: miles ? price / miles : null };
   }
   function fuelFmt(m) {
     if (!m || !m.ok) return { miles: "", mpg: "", tank: "", ppm: "" };

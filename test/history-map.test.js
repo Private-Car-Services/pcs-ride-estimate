@@ -329,16 +329,16 @@ test("God day view keeps a missing stored type blank and does not call it PCS", 
 });
 
 
-test("v2.0m-am is the update phones on v2.0m-ai will accept", function () {
+test("v2.0m-an is the update phones on v2.0m-ai will accept", function () {
   const box = loadScript("app/version.js");
-  assert.equal(box.PCS_APP_VERSION, "v2.0m-am");
-  assert.ok(box.pcsVersionCmp("v2.0m-am", "v2.0m-ai") >= 0);
-  assert.ok(box.pcsVersionCmp("v2.0m-am", "v2.0m-aj") >= 0);
+  assert.equal(box.PCS_APP_VERSION, "v2.0m-an");
+  assert.ok(box.pcsVersionCmp("v2.0m-an", "v2.0m-ai") >= 0);
+  assert.ok(box.pcsVersionCmp("v2.0m-an", "v2.0m-aj") >= 0);
   assert.notEqual(box.PCS_APP_VERSION, "v2.0m-ai");
   const pages = {
-    "app/driver/index.html": ["../version.js?v=2.0m-am", "../driverlog.js?v=2.0m-ad", "../app.js?v=2.0m-am"],
-    "app/index.html": ["version.js?v=2.0m-am", "app.js?v=2.0m-am"],
-    "god/index.html": ["../app/version.js?v=2.0m-am", "../app/driverlog.js?v=2.0m-ad", "./godmap.js?v=2.0m-ad", "./goal.js?v=2.0m-am"]
+    "app/driver/index.html": ["../version.js?v=2.0m-an", "../driverlog.js?v=2.0m-ad", "../app.js?v=2.0m-an"],
+    "app/index.html": ["version.js?v=2.0m-an", "app.js?v=2.0m-an"],
+    "god/index.html": ["../app/version.js?v=2.0m-an", "../app/driverlog.js?v=2.0m-ad", "./godmap.js?v=2.0m-ad", "./goal.js?v=2.0m-an"]
   };
   Object.keys(pages).forEach(function (rel) {
     const html = fs.readFileSync(path.join(root, rel), "utf8");
