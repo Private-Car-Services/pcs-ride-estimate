@@ -9705,6 +9705,12 @@
       trip: raw.trip && typeof raw.trip === "object" ? raw.trip : null,
       prepaid: raw.prepaid === true, prepaidAmountCents: raw.prepaidAmountCents != null && isFinite(+raw.prepaidAmountCents) ? Math.round(+raw.prepaidAmountCents) : null, /* v75v */
       prepaidTaxCents: raw.prepaidTaxCents != null && isFinite(+raw.prepaidTaxCents) ? Math.round(+raw.prepaidTaxCents) : null, prepaidInvoiceNo: String(raw.prepaidInvoiceNo || ""),
+      prepaidVia: raw.prepaidVia ? String(raw.prepaidVia) : "", payState: raw.payState ? String(raw.payState) : "", invoiceStatus: raw.invoiceStatus ? String(raw.invoiceStatus) : "",
+      sqInvoice: raw.sqInvoice && typeof raw.sqInvoice === "object" ? raw.sqInvoice : null,
+      paidCash: raw.paidCash && typeof raw.paidCash === "object" ? raw.paidCash : null,
+      paidCashOverride: raw.paidCashOverride && typeof raw.paidCashOverride === "object" ? raw.paidCashOverride : null,
+      payUnverified: raw.payUnverified && typeof raw.payUnverified === "object" ? raw.payUnverified : null,
+      receiptUrl: raw.receiptUrl ? String(raw.receiptUrl) : "", invoicePayUrl: raw.invoicePayUrl ? String(raw.invoicePayUrl) : "",
       rideCommissionPct: raw.rideCommissionPct != null && raw.rideCommissionPct !== "" && isFinite(+raw.rideCommissionPct) ? Math.round(+raw.rideCommissionPct) : null, /* v76d */
       rateOverride: rateOvOf(raw), /* v76j contract rate (God mode only) */
       meterCode: raw.meterCode ? String(raw.meterCode) : ""
@@ -9836,9 +9842,42 @@
     if (!no) return t;
     return t + " Invoice #" + no;
   }
+  /* Paid only from a verified record (Square paid, assigned-driver cash, or a God cash override with a reason).
+     Unpaid only from an explicit not-paid record (Square status, invoice_pending, prepaid billed, or unverified).
+     A bare invoice number is neither. prepaid:false and prepaidVia alone are not a payment record. */
+  function ridePayWord(r, M) {
+    r = r || {};
+    var q = r.sqInvoice && typeof r.sqInvoice === "object" ? r.sqInvoice : null;
+    if (q && (q.paid === true || String(q.status || "").toUpperCase() === "PAID")) return "paid";
+    if (M && M.prepaid && M.prepaid.squarePaid) return "paid";
+    if (String(r.invoiceStatus || "").toUpperCase() === "PAID") return "paid";
+    var pc = r.paidCash;
+    if (pc && typeof pc === "object" && pc.by === "driver" && pc.driverId && r.assignedDriverId && pc.driverId === r.assignedDriverId) return "paid";
+    var ov = r.paidCashOverride;
+    if (ov && typeof ov === "object" && String(ov.reason || "").trim()) return "paid";
+    if (q && (q.paid === false || (String(q.status || "").trim() && String(q.status || "").toUpperCase() !== "PAID"))) return "unpaid";
+    if (String(r.invoiceStatus || "").toUpperCase() === "UNPAID") return "unpaid";
+    if (r.payState === "invoice_pending") return "unpaid";
+    if (r.prepaid === true) return "unpaid";
+    if (r.payUnverified && typeof r.payUnverified === "object") return "unpaid";
+    return "";
+  }
+  function rideMapBillText(r, M) {
+    var no = rideInvoiceNoFrom(r || {}, M);
+    var w = "";
+    try { w = ridePayWord(r || {}, M); } catch (e) { w = ""; }
+    if (no && w) return "Invoice #" + no + " \u2013 " + w;
+    if (no) return "Invoice #" + no;
+    return rideBillText(rideBillKind(r || {}, M), "");
+  }
+  function rideCustomerPayUrl(r) {
+    r = r || {};
+    var q = r.sqInvoice && typeof r.sqInvoice === "object" ? r.sqInvoice : null;
+    return String(r.invoicePayUrl || r.payUrl || (q && (q.payUrl || q.publicUrl)) || "");
+  }
   function schedPickupStatusText(r) {
     var bill = "";
-    try { bill = rideBillText(rideBillKind(r || {}, null), rideInvoiceNoFrom(r || {}, null)); } catch (e) { bill = ""; }
+    try { bill = rideMapBillText(r || {}, null); } catch (e) { bill = ""; }
     return bill ? "I\u2019m at the pickup \u00b7 " + bill : "I\u2019m at the pickup";
   }
   function schedMapBillHtml(r, id) { return rideBillLabelHtml(rideBillKind(r, null), id || "sched-bill-label", rideInvoiceNoFrom(r, null)); }
@@ -9865,7 +9904,7 @@
     try { if (M && M.schedId) r = schedFind(M.schedId); } catch (e) {}
     return rideInvoiceNoFrom(r, M);
   }
-  if (typeof window !== "undefined") window.__pcsV20lBill = { kind: rideBillKind, text: rideBillText, label: rideBillLabelHtml, invoiceNo: rideInvoiceDisplayNo, from: rideInvoiceNoFrom, fit: rideBillLabelFitCss, map: schedMapBillHtml, pickupLine: schedPickupStatusText };
+  if (typeof window !== "undefined") window.__pcsV20lBill = { kind: rideBillKind, text: rideBillText, label: rideBillLabelHtml, invoiceNo: rideInvoiceDisplayNo, from: rideInvoiceNoFrom, fit: rideBillLabelFitCss, map: schedMapBillHtml, pickupLine: schedPickupStatusText, pay: ridePayWord, bar: rideMapBillText, payUrl: rideCustomerPayUrl };
   function meterInvInfo(M) { return rideInvoiceInfo(M && M.schedId ? schedFind(M.schedId) : null, M); }
   function meterInvRefresh(M) { /* live: the 15-min Square sync / refreshScheduledRides flips the badge without a re-render */
     if (typeof document === "undefined" || meterShown(M)) return;
@@ -10526,7 +10565,7 @@
       "#home-map-stage.pcs-fullmap #sched-fs-open{display:none}" +
       "#sched-fs-top{position:absolute;left:max(8px, calc(var(--pcs-safe-left, env(safe-area-inset-left, 0px)) + 8px));right:max(8px, calc(var(--pcs-safe-right, env(safe-area-inset-right, 0px)) + 8px));top:calc(var(--pcs-safe-top, env(safe-area-inset-top, 0px)) + 8px);z-index:1002}#sched-fs-top #sched-turn-fs{margin:0;box-shadow:0 2px 8px rgba(0,0,0,.4)}" +
       "#sched-fs-bottom{position:absolute;left:max(8px, calc(var(--pcs-safe-left, env(safe-area-inset-left, 0px)) + 8px));right:max(8px, calc(var(--pcs-safe-right, env(safe-area-inset-right, 0px)) + 8px));bottom:calc(var(--pcs-safe-bottom, env(safe-area-inset-bottom, 0px)) + 22px);z-index:1002;pointer-events:none}#sched-fs-bottom button{pointer-events:auto}" +
-      "#sched-fs-arrived{display:block;width:100%;min-height:62px;font-size:clamp(15px,2.2vw,22px);font-weight:800;background:#0b6b3a;color:#fff;border:2px solid #fff;border-radius:14px;margin:0 0 8px;padding:0 12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.4)}" +
+      "#sched-fs-bottom{container-type:inline-size}#sched-fs-arrived{display:block;width:100%;min-height:62px;height:62px;font-size:clamp(12px,calc(100cqw / 26),20px);font-weight:800;line-height:62px;background:#0b6b3a;color:#fff;border:2px solid #fff;border-radius:14px;margin:0 0 8px;padding:0 10px;white-space:nowrap;overflow:hidden;text-overflow:clip;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.4)}" +
       "#sched-fs-close{display:block;width:100%;min-height:58px;font-size:21px;font-weight:800;background:#d1fae5;color:#0b3d23;border:3px solid #0b3d23;border-radius:14px;margin:0;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.4)}";
     document.head.appendChild(st);
   }
@@ -10645,7 +10684,8 @@
       "#meter-map-stage.pcs-rfs #rfs-open{display:none}" +
       "#rfs-open{position:absolute;left:8px;bottom:34px;z-index:1002;width:auto;min-height:52px;margin:0;padding:10px 16px;font-size:18px;font-weight:800;border-radius:12px;border:2px solid #0b3d23;background:#d1fae5;color:#0b3d23;box-shadow:0 2px 6px rgba(0,0,0,.35);cursor:pointer}" +
       "#rfs-bar{position:absolute;left:0;right:0;bottom:0;z-index:1003;background:#f0fdf4;color:#0b3d23;border-top:4px solid #0b6b3a;border-radius:16px 16px 0 0;padding:8px 10px 18px;padding-bottom:calc(env(safe-area-inset-bottom,0px) + 18px);box-shadow:0 -4px 14px rgba(0,0,0,.45);font-family:system-ui,-apple-system,sans-serif}" +
-      "#rfs-bar *{box-sizing:border-box}.rfs-row{display:flex;align-items:center;gap:8px;margin:0 0 6px}" +
+      "#rfs-bar *{box-sizing:border-box}.rfs-row{display:flex;align-items:center;flex-wrap:nowrap;gap:8px;margin:0 0 6px}" +
+      "#rfs-bar .rfs-bill{flex:1 1 auto;min-width:0;margin:0;padding:0;font-size:clamp(14px,3.2vw,20px);font-weight:900;line-height:1.2;color:#0b3d23;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;background:transparent;border:0}" +
       ".rfs-fare{flex:0 0 auto;font-size:38px;line-height:1;font-weight:900;color:#0b3d23;font-variant-numeric:tabular-nums}" +
       ".rfs-stats{flex:1 1 auto;min-width:0;display:flex;flex-wrap:wrap;justify-content:flex-end;gap:4px 12px;font-size:17px;font-weight:800;color:#0b3d23}" +
       ".rfs-stats b{font-size:21px;font-variant-numeric:tabular-nums}.rfs-tier{flex:1 0 100%;text-align:right;font-size:14px;font-weight:800;color:#14532d;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}" +
@@ -10748,7 +10788,9 @@
   function rfsBarHtml(M) {
     var f = meterFare(M), t = meterTollInfo(M), pp = M.prepaid;
     var shown = meterShown(M);
-    var html = (shown ? "" : rideBillLabelHtml(meterBillKind(M), "rfs-bill-label", meterBillInvoiceNo(M))) + '<div class="rfs-row">' + (shown ? '<div class="rfs-fare" id="rfs-fare" aria-label="Meter fare">' + meterMoneyShown(M, f.sub) + "</div>" : "") +
+    var bill = "";
+    if (!shown) { try { bill = rideMapBillText(M && M.schedId ? schedFind(M.schedId) : null, M); } catch (e) { bill = ""; } }
+    var html = '<div class="rfs-row">' + (shown ? '<div class="rfs-fare" id="rfs-fare" aria-label="Meter fare">' + meterMoneyShown(M, f.sub) + "</div>" : (bill ? '<p class="rfs-bill" id="rfs-bill">' + esc(bill) + "</p>" : "")) +
       '<div class="rfs-stats"><span><b id="rfs-miles">' + f.miles.toFixed(2) + "</b> mi</span><span><b id=\"rfs-time\">" + meterClock(Date.now() - M.startedAt) + "</b></span>" +
       (shown ? '<span class="rfs-tier" id="rfs-tier">' + esc(M.tierLabel || "Meter") + (M.taxRate ? " \u00b7 tax at the end" : "") + "</span>" : "") + "</div></div>" + rideEstHtml(M, "rfs-est");
     if (pp && shown) html += '<p class="rfs-paid" id="rfs-paid">\u2713 ' + esc(prepaidBadgeText(pp)) + " \u00b7 balance $0.00</p>";
@@ -10946,6 +10988,12 @@
     var out = { v: 1, status: st, kind: o.kind === "sched" ? "sched" : "app", updatedAt: now };
     if (st === "ended" || st === "stopped") { out.endedAt = Number(o.endedAt) || now; return out; }
     if (o.bill === "invoiced" || o.bill === "prepaid") out.bill = o.bill; /* v2.0l r3: a plain word only ("Invoiced ride" / "Prepaid ride"), never an amount */
+    if (o.pay === "paid" || o.pay === "unpaid") out.pay = o.pay;
+    var invNo = String(o.invoiceNo || "").replace(/^#/, "").replace(/\s+/g, "");
+    if (/^\d{1,20}$/.test(invNo)) out.invoiceNo = invNo;
+    var recUrl = folSquareUrl(o.receiptUrl), payUrl = folSquareUrl(o.payUrl);
+    if (o.pay === "paid" && recUrl) out.receiptUrl = recUrl; /* receipt link only after a verified paid record */
+    if (o.pay === "unpaid" && payUrl) out.payUrl = payUrl; /* pay link only with an explicit unpaid record */
     var df = folFirst(o.driverName); if (df) out.driverFirst = df;
     var car = folCar(o.car); if (car) out.car = car;
     if (/^[A-Za-z0-9_-]{24}$/.test(String(o.cardKey || ""))) out.cardKey = String(o.cardKey); /* v77.3b: random key of the driver's picture card (photo shown on /follow/); never the driver id */
@@ -11033,7 +11081,14 @@
     folWrite(folMapUrl(k), "DELETE");
     folRedraw();
   }
-  function folSig(c) { return JSON.stringify([c.bill || "", c.status, c.pos ? [c.pos.lat, c.pos.lng] : 0, c.eta || 0, c.pickup || 0, c.dest || 0, c.car || 0, c.driverFirst || "", c.cardKey || "", folPhotoSig(c.photo), c.route ? c.route.length + ":" + c.route[c.route.length - 1] : 0, c.stops || 0]); }
+  function folSquareUrl(v) {
+    var s = String(v || "").trim();
+    if (!s || s.length > 300 || /[\s<>"']/.test(s)) return "";
+    var m = /^https:\/\/([^\/?#:]+)(?:[\/?#]|$)/i.exec(s);
+    if (!m || !/(^|\.)squareup(sandbox)?\.com$|(^|\.)square\.link$/i.test(m[1])) return "";
+    return s;
+  }
+  function folSig(c) { return JSON.stringify([c.bill || "", c.pay || "", c.invoiceNo || "", c.receiptUrl || "", c.payUrl || "", c.status, c.pos ? [c.pos.lat, c.pos.lng] : 0, c.eta || 0, c.pickup || 0, c.dest || 0, c.car || 0, c.driverFirst || "", c.cardKey || "", folPhotoSig(c.photo), c.route ? c.route.length + ":" + c.route[c.route.length - 1] : 0, c.stops || 0]); }
   function folHere() {
     if (!isCoord(state.hereLat) || !isCoord(state.hereLng)) return null;
     var at = Number(state.gpsAt) || 0;
@@ -11128,7 +11183,7 @@
         if (e && !e.pending) eta = { to: "dest", miles: e.miles, min: e.min };
         if (meterRoute && meterRoute.line) route = meterRoute.line;
       }
-      out.push(Object.assign({ key: "c_" + r.id, kind: "sched", bill: rideBillKind(r, onMeter ? M : null), status: st, phone: r.riderPhone, pickup: pickup, dest: dest, stops: stops, eta: eta, route: route, pos: here }, base));
+      out.push(Object.assign({ key: "c_" + r.id, kind: "sched", bill: rideBillKind(r, onMeter ? M : null), pay: ridePayWord(r, onMeter ? M : null), invoiceNo: rideInvoiceNoFrom(r, onMeter ? M : null), receiptUrl: r.receiptUrl || "", payUrl: rideCustomerPayUrl(r), status: st, phone: r.riderPhone, pickup: pickup, dest: dest, stops: stops, eta: eta, route: route, pos: here }, base));
     });
     var code = state.screen === "trip" ? String(state.driverCode || readDriverCode() || "") : "";
     if (code && FOL_KEY_RE.test("r_" + code)) {
@@ -11673,7 +11728,7 @@
       if (onMeter) actions = '<p style="margin:8px 0;color:#0b3d23;font-weight:800">' + (meterShown(M) ? "Ride in progress on the meter above. Change the drop-off there any time." : "Ride in progress above. Change the drop-off there any time.") + '</p>' + drvCancelBtnHtml("sched", r.id); /* r13 */
       else if (inTrip) {
         var nav = schedNavUrl(r.pickup, r.pickupLat, r.pickupLng);
-        var billLine = rideBillText(rideBillKind(r, null), rideInvoiceNoFrom(r, null));
+        var billLine = rideMapBillText(r, null);
         var wayLine = (trip.phase === "arrived" ? "You\u2019re at the pickup" : "On the way to the pickup") + (billLine ? " \u00b7 " + billLine : "");
         actions = '<div class="sched-trip" id="sched-trip" style="background:#ecfdf5;border:2px solid #0b6b3a;border-radius:12px;padding:10px;margin:8px 0">' +
           '<p style="margin:0 0 6px;font-weight:800;color:#0b3d23">' + esc(wayLine) + "</p>" +
@@ -16403,7 +16458,7 @@
       (meterShown(M) ? prepaidBadgeHtml(M.prepaid, "meter-prepaid-badge") + /* v75v */
       '<p class="meter-fare" id="meter-fare" aria-live="off">' + meterMoneyShown(M, f.sub) + "</p>" +
       '<p class="meter-sub">Meter' + (M.minCents > M.baseCents ? " · " + money(M.minCents) + " minimum" : "") + (M.taxRate ? " · tax added at the end" : "") + "</p>"
-        : rideBillLabelHtml(meterBillKind(M), "meter-bill-label", meterBillInvoiceNo(M))) + /* v2.0a: no fare on a non-metered ride */
+        : (function () { var b = ""; try { b = rideMapBillText(M && M.schedId ? schedFind(M.schedId) : null, M); } catch (e) { b = ""; } return b ? '<p class="rfs-bill" id="meter-bill-label" style="margin:0 0 6px;text-align:center">' + esc(b) + "</p>" : ""; })()) + /* v2.0a: no fare on a non-metered ride */
       (!meterShown(M) ? "" : /* v2.0d.5 r3: miles / time / slow min / mph are the meter: metered rides only */
       '<div class="meter-grid"><div><b id="meter-miles">' + f.miles.toFixed(2) + "</b><span>Miles</span></div>" +
       '<div><b id="meter-time">' + meterClock(Date.now() - M.startedAt) + "</b><span>Time</span></div>" +

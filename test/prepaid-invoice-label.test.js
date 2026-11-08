@@ -120,10 +120,12 @@ test("invoiced and prepaid rides both show the saved number on the same green li
 
 test("the pickup status keeps Invoice #000574 on the same line and does not add a map row", function () {
   const row = { prepaid: true, prepaidInvoiceNo: "000574" };
-  assert.equal(bill.pickupLine(row), "I\u2019m at the pickup \u00b7 Prepaid ride Invoice #000574");
-  assert.equal(bill.pickupLine({ prepaidInvoiceNo: "000574" }), "I\u2019m at the pickup \u00b7 Invoiced ride Invoice #000574");
+  assert.equal(bill.pickupLine(row), "I\u2019m at the pickup \u00b7 Invoice #000574 \u2013 unpaid");
+  assert.equal(bill.pickupLine({ prepaidInvoiceNo: "000574" }), "I\u2019m at the pickup \u00b7 Invoice #000574");
   assert.equal(bill.pickupLine({ prepaid: true }), "I\u2019m at the pickup \u00b7 Prepaid ride");
   assert.equal(bill.pickupLine({}), "I\u2019m at the pickup");
+  assert.equal(bill.pay({ prepaidInvoiceNo: "000554" }), "");
+  assert.equal(bill.bar({ prepaidInvoiceNo: "000554" }), "Invoice #000554");
   const src = fs.readFileSync(path.join(__dirname, "../app/app.js"), "utf8");
   const place = src.slice(src.indexOf("function schedMapBillPlace"), src.indexOf("function schedFsMeasure"));
   assert.match(place, /host\.remove/);
