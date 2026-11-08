@@ -169,7 +169,8 @@
   /* v75u: big on-screen 9-key pad (iPadOS has none). Boxes marked by numPad get data-kp="d" (dollars, has a point) or "w" (whole: days, PIN).
      inputmode="none" does not stop iPad Safari from opening the full alphabet keyboard on a focused text or PIN box.
      v2.0m-ah: the ledger PIN and the ride and tip totals stay read-only and always use this pad, even if "Use iPad keyboard" was saved.
-     v2.0m-an: the same pad holds every typed fuel box (starting odometer, price, current odometer, gallons). */
+     v2.0m-an: the same pad holds every typed fuel box (starting odometer, price, current odometer, gallons).
+     v2.0m-ao: those boxes stay above the open pad, and a typed zero price stays 0.00. */
   var KP_KEY = "pcsGoalSysKb", kpEl = null, kpCur = null;
   function kpOn() { try { return localStorage.getItem(KP_KEY) !== "1"; } catch (e) { return true; } }
   function kpHold(el) { var id = el && el.id; return id === "gl-pin" || id === "gl-pin1" || id === "gl-pin2" || id === "gl-q-amt" || id === "gl-q-tip" || id === "gl-fuel-odo" || id === "gl-fuel-price" || id === "gl-fuel-gal"; }
@@ -182,16 +183,17 @@
     d.innerHTML = '<div class="kp-top"><button type="button" data-k="sys" class="kp-sm">Use iPad keyboard</button><span id="gl-kp-lbl"></span><button type="button" data-k="clr" class="kp-sm kp-clr">Clear</button></div><div class="kp-g">' +
       ["1","2","3","4","5","6","7","8","9",".","0","bs"].map(function (k) { return '<button type="button" data-k="' + k + '"' + (k === "bs" ? ' aria-label="Delete">\u232b' : ">" + k) + "</button>"; }).join("") +
       '</div><button type="button" data-k="done" class="kp-done">Done</button>';
-    d.addEventListener("pointerdown", function (e) { var b = kpBtn(e); if (b) e.preventDefault(); });
+    d.addEventListener("pointerdown", function (e) { var b = kpBtn(e); if (!b) return; d.__padDown = true; e.preventDefault(); });
     d.addEventListener("mousedown", function (e) { var b = kpBtn(e); if (b) e.preventDefault(); });
-    /* A cancelled pointerdown does not always produce a click (iPhone). Count the key on pointerup, and ignore the click that follows the same tap. */
-    d.addEventListener("pointerup", function (e) { var b = kpBtn(e); if (!b || (e.pointerType === "mouse" && e.button !== 0)) return; b.__kpUp = Date.now(); kpPress(b.getAttribute("data-k")); });
-    d.addEventListener("click", function (e) { var b = kpBtn(e); if (!b || (b.__kpUp && Date.now() - b.__kpUp < 700)) return; kpPress(b.getAttribute("data-k")); });
+    /* A cancelled pointerdown does not always produce a click (iPhone). Count the key on pointerup, and ignore the click that follows the same tap.
+       A pointer that started on a field and was released on the pad (the pad opened under the cursor) is not a key. */
+    d.addEventListener("pointerup", function (e) { var b = kpBtn(e), fromPad = d.__padDown; d.__padDown = false; if (!fromPad || !b || (e.pointerType === "mouse" && e.button !== 0)) return; b.__kpUp = Date.now(); kpPress(b.getAttribute("data-k")); });
+    d.addEventListener("click", function (e) { var b = kpBtn(e); if (!b || (b.__kpUp && Date.now() - b.__kpUp < 700) || (d.__eatClick && Date.now() < d.__eatClick)) return; kpPress(b.getAttribute("data-k")); });
     kpEl = d; return d; }
   /* v75x (Matthew): cash-register money boxes: digits fill from the cents, 9,6,2,5 -> 96.25; Delete drops the last digit; first key after opening a box starts a new amount */
-  function regFmt(v) { var dg = String(v == null ? "" : v).replace(/\D/g, "").replace(/^0+/, ""); if (!dg) return ""; if (dg.length > 7) dg = dg.slice(0, 7); return (Number(dg) / 100).toFixed(2); }
-  function regKey(el, k) { var dg = el.__regFresh ? "" : String(el.value || "").replace(/\D/g, "").replace(/^0+/, ""); el.__regFresh = false;
-    if (k === "clr") dg = ""; else if (k === "bs") dg = dg.slice(0, -1); else if (/^[0-9]$/.test(k)) { if (dg.length < 7) dg += k; } else return;
+  function regFmt(v) { var raw = String(v == null ? "" : v).replace(/\D/g, ""), dg = raw.replace(/^0+/, ""); if (!dg) return raw ? "0.00" : ""; if (dg.length > 7) dg = dg.slice(0, 7); return (Number(dg) / 100).toFixed(2); }
+  function regKey(el, k) { var shown = el.__regFresh ? "" : String(el.value || ""), dg = shown.replace(/\D/g, "").replace(/^0+/, ""); el.__regFresh = false;
+    if (k === "clr" || (k === "bs" && !dg)) dg = ""; else if (k === "bs") dg = dg.slice(0, -1); else if (/^[0-9]$/.test(k)) { if (dg.length < 7) dg += k; } else return;
     el.value = regFmt(dg); try { el.setSelectionRange(el.value.length, el.value.length); } catch (e) {} kpFire(el); }
   if (typeof document !== "undefined") document.addEventListener("input", function (e) { var t = e.target; if (!t || !t.getAttribute || t.getAttribute("data-reg") !== "1" || t.__regIn) return;
     var f = regFmt(t.value); if (t.value !== f) { t.value = f; try { t.setSelectionRange(f.length, f.length); } catch (x) {} } }, true);
@@ -219,16 +221,23 @@
   function kpFromTarget(t) { while (t && t.getAttribute) { if (kpHold(t)) return t; t = t.parentNode; } return null; }
   function kpReveal(el) {
     var ov = document.getElementById("gl-screen"), d = kpEl;
-    if (!ov || !d || !el || !el.getBoundingClientRect) return;
+    if (!ov || !d || d.style.display === "none" || !el || !el.getBoundingClientRect) return;
     var padTop = d.getBoundingClientRect().top;
     if (!(padTop > 40)) return;
-    var nodes = [el], pair = kpPair(el);
+    var nodes = [], fuel = document.getElementById("gl-fuel"), i, r, top = 1e9, bottom = 0;
+    if (fuel && fuel.contains && fuel.contains(el) && fuel.querySelectorAll) {
+      var inputs = fuel.querySelectorAll("input");
+      for (i = 0; i < inputs.length; i++) if (inputs[i].getBoundingClientRect) nodes.push(inputs[i]);
+    }
+    var pair = kpPair(el);
     if (pair && pair.getBoundingClientRect) nodes.push(pair);
-    var top = 1e9, bottom = 0, i, r;
+    if (!nodes.length) nodes.push(el);
     for (i = 0; i < nodes.length; i++) { r = nodes[i].getBoundingClientRect(); if (r.top < top) top = r.top; if (r.bottom > bottom) bottom = r.bottom; }
-    if (bottom > padTop - 12) ov.scrollTop += bottom - padTop + 20;
-    r = nodes[0].getBoundingClientRect();
+    if (bottom > padTop - 16) ov.scrollTop += bottom - (padTop - 16);
+    r = el.getBoundingClientRect();
     if (r.top < 64) ov.scrollTop -= 64 - r.top;
+    r = el.getBoundingClientRect();
+    if (r.bottom > padTop - 16) ov.scrollTop += r.bottom - (padTop - 16);
   }
   function kpShow(el) { if (!el || (!kpOn() && !kpHold(el))) return; var ov = document.getElementById("gl-screen"); if (!ov) return; var d = kpBuild(); if (d.parentNode !== ov) ov.appendChild(d);
     if (kpCur && kpCur !== el) kpCur.dispatchEvent(new Event("change", { bubbles: true }));
@@ -242,7 +251,7 @@
   function kpWire(ov) { kpEl = null; kpCur = null;
     ov.addEventListener("focusin", function (e) { var t = e.target; if (t && t.getAttribute && t.getAttribute("data-kp")) kpShow(t); });
     ov.addEventListener("touchstart", function (e) { var t = e.target; if (!t || !t.getAttribute || !kpHold(t)) return; if (e.cancelable !== false && e.preventDefault) e.preventDefault(); kpShow(t); }, { capture: true, passive: false });
-    ov.addEventListener("pointerdown", function (e) { var t = e.target; if (t && t.getAttribute && t.getAttribute("data-kp")) { if (kpHold(t) && e.cancelable !== false && e.preventDefault) e.preventDefault(); kpShow(t); return; } /* a tap on the PIN or amount opens the pad even if focus was refused */ if (!kpCur) return; if (kpEl && kpEl.contains(t)) return; if (t && t.closest && t.closest("button")) return; /* v76d: let the button's click land first; it closes the pad itself */ kpClose(); }, true);
+    ov.addEventListener("pointerdown", function (e) { var t = e.target; if (t && t.getAttribute && t.getAttribute("data-kp")) { if (kpHold(t) && e.cancelable !== false && e.preventDefault) e.preventDefault(); if (kpEl) kpEl.__eatClick = Date.now() + 500; kpShow(t); return; } /* a tap on the PIN or amount opens the pad even if focus was refused */ if (!kpCur) return; if (kpEl && kpEl.contains(t)) return; if (t && t.closest && t.closest("button")) return; /* v76d: let the button's click land first; it closes the pad itself */ kpClose(); }, true);
     ov.addEventListener("click", function (e) { var held = kpFromTarget(e.target); if (held) { kpShow(held); return; } var t = e.target; if (kpCur && t && t.closest && t.closest("button") && !(kpEl && kpEl.contains(t))) setTimeout(kpClose, 0); });
     ov.addEventListener("keydown", function (e) { if (kpCur && e.key === "Escape" && e.target === kpCur) kpClose(); });
     var tg = document.createElement("button"); tg.type = "button"; tg.id = "gl-kb-tog"; tg.onclick = function () { try { localStorage.removeItem(KP_KEY); } catch (e) {} kpRefresh(); }; ov.appendChild(tg); kpRefresh(); }

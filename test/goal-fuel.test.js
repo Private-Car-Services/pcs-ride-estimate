@@ -83,6 +83,11 @@ test("a fill figures miles, mpg, tank, and price per mile", function () {
   assert.equal(fuel.fmt(fill).tank, (mpg * 22).toFixed(2));
   assert.notEqual(fuel.fmt(fill).tank, (Math.round(mpg * 100) / 100 * 22).toFixed(2));
   assert.equal(fuel.fmt(fill).ppm, "$" + (40.5 / 379).toFixed(2));
+  const free = fuel.math(100000, 100379, 18.157, 0);
+  assert.equal(free.ok, true);
+  assert.equal(free.price, 0);
+  assert.equal(free.ppm, 0);
+  assert.equal(fuel.fmt(free).ppm, "$0.00");
   assert.equal(fuel.math(1000, 1000, 10, 40).ok, false);
   assert.equal(fuel.math(null, 10, 1, 1).ok, false);
   const book = { seed: { odo: 500, at: 1 } };
@@ -116,7 +121,9 @@ test("gallons keep three decimals and a price stays at cents", function () {
     const html = pad.innerHTML;
     assert.ok(html.indexOf('data-k="' + key + '"') >= 0);
     const node = { tag: "button", attrs: { "data-k": key }, parentNode: pad, getAttribute(k) { return this.attrs[k] || null; }, closest() { return node; } };
-    (pad._l.pointerup || []).forEach(function (fn) { fn({ target: node, pointerType: "touch", button: 0, preventDefault() {} }); });
+    const ev = { target: node, pointerType: "touch", button: 0, preventDefault() {} };
+    (pad._l.pointerdown || []).forEach(function (fn) { fn(ev); });
+    (pad._l.pointerup || []).forEach(function (fn) { fn(ev); });
   }
   const gal = field("g");
   ["1", ".", "2", "3", "4", "5"].forEach(press);

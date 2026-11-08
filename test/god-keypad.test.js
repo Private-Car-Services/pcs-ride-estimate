@@ -136,7 +136,10 @@ function press(pad, key, how) {
   })(pad);
   assert.ok(btn, key);
   const ev = { target: btn, pointerType: "touch", button: 0, preventDefault() {} };
-  if (how === "up") (pad._l.pointerup || []).forEach(function (fn) { fn(ev); });
+  if (how === "up") {
+    (pad._l.pointerdown || []).forEach(function (fn) { fn(ev); });
+    (pad._l.pointerup || []).forEach(function (fn) { fn(ev); });
+  }
   if (how === "click") (pad._l.click || []).forEach(function (fn) { fn(ev); });
 }
 
@@ -149,6 +152,26 @@ test("a price tap types from the cents when only pointerup arrives", function ()
   press(pad, "2", "up");
   press(pad, "5", "up");
   assert.equal(input.value, "96.25");
+});
+
+test("releasing the mouse on the pad after pressing a box does not type", function () {
+  const { sandbox, doc } = loadGoal();
+  sandbox.__pcsGoalOpen();
+  const ov = doc.getElementById("gl-screen");
+  const input = doc.createElement("input");
+  input.id = "gl-fuel-price";
+  input.setAttribute("data-kp", "d");
+  input.setAttribute("data-reg", "1");
+  ov.appendChild(input);
+  webkitTap(ov, input);
+  const pad = doc.getElementById("gl-kp");
+  let btn = null;
+  (function walk(n) { if (n && n.attrs && n.attrs["data-k"] === "9") btn = n; (n.children || []).forEach(walk); })(pad);
+  (pad._l.pointerup || []).forEach(function (fn) { fn({ target: btn, pointerType: "mouse", button: 0, preventDefault() {} }); });
+  (pad._l.click || []).forEach(function (fn) { fn({ target: btn, preventDefault() {} }); });
+  assert.equal(input.value, "");
+  press(pad, "9", "up");
+  assert.equal(input.value, "0.09");
 });
 
 test("a click without pointerup still types one price digit", function () {
@@ -165,15 +188,15 @@ test("a PIN tap types one digit and does not double it", function () {
   assert.equal(input.value, "1234");
 });
 
-test("v2.0m-an is what a phone on v2.0m-ai is offered", function () {
+test("v2.0m-ao is what a phone on v2.0m-ai is offered", function () {
   const { sandbox } = loadGoal();
   const version = fs.readFileSync(path.join(__dirname, "../app/version.js"), "utf8");
-  assert.ok(version.indexOf('var APP_VERSION = "v2.0m-an"') >= 0);
+  assert.ok(version.indexOf('var APP_VERSION = "v2.0m-ao"') >= 0);
   const pages = {
-    "app/driver/index.html": "version.js?v=2.0m-an",
-    "app/index.html": "version.js?v=2.0m-an",
-    "god/index.html": "goal.js?v=2.0m-an",
-    "meter/index.html": "version.js?v=2.0m-an"
+    "app/driver/index.html": "version.js?v=2.0m-ao",
+    "app/index.html": "version.js?v=2.0m-ao",
+    "god/index.html": "goal.js?v=2.0m-ao",
+    "meter/index.html": "version.js?v=2.0m-ao"
   };
   Object.keys(pages).forEach(function (rel) {
     const html = fs.readFileSync(path.join(__dirname, "..", rel), "utf8");
@@ -485,7 +508,11 @@ test("every typed fuel box uses the nine-key pad after the iPad keyboard was sav
   assert.equal(yearTap.prevented, false);
   webkitTap(ov, price);
   press(doc.getElementById("gl-kp"), "0", "up");
+  assert.equal(price.value, "0.00");
+  press(doc.getElementById("gl-kp"), "bs", "up");
   assert.equal(price.value, "");
+  press(doc.getElementById("gl-kp"), "0", "up");
+  assert.equal(price.value, "0.00");
   press(doc.getElementById("gl-kp"), "5", "up");
   assert.equal(price.value, "0.05");
   price.__regFresh = true;
@@ -535,6 +562,26 @@ test("every typed fuel box uses the nine-key pad after the iPad keyboard was sav
   assert.equal(locked.indexOf("459.14"), -1);
   assert.equal(locked.indexOf('<input id="gl-fuel-miles"'), -1);
   assert.equal(locked.indexOf('<input id="gl-fuel-mpg"'), -1);
+  const price2 = doc.getElementById("gl-fuel-price");
+  const odo2 = doc.getElementById("gl-fuel-odo");
+  const gal2 = doc.getElementById("gl-fuel-gal");
+  webkitTap(ov, price2);
+  price2.__regFresh = true;
+  press(doc.getElementById("gl-kp"), "0", "up");
+  assert.equal(price2.value, "0.00");
+  webkitTap(ov, odo2);
+  ["1", "0", "0", "4", "0", "0"].forEach(function (k) { press(doc.getElementById("gl-kp"), k, "up"); });
+  webkitTap(ov, gal2);
+  ["1", ".", "0", "0", "0"].forEach(function (k) { press(doc.getElementById("gl-kp"), k, "up"); });
+  assert.equal(gal2.value, "1.000");
+  doc.getElementById("gl-fuel-save").onclick();
+  const zeroRows = Object.keys(sandbox.module.exports._get().fuel).filter(function (k) { return k.indexOf("log_") === 0; }).map(function (k) { return sandbox.module.exports._get().fuel[k]; });
+  const zero = zeroRows.filter(function (r) { return r.odo === 100400; })[0];
+  assert.ok(zero);
+  assert.equal(zero.price, 0);
+  assert.equal(zero.gallons, 1);
+  sandbox.module.exports.paint();
+  assert.ok(doc.getElementById("gl-app")._html.indexOf(">100400<") >= 0);
   assert.equal(year.getAttribute("data-kp"), "d");
   assert.notEqual(year.readOnly, true);
 });
