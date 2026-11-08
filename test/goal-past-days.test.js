@@ -140,6 +140,48 @@ test("no selection keeps today's tape, and the manual past-entry date field stay
   assert.equal(box.__pcsGoalHourly.dayPick(SAT, T), "");
 });
 
+test("the shift fetch and the minute refresh keep Saturday's hourly line", async () => {
+  const box = load();
+  let paints = 0;
+  const slot = { _html: "", set innerHTML(v) { this._html = v; paints += 1; }, get innerHTML() { return this._html; } };
+  box.document.getElementById = function (id) { return id === "gl-hr" ? slot : null; };
+  box.module.exports._set(ledger());
+  let release;
+  const gate = new Promise(function (resolve) { release = resolve; });
+  box.fetch = function () {
+    box.__fetches.push("fetch");
+    return gate.then(function () { return { ok: true, json: function () { return Promise.resolve({ shiftStartAt: Date.now() - 3 * 3600000, shiftClosed: false }); } }; });
+  };
+  box.__pcsGoalHourly.hrPaint();
+  assert.ok(box.__fetches.length >= 1);
+  assert.match(slot.innerHTML, /first entry|Starts with/);
+  assert.equal(box.__pcsGoalHourly.dayPick(SAT, T), SAT);
+  const page = box.module.exports.topHtml(box.module.exports.calc(T));
+  assert.match(page, /DAILY TOTAL[^<]*Sat 11\/7/);
+  assert.match(page, /class="total">\$45\.00</);
+  assert.match(page, /\+\$40\.00/);
+  assert.match(page, /\+\$5\.00/);
+  const duringFetch = box.__fetches.length;
+  box.__pcsGoalHourly.hrPaint();
+  assert.match(slot.innerHTML, /\$22\.50\/hr \u00b7 2h 0m on shift/);
+  assert.doesNotMatch(slot.innerHTML, /first entry|Starts with/);
+  assert.equal(box.__fetches.length, duringFetch);
+  release();
+  await gate;
+  for (let i = 0; i < 12; i++) await Promise.resolve();
+  assert.ok(paints >= 3, "the shift fetch called the hourly refresh");
+  assert.match(slot.innerHTML, /\$22\.50\/hr \u00b7 2h 0m on shift/);
+  assert.doesNotMatch(slot.innerHTML, /first entry|Starts with/);
+  const fetches = box.__fetches.length;
+  box.__pcsGoalHourly.hrPaint();
+  assert.match(slot.innerHTML, /\$22\.50\/hr \u00b7 2h 0m on shift/);
+  assert.equal(box.__fetches.length, fetches);
+  const still = box.module.exports.topHtml(box.module.exports.calc(T));
+  assert.match(still, /Sat 11\/7/);
+  assert.match(still, /\$45\.00/);
+  assert.match(fs.readFileSync(path.join(__dirname, "../god/goal.js"), "utf8"), /D\.entries\[newId\(at\)\] = \{ date: today\(\)/);
+});
+
 test("date buttons are real buttons so touch and keyboard can activate them", () => {
   const box = load();
   box.module.exports._set(ledger());

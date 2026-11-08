@@ -590,9 +590,9 @@
   function hrPastHtml(day) { var r = ((D && D.dayHrs) || {})[day], mins = r && r.mins > 0 ? r.mins : 0, rate = mins ? hrRateOf(dayTotal(day), mins) : null, dur = mins ? Math.floor(mins / 60) + "h " + (mins % 60) + "m" : "";
     var text = mins ? ((rate == null || mins < 15 ? "\u2014" : "$" + rate.toFixed(2)) + "/hr \u00b7 " + dur + " on shift") : "\u2014";
     return '<div style="font-size:30px;font-weight:900;color:var(--lite,#7ee08f);line-height:1.2">' + esc(text) + "</div>"; }
-  function hrPaint() { var el = typeof document !== "undefined" && document.getElementById("gl-hr"); if (el && D) el.innerHTML = hrHtml(today()); }
+  function hrPaint() { var el = typeof document !== "undefined" && document.getElementById("gl-hr"); if (!el || !D) return; var day = dayView(today()); el.innerHTML = day < today() ? hrPastHtml(day) : hrHtml(day); }
   if (typeof setInterval === "function") setInterval(hrPaint, 60000);
-  if (typeof window !== "undefined") window.__pcsGoalHourly = { hrCalc: hrCalc, hrText: hrText, hrShiftStart: hrShiftStart, hrPrevDay: hrPrevDay, hrSpans: hrSpans, hrDayStartMs: hrDayStartMs, hrRecord: hrRecord, hrNeedSave: hrNeedSave, hrRateOf: hrRateOf, hrFixPast: hrFixPast, pastDaysHtml: function (t) { return pastDaysHtml(t); }, pastDayKeys: function (t) { return pastDayKeys(t); }, dayPick: function (d, t) { return pickDay(d, t); } };
+  if (typeof window !== "undefined") window.__pcsGoalHourly = { hrCalc: hrCalc, hrText: hrText, hrShiftStart: hrShiftStart, hrPrevDay: hrPrevDay, hrSpans: hrSpans, hrDayStartMs: hrDayStartMs, hrRecord: hrRecord, hrNeedSave: hrNeedSave, hrRateOf: hrRateOf, hrFixPast: hrFixPast, pastDaysHtml: function (t) { return pastDaysHtml(t); }, pastDayKeys: function (t) { return pastDayKeys(t); }, dayPick: function (d, t) { return pickDay(d, t); }, hrPaint: function () { hrPaint(); } };
   function topHtml(c) {
     var g = c.g, h = "";
     h += '<div class="row" style="justify-content:space-between"><h1>Monthly Goal</h1><button class="btn ghost" id="gl-b-lock">Lock</button></div>';
