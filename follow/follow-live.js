@@ -67,6 +67,23 @@
   function photoSrc(k) { /* pure (tested): only a 24-char card key, only our Worker */
     return /^[A-Za-z0-9_-]{24}$/.test(String(k || "")) ? "https://pcs-pay.pcsrides.workers.dev/dcard/" + k + "-p.jpg" : "";
   }
+  function trackerPhotoSrc(d) { /* card jpeg when its key is on the copy; otherwise the driver's existing profile jpeg. No other addresses. */
+    d = d || {};
+    var card = photoSrc(d.cardKey);
+    if (card) return card;
+    var p = typeof d.photo === "string" ? d.photo : "";
+    return /^data:image\/jpeg;base64,[A-Za-z0-9+/=]+$/.test(p) && p.length <= 120000 ? p : "";
+  }
+  function applyTrackerPhoto(ph, d) {
+    if (!ph) return "";
+    var src = trackerPhotoSrc(d);
+    if (ph.__s !== src) {
+      ph.__s = src;
+      if (src) { ph.onerror = function () { ph.hidden = true; }; ph.src = src; ph.hidden = false; }
+      else { ph.src = ""; ph.hidden = true; }
+    }
+    return src;
+  }
   function carText(c) {
     if (!c || typeof c !== "object") return "";
     return [txt(c.color, 20), txt(c.year, 4), txt(c.make, 30), txt(c.model, 30)].filter(Boolean).join(" ");
@@ -306,8 +323,7 @@
     var car = $("fl-car"), ct = carText(d.car), plate = d.car && typeof d.car === "object" ? txt(d.car.plate, 12) : "";
     var ch = (ct ? esc(ct) : "") + (plate ? ' <span class="fl-plate" aria-label="License plate">' + esc(plate) + "</span>" : "");
     if (car && car.__h !== ch) { car.innerHTML = ch; car.__h = ch; }
-    var ph = $("fl-photo"), src = photoSrc(d.cardKey); /* v77.3b: the driver's photo (from their PCS picture card) */
-    if (ph && ph.__s !== src) { ph.__s = src; if (src) { ph.onerror = function () { ph.hidden = true; }; ph.src = src; ph.hidden = false; } else ph.hidden = true; }
+    applyTrackerPhoto($("fl-photo"), d);
     var live = d.status === "on_way" || d.status === "arrived" || d.status === "picked_up";
     var done = d.status === "completed" || d.status === "cancelled";
     var e = d.eta, etaOk = live && e && num(e.min) !== null && num(e.miles) !== null && (!num(d.etaAt) || now - num(d.etaAt) <= 180000);
@@ -495,6 +511,6 @@
   (function qr() { var el = $("fw-qr"); if (!el || typeof window.qrcode !== "function") return; try { var x = window.qrcode(0, "M"); x.addData("https://www.PCSrides.com"); x.make(); el.innerHTML = x.createSvgTag(4, 0); } catch (e) {} })();
   setInterval(function () { if (S.d && !S.ended && $("fl-live")) { try { bigBox(S.d, Date.now(), /^(on_way|arrived|picked_up)$/.test(String(S.d.status))); } catch (e) {} } }, 15000);
   window.__pcsFollowLive = { resume: resume, setPath: setPath, update: update, track: track, state: S, over: over, statusText: statusText,
-    stopsOf: stopsOf, nextTarget: nextTarget, soonDue: soonDue, soonText: SOON_TEXT };
+    stopsOf: stopsOf, nextTarget: nextTarget, soonDue: soonDue, soonText: SOON_TEXT, photo: trackerPhotoSrc, showPhoto: applyTrackerPhoto };
   poll();
 })();

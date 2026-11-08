@@ -93,9 +93,29 @@ test("missing or uninvoiced prepaid rides stay Prepaid ride with no invoice suff
   });
   assert.equal(bill.from({}, null), "");
   assert.equal(bill.from({ prepaid: true }, null), "");
-  assert.equal(bill.text("invoiced", "000555"), "Invoiced ride");
+  assert.equal(bill.text("invoiced", ""), "Invoiced ride");
   assert.equal(bill.text("", "000555"), "");
-  assert.equal(bill.label("invoiced", "ride-bill-label", "000555").indexOf("Invoice #"), -1);
+  assert.equal(bill.label("invoiced", "ride-bill-label", "").indexOf("Invoice #"), -1);
+});
+
+test("invoiced and prepaid rides both show the saved number on the same green line", function () {
+  const row = { prepaid: false, prepaidInvoiceNo: "000573", prepaidVia: "square_invoice" };
+  assert.equal(bill.kind(row, null), "invoiced");
+  assert.equal(bill.from(row, null), "000573");
+  assert.equal(bill.text("invoiced", "000573"), "Invoiced ride Invoice #000573");
+  assert.equal(bill.text("prepaid", "000573"), "Prepaid ride Invoice #000573");
+  const invoiced = bill.label("invoiced", "sched-bill-label", "000573");
+  const prepaid = bill.label("prepaid", "meter-bill-label", "000573");
+  assert.ok(invoiced.indexOf("Invoiced ride Invoice #000573") >= 0);
+  assert.ok(prepaid.indexOf("Prepaid ride Invoice #000573") >= 0);
+  assert.ok(invoiced.indexOf("text-align:center") >= 0);
+  assert.equal(invoiced.indexOf("prepaid:true"), -1);
+  const map = bill.map(row);
+  assert.ok(map.indexOf('id="sched-bill-label"') >= 0);
+  assert.ok(map.indexOf("Invoiced ride Invoice #000573") >= 0);
+  assert.equal(bill.map({ prepaid: true, prepaidInvoiceNo: "" }).indexOf("Invoice #"), -1);
+  assert.ok(bill.map({ prepaid: true }).indexOf(">Prepaid ride</p>") >= 0);
+  assert.equal(bill.kind(row, null), "invoiced");
 });
 
 test("invoice line stays one centered line without clipping", function () {

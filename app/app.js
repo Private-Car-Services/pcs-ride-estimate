@@ -9831,14 +9831,15 @@
   }
   function rideBillText(k, no) {
     var t = k === "prepaid" ? "Prepaid ride" : k === "invoiced" ? "Invoiced ride" : "";
-    if (t !== "Prepaid ride") return t;
+    if (!t) return "";
     no = rideInvoiceDisplayNo(no);
     if (!no) return t;
     return t + " Invoice #" + no;
   }
+  function schedMapBillHtml(r, id) { return rideBillLabelHtml(rideBillKind(r, null), id || "sched-bill-label", rideInvoiceNoFrom(r, null)); }
   /* Narrow embedded ride bar is tighter than the full-screen map bar. Shrink only enough to stay one centered line; 16px floor stays readable. Wide full-screen bar stays 22px. */
   function rideBillLabelFitCss() {
-    return "#rfs-bar,#meter-running,#meter-paid{container-type:inline-size}" +
+    return "#rfs-bar,#meter-running,#meter-paid,#sched-fs-bottom{container-type:inline-size}" +
       ".pcs-bill-label{font-size:clamp(16px,calc(6.35cqw - 1px),22px);text-align:center}";
   }
   function rideBillLabelStyle() {
@@ -9859,7 +9860,7 @@
     try { if (M && M.schedId) r = schedFind(M.schedId); } catch (e) {}
     return rideInvoiceNoFrom(r, M);
   }
-  if (typeof window !== "undefined") window.__pcsV20lBill = { kind: rideBillKind, text: rideBillText, label: rideBillLabelHtml, invoiceNo: rideInvoiceDisplayNo, from: rideInvoiceNoFrom, fit: rideBillLabelFitCss };
+  if (typeof window !== "undefined") window.__pcsV20lBill = { kind: rideBillKind, text: rideBillText, label: rideBillLabelHtml, invoiceNo: rideInvoiceDisplayNo, from: rideInvoiceNoFrom, fit: rideBillLabelFitCss, map: schedMapBillHtml };
   function meterInvInfo(M) { return rideInvoiceInfo(M && M.schedId ? schedFind(M.schedId) : null, M); }
   function meterInvRefresh(M) { /* live: the 15-min Square sync / refreshScheduledRides flips the badge without a re-render */
     if (typeof document === "undefined" || meterShown(M)) return;
@@ -10490,6 +10491,13 @@
     /* v77s (Matthew 10/16): text the rider "your driver has arrived" (Worker sends once per ride, only when the text service is set up). Never blocks arriving. */
     try { var tk = qToken(); if (tk) qWorker("/notify/arrived", { token: tk, rideId: t.id }).catch(function () {}); } catch (e) {}
   }
+  function schedMapBillPlace(bot) {
+    if (!bot || typeof document === "undefined") return;
+    var t = schedNavTrip(), r = t ? schedFind(t.id) : null, html = schedMapBillHtml(r);
+    var host = bot.querySelector ? bot.querySelector("#sched-bill-host") : null;
+    if (!host) { host = document.createElement("div"); host.id = "sched-bill-host"; if (bot.firstChild && bot.insertBefore) bot.insertBefore(host, bot.firstChild); else if (bot.appendChild) bot.appendChild(host); else return; }
+    if (host.__h !== html) { host.innerHTML = html; host.__h = html; }
+  }
   function schedFullStyle() {
     if (document.getElementById("pcs-fullmap-style")) return;
     var st = document.createElement("style"); st.id = "pcs-fullmap-style";
@@ -10550,6 +10558,7 @@
         stage.appendChild(bot);
       }
       if (navTestOn()) navTestBottom(bot); /* v75y test flag */
+      else schedMapBillPlace(bot);
       fsMphPlace(stage, (navTestOn() ? 262 : 172) + "px"); /* v76b: MPH badge */
     } else { if (top) top.remove(); if (bot) bot.remove(); fsMphDrop(stage); }
     if (full !== was) {
@@ -10921,6 +10930,7 @@
     var df = folFirst(o.driverName); if (df) out.driverFirst = df;
     var car = folCar(o.car); if (car) out.car = car;
     if (/^[A-Za-z0-9_-]{24}$/.test(String(o.cardKey || ""))) out.cardKey = String(o.cardKey); /* v77.3b: random key of the driver's picture card (photo shown on /follow/); never the driver id */
+    else { var ph = safePhoto(o.photo); if (ph) out.photo = ph; } /* existing profile jpeg only when no picture-card key is stored; never a web address */
     var pk = folPlace(o.pickup); if (pk) out.pickup = pk;
     var dr = folPlace(o.dest); if (dr) out.dest = dr;
     var sx = folStopsOut(o.stops); if (sx) out.stops = sx; /* v76g */
@@ -11004,7 +11014,7 @@
     folWrite(folMapUrl(k), "DELETE");
     folRedraw();
   }
-  function folSig(c) { return JSON.stringify([c.bill || "", c.status, c.pos ? [c.pos.lat, c.pos.lng] : 0, c.eta || 0, c.pickup || 0, c.dest || 0, c.car || 0, c.driverFirst || "", c.cardKey || "", c.route ? c.route.length + ":" + c.route[c.route.length - 1] : 0, c.stops || 0]); }
+  function folSig(c) { return JSON.stringify([c.bill || "", c.status, c.pos ? [c.pos.lat, c.pos.lng] : 0, c.eta || 0, c.pickup || 0, c.dest || 0, c.car || 0, c.driverFirst || "", c.cardKey || "", c.photo ? c.photo.length : 0, c.route ? c.route.length + ":" + c.route[c.route.length - 1] : 0, c.stops || 0]); }
   function folHere() {
     if (!isCoord(state.hereLat) || !isCoord(state.hereLng)) return null;
     var at = Number(state.gpsAt) || 0;
@@ -11040,7 +11050,7 @@
     if (ROLE !== "driver" || fol.off || !syncOn()) return [];
     var out = [], me = driverPresenceId(), M = state.meter, trip = schedTripNow(), here = folHere();
     var acc = readDriverAccount() || {};
-    var base = { driverName: acc.name || state.driverName || "", car: acc, cardKey: folCardKey() }; /* v77.3b */
+    var base = { driverName: acc.name || state.driverName || "", car: acc, cardKey: folCardKey(), photo: safePhoto(acc.photo) || safePhoto(state.driverPhoto) }; /* picture-card key if already stored; otherwise the profile jpeg on this phone */
     (state.scheduledRides || []).forEach(function (r) {
       if (!r || !r.id || folMyId(r) !== me || !FOL_KEY_RE.test("c_" + r.id)) return;
       var st = r.status === "cancelled" || r.status === "deleted" ? "cancelled" : r.status === "completed" ? "completed" : "assigned";
@@ -11605,7 +11615,7 @@
       if (onMeter) actions = '<p style="margin:8px 0;color:#0b3d23;font-weight:800">' + (meterShown(M) ? "Ride in progress on the meter above. Change the drop-off there any time." : "Ride in progress above. Change the drop-off there any time.") + '</p>' + drvCancelBtnHtml("sched", r.id); /* r13 */
       else if (inTrip) {
         var nav = schedNavUrl(r.pickup, r.pickupLat, r.pickupLng);
-        actions = '<div class="sched-trip" id="sched-trip" style="background:#ecfdf5;border:2px solid #0b6b3a;border-radius:12px;padding:10px;margin:8px 0">' +
+        actions = schedMapBillHtml(r, "sched-card-bill") + '<div class="sched-trip" id="sched-trip" style="background:#ecfdf5;border:2px solid #0b6b3a;border-radius:12px;padding:10px;margin:8px 0">' +
           '<p style="margin:0 0 6px;font-weight:800;color:#0b3d23">' + (trip.phase === "arrived" ? "You're at the pickup" : "On the way to the pickup") + "</p>" +
           (trip.phase === "arrived" ? "" : navButtonPcsHtml() + schedTurnHtml()) + /* v2.0m-c: Navigate to pickup */ /* v75s: in-app turn-by-turn on the map below */
           (trip.phase === "arrived"
