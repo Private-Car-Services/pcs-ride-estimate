@@ -132,7 +132,8 @@ test("the ride map bar does not add a second invoice row", function () {
   const rfs = appSrc.slice(appSrc.indexOf("function rfsBarHtml"), appSrc.indexOf("function rfsBarClick"));
   const place = appSrc.slice(appSrc.indexOf("function schedMapBillPlace"), appSrc.indexOf("function schedFsMeasure"));
   assert.equal(rfs.indexOf("rideBillLabelHtml"), -1);
-  assert.ok(rfs.indexOf('id="rfs-bill"') >= 0);
+  assert.ok(rfs.indexOf('class="pcs-map-green"') >= 0);
+  assert.ok(rfs.indexOf('class="pcs-map-green"') < rfs.indexOf('id="rfs-end"'));
   assert.match(place, /host\.remove/);
   assert.doesNotMatch(place, /insertBefore/);
   assert.match(appSrc, /sqInvoice: raw\.sqInvoice/);
@@ -177,18 +178,19 @@ function quotedCss(fnSrc) {
   return parts.join("");
 }
 
-function driverPage(kind, text, w, h) {
+function driverPage(kind, text, w, h, safe) {
+  safe = safe || { top: 47, bottom: 34, left: 0, right: 0 };
   const css = quotedCss(appSrc.slice(appSrc.indexOf("function schedFullStyle"), appSrc.indexOf("function schedFullResize"))) +
     quotedCss(appSrc.slice(appSrc.indexOf("function fsStyle"), appSrc.indexOf("function rfsKey")));
   const rfs = kind === "rfs";
+  const stageStyle = "position:relative;width:" + w + "px;height:" + h + "px;--pcs-safe-top:" + safe.top + "px;--pcs-safe-bottom:" + safe.bottom + "px;--pcs-safe-left:" + safe.left + "px;--pcs-safe-right:" + safe.right + "px";
   return `<!doctype html><html><head><meta charset="utf-8"><style>
     html,body{margin:0;background:#123}
     .leaflet-top,.leaflet-left{position:absolute}
     .leaflet-bar a{display:block;width:44px;height:44px;line-height:44px;background:#fff;color:#000;text-align:center;text-decoration:none}
     ${css}
-    #home-map-stage{--pcs-safe-top:47px;--pcs-safe-bottom:34px;--pcs-safe-left:0px;--pcs-safe-right:0px}
   </style></head><body>
-  <div id="${rfs ? "meter-map-stage" : "home-map-stage"}" class="${rfs ? "pcs-rfs" : "pcs-fullmap"}" style="position:relative;width:${w}px;height:${h}px">
+  <div id="${rfs ? "meter-map-stage" : "home-map-stage"}" class="${rfs ? "pcs-rfs" : "pcs-fullmap"}" style="${stageStyle}">
     <div class="leaflet-top leaflet-left"><div class="leaflet-control-zoom leaflet-bar"><a id="zoom-out" href="#">−</a></div></div>
     ${rfs ? "" : '<div id="sched-fs-top" style="height:72px;background:#20371d;color:#fff">In 0.4 mi · about 2 min</div>'}
     <div class="nav-toggle" style="position:absolute;right:8px;display:flex;gap:6px;z-index:1004">
@@ -196,32 +198,39 @@ function driverPage(kind, text, w, h) {
       <button type="button" id="map-mode-toggle" style="min-height:36px">Follow</button>
     </div>
     ${rfs
-      ? '<div id="rfs-bar" role="region" aria-label="Ride"><div class="rfs-row"><p class="rfs-bill" id="rfs-bill">' + text + '</p><div class="rfs-stats"><span><b>1.20</b> mi</span><span><b>0:12</b></span></div></div><div class="rfs-actions"><button type="button" class="rfs-end" id="rfs-end">End ride</button><button type="button" class="rfs-close" id="sched-fs-close">Close map</button></div></div>'
-      : '<div id="sched-fs-bottom"><button type="button" id="sched-fs-arrived">' + text + '</button><button type="button" id="sched-fs-close">Close map</button></div>'}
+      ? '<div id="rfs-bar" role="region" aria-label="Ride"><p class="pcs-map-green" id="rfs-bill">' + text + '</p><div class="rfs-row"><div class="rfs-stats"><span><b>1.20</b> mi</span><span><b>0:12</b></span></div></div><div class="rfs-actions"><button type="button" class="rfs-end" id="rfs-end">End ride</button><button type="button" class="rfs-close" id="sched-fs-close">Close map</button></div></div>'
+      : '<div id="sched-fs-bottom"><button type="button" class="pcs-map-green" id="sched-fs-arrived">' + text + '</button><button type="button" id="sched-fs-close">Close map</button></div>'}
   </div>
   <script>
     var stage = document.getElementById("${rfs ? "meter-map-stage" : "home-map-stage"}");
     var bar = document.getElementById("${rfs ? "rfs-bar" : "sched-fs-bottom"}");
     if (stage.style.setProperty) stage.style.setProperty("${rfs ? "--rfs-bar" : "--sched-fs-bar"}", bar.offsetHeight + "px");
     if (!${rfs ? "true" : "false"} && stage.style.setProperty) stage.style.setProperty("--sched-fs-top", "84px");
-    ["map-mode-toggle","map-orient-toggle","zoom-out","sched-fs-close"].forEach(function (id) {
+    ["map-mode-toggle","map-orient-toggle","zoom-out","sched-fs-close","rfs-end","rfs-bill","sched-fs-arrived"].forEach(function (id) {
       var el = document.getElementById(id);
       if (!el) return;
       el.addEventListener("click", function (e) { if (e.preventDefault) e.preventDefault(); el.dataset.n = String(Number(el.dataset.n || 0) + 1); });
     });
+    var greenEl = document.getElementById("rfs-bill") || document.getElementById("sched-fs-arrived");
+    var endEl = document.getElementById("rfs-end");
+    var overlap = false, greenBottom = 0, endTop = 0, greenH = 0;
+    if (greenEl) { var gb = greenEl.getBoundingClientRect(); greenBottom = gb.bottom; greenH = gb.height; }
+    if (endEl) { var eb = endEl.getBoundingClientRect(); endTop = eb.top; overlap = greenBottom > endTop + 1; }
     function hit(id) {
       var el = document.getElementById(id); if (!el) return { id: id, hit: "missing" };
       var r = el.getBoundingClientRect();
-      var x = Math.round(r.left + Math.min(r.width / 2, 18));
-      var y = Math.round(r.top + Math.min(r.height / 2, 16));
+      var x = Math.round(r.left + r.width / 2);
+      var y = Math.round(r.top + r.height / 2);
       var got = document.elementFromPoint(x, y);
       var bill = document.getElementById("sched-fs-arrived") || document.getElementById("rfs-bill");
       return { id: id, x: x, y: y, top: r.top, bottom: r.bottom, left: r.left, hit: got ? (got.id || got.className || got.tagName) : "",
         bill: bill ? bill.textContent : "", clip: bill ? bill.scrollWidth > bill.clientWidth + 2 : false,
         links: document.querySelectorAll("a[href]").length, host: !!document.getElementById("sched-bill-host"), label: !!document.querySelector(".pcs-bill-label"),
-        rows: document.querySelectorAll(".pcs-bill-label,.rfs-bill,#sched-fs-arrived").length };
+        overlap: overlap, greenBottom: greenBottom, endTop: endTop, greenH: greenH };
     }
-    document.body.dataset.report = JSON.stringify(["map-orient-toggle","map-mode-toggle","zoom-out","sched-fs-close"].map(hit));
+    var ids = ["map-orient-toggle","map-mode-toggle","zoom-out","sched-fs-close"];
+    if (document.getElementById("rfs-bill")) ids.push("rfs-bill","rfs-end");
+    document.body.dataset.report = JSON.stringify(ids.map(hit));
   </script></body></html>`;
 }
 
@@ -308,31 +317,44 @@ test("full-page map and tracker keep the invoice on one line and the controls hi
       fs.writeFileSync("/opt/cursor/artifacts/invoice-" + name.replace(".html", "") + ".png", Buffer.from(shot.result.data, "base64"));
       return JSON.parse(report);
     }
+    const ipadSafe = { top: 24, bottom: 20, left: 0, right: 0 };
+    const ipadLand = { top: 24, bottom: 20, left: 24, right: 24 };
     const pages = [
-      ["554-portrait.html", driverPage("pickup", bill.pickupLine(RAHUAL), 768, 1024)],
-      ["574-portrait.html", driverPage("pickup", bill.pickupLine(CAMARA), 768, 1024)],
-      ["554-landscape.html", driverPage("pickup", bill.pickupLine(RAHUAL), 1024, 768)],
-      ["574-rfs.html", driverPage("rfs", bill.bar(CAMARA), 768, 1024)],
-      ["554-paid-rfs.html", driverPage("rfs", bill.bar({ prepaidInvoiceNo: "000554", sqInvoice: { paid: true, status: "PAID" } }), 768, 1024)]
+      ["554-portrait.html", driverPage("pickup", bill.pickupLine(RAHUAL), 768, 1024, ipadSafe)],
+      ["574-portrait.html", driverPage("pickup", bill.pickupLine(CAMARA), 768, 1024, ipadSafe)],
+      ["554-landscape.html", driverPage("pickup", bill.pickupLine(RAHUAL), 1024, 768, ipadLand)],
+      ["574-rfs.html", driverPage("rfs", bill.bar(CAMARA), 768, 1024, ipadSafe)],
+      ["554-rfs-landscape.html", driverPage("rfs", bill.bar(RAHUAL), 1024, 768, ipadLand)],
+      ["574-unpaid-rfs.html", driverPage("rfs", bill.bar({ prepaidInvoiceNo: "000574", prepaid: false, prepaidVia: "square_invoice", payState: "invoice_pending" }), 1024, 768, ipadLand)],
+      ["554-paid-rfs.html", driverPage("rfs", bill.bar({ prepaidInvoiceNo: "000554", sqInvoice: { paid: true, status: "PAID" } }), 768, 1024, ipadSafe)]
     ];
     for (const pair of pages) {
       const hits = await open(pair[0], pair[1]);
       hits.forEach(function (row) {
-        assert.equal(row.hit, row.id, pair[0] + " " + row.id + " hit " + row.hit);
+        assert.equal(row.hit, row.id, pair[0] + " " + row.id + " hit " + row.hit + " @" + row.x + "," + row.y);
         assert.equal(row.clip, false, pair[0] + " clipped " + row.bill);
         assert.equal(row.links, 1, pair[0] + " unexpected link");
         assert.equal(row.host, false);
         assert.equal(row.label, false);
       });
       const zoom = hits.filter(function (row) { return row.id === "zoom-out"; })[0];
-      if (pair[0].indexOf("rfs") < 0) assert.ok(zoom.top >= 47, pair[0] + " zoom is under the status area");
+      if (pair[0].indexOf("rfs") < 0) assert.ok(zoom.top >= 24, pair[0] + " zoom is under the status area");
+      if (pair[0].indexOf("rfs") >= 0) {
+        assert.equal(hits[0].overlap, false, pair[0] + " green bar is behind End ride");
+        assert.ok(hits[0].endTop + 1 >= hits[0].greenBottom, pair[0] + " End ride covers the green bar");
+        assert.ok(Math.abs(hits[0].greenH - 62) < 2, pair[0] + " green bar height " + hits[0].greenH);
+        const follow = hits.filter(function (row) { return row.id === "map-mode-toggle"; })[0];
+        assert.ok(follow.bottom <= hits[0].greenBottom - hits[0].greenH, pair[0] + " Follow is not above the green bar");
+      }
     }
-    await send("Runtime.evaluate", { expression: "document.getElementById('map-mode-toggle').click(); document.getElementById('map-orient-toggle').click(); document.getElementById('zoom-out').click(); document.getElementById('sched-fs-close').click();", returnByValue: true }, sid);
-    const tapped = await send("Runtime.evaluate", { expression: "JSON.stringify({mode:document.getElementById('map-mode-toggle').dataset.n,orient:document.getElementById('map-orient-toggle').dataset.n,zoom:document.getElementById('zoom-out').dataset.n,close:document.getElementById('sched-fs-close').dataset.n,bill:document.getElementById('rfs-bill').textContent})", returnByValue: true }, sid);
+    await send("Runtime.evaluate", { expression: "document.getElementById('map-mode-toggle').click(); document.getElementById('map-orient-toggle').click(); document.getElementById('zoom-out').click(); document.getElementById('rfs-end').click(); document.getElementById('rfs-bill').click(); document.getElementById('sched-fs-close').click();", returnByValue: true }, sid);
+    const tapped = await send("Runtime.evaluate", { expression: "JSON.stringify({mode:document.getElementById('map-mode-toggle').dataset.n,orient:document.getElementById('map-orient-toggle').dataset.n,zoom:document.getElementById('zoom-out').dataset.n,end:document.getElementById('rfs-end').dataset.n,green:document.getElementById('rfs-bill').dataset.n,close:document.getElementById('sched-fs-close').dataset.n,bill:document.getElementById('rfs-bill').textContent})", returnByValue: true }, sid);
     const got = JSON.parse(tapped.result.result.value);
     assert.equal(got.mode, "1");
     assert.equal(got.orient, "1");
     assert.equal(got.zoom, "1");
+    assert.equal(got.end, "1");
+    assert.equal(got.green, "1");
     assert.equal(got.close, "1");
     assert.equal(got.bill, "Invoice #000554 – paid");
     const bare = await open("tracker-554.html", customerPage(live.bill({ status: "picked_up", invoiceNo: "000554", driverName: "Matt" }), 768, 1024));

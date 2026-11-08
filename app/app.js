@@ -10564,8 +10564,8 @@
       "#sched-fs-open{position:absolute;left:8px;top:8px;z-index:1002;width:auto;min-height:52px;margin:0;padding:10px 16px;font-size:18px;font-weight:800;border-radius:12px;border:2px solid #0b3d23;background:#d1fae5;color:#0b3d23;box-shadow:0 2px 6px rgba(0,0,0,.35);cursor:pointer}" +
       "#home-map-stage.pcs-fullmap #sched-fs-open{display:none}" +
       "#sched-fs-top{position:absolute;left:max(8px, calc(var(--pcs-safe-left, env(safe-area-inset-left, 0px)) + 8px));right:max(8px, calc(var(--pcs-safe-right, env(safe-area-inset-right, 0px)) + 8px));top:calc(var(--pcs-safe-top, env(safe-area-inset-top, 0px)) + 8px);z-index:1002}#sched-fs-top #sched-turn-fs{margin:0;box-shadow:0 2px 8px rgba(0,0,0,.4)}" +
-      "#sched-fs-bottom{position:absolute;left:max(8px, calc(var(--pcs-safe-left, env(safe-area-inset-left, 0px)) + 8px));right:max(8px, calc(var(--pcs-safe-right, env(safe-area-inset-right, 0px)) + 8px));bottom:calc(var(--pcs-safe-bottom, env(safe-area-inset-bottom, 0px)) + 22px);z-index:1002;pointer-events:none}#sched-fs-bottom button{pointer-events:auto}" +
-      "#sched-fs-bottom{container-type:inline-size}#sched-fs-arrived{display:block;width:100%;min-height:62px;height:62px;font-size:clamp(12px,calc(100cqw / 26),20px);font-weight:800;line-height:62px;background:#0b6b3a;color:#fff;border:2px solid #fff;border-radius:14px;margin:0 0 8px;padding:0 10px;white-space:nowrap;overflow:hidden;text-overflow:clip;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.4)}" +
+      "#sched-fs-bottom{position:absolute;left:max(8px, calc(var(--pcs-safe-left, env(safe-area-inset-left, 0px)) + 8px));right:max(8px, calc(var(--pcs-safe-right, env(safe-area-inset-right, 0px)) + 8px));bottom:calc(var(--pcs-safe-bottom, env(safe-area-inset-bottom, 0px)) + 22px);z-index:1002;display:flex;flex-direction:column;gap:8px;pointer-events:none}#sched-fs-bottom button{pointer-events:auto}.pcs-map-green{pointer-events:auto}" +
+      "#sched-fs-bottom,#rfs-bar{container-type:inline-size}.pcs-map-green,#sched-fs-arrived{display:block;width:100%;box-sizing:border-box;height:62px;min-height:62px;margin:0;padding:0 10px;font-size:clamp(12px,calc(100cqw / 26),20px);font-weight:800;line-height:58px;text-align:center;background:#0b6b3a;color:#fff;border:2px solid #fff;border-radius:14px;white-space:nowrap;overflow:hidden;text-overflow:clip;position:relative;z-index:1;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.4)}" +
       "#sched-fs-close{display:block;width:100%;min-height:58px;font-size:21px;font-weight:800;background:#d1fae5;color:#0b3d23;border:3px solid #0b3d23;border-radius:14px;margin:0;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.4)}";
     document.head.appendChild(st);
   }
@@ -10608,7 +10608,7 @@
       top.innerHTML = schedTurnHtml().replace('id="sched-turn"', 'id="sched-turn-fs"') + schedEtaHtml("sched-eta-fs"); /* v77.8 ETA box below the banner */
       if (!bot) {
         bot = document.createElement("div"); bot.id = "sched-fs-bottom";
-        bot.innerHTML = '<button type="button" id="sched-fs-arrived">I\u2019m at the pickup</button><button type="button" id="sched-fs-close">Close map</button>';
+        bot.innerHTML = '<button type="button" id="sched-fs-arrived" class="pcs-map-green">I\u2019m at the pickup</button><button type="button" id="sched-fs-close">Close map</button>';
         ["touchstart", "pointerdown", "mousedown", "wheel"].forEach(function (ev) { bot.addEventListener(ev, function (e) { e.stopPropagation(); }, { passive: true }); });
         bot.querySelector("#sched-fs-arrived").addEventListener("click", function (e) { e.stopPropagation(); schedArrivedNow(); });
         bot.querySelector("#sched-fs-close").addEventListener("click", function (e) { e.stopPropagation(); schedFullSet(false); });
@@ -10680,12 +10680,13 @@
       "#meter-map-stage.pcs-rfs{position:fixed !important;left:0;right:0;top:0;bottom:0;width:100vw;height:100vh !important;height:100dvh !important;min-height:0 !important;margin:0 !important;z-index:2147481900;background:#0b3d23;border-radius:0}" +
       "#meter-map-stage.pcs-rfs .map-caption{display:none}" +
       "#meter-map-stage.pcs-rfs .meter-topstack{top:8px;top:calc(env(safe-area-inset-top,0px) + 8px)}" +
-      "#meter-map-stage.pcs-rfs .nav-toggle{bottom:calc(var(--rfs-bar,230px) + 12px) !important}#meter-map-stage.pcs-rfs .nav-recenter{bottom:calc(var(--rfs-bar,230px) + 58px) !important}" +
+      "#meter-map-stage.pcs-rfs .nav-toggle{bottom:calc(var(--pcs-safe-bottom, env(safe-area-inset-bottom, 0px)) + 22px + var(--rfs-bar, 148px) + 14px) !important;z-index:1004;pointer-events:auto}#meter-map-stage.pcs-rfs .nav-recenter{bottom:calc(var(--pcs-safe-bottom, env(safe-area-inset-bottom, 0px)) + 22px + var(--rfs-bar, 148px) + 62px) !important;z-index:1004;pointer-events:auto}" +
+      "#meter-map-stage.pcs-rfs .leaflet-top.leaflet-left{top:calc(var(--pcs-safe-top, env(safe-area-inset-top, 0px)) + 12px) !important;left:calc(var(--pcs-safe-left, env(safe-area-inset-left, 0px)) + 10px) !important;z-index:1005;pointer-events:auto}" +
       "#meter-map-stage.pcs-rfs #rfs-open{display:none}" +
       "#rfs-open{position:absolute;left:8px;bottom:34px;z-index:1002;width:auto;min-height:52px;margin:0;padding:10px 16px;font-size:18px;font-weight:800;border-radius:12px;border:2px solid #0b3d23;background:#d1fae5;color:#0b3d23;box-shadow:0 2px 6px rgba(0,0,0,.35);cursor:pointer}" +
-      "#rfs-bar{position:absolute;left:0;right:0;bottom:0;z-index:1003;background:#f0fdf4;color:#0b3d23;border-top:4px solid #0b6b3a;border-radius:16px 16px 0 0;padding:8px 10px 18px;padding-bottom:calc(env(safe-area-inset-bottom,0px) + 18px);box-shadow:0 -4px 14px rgba(0,0,0,.45);font-family:system-ui,-apple-system,sans-serif}" +
-      "#rfs-bar *{box-sizing:border-box}.rfs-row{display:flex;align-items:center;flex-wrap:nowrap;gap:8px;margin:0 0 6px}" +
-      "#rfs-bar .rfs-bill{flex:1 1 auto;min-width:0;margin:0;padding:0;font-size:clamp(14px,3.2vw,20px);font-weight:900;line-height:1.2;color:#0b3d23;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;background:transparent;border:0}" +
+      "#rfs-bar{position:absolute;left:max(8px, calc(var(--pcs-safe-left, env(safe-area-inset-left, 0px)) + 8px));right:max(8px, calc(var(--pcs-safe-right, env(safe-area-inset-right, 0px)) + 8px));bottom:calc(var(--pcs-safe-bottom, env(safe-area-inset-bottom, 0px)) + 22px);z-index:1003;display:flex;flex-direction:column;gap:8px;background:transparent;padding:0;margin:0;border:0;box-shadow:none;pointer-events:none}" +
+      "#rfs-bar .pcs-map-green,#rfs-bar button,#rfs-bar .rfs-row{pointer-events:auto;position:relative;z-index:1}" +
+      "#rfs-bar *{box-sizing:border-box}.rfs-row{display:flex;align-items:center;flex-wrap:nowrap;gap:8px;margin:0;min-height:28px;background:#f0fdf4;color:#0b3d23;border-radius:10px;padding:2px 10px}" +
       ".rfs-fare{flex:0 0 auto;font-size:38px;line-height:1;font-weight:900;color:#0b3d23;font-variant-numeric:tabular-nums}" +
       ".rfs-stats{flex:1 1 auto;min-width:0;display:flex;flex-wrap:wrap;justify-content:flex-end;gap:4px 12px;font-size:17px;font-weight:800;color:#0b3d23}" +
       ".rfs-stats b{font-size:21px;font-variant-numeric:tabular-nums}.rfs-tier{flex:1 0 100%;text-align:right;font-size:14px;font-weight:800;color:#14532d;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}" +
@@ -10790,7 +10791,8 @@
     var shown = meterShown(M);
     var bill = "";
     if (!shown) { try { bill = rideMapBillText(M && M.schedId ? schedFind(M.schedId) : null, M); } catch (e) { bill = ""; } }
-    var html = '<div class="rfs-row">' + (shown ? '<div class="rfs-fare" id="rfs-fare" aria-label="Meter fare">' + meterMoneyShown(M, f.sub) + "</div>" : (bill ? '<p class="rfs-bill" id="rfs-bill">' + esc(bill) + "</p>" : "")) +
+    var html = (bill ? '<p class="pcs-map-green" id="rfs-bill" role="status">' + esc(bill) + "</p>" : "") +
+      '<div class="rfs-row">' + (shown ? '<div class="rfs-fare" id="rfs-fare" aria-label="Meter fare">' + meterMoneyShown(M, f.sub) + "</div>" : "") +
       '<div class="rfs-stats"><span><b id="rfs-miles">' + f.miles.toFixed(2) + "</b> mi</span><span><b id=\"rfs-time\">" + meterClock(Date.now() - M.startedAt) + "</b></span>" +
       (shown ? '<span class="rfs-tier" id="rfs-tier">' + esc(M.tierLabel || "Meter") + (M.taxRate ? " \u00b7 tax at the end" : "") + "</span>" : "") + "</div></div>" + rideEstHtml(M, "rfs-est");
     if (pp && shown) html += '<p class="rfs-paid" id="rfs-paid">\u2713 ' + esc(prepaidBadgeText(pp)) + " \u00b7 balance $0.00</p>";
@@ -10832,7 +10834,7 @@
     var f = meterFare(M), set = function (id, v) { var el = document.getElementById(id); if (el && el.textContent !== v) el.textContent = v; };
     if (meterShown(M)) set("rfs-fare", meterMoneyShown(M, f.sub)); else meterInvRefresh(M); set("rfs-miles", f.miles.toFixed(2)); set("rfs-time", meterClock(Date.now() - M.startedAt));
     var h = bar.offsetHeight, stage = rfsStage();
-    if (stage && h && stage.__rfsBarH !== h) { stage.__rfsBarH = h; stage.style.setProperty("--rfs-bar", h + "px"); var mp = document.getElementById("fs-mph"); if (mp) mp.style.bottom = (h + 12) + "px"; }
+    if (stage && h && stage.__rfsBarH !== h) { stage.__rfsBarH = h; stage.style.setProperty("--rfs-bar", h + "px"); var mp = document.getElementById("fs-mph"); if (mp && bar.getBoundingClientRect && stage.getBoundingClientRect) mp.style.bottom = Math.round(stage.getBoundingClientRect().bottom - bar.getBoundingClientRect().top + 12) + "px"; }
   }
   function rfsApply() {
     if (typeof document === "undefined" || !document.body) return;
@@ -10857,7 +10859,7 @@
       if (!bar) { bar = document.createElement("div"); bar.id = "rfs-bar"; bar.setAttribute("role", "region"); bar.setAttribute("aria-label", "Meter"); navStopTouch(bar); bar.addEventListener("click", rfsBarClick); stage.appendChild(bar); }
       var sig = rfsSig(M);
       if (bar.__sig !== sig) { bar.__sig = sig; bar.innerHTML = rfsBarHtml(M); }
-      fsMphPlace(stage, ((bar.offsetHeight || 230) + 12) + "px");
+      fsMphPlace(stage, (bar.getBoundingClientRect && stage.getBoundingClientRect ? Math.round(stage.getBoundingClientRect().bottom - bar.getBoundingClientRect().top + 12) : ((bar.offsetHeight || 148) + 34)) + "px");
     } else { if (bar) bar.remove(); fsMphDrop(stage); }
     if (full !== was) {
       stage.classList.toggle("pcs-rfs", full);
