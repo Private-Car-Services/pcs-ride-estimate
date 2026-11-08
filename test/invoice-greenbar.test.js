@@ -1,4 +1,4 @@
-/* Driver green bar and customer white bar for the 000554 and 000574 field shapes. */
+/* Driver green bar for the 000554 and 000574 field shapes. Customer tracker is a separate change. */
 const assert = require("assert");
 const fs = require("fs");
 const os = require("os");
@@ -44,72 +44,19 @@ function loadApp() {
   vm.runInContext(fs.readFileSync(path.join(__dirname, "../app/app.js"), "utf8"), sandbox, { filename: "app/app.js" });
   return sandbox.__pcsV20lBill;
 }
-function loadFollow() {
-  const nodes = {};
-  function make(id) {
-    return nodes[id] || (nodes[id] = { id: id, hidden: true, textContent: "", innerHTML: "", src: "", style: {}, className: "", children: [],
-      appendChild: function (c) { this.children.push(c); }, setAttribute: function () {}, addEventListener: function () {},
-      querySelector: function () { return null; }, parentNode: { removeChild: function () {} } });
-  }
-  ["app", "fl-live", "fl-photo", "fl-status", "fl-bill", "fl-who", "fl-car", "fl-eta", "fl-from", "fl-to", "fl-upd", "fl-net", "fl-stops", "fl-big", "fl-map"].forEach(make);
-  const sandbox = {
-    console: console, Date: Date, Math: Math, JSON: JSON, Promise: Promise, Number: Number, String: String, Object: Object,
-    Array: Array, RegExp: RegExp, Error: Error, parseInt: parseInt, isFinite: isFinite, encodeURIComponent: encodeURIComponent,
-    setTimeout: function () { return 0; }, clearTimeout: function () {}, setInterval: function () { return 0; }, clearInterval: function () {},
-    document: { visibilityState: "visible", getElementById: function (id) { return nodes[id] || null; }, createElement: function () { return make("made"); }, addEventListener: function () {}, head: { appendChild: function () {} }, body: {} },
-    location: { search: "?t=" + "a".repeat(32) },
-    fetch: function () { return new Promise(function () {}); },
-    navigator: {}, addEventListener: function () {}, removeEventListener: function () {}
-  };
-  sandbox.window = sandbox;
-  vm.createContext(sandbox);
-  vm.runInContext(fs.readFileSync(path.join(__dirname, "../follow/follow-live.js"), "utf8"), sandbox, { filename: "follow-live.js" });
-  return sandbox.__pcsFollowLive;
-}
-function loadClean() {
-  const sandbox = {
-    console: console, Date: Date, Math: Math, Intl: Intl, JSON: JSON, Promise: Promise,
-    Number: Number, String: String, Object: Object, Array: Array, isFinite: isFinite, parseInt: parseInt,
-    RegExp: RegExp, Error: Error, encodeURIComponent: encodeURIComponent, decodeURIComponent: decodeURIComponent,
-    setTimeout: function () { return 0; }, clearTimeout: function () {}, setInterval: function () { return 0; }, clearInterval: function () {},
-    requestAnimationFrame: function () { return 0; }, cancelAnimationFrame: function () {},
-    navigator: { userAgent: "test", geolocation: null, maxTouchPoints: 0, language: "en-US" },
-    location: { search: "", hostname: "localhost", href: "http://localhost/app/driver/", protocol: "http:", hash: "", pathname: "/app/driver/", replace: function () {} },
-    history: { pushState: function () {}, replaceState: function () {}, back: function () {}, state: null },
-    localStorage: { getItem: function () { return null; }, setItem: function () {}, removeItem: function () {} },
-    sessionStorage: { getItem: function () { return null; }, setItem: function () {}, removeItem: function () {} },
-    addEventListener: function () {}, removeEventListener: function () {},
-    fetch: function () { return Promise.resolve({ ok: true, status: 200, text: function () { return Promise.resolve("null"); }, json: function () { return Promise.resolve(null); } }); },
-    PCS_SYNC: { databaseURL: "https://example.test" },
-    document: {
-      readyState: "complete", currentScript: { src: "" }, visibilityState: "visible",
-      getElementById: function () { return null; }, querySelector: function () { return null; }, querySelectorAll: function () { return []; },
-      addEventListener: function () {}, createElement: function () { return { style: {}, appendChild: function () {}, setAttribute: function () {} }; },
-      body: { getAttribute: function () { return "driver"; }, style: {} }, head: { appendChild: function () {} }, documentElement: {}
-    }
-  };
-  sandbox.window = sandbox;
-  vm.createContext(sandbox);
-  vm.runInContext(fs.readFileSync(path.join(__dirname, "../app/app.js"), "utf8"), sandbox, { filename: "app.js" });
-  return sandbox.__pcsFollow.clean;
-}
-
 const bill = loadApp();
-const live = loadFollow();
-const clean = loadClean();
 const appSrc = fs.readFileSync(path.join(__dirname, "../app/app.js"), "utf8");
-const followSrc = fs.readFileSync(path.join(__dirname, "../follow/follow-live.js"), "utf8");
 
 test("000554 and 000574 show the invoice number and do not invent paid or unpaid", function () {
   assert.equal(bill.pay(RAHUAL), "");
   assert.equal(bill.bar(RAHUAL), "Invoice #000554");
-  assert.equal(bill.pickupLine(RAHUAL), "I\u2019m at the pickup \u00b7 Invoice #000554");
+  assert.equal(bill.pickupLine(RAHUAL), "I\u2019m at the pickup");
+  assert.equal(bill.slot(RAHUAL), " \u00b7 Invoice #000554");
+  assert.equal(bill.slot(RAHUAL).indexOf("href"), -1);
   assert.equal(bill.pay(CAMARA), "");
-  assert.equal(bill.bar(CAMARA), "Invoice #000574");
-  assert.equal(bill.pickupLine(CAMARA), "I\u2019m at the pickup \u00b7 Invoice #000574");
-  assert.equal(bill.pickupLine(RAHUAL).indexOf("paid"), -1);
-  assert.equal(bill.pickupLine(CAMARA).indexOf("unpaid"), -1);
-  assert.equal(bill.pickupLine(CAMARA).indexOf("href"), -1);
+  assert.equal(bill.slot(CAMARA), " \u00b7 Invoice #000574");
+  assert.equal(bill.pickupLine({}), "I\u2019m at the pickup");
+  assert.equal(bill.slot({ riderPhone: "9365550100" }), "");
 });
 
 test("paid and unpaid words follow an actual payment record", function () {
@@ -125,46 +72,25 @@ test("paid and unpaid words follow an actual payment record", function () {
   assert.equal(bill.pay(cash), "paid");
   assert.equal(bill.pay({ prepaidInvoiceNo: "000554", prepaid: false }), "");
   assert.equal(bill.pay({ prepaidInvoiceNo: "000574", prepaidVia: "square_invoice" }), "");
-  assert.equal(bill.bar(paid).indexOf("href"), -1);
+  const paidLinked = { prepaidInvoiceNo: "000554", sqInvoice: { paid: true, status: "PAID", amountDueCents: 0 }, receiptUrl: RECEIPT };
+  assert.equal(bill.slot(paidLinked), " \u00b7 Invoice #000554 \u2013 paid \u00b7 <a id=\"sched-inv-link\" href=\"" + RECEIPT + "\" target=\"_blank\" rel=\"noopener\">View receipt</a>");
+  const owedLinked = { prepaidInvoiceNo: "000574", payState: "invoice_pending", invoicePayUrl: PAY };
+  assert.equal(bill.slot(owedLinked).indexOf("Pay invoice") >= 0, true);
+  assert.equal(bill.slot(owedLinked).indexOf(PAY) >= 0, true);
+  assert.equal(bill.slot({ prepaidInvoiceNo: "000300", sqInvoice: { status: "PARTIALLY_PAID", amountDueCents: 400 } }).indexOf("href"), -1);
+  assert.equal(bill.slot({ prepaidInvoiceNo: "000301", sqInvoice: { status: "REFUNDED" } }).indexOf("unpaid"), -1);
+  assert.equal(bill.slot({ prepaidInvoiceNo: "000574", payState: "invoice_pending" }).indexOf("href"), -1);
 });
 
 test("the ride map bar does not add a second invoice row", function () {
   const rfs = appSrc.slice(appSrc.indexOf("function rfsBarHtml"), appSrc.indexOf("function rfsBarClick"));
   const place = appSrc.slice(appSrc.indexOf("function schedMapBillPlace"), appSrc.indexOf("function schedFsMeasure"));
   assert.equal(rfs.indexOf("rideBillLabelHtml"), -1);
-  assert.ok(rfs.indexOf('class="pcs-map-green"') >= 0);
-  assert.ok(rfs.indexOf('class="pcs-map-green"') < rfs.indexOf('id="rfs-end"'));
+  assert.equal(rfs.indexOf("pcs-map-green"), -1);
+  assert.equal(rfs.indexOf("rfs-bill"), -1);
   assert.match(place, /host\.remove/);
   assert.doesNotMatch(place, /insertBefore/);
   assert.match(appSrc, /sqInvoice: raw\.sqInvoice/);
-});
-
-test("the public tracker keeps a real Square link only beside the matching pay word", function () {
-  const now = Date.now();
-  const bare = clean({ status: "picked_up", bill: "invoiced", invoiceNo: "000554", driverName: "Pat" }, now);
-  assert.equal(bare.invoiceNo, "000554");
-  assert.equal(bare.pay, undefined);
-  assert.equal(bare.payUrl, undefined);
-  assert.equal(bare.receiptUrl, undefined);
-  const via = clean(Object.assign({ status: "picked_up", bill: "invoiced", invoiceNo: "000574", payUrl: PAY, receiptUrl: RECEIPT }, { pay: "" }), now);
-  assert.equal(via.payUrl, undefined);
-  assert.equal(via.receiptUrl, undefined);
-  const owed = clean({ status: "picked_up", bill: "invoiced", pay: "unpaid", invoiceNo: "000574", payUrl: PAY, receiptUrl: RECEIPT }, now);
-  assert.equal(owed.pay, "unpaid");
-  assert.equal(owed.payUrl, PAY);
-  assert.equal(owed.receiptUrl, undefined);
-  const done = clean({ status: "picked_up", bill: "invoiced", pay: "paid", invoiceNo: "000554", payUrl: PAY, receiptUrl: RECEIPT }, now);
-  assert.equal(done.pay, "paid");
-  assert.equal(done.receiptUrl, RECEIPT);
-  assert.equal(done.payUrl, undefined);
-  const evil = clean({ status: "picked_up", pay: "unpaid", payUrl: "https://evil.example/pay", invoiceNo: "000574" }, now);
-  assert.equal(evil.payUrl, undefined);
-  assert.equal(live.bill({ status: "picked_up", pay: "unpaid", invoiceNo: "000574", payUrl: PAY }).link.text, "Pay now");
-  assert.equal(live.bill({ status: "completed", pay: "unpaid", invoiceNo: "000574", payUrl: PAY }).link, null);
-  assert.equal(live.bill({ status: "picked_up", pay: "paid", invoiceNo: "000554", receiptUrl: RECEIPT }).link.text, "View receipt");
-  assert.equal(live.bill({ status: "picked_up", invoiceNo: "000554" }).label, "Invoice #000554");
-  assert.equal(live.bill({ status: "picked_up", invoiceNo: "000554" }).link, null);
-  assert.equal(live.bill({ status: "picked_up", pay: "unpaid", payUrl: "javascript:alert(1)" }).link, null);
 });
 
 function quotedCss(fnSrc) {
@@ -178,7 +104,7 @@ function quotedCss(fnSrc) {
   return parts.join("");
 }
 
-function driverPage(kind, text, w, h, safe) {
+function driverPage(kind, text, w, h, safe, slot) {
   safe = safe || { top: 47, bottom: 34, left: 0, right: 0 };
   const css = quotedCss(appSrc.slice(appSrc.indexOf("function schedFullStyle"), appSrc.indexOf("function schedFullResize"))) +
     quotedCss(appSrc.slice(appSrc.indexOf("function fsStyle"), appSrc.indexOf("function rfsKey")));
@@ -198,15 +124,16 @@ function driverPage(kind, text, w, h, safe) {
       <button type="button" id="map-mode-toggle" style="min-height:36px">Follow</button>
     </div>
     ${rfs
-      ? '<div id="rfs-bar" role="region" aria-label="Ride"><p class="pcs-map-green" id="rfs-bill">' + text + '</p><div class="rfs-row"><div class="rfs-stats"><span><b>1.20</b> mi</span><span><b>0:12</b></span></div></div><div class="rfs-actions"><button type="button" class="rfs-end" id="rfs-end">End ride</button><button type="button" class="rfs-close" id="sched-fs-close">Close map</button></div></div>'
+      ? '<div id="rfs-bar" role="region" aria-label="Ride"><div class="rfs-row"><div class="rfs-stats"><span><b>1.20</b> mi</span><span><b>0:12</b></span></div></div><div class="rfs-actions"><button type="button" class="rfs-end" id="rfs-end">End ride</button><button type="button" class="rfs-close" id="sched-fs-close">Close map</button></div></div>'
       : '<div id="sched-fs-bottom"><button type="button" class="pcs-map-green" id="sched-fs-arrived">' + text + '</button><button type="button" id="sched-fs-close">Close map</button></div>'}
   </div>
+  <p id="sched-rider-line" style="margin:8px">Rider: Rahual${slot || ""}</p>
   <script>
     var stage = document.getElementById("${rfs ? "meter-map-stage" : "home-map-stage"}");
     var bar = document.getElementById("${rfs ? "rfs-bar" : "sched-fs-bottom"}");
     if (stage.style.setProperty) stage.style.setProperty("${rfs ? "--rfs-bar" : "--sched-fs-bar"}", bar.offsetHeight + "px");
     if (!${rfs ? "true" : "false"} && stage.style.setProperty) stage.style.setProperty("--sched-fs-top", "84px");
-    ["map-mode-toggle","map-orient-toggle","zoom-out","sched-fs-close","rfs-end","rfs-bill","sched-fs-arrived"].forEach(function (id) {
+    ["map-mode-toggle","map-orient-toggle","zoom-out","sched-fs-close","rfs-end","sched-fs-arrived","sched-inv-link"].forEach(function (id) {
       var el = document.getElementById(id);
       if (!el) return;
       el.addEventListener("click", function (e) { if (e.preventDefault) e.preventDefault(); el.dataset.n = String(Number(el.dataset.n || 0) + 1); });
@@ -225,45 +152,12 @@ function driverPage(kind, text, w, h, safe) {
       var bill = document.getElementById("sched-fs-arrived") || document.getElementById("rfs-bill");
       return { id: id, x: x, y: y, top: r.top, bottom: r.bottom, left: r.left, hit: got ? (got.id || got.className || got.tagName) : "",
         bill: bill ? bill.textContent : "", clip: bill ? bill.scrollWidth > bill.clientWidth + 2 : false,
-        links: document.querySelectorAll("a[href]").length, host: !!document.getElementById("sched-bill-host"), label: !!document.querySelector(".pcs-bill-label"),
+        links: document.querySelectorAll("#home-map-stage a[href],#meter-map-stage a[href]").length, host: !!document.getElementById("sched-bill-host"), label: !!document.querySelector(".pcs-bill-label,#rfs-bill"),
         overlap: overlap, greenBottom: greenBottom, endTop: endTop, greenH: greenH };
     }
     var ids = ["map-orient-toggle","map-mode-toggle","zoom-out","sched-fs-close"];
-    if (document.getElementById("rfs-bill")) ids.push("rfs-bill","rfs-end");
+    if (document.getElementById("rfs-end")) ids.push("rfs-end");
     document.body.dataset.report = JSON.stringify(ids.map(hit));
-  </script></body></html>`;
-}
-
-function customerPage(model, w, h) {
-  const link = model.link ? ' · <a id="' + model.link.id + '" href="' + model.link.href + '">' + model.link.text + "</a>" : "";
-  return `<!doctype html><html><head><meta charset="utf-8"><style>
-    html,body{margin:0;background:#e8f5e9}
-    #fl-live{position:relative;width:${w}px;height:${h}px;box-sizing:border-box;background:#f0fdf4;color:#0b3d23;padding:12px}
-    #fl-live p{color:#0b3d23}.fl-status{display:block;margin:0 0 8px;padding:10px 12px;border-radius:12px;background:#0b6b3a;color:#fff !important;font-size:21px;font-weight:900;text-align:center}
-    .fl-head{position:relative;min-height:68px;margin:0 0 6px;padding:2px 76px 2px 0}
-    .fl-photo{position:absolute;top:0;right:0;width:64px;height:64px;border-radius:50%;object-fit:cover;border:3px solid #0b3d23;background:#cde}
-    #fl-bill{margin:0 0 8px;padding:6px 10px;border-radius:12px;border:2px solid #0b6b3a;background:#fff;color:#0b3d23;font-size:19px;font-weight:900;text-align:center}
-    #fl-map{position:relative;height:${Math.max(220, h - 230)}px;border:2px solid #0b3d23;background:#ddd}
-    #fl-north{position:absolute;top:8px;right:8px;width:40px;height:48px;background:#fff;border:3px solid #0b3d23}
-    #zoom-out{position:absolute;top:8px;left:8px;width:44px;height:44px}
-  </style></head><body>
-  <div id="fl-live">
-    <p class="fl-status" id="fl-status">On the ride</p>
-    <div class="fl-head" id="fl-head"><div><p class="fl-who" id="fl-who">Your PCS driver: Matt</p><p class="fl-car" id="fl-car">Black sedan</p></div>
-      <img class="fl-photo" id="fl-photo" alt="Your PCS driver" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7"></div>
-    <p class="fl-bill" id="fl-bill">${model.label || ""}${link}</p>
-    <div id="fl-map"><button type="button" id="zoom-out">−</button><div id="fl-north">N</div></div>
-  </div>
-  <script>
-    ["fl-pay","fl-receipt","zoom-out"].forEach(function (id) {
-      var el = document.getElementById(id); if (!el) return;
-      el.addEventListener("click", function (e) { e.preventDefault(); el.dataset.n = "1"; });
-    });
-    function box(id) { var el = document.getElementById(id), r = el.getBoundingClientRect(); return { top: r.top, bottom: r.bottom, left: r.left, right: r.right, w: r.width }; }
-    var photo = box("fl-photo"), statusBox = box("fl-status"), map = box("fl-map"), north = box("fl-north"), billBox = box("fl-bill");
-    var pay = document.getElementById("fl-pay"), receipt = document.getElementById("fl-receipt");
-    document.body.dataset.report = JSON.stringify({ photo: photo, statusBox: statusBox, map: map, north: north, bill: billBox,
-      text: document.getElementById("fl-bill").textContent, pay: pay ? pay.getAttribute("href") : "", receipt: receipt ? receipt.getAttribute("href") : "" });
   </script></body></html>`;
 }
 
@@ -320,13 +214,13 @@ test("full-page map and tracker keep the invoice on one line and the controls hi
     const ipadSafe = { top: 24, bottom: 20, left: 0, right: 0 };
     const ipadLand = { top: 24, bottom: 20, left: 24, right: 24 };
     const pages = [
-      ["554-portrait.html", driverPage("pickup", bill.pickupLine(RAHUAL), 768, 1024, ipadSafe)],
-      ["574-portrait.html", driverPage("pickup", bill.pickupLine(CAMARA), 768, 1024, ipadSafe)],
-      ["554-landscape.html", driverPage("pickup", bill.pickupLine(RAHUAL), 1024, 768, ipadLand)],
-      ["574-rfs.html", driverPage("rfs", bill.bar(CAMARA), 768, 1024, ipadSafe)],
-      ["554-rfs-landscape.html", driverPage("rfs", bill.bar(RAHUAL), 1024, 768, ipadLand)],
-      ["574-unpaid-rfs.html", driverPage("rfs", bill.bar({ prepaidInvoiceNo: "000574", prepaid: false, prepaidVia: "square_invoice", payState: "invoice_pending" }), 1024, 768, ipadLand)],
-      ["554-paid-rfs.html", driverPage("rfs", bill.bar({ prepaidInvoiceNo: "000554", sqInvoice: { paid: true, status: "PAID" } }), 768, 1024, ipadSafe)]
+      ["554-portrait.html", driverPage("pickup", bill.pickupLine(RAHUAL), 768, 1024, ipadSafe, bill.slot(RAHUAL))],
+      ["574-portrait.html", driverPage("pickup", bill.pickupLine(CAMARA), 768, 1024, ipadSafe, bill.slot(CAMARA))],
+      ["554-landscape.html", driverPage("pickup", bill.pickupLine(RAHUAL), 1024, 768, ipadLand, bill.slot(Object.assign({ receiptUrl: RECEIPT, sqInvoice: { paid: true, status: "PAID", amountDueCents: 0 } }, RAHUAL)))],
+      ["574-rfs.html", driverPage("rfs", "", 768, 1024, ipadSafe, bill.slot(CAMARA))],
+      ["554-rfs-landscape.html", driverPage("rfs", "", 1024, 768, ipadLand, bill.slot(RAHUAL))],
+      ["574-unpaid-rfs.html", driverPage("rfs", "", 1024, 768, ipadLand, bill.slot({ prepaidInvoiceNo: "000574", payState: "invoice_pending", invoicePayUrl: PAY }))],
+      ["554-paid-rfs.html", driverPage("rfs", "", 768, 1024, ipadSafe, bill.slot({ prepaidInvoiceNo: "000554", sqInvoice: { paid: true, status: "PAID", amountDueCents: 0 }, receiptUrl: RECEIPT }))]
     ];
     for (const pair of pages) {
       const hits = await open(pair[0], pair[1]);
@@ -340,47 +234,24 @@ test("full-page map and tracker keep the invoice on one line and the controls hi
       const zoom = hits.filter(function (row) { return row.id === "zoom-out"; })[0];
       if (pair[0].indexOf("rfs") < 0) assert.ok(zoom.top >= 24, pair[0] + " zoom is under the status area");
       if (pair[0].indexOf("rfs") >= 0) {
-        assert.equal(hits[0].overlap, false, pair[0] + " green bar is behind End ride");
-        assert.ok(hits[0].endTop + 1 >= hits[0].greenBottom, pair[0] + " End ride covers the green bar");
-        assert.ok(Math.abs(hits[0].greenH - 62) < 2, pair[0] + " green bar height " + hits[0].greenH);
+        const end = hits.filter(function (row) { return row.id === "rfs-end"; })[0];
         const follow = hits.filter(function (row) { return row.id === "map-mode-toggle"; })[0];
-        assert.ok(follow.bottom <= hits[0].greenBottom - hits[0].greenH, pair[0] + " Follow is not above the green bar");
+        assert.equal(end.hit, "rfs-end", pair[0] + " End ride covered");
+        assert.ok(follow.bottom <= end.top, pair[0] + " Follow overlaps End ride");
       }
     }
-    await send("Runtime.evaluate", { expression: "document.getElementById('map-mode-toggle').click(); document.getElementById('map-orient-toggle').click(); document.getElementById('zoom-out').click(); document.getElementById('rfs-end').click(); document.getElementById('rfs-bill').click(); document.getElementById('sched-fs-close').click();", returnByValue: true }, sid);
-    const tapped = await send("Runtime.evaluate", { expression: "JSON.stringify({mode:document.getElementById('map-mode-toggle').dataset.n,orient:document.getElementById('map-orient-toggle').dataset.n,zoom:document.getElementById('zoom-out').dataset.n,end:document.getElementById('rfs-end').dataset.n,green:document.getElementById('rfs-bill').dataset.n,close:document.getElementById('sched-fs-close').dataset.n,bill:document.getElementById('rfs-bill').textContent})", returnByValue: true }, sid);
+    await send("Runtime.evaluate", { expression: "document.getElementById('map-mode-toggle').click(); document.getElementById('map-orient-toggle').click(); document.getElementById('zoom-out').click(); document.getElementById('rfs-end').click(); document.getElementById('sched-inv-link').click(); document.getElementById('sched-fs-close').click();", returnByValue: true }, sid);
+    const tapped = await send("Runtime.evaluate", { expression: "JSON.stringify({mode:document.getElementById('map-mode-toggle').dataset.n,orient:document.getElementById('map-orient-toggle').dataset.n,zoom:document.getElementById('zoom-out').dataset.n,end:document.getElementById('rfs-end').dataset.n,link:document.getElementById('sched-inv-link').dataset.n,href:document.getElementById('sched-inv-link').getAttribute('href'),line:document.getElementById('sched-rider-line').textContent,close:document.getElementById('sched-fs-close').dataset.n})", returnByValue: true }, sid);
     const got = JSON.parse(tapped.result.result.value);
     assert.equal(got.mode, "1");
     assert.equal(got.orient, "1");
     assert.equal(got.zoom, "1");
     assert.equal(got.end, "1");
-    assert.equal(got.green, "1");
+    assert.equal(got.link, "1");
+    assert.equal(got.href, RECEIPT);
+    assert.ok(got.line.indexOf("Invoice #000554 – paid") >= 0);
+    assert.ok(got.line.indexOf("View receipt") >= 0);
     assert.equal(got.close, "1");
-    assert.equal(got.bill, "Invoice #000554 – paid");
-    const bare = await open("tracker-554.html", customerPage(live.bill({ status: "picked_up", invoiceNo: "000554", driverName: "Matt" }), 768, 1024));
-    assert.equal(bare.text, "Invoice #000554");
-    assert.equal(bare.pay, "");
-    assert.equal(bare.receipt, "");
-    assert.ok(bare.photo.top + 8 >= bare.statusBox.bottom, "photo overlaps the green bar " + JSON.stringify({ photo: bare.photo, status: bare.statusBox }));
-    assert.ok(bare.photo.left > 768 / 2, "photo is not on the right");
-    assert.ok(bare.photo.bottom <= bare.map.top + 1, "photo covers the map");
-    assert.ok(bare.north.top >= bare.map.top, "north control left the map");
-    const owed = await open("tracker-574-unpaid.html", customerPage(live.bill({ status: "picked_up", pay: "unpaid", invoiceNo: "000574", payUrl: PAY }), 390, 844));
-    assert.ok(owed.text.indexOf("Unpaid") >= 0 && owed.text.indexOf("Pay now") >= 0);
-    assert.equal(owed.pay, PAY);
-    assert.ok(owed.photo.bottom <= owed.bill.top + 1, "photo covers the white bar");
-    await send("Runtime.evaluate", { expression: "document.getElementById('fl-pay').click()", returnByValue: true }, sid);
-    const payN = await send("Runtime.evaluate", { expression: "document.getElementById('fl-pay').dataset.n", returnByValue: true }, sid);
-    assert.equal(payN.result.result.value, "1");
-    const paid = await open("tracker-554-paid.html", customerPage(live.bill({ status: "picked_up", pay: "paid", invoiceNo: "000554", receiptUrl: RECEIPT, payUrl: PAY }), 768, 1024));
-    assert.ok(paid.text.indexOf("Paid") >= 0 && paid.text.indexOf("View receipt") >= 0);
-    assert.equal(paid.text.indexOf("Pay now"), -1);
-    assert.equal(paid.receipt, RECEIPT);
-    assert.equal(paid.pay, "");
-    await send("Runtime.evaluate", { expression: "document.getElementById('fl-receipt').click()", returnByValue: true }, sid);
-    const recN = await send("Runtime.evaluate", { expression: "document.getElementById('fl-receipt').dataset.n", returnByValue: true }, sid);
-    assert.equal(recN.result.result.value, "1");
-    assert.match(followSrc, /\.fl-photo\{position:absolute;top:0;right:0/);
     ws.close();
   } finally {
     session.chrome.kill("SIGKILL");

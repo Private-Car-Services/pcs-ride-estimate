@@ -9876,9 +9876,32 @@
     return String(r.invoicePayUrl || r.payUrl || (q && (q.payUrl || q.publicUrl)) || "");
   }
   function schedPickupStatusText(r) {
-    var bill = "";
-    try { bill = rideMapBillText(r || {}, null); } catch (e) { bill = ""; }
-    return bill ? "I\u2019m at the pickup \u00b7 " + bill : "I\u2019m at the pickup";
+    return "I\u2019m at the pickup";
+  }
+  function rideSquareHttps(v) {
+    var s = String(v || "").trim();
+    if (!s || s.length > 300 || /[\s<>"']/.test(s)) return "";
+    var m = /^https:\/\/([^\/?#:]+)(?:[\/?#]|$)/i.exec(s);
+    if (!m || !/(^|\.)squareup(sandbox)?\.com$|(^|\.)square\.link$/i.test(m[1])) return "";
+    return s;
+  }
+  /* Replaces the rider phone text on the existing rider line. No new row.
+     Full "Invoice # – paid/unpaid" plus a link only when both the verified word and a Square URL exist.
+     Partial, refund, or a missing URL keeps the number only. No invoice number: caller keeps the phone. */
+  function rideInvoiceSlotHtml(r, M) {
+    r = r || {};
+    var no = rideInvoiceNoFrom(r, M);
+    if (!no) return "";
+    var q = r.sqInvoice && typeof r.sqInvoice === "object" ? r.sqInvoice : null;
+    var st = String((q && q.status) || r.invoiceStatus || "").toUpperCase();
+    if (/PARTIAL|REFUND|CANCEL/.test(st) || (q && isFinite(+q.amountDueCents) && +q.amountDueCents > 0)) return " \u00b7 Invoice #" + esc(no);
+    var w = "";
+    try { w = ridePayWord(r, M); } catch (e) { w = ""; }
+    var receipt = rideSquareHttps(r.receiptUrl || (q && q.receiptUrl) || "");
+    var pay = rideSquareHttps(rideCustomerPayUrl(r));
+    if (w === "paid" && receipt) return " \u00b7 Invoice #" + esc(no) + " \u2013 paid \u00b7 <a id=\"sched-inv-link\" href=\"" + esc(receipt) + "\" target=\"_blank\" rel=\"noopener\">View receipt</a>";
+    if (w === "unpaid" && pay) return " \u00b7 Invoice #" + esc(no) + " \u2013 unpaid \u00b7 <a id=\"sched-inv-link\" href=\"" + esc(pay) + "\" target=\"_blank\" rel=\"noopener\">Pay invoice</a>";
+    return " \u00b7 Invoice #" + esc(no);
   }
   function schedMapBillHtml(r, id) { return rideBillLabelHtml(rideBillKind(r, null), id || "sched-bill-label", rideInvoiceNoFrom(r, null)); }
   /* Narrow embedded ride bar is tighter than the full-screen map bar. Shrink only enough to stay one centered line; 16px floor stays readable. Wide full-screen bar stays 22px. */
@@ -9904,7 +9927,7 @@
     try { if (M && M.schedId) r = schedFind(M.schedId); } catch (e) {}
     return rideInvoiceNoFrom(r, M);
   }
-  if (typeof window !== "undefined") window.__pcsV20lBill = { kind: rideBillKind, text: rideBillText, label: rideBillLabelHtml, invoiceNo: rideInvoiceDisplayNo, from: rideInvoiceNoFrom, fit: rideBillLabelFitCss, map: schedMapBillHtml, pickupLine: schedPickupStatusText, pay: ridePayWord, bar: rideMapBillText, payUrl: rideCustomerPayUrl };
+  if (typeof window !== "undefined") window.__pcsV20lBill = { kind: rideBillKind, text: rideBillText, label: rideBillLabelHtml, invoiceNo: rideInvoiceDisplayNo, from: rideInvoiceNoFrom, fit: rideBillLabelFitCss, map: schedMapBillHtml, pickupLine: schedPickupStatusText, pay: ridePayWord, bar: rideMapBillText, payUrl: rideCustomerPayUrl, slot: rideInvoiceSlotHtml };
   function meterInvInfo(M) { return rideInvoiceInfo(M && M.schedId ? schedFind(M.schedId) : null, M); }
   function meterInvRefresh(M) { /* live: the 15-min Square sync / refreshScheduledRides flips the badge without a re-render */
     if (typeof document === "undefined" || meterShown(M)) return;
@@ -10789,10 +10812,7 @@
   function rfsBarHtml(M) {
     var f = meterFare(M), t = meterTollInfo(M), pp = M.prepaid;
     var shown = meterShown(M);
-    var bill = "";
-    if (!shown) { try { bill = rideMapBillText(M && M.schedId ? schedFind(M.schedId) : null, M); } catch (e) { bill = ""; } }
-    var html = (bill ? '<p class="pcs-map-green" id="rfs-bill" role="status">' + esc(bill) + "</p>" : "") +
-      '<div class="rfs-row">' + (shown ? '<div class="rfs-fare" id="rfs-fare" aria-label="Meter fare">' + meterMoneyShown(M, f.sub) + "</div>" : "") +
+    var html = '<div class="rfs-row">' + (shown ? '<div class="rfs-fare" id="rfs-fare" aria-label="Meter fare">' + meterMoneyShown(M, f.sub) + "</div>" : "") +
       '<div class="rfs-stats"><span><b id="rfs-miles">' + f.miles.toFixed(2) + "</b> mi</span><span><b id=\"rfs-time\">" + meterClock(Date.now() - M.startedAt) + "</b></span>" +
       (shown ? '<span class="rfs-tier" id="rfs-tier">' + esc(M.tierLabel || "Meter") + (M.taxRate ? " \u00b7 tax at the end" : "") + "</span>" : "") + "</div></div>" + rideEstHtml(M, "rfs-est");
     if (pp && shown) html += '<p class="rfs-paid" id="rfs-paid">\u2713 ' + esc(prepaidBadgeText(pp)) + " \u00b7 balance $0.00</p>";
@@ -11730,8 +11750,7 @@
       if (onMeter) actions = '<p style="margin:8px 0;color:#0b3d23;font-weight:800">' + (meterShown(M) ? "Ride in progress on the meter above. Change the drop-off there any time." : "Ride in progress above. Change the drop-off there any time.") + '</p>' + drvCancelBtnHtml("sched", r.id); /* r13 */
       else if (inTrip) {
         var nav = schedNavUrl(r.pickup, r.pickupLat, r.pickupLng);
-        var billLine = rideMapBillText(r, null);
-        var wayLine = (trip.phase === "arrived" ? "You\u2019re at the pickup" : "On the way to the pickup") + (billLine ? " \u00b7 " + billLine : "");
+        var wayLine = trip.phase === "arrived" ? "You\u2019re at the pickup" : "On the way to the pickup";
         actions = '<div class="sched-trip" id="sched-trip" style="background:#ecfdf5;border:2px solid #0b6b3a;border-radius:12px;padding:10px;margin:8px 0">' +
           '<p style="margin:0 0 6px;font-weight:800;color:#0b3d23">' + esc(wayLine) + "</p>" +
           (trip.phase === "arrived" ? "" : navButtonPcsHtml() + schedTurnHtml()) + /* v2.0m-c: Navigate to pickup */ /* v75s: in-app turn-by-turn on the map below */
@@ -11763,7 +11782,7 @@
         '<p style="margin:0 0 6px;font-size:20px;font-weight:800;color:#111">' + esc(prettyScheduleWhen(r.start)) + "</p>" +
         prepaidBadgeHtml(prepaidOf(r)) + /* v75v */
         (rateOvOf(r) ? rateOvBadgeHtml("sched-contract-" + esc(r.id)) : "") + /* v76j */
-        '<p style="margin:0 0 6px;color:#1a1a1a"><strong style="' + SCHED_LBL + '">Rider:</strong> ' + esc(r.rider || "\u2014") + (r.riderPhone ? ' \u00b7 <a href="tel:' + esc(r.riderPhone) + '" style="color:#0b3d23;font-weight:700">' + esc(r.riderPhone) + "</a>" : "") + "</p>" +
+        '<p id="sched-rider-line" style="margin:0 0 6px;color:#1a1a1a"><strong style="' + SCHED_LBL + '">Rider:</strong> ' + esc(r.rider || "\u2014") + (function () { var slot = ""; try { slot = rideInvoiceSlotHtml(r, null); } catch (e) { slot = ""; } if (slot) return slot; return r.riderPhone ? ' \u00b7 <a href="tel:' + esc(r.riderPhone) + '" style="color:#0b3d23;font-weight:700">' + esc(r.riderPhone) + "</a>" : ""; })() + "</p>" +
         '<p style="margin:0 0 6px;color:#1a1a1a"><strong style="' + SCHED_LBL + '">Pickup:</strong> ' + esc(r.pickup || "\u2014") + "</p>" +
         (st ? '<p style="margin:0 0 6px;color:#1a1a1a"><strong style="' + SCHED_LBL + '">Stop:</strong> ' + esc(st.address) + "</p>" : "") +
         '<p style="margin:0 0 6px;color:#1a1a1a"><strong style="' + SCHED_LBL + '">Drop-off:</strong> ' + (r.dropoff ? esc(r.dropoff) : '<span style="color:#7c2d12;font-weight:700">Add the drop-off</span>') + "</p>" +
@@ -16460,7 +16479,7 @@
       (meterShown(M) ? prepaidBadgeHtml(M.prepaid, "meter-prepaid-badge") + /* v75v */
       '<p class="meter-fare" id="meter-fare" aria-live="off">' + meterMoneyShown(M, f.sub) + "</p>" +
       '<p class="meter-sub">Meter' + (M.minCents > M.baseCents ? " · " + money(M.minCents) + " minimum" : "") + (M.taxRate ? " · tax added at the end" : "") + "</p>"
-        : (function () { var b = ""; try { b = rideMapBillText(M && M.schedId ? schedFind(M.schedId) : null, M); } catch (e) { b = ""; } return b ? '<p class="rfs-bill" id="meter-bill-label" style="margin:0 0 6px;text-align:center">' + esc(b) + "</p>" : ""; })()) + /* v2.0a: no fare on a non-metered ride */
+        : "") + /* invoice words replace the rider phone line on the ride card; no second row here */
       (!meterShown(M) ? "" : /* v2.0d.5 r3: miles / time / slow min / mph are the meter: metered rides only */
       '<div class="meter-grid"><div><b id="meter-miles">' + f.miles.toFixed(2) + "</b><span>Miles</span></div>" +
       '<div><b id="meter-time">' + meterClock(Date.now() - M.startedAt) + "</b><span>Time</span></div>" +
