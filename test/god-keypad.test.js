@@ -5,7 +5,7 @@ const path = require("path");
 const vm = require("vm");
 const test = require("node:test");
 
-function loadGoal() {
+function loadGoal(opts) {
   const nodes = {};
   function el(tag) {
     const node = {
@@ -29,7 +29,7 @@ function loadGoal() {
       },
       closest(sel) { let n = this; while (n) { if (match(n, sel)) return n; n = n.parentNode; } return null; },
       contains(n) { let x = n; while (x) { if (x === this) return true; x = x.parentNode; } return false; },
-      focus() { let n = this; const ev = { type: "focusin", target: this }; while (n) { (n._l && n._l.focusin || []).forEach(function (fn) { fn(ev); }); n = n.parentNode; } },
+      focus() { this._focusCalls = (this._focusCalls || 0) + 1; if (opts && opts.suppressFocus) return; let n = this; const ev = { type: "focusin", target: this }; while (n) { (n._l && n._l.focusin || []).forEach(function (fn) { fn(ev); }); n = n.parentNode; } },
       blur() {}, setSelectionRange() {}, remove() {},
       getBoundingClientRect() { return { top: 700, bottom: 760, left: 0, right: 80, width: 80, height: 60 }; }
     };
@@ -49,15 +49,22 @@ function loadGoal() {
     for (let i = 0; i < (n.children || []).length; i++) { const f = walk(n.children[i], sel); if (f) return f; }
     return null;
   }
+  function attr(text, name) { const m = new RegExp("\\b" + name + '="([^"]*)"').exec(text || ""); return m ? m[1] : ""; }
   function parseButtons(node, html) {
     node.children = [];
-    const re = /<button[^>]*data-k="([^"]+)"[^>]*>/g;
+    const re = /<(button|input|main|form)\b([^>]*)>/gi;
     let m;
     while ((m = re.exec(html))) {
-      const b = el("button");
-      b.setAttribute("data-k", m[1]);
-      b.parentNode = node;
-      node.children.push(b);
+      const child = el(m[1].toLowerCase());
+      const id = attr(m[2], "id"), type = attr(m[2], "type"), im = attr(m[2], "inputmode"), ml = attr(m[2], "maxlength"), ph = attr(m[2], "placeholder"), dk = attr(m[2], "data-k");
+      if (id) child.id = id;
+      if (type) child.type = type;
+      if (im) child.setAttribute("inputmode", im);
+      if (ml) child.setAttribute("maxlength", ml);
+      if (ph) child.setAttribute("placeholder", ph);
+      if (dk) child.setAttribute("data-k", dk);
+      child.parentNode = node;
+      node.children.push(child);
     }
   }
   const doc = {
@@ -162,24 +169,50 @@ test("v2.0m-ae is what a phone on v2.0m-ad is offered", function () {
   assert.equal(sandbox.__pcsKpBtn({ target: text }).attrs["data-k"], "1");
 });
 
-test("ledger PIN pad is visible without delayed focus, and a tap opens it", function () {
-  const { sandbox, doc } = loadGoal();
+test("stored-ledger pinScreen shows the pad when focus is suppressed", function () {
+  const { sandbox, doc } = loadGoal({ suppressFocus: true });
   sandbox.__pcsGoalOpen();
-  const ov = doc.getElementById("gl-screen");
-  const pin = doc.createElement("input");
-  pin.id = "gl-pin";
-  pin.type = "password";
-  pin.setAttribute("inputmode", "numeric");
-  ov.appendChild(pin);
-  assert.ok(sandbox.__pcsNumPad(ov) >= 1);
+  sandbox.__pcsGoalPinScreen({ fails: 0, exp: Date.now() + 3600000 });
+  const pin = doc.getElementById("gl-pin");
+  assert.equal(pin.tag, "input");
   assert.equal(pin.getAttribute("inputmode"), "none");
   assert.equal(pin.getAttribute("data-kp"), "w");
-  const before = doc.getElementById("gl-kp");
-  assert.ok(!before || before.style.display !== "block");
-  sandbox.__pcsKpShow(pin);
-  const opened = doc.getElementById("gl-kp");
-  assert.equal(opened.style.display, "block");
-  assert.ok(String(opened.className).indexOf("whole") >= 0);
+  assert.equal(pin.getAttribute("maxlength"), "4");
+  assert.equal(pin._focusCalls || 0, 0);
+  const pad = doc.getElementById("gl-kp");
+  assert.equal(pad.style.display, "block");
+  assert.ok(String(pad.className).indexOf("whole") >= 0);
+});
+
+test("first-run PIN boxes show the pad when focus is suppressed", function () {
+  const { sandbox, doc } = loadGoal({ suppressFocus: true });
+  sandbox.__pcsGoalOpen();
+  sandbox.__pcsGoalFirstRun();
+  const pin1 = doc.getElementById("gl-pin1");
+  const pin2 = doc.getElementById("gl-pin2");
+  const pw = doc.getElementById("gl-pw1");
+  assert.equal(pin1.tag, "input");
+  assert.equal(pin2.tag, "input");
+  assert.equal(pin1.getAttribute("inputmode"), "none");
+  assert.equal(pin2.getAttribute("inputmode"), "none");
+  assert.equal(pin1.getAttribute("data-kp"), "w");
+  assert.equal(pin2.getAttribute("data-kp"), "w");
+  assert.equal(pin1.getAttribute("maxlength"), "4");
+  assert.equal(pw.getAttribute("data-kp"), null);
+  assert.equal(pin1._focusCalls || 0, 0);
+  assert.equal(pin2._focusCalls || 0, 0);
+  const pad = doc.getElementById("gl-kp");
+  assert.equal(pad.style.display, "block");
+  assert.ok(String(pad.className).indexOf("whole") >= 0);
+  ["1", "2", "3", "4"].forEach(function (k) { press(pad, k, "up"); press(pad, k, "click"); });
+  assert.equal(pin1.value, "1234");
+  press(pad, "5", "up");
+  assert.equal(pin1.value, "1234");
+  const ov = doc.getElementById("gl-screen");
+  ov._l.pointerdown.forEach(function (fn) { fn({ target: pin2, preventDefault: function () {} }); });
+  assert.equal(doc.getElementById("gl-kp").style.display, "block");
+  press(pad, "9", "up");
+  assert.equal(pin2.value, "9");
 });
 
 test("tapping the PIN opens the pad when focus never arrived", function () {
