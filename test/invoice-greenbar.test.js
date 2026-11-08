@@ -98,9 +98,35 @@ test("a live Square read picks the pay page or the receipt, and a saved flag doe
   const shown = bill.slot({ prepaidInvoiceNo: "000554", sqLive: unpaid });
   assert.ok(shown.indexOf("Invoice #000554") >= 0 && shown.indexOf("unpaid") >= 0 && shown.indexOf("Pay invoice") >= 0);
   assert.ok(shown.indexOf(unpaid.public_url) >= 0);
-  const shownPaid = bill.slot({ prepaidInvoiceNo: "000999", sqLive: paid });
+  const shownPaid = bill.slot({ prepaidInvoiceNo: "000574", sqLive: paid });
   assert.ok(shownPaid.indexOf("Invoice #000574") >= 0 && shownPaid.indexOf("View receipt") >= 0);
   assert.equal(shownPaid.indexOf(paid.public_url), -1);
+});
+
+test("the driver invoice read keeps only the asked ride", function () {
+  const slice = appSrc.slice(appSrc.indexOf("function verInvFetch"), appSrc.indexOf("function verifiedPrepaid"));
+  assert.equal(slice.indexOf("/sq/invoice"), -1);
+  assert.equal(slice.indexOf("godToken"), -1);
+  assert.equal(slice.indexOf("godPassword"), -1);
+  const askAt = appSrc.indexOf("verInvFetch((rows");
+  const ask = appSrc.slice(askAt, askAt + 500);
+  assert.ok(ask.indexOf('r.status !== "cancelled"') >= 0 && ask.indexOf('r.status !== "canceled"') >= 0);
+  const got = bill.take(["ride-554"], {
+    "ride-554": { square: { invoiceNumber: "000554", status: "UNPAID", public_url: "https://app.squareup.com/pay-invoice/invtmp:example-554", payments: [] } },
+    "ride-574": { square: { invoiceNumber: "000574", status: "PAID", public_url: "https://app.squareup.com/pay-invoice/invtmp:example-574", payments: [{ status: "COMPLETED", refundedCents: 0, receipt_url: "https://squareup.com/receipt/preview/EXAMPLE574" }] } }
+  });
+  assert.equal(got["ride-574"], undefined);
+  assert.equal(got["ride-554"].square.status, "UNPAID");
+  assert.equal(got["ride-554"].square.payments.length, 0);
+  const shown = bill.slot({ id: "ride-554", prepaidInvoiceNo: "000554" });
+  assert.ok(shown.indexOf("Invoice #000554") >= 0 && shown.indexOf("unpaid") >= 0 && shown.indexOf("Pay invoice") >= 0);
+  assert.ok(shown.indexOf("app.squareup.com/pay-invoice/invtmp:example-554") >= 0);
+  const stranger = bill.slot({ id: "ride-574", prepaidInvoiceNo: "000574" });
+  assert.equal(stranger.indexOf("View receipt"), -1);
+  assert.equal(stranger.indexOf("paid"), -1);
+  assert.ok(appSrc.indexOf("rideLineHold(bot)") >= 0);
+  assert.ok(appSrc.indexOf('id="meter-ride-line"') >= 0);
+  assert.ok(appSrc.indexOf("stage.clientHeight - reserve") >= 0);
 });
 
 test("the ride map bar does not add a second invoice row", function () {

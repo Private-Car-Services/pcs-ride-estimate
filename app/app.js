@@ -9888,11 +9888,22 @@
   /* Replaces the rider phone text on the existing rider line. No new row.
      Full "Invoice # – paid/unpaid" plus a link only when both the verified word and a Square URL exist.
      Partial, refund, or a missing URL keeps the number only. No invoice number: caller keeps the phone. */
+  function rideLivePay(r, M) {
+    var live = null;
+    try {
+      var row = r && r.id && typeof verInv !== "undefined" ? verInv[r.id] : null;
+      var src = (r && r.sqLive) || (M && M.sqLive) || (row && row.square && row.square.status ? row.square : row);
+      live = squareInvoiceLink(src);
+    } catch (e) { live = null; }
+    var mine = "";
+    try { mine = String(rideInvoiceNoFrom(r, M) || "").replace(/^#/, ""); } catch (e2) {}
+    if (!live || (mine && live.invoiceNo !== mine)) return null;
+    return live.pay && live.url && live.link ? live : null;
+  }
   function rideInvoiceSlotHtml(r, M) {
     r = r || {};
-    var live = null;
-    try { live = squareInvoiceLink(r.sqLive || (M && M.sqLive) || (typeof verInv !== "undefined" && r.id && verInv[r.id] && verInv[r.id].square)); } catch (e) { live = null; }
-    if (live && live.pay && live.url && live.link) return " \u00b7 Invoice #" + esc(live.invoiceNo) + " \u2013 " + live.pay + " \u00b7 <a id=\"sched-inv-link\" href=\"" + esc(live.url) + "\" target=\"_blank\" rel=\"noopener\">" + esc(live.link) + "</a>";
+    var live = rideLivePay(r, M);
+    if (live) return " \u00b7 Invoice #" + esc(live.invoiceNo) + " \u2013 " + live.pay + " \u00b7 <a id=\"sched-inv-link\" href=\"" + esc(live.url) + "\" target=\"_blank\" rel=\"noopener\">" + esc(live.link) + "</a>";
     var no = rideInvoiceNoFrom(r, M);
     if (!no) return "";
     var q = r.sqInvoice && typeof r.sqInvoice === "object" ? r.sqInvoice : null;
@@ -9948,7 +9959,7 @@
     try { if (M && M.schedId) r = schedFind(M.schedId); } catch (e) {}
     return rideInvoiceNoFrom(r, M);
   }
-  if (typeof window !== "undefined") window.__pcsV20lBill = { kind: rideBillKind, text: rideBillText, label: rideBillLabelHtml, invoiceNo: rideInvoiceDisplayNo, from: rideInvoiceNoFrom, fit: rideBillLabelFitCss, map: schedMapBillHtml, pickupLine: schedPickupStatusText, pay: ridePayWord, bar: rideMapBillText, payUrl: rideCustomerPayUrl, slot: rideInvoiceSlotHtml, square: squareInvoiceLink };
+  if (typeof window !== "undefined") window.__pcsV20lBill = { kind: rideBillKind, text: rideBillText, label: rideBillLabelHtml, invoiceNo: rideInvoiceDisplayNo, from: rideInvoiceNoFrom, fit: rideBillLabelFitCss, map: schedMapBillHtml, pickupLine: schedPickupStatusText, pay: ridePayWord, bar: rideMapBillText, payUrl: rideCustomerPayUrl, slot: rideInvoiceSlotHtml, square: squareInvoiceLink, take: verInvTake, live: rideLivePay };
   function meterInvInfo(M) { return rideInvoiceInfo(M && M.schedId ? schedFind(M.schedId) : null, M); }
   function meterInvRefresh(M) { /* live: the 15-min Square sync / refreshScheduledRides flips the badge without a re-render */
     if (typeof document === "undefined" || meterShown(M)) return;
@@ -10141,8 +10152,26 @@
     ids = (ids || []).filter(Boolean).slice(0, 30); var tk = qToken();
     if (!ids.length || !tk) return Promise.resolve(verInv);
     return qWorker("/driver/invoice", { token: tk, rideIds: ids }).then(function (d) {
-      var got = (d && d.invoices) || {}; ids.forEach(function (id) { verInv[id] = got[id] && typeof got[id] === "object" ? got[id] : null; }); return verInv;
+      verInvTake(ids, (d && d.invoices) || {}); return verInv;
     }, function () { return verInv; });
+  }
+  /* The driver read is /driver/invoice with the driver token only. A row is kept only for a ride this call asked for.
+     Nested square (status, public_url, payments) is the trusted link source. God tokens are never added. */
+  function verInvTake(ids, got) {
+    var allow = {};
+    (ids || []).forEach(function (id) { if (id) allow[id] = 1; });
+    Object.keys(got || {}).forEach(function (id) {
+      if (!allow[id]) return;
+      var row = got[id] && typeof got[id] === "object" ? got[id] : null;
+      if (!row) { verInv[id] = null; return; }
+      var src = row.square && typeof row.square === "object" ? row.square : row;
+      var link = null;
+      try { link = squareInvoiceLink(src); } catch (e) { link = null; }
+      var keep = { invoiceNo: String(row.invoiceNo || (link && link.invoiceNo) || ""), amountCents: row.amountCents, taxCents: row.taxCents };
+      if (link && link.pay) keep.square = { invoiceNumber: link.invoiceNo, status: link.pay === "paid" ? "PAID" : "UNPAID", public_url: link.pay === "unpaid" ? link.url : "", payments: link.pay === "paid" ? [{ status: "COMPLETED", refundedCents: 0, receipt_url: link.url }] : [] };
+      verInv[id] = keep;
+    });
+    return verInv;
   }
   function verifiedPrepaid(pp, ver) { /* pure (tested) */
     if (!pp) return null;
@@ -10579,6 +10608,38 @@
     /* v77s (Matthew 10/16): text the rider "your driver has arrived" (Worker sends once per ride, only when the text service is set up). Never blocks arriving. */
     try { var tk = qToken(); if (tk) qWorker("/notify/arrived", { token: tk, rideId: t.id }).catch(function () {}); } catch (e) {}
   }
+  function schedRiderLineHtml(r) {
+    r = r || {};
+    var slot = "";
+    try { slot = rideInvoiceSlotHtml(r, null); } catch (e) { slot = ""; }
+    var phone = slot ? "" : (r.riderPhone ? " \u00b7 <a href=\"tel:" + esc(r.riderPhone) + "\" style=\"color:#0b3d23;font-weight:700\">" + esc(r.riderPhone) + "</a>" : "");
+    return "<p id=\"sched-rider-line\" class=\"pcs-ride-line\" style=\"margin:0;min-height:44px;box-sizing:border-box;padding:8px 10px;background:#fff;color:#1a1a1a;border-radius:10px;font-size:16px;font-weight:700;line-height:1.35;white-space:normal;overflow:visible\"><strong style=\"" + SCHED_LBL + "\">Rider:</strong> " + esc(r.rider || "\u2014") + (slot || phone) + "</p>";
+  }
+  function rideLineRide() {
+    var M = state.meter;
+    if (M && M.status === "running" && M.schedId) { try { var on = schedFind(M.schedId); if (on && on.status !== "cancelled" && on.status !== "canceled") return on; } catch (e) {} }
+    var t = null;
+    try { t = schedNavTrip() || schedTripNow(); } catch (e2) {}
+    if (!t || !t.id) return null;
+    try { var row = schedFind(t.id); return row && row.status !== "cancelled" && row.status !== "canceled" ? row : null; } catch (e3) { return null; }
+  }
+  function rideLineHome() {
+    if (typeof document === "undefined") return;
+    var line = document.getElementById("sched-rider-line");
+    var home = document.getElementById("sched-rider-home") || document.getElementById("meter-ride-line");
+    if (line && home && line.parentNode !== home) home.appendChild(line);
+  }
+  function rideLineHold(host) {
+    if (!host || typeof document === "undefined") return null;
+    var line = document.getElementById("sched-rider-line");
+    if (!line) {
+      var r = rideLineRide();
+      if (!r) return null;
+      host.insertAdjacentHTML("afterbegin", schedRiderLineHtml(r));
+      line = document.getElementById("sched-rider-line");
+    } else if (line.parentNode !== host) host.insertBefore(line, host.firstChild);
+    return line;
+  }
   function schedMapBillPlace(bot) {
     if (!bot || typeof document === "undefined") return;
     var host = bot.querySelector ? bot.querySelector("#sched-bill-host") : null;
@@ -10609,6 +10670,7 @@
       "#home-map-stage.pcs-fullmap #sched-fs-open{display:none}" +
       "#sched-fs-top{position:absolute;left:max(8px, calc(var(--pcs-safe-left, env(safe-area-inset-left, 0px)) + 8px));right:max(8px, calc(var(--pcs-safe-right, env(safe-area-inset-right, 0px)) + 8px));top:calc(var(--pcs-safe-top, env(safe-area-inset-top, 0px)) + 8px);z-index:1002}#sched-fs-top #sched-turn-fs{margin:0;box-shadow:0 2px 8px rgba(0,0,0,.4)}" +
       "#sched-fs-bottom{position:absolute;left:max(8px, calc(var(--pcs-safe-left, env(safe-area-inset-left, 0px)) + 8px));right:max(8px, calc(var(--pcs-safe-right, env(safe-area-inset-right, 0px)) + 8px));bottom:calc(var(--pcs-safe-bottom, env(safe-area-inset-bottom, 0px)) + 22px);z-index:1002;display:flex;flex-direction:column;gap:8px;pointer-events:none}#sched-fs-bottom button{pointer-events:auto}.pcs-map-green{pointer-events:auto}" +
+      "#sched-fs-bottom #sched-rider-line,#rfs-bar #sched-rider-line{pointer-events:auto;position:relative;z-index:1}" +
       "#sched-fs-bottom,#rfs-bar{container-type:inline-size}.pcs-map-green,#sched-fs-arrived{display:block;width:100%;box-sizing:border-box;height:62px;min-height:62px;margin:0;padding:0 10px;font-size:clamp(12px,calc(100cqw / 26),20px);font-weight:800;line-height:58px;text-align:center;background:#0b6b3a;color:#fff;border:2px solid #fff;border-radius:14px;white-space:nowrap;overflow:hidden;text-overflow:clip;position:relative;z-index:1;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.4)}" +
       "#sched-fs-close{display:block;width:100%;min-height:58px;font-size:21px;font-weight:800;background:#d1fae5;color:#0b3d23;border:3px solid #0b3d23;border-radius:14px;margin:0;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.4)}";
     document.head.appendChild(st);
@@ -10617,7 +10679,14 @@
     if (!liveMap) return;
     var box = liveMap.getContainer(), stage = document.getElementById("home-map-stage");
     if (box && box.__navRot) { box.setAttribute("style", box.__navRot.css); box.__navRot = null; } /* heading-up re-sizes to the new stage below */
-    if (box && stage) box.style.height = stage.classList.contains("pcs-fullmap") ? stage.clientHeight + "px" : Math.max(160, (parseFloat(stage.style.height) || 260) - 18) + "px";
+    if (box && stage) {
+      var reserve = 0;
+      if (stage.classList.contains("pcs-fullmap")) {
+        var dock = document.getElementById("sched-fs-bottom");
+        if (dock && dock.getBoundingClientRect && stage.getBoundingClientRect) reserve = Math.max(0, Math.round(stage.getBoundingClientRect().bottom - dock.getBoundingClientRect().top));
+        box.style.height = Math.max(120, stage.clientHeight - reserve) + "px";
+      } else box.style.height = Math.max(160, (parseFloat(stage.style.height) || 260) - 18) + "px";
+    }
     try { liveMap.invalidateSize(false); } catch (e) {}
     try { if (window.PCSMaps && PCSMaps.resize) PCSMaps.resize(); } catch (e) {}
     try { navApplyOrient(); } catch (e) {}
@@ -10660,9 +10729,10 @@
       }
       if (navTestOn()) navTestBottom(bot); /* v75y test flag */
       else schedMapBillPlace(bot);
+      rideLineHold(bot);
       schedFsMeasure();
       fsMphPlace(stage, (navTestOn() ? 262 : 172) + "px"); /* v76b: MPH badge */
-    } else { if (top) top.remove(); if (bot) bot.remove(); fsMphDrop(stage); }
+    } else { rideLineHome(); if (top) top.remove(); if (bot) bot.remove(); fsMphDrop(stage); }
     if (full !== was) {
       stage.classList.toggle("pcs-fullmap", full);
       document.body.style.overflow = full ? "hidden" : "";
@@ -10729,7 +10799,7 @@
       "#meter-map-stage.pcs-rfs #rfs-open{display:none}" +
       "#rfs-open{position:absolute;left:8px;bottom:34px;z-index:1002;width:auto;min-height:52px;margin:0;padding:10px 16px;font-size:18px;font-weight:800;border-radius:12px;border:2px solid #0b3d23;background:#d1fae5;color:#0b3d23;box-shadow:0 2px 6px rgba(0,0,0,.35);cursor:pointer}" +
       "#rfs-bar{position:absolute;left:max(8px, calc(var(--pcs-safe-left, env(safe-area-inset-left, 0px)) + 8px));right:max(8px, calc(var(--pcs-safe-right, env(safe-area-inset-right, 0px)) + 8px));bottom:calc(var(--pcs-safe-bottom, env(safe-area-inset-bottom, 0px)) + 22px);z-index:1003;display:flex;flex-direction:column;gap:8px;background:transparent;padding:0;margin:0;border:0;box-shadow:none;pointer-events:none}" +
-      "#rfs-bar .pcs-map-green,#rfs-bar button,#rfs-bar .rfs-row{pointer-events:auto;position:relative;z-index:1}" +
+      "#rfs-bar .pcs-map-green,#rfs-bar button,#rfs-bar .rfs-row,#rfs-bar #sched-rider-line{pointer-events:auto;position:relative;z-index:1}" +
       "#rfs-bar *{box-sizing:border-box}.rfs-row{display:flex;align-items:center;flex-wrap:nowrap;gap:8px;margin:0;min-height:28px;background:#f0fdf4;color:#0b3d23;border-radius:10px;padding:2px 10px}" +
       ".rfs-fare{flex:0 0 auto;font-size:38px;line-height:1;font-weight:900;color:#0b3d23;font-variant-numeric:tabular-nums}" +
       ".rfs-stats{flex:1 1 auto;min-width:0;display:flex;flex-wrap:wrap;justify-content:flex-end;gap:4px 12px;font-size:17px;font-weight:800;color:#0b3d23}" +
@@ -10768,7 +10838,12 @@
     var box = liveMap.getContainer(), stage = rfsStage();
     if (!box || !stage || box.parentNode !== stage) return;
     if (box.__navRot) { box.setAttribute("style", box.__navRot.css); box.__navRot = null; } /* heading-up re-sizes to the new stage below */
-    if (stage.classList.contains("pcs-rfs")) { if (box.__rfsH === undefined) box.__rfsH = box.style.height || ""; box.style.height = stage.clientHeight + "px"; }
+    if (stage.classList.contains("pcs-rfs")) {
+      if (box.__rfsH === undefined) box.__rfsH = box.style.height || "";
+      var reserve = 0, dock = document.getElementById("rfs-bar");
+      if (dock && dock.getBoundingClientRect && stage.getBoundingClientRect) reserve = Math.max(0, Math.round(stage.getBoundingClientRect().bottom - dock.getBoundingClientRect().top));
+      box.style.height = Math.max(120, stage.clientHeight - reserve) + "px";
+    }
     else if (box.__rfsH !== undefined) { box.style.height = box.__rfsH; box.__rfsH = undefined; }
     try { liveMap.invalidateSize(false); } catch (e) {}
     try { if (window.PCSMaps && PCSMaps.resize) PCSMaps.resize(); } catch (e) {}
@@ -10881,7 +10956,7 @@
     if (typeof document === "undefined" || !document.body) return;
     var stage = rfsStage();
     if (!stage || !rfsRunning()) {
-      if (stage) { ["rfs-open", "rfs-bar"].forEach(function (id) { var el = document.getElementById(id); if (el) el.remove(); }); fsMphDrop(stage); if (stage.classList.contains("pcs-rfs")) { stage.classList.remove("pcs-rfs"); rfsResize(); } }
+      if (stage) { rideLineHome(); ["rfs-open", "rfs-bar"].forEach(function (id) { var el = document.getElementById(id); if (el) el.remove(); }); fsMphDrop(stage); if (stage.classList.contains("pcs-rfs")) { stage.classList.remove("pcs-rfs"); rfsResize(); } }
       if (document.body.classList.contains("pcs-rfs-body")) { document.body.classList.remove("pcs-rfs-body"); document.body.style.overflow = ""; }
       return;
     }
@@ -10899,9 +10974,16 @@
     if (full) {
       if (!bar) { bar = document.createElement("div"); bar.id = "rfs-bar"; bar.setAttribute("role", "region"); bar.setAttribute("aria-label", "Meter"); navStopTouch(bar); bar.addEventListener("click", rfsBarClick); stage.appendChild(bar); }
       var sig = rfsSig(M);
-      if (bar.__sig !== sig) { bar.__sig = sig; bar.innerHTML = rfsBarHtml(M); }
+      if (bar.__sig !== sig) {
+        bar.__sig = sig;
+        var kept = document.getElementById("sched-rider-line");
+        if (kept && kept.parentNode) kept.parentNode.removeChild(kept);
+        bar.innerHTML = rfsBarHtml(M);
+        if (kept) bar.insertBefore(kept, bar.firstChild);
+        else rideLineHold(bar);
+      } else rideLineHold(bar);
       fsMphPlace(stage, (bar.getBoundingClientRect && stage.getBoundingClientRect ? Math.round(stage.getBoundingClientRect().bottom - bar.getBoundingClientRect().top + 12) : ((bar.offsetHeight || 148) + 34)) + "px");
-    } else { if (bar) bar.remove(); fsMphDrop(stage); }
+    } else { rideLineHome(); if (bar) bar.remove(); fsMphDrop(stage); }
     if (full !== was) {
       stage.classList.toggle("pcs-rfs", full);
       document.body.classList.toggle("pcs-rfs-body", full);
@@ -11226,7 +11308,9 @@
         if (e && !e.pending) eta = { to: "dest", miles: e.miles, min: e.min };
         if (meterRoute && meterRoute.line) route = meterRoute.line;
       }
-      out.push(Object.assign({ key: "c_" + r.id, kind: "sched", bill: rideBillKind(r, onMeter ? M : null), pay: ridePayWord(r, onMeter ? M : null), invoiceNo: rideInvoiceNoFrom(r, onMeter ? M : null), receiptUrl: r.receiptUrl || "", payUrl: rideCustomerPayUrl(r), status: st, phone: r.riderPhone, pickup: pickup, dest: dest, stops: stops, eta: eta, route: route, pos: here }, base));
+      var livePay = null;
+      try { livePay = rideLivePay(r, onMeter ? M : null); } catch (e) { livePay = null; }
+      out.push(Object.assign({ key: "c_" + r.id, kind: "sched", bill: rideBillKind(r, onMeter ? M : null), pay: livePay ? livePay.pay : ridePayWord(r, onMeter ? M : null), invoiceNo: rideInvoiceNoFrom(r, onMeter ? M : null), receiptUrl: livePay && livePay.pay === "paid" ? livePay.url : (r.receiptUrl || ""), payUrl: livePay && livePay.pay === "unpaid" ? livePay.url : rideCustomerPayUrl(r), status: st, phone: r.riderPhone, pickup: pickup, dest: dest, stops: stops, eta: eta, route: route, pos: here }, base));
     });
     var code = state.screen === "trip" ? String(state.driverCode || readDriverCode() || "") : "";
     if (code && FOL_KEY_RE.test("r_" + code)) {
@@ -11803,7 +11887,7 @@
         '<p style="margin:0 0 6px;font-size:20px;font-weight:800;color:#111">' + esc(prettyScheduleWhen(r.start)) + "</p>" +
         prepaidBadgeHtml(prepaidOf(r)) + /* v75v */
         (rateOvOf(r) ? rateOvBadgeHtml("sched-contract-" + esc(r.id)) : "") + /* v76j */
-        '<p id="sched-rider-line" style="margin:0 0 6px;color:#1a1a1a"><strong style="' + SCHED_LBL + '">Rider:</strong> ' + esc(r.rider || "\u2014") + (function () { var slot = ""; try { slot = rideInvoiceSlotHtml(r, null); } catch (e) { slot = ""; } if (slot) return slot; return r.riderPhone ? ' \u00b7 <a href="tel:' + esc(r.riderPhone) + '" style="color:#0b3d23;font-weight:700">' + esc(r.riderPhone) + "</a>" : ""; })() + "</p>" +
+        '<div id="sched-rider-home">' + schedRiderLineHtml(r) + "</div>" +
         '<p style="margin:0 0 6px;color:#1a1a1a"><strong style="' + SCHED_LBL + '">Pickup:</strong> ' + esc(r.pickup || "\u2014") + "</p>" +
         (st ? '<p style="margin:0 0 6px;color:#1a1a1a"><strong style="' + SCHED_LBL + '">Stop:</strong> ' + esc(st.address) + "</p>" : "") +
         '<p style="margin:0 0 6px;color:#1a1a1a"><strong style="' + SCHED_LBL + '">Drop-off:</strong> ' + (r.dropoff ? esc(r.dropoff) : '<span style="color:#7c2d12;font-weight:700">Add the drop-off</span>') + "</p>" +
@@ -16529,7 +16613,7 @@
       '<div id="live-map" role="img" aria-label="Map: you during the metered ride"></div>' +
       '<div class="meter-topstack" id="meter-topstack">' + meterTurnHtml() + /* v72t: next turn right on the map; v72u: ETA on its own line below it */
       '<button type="button" class="meter-eta-chip' + (state.meter && state.meter.dest ? " has-dest" : "") + '" id="meter-eta-chip"' + (meterEtaBoxHtml(state.meter).indexOf("display:none") === -1 ? ' style="display:none"' : "") + ">" + esc(meterChipText(state.meter)) + "</button>" + meterEtaBoxHtml(state.meter) + "</div>" + /* v71; v77.8 big ETA box */
-      "</div>" + /* v2.0d.5 r3 (Matthew iPad 712px): the caption sat inside the map under Full screen; now below the map, never over its buttons,
+      "</div>" + '<div id="meter-ride-line">' + (function () { var row = null; try { row = state.meter && state.meter.schedId ? schedFind(state.meter.schedId) : null; } catch (e) {} return row && row.status !== "cancelled" && row.status !== "canceled" ? schedRiderLineHtml(row) : ""; })() + "</div>" + /* v2.0d.5 r3 (Matthew iPad 712px): the caption sat inside the map under Full screen; now below the map, never over its buttons,
          and only on a ride started as Metered (a scheduled / invoiced ride also runs a trip session but is not metered) */
       (meterShown(state.meter) ? '<p class="map-caption meter-map-caption" id="meter-map-caption">' + (meterKindOf(state.meter) === "comparison" ? "You · comparison ride" : "You · metered ride") /* v2.0m-g */ + "</p>" : "") + meterEstLineHtml() + "</div></div>" + /* v72u: estimate under the map during the ride too */
       (isFinite(state.hereLat) ? "" : '<p class="fine">Allow location so the map can show where you are.</p>') +
@@ -17469,6 +17553,7 @@
       /* v72t (Matthew): back to the pre-v72s single column; while driving the MAP is at the TOP with the next turn on it */
       "#meter-split-run>.meter-map-col{order:-1}" +
       "#meter-split-run .map-stage.board-map{height:46vh;height:46dvh;min-height:240px}#meter-split-run .map-stage.board-map #live-map,#meter-split-run .map-stage.board-map .leaflet-container{min-height:240px}" +
+      "#meter-split-run .meter-map-col:has(#sched-rider-line) .map-stage.board-map{height:calc(46vh - 52px);height:calc(46dvh - 52px);min-height:188px;overflow:hidden}#meter-split-run .meter-map-col:has(#sched-rider-line) .map-stage.board-map #live-map,#meter-split-run .meter-map-col:has(#sched-rider-line) .map-stage.board-map .leaflet-container{min-height:0}" +
       ".meter-turn{position:absolute;left:8px;right:8px;top:8px;z-index:500;background:#20371d;color:#cdeccd;border-radius:10px;padding:8px 12px;font-weight:800;font-size:18px;line-height:1.25;box-shadow:0 2px 8px rgba(0,0,0,.35)}" +
       ".meter-turn small{display:block;font-weight:600;font-size:13px;opacity:.85}" +
       ".meter-topstack{position:absolute;left:8px;right:8px;top:8px;z-index:900;display:flex;flex-direction:column;align-items:flex-end;gap:6px;pointer-events:none}" +
