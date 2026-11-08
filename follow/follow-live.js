@@ -29,7 +29,8 @@
     var st = document.createElement("style"); st.id = "fl-style";
     st.textContent = "#fl-live{background:#f0fdf4;color:#0b3d23;border:3px solid #2e9d4f;border-radius:16px;padding:12px}" +
       "#fl-live p{color:#0b3d23}.fl-status{display:block;margin:0 0 8px;padding:10px 12px;border-radius:12px;background:#0b6b3a;color:#fff !important;font-size:21px;font-weight:900;text-align:center}" +
-      ".fl-drv{display:flex;align-items:center;gap:10px;background:#0b3d23;color:#f3ead2;border:2px solid #d4b15a;border-radius:14px;padding:6px 10px;margin:0 0 6px}#fl-live .fl-drv .fl-who,#fl-live .fl-drv .fl-car{color:#f3ead2}.fl-photo{width:64px;height:64px;border-radius:50%;object-fit:cover;border:3px solid #d4b15a;flex:none;background:#20371d}.fl-drv-t{min-width:0}.fl-drv .fl-plate{color:#0b3d23}" +
+      ".fl-under{display:flex;align-items:flex-start;gap:8px;margin:0 0 6px}.fl-under-main{flex:1 1 auto;min-width:0}#fl-bill a{color:#0b3d23;font-weight:900;text-decoration:underline}" +
+      ".fl-drv{display:flex;align-items:center;gap:10px;background:#0b3d23;color:#f3ead2;border:2px solid #d4b15a;border-radius:14px;padding:6px 10px;margin:0}#fl-live .fl-drv .fl-who,#fl-live .fl-drv .fl-car{color:#f3ead2}.fl-photo{width:64px;height:64px;border-radius:50%;object-fit:cover;border:3px solid #d4b15a;flex:none;background:#20371d}.fl-drv-t{min-width:0}.fl-drv .fl-plate{color:#0b3d23}" +
       ".fl-who{font-size:18px;font-weight:800;margin:4px 0}.fl-car{font-size:16px;font-weight:700;margin:2px 0 8px}.fl-plate{display:inline-block;background:#fff;border:2px solid #0b3d23;border-radius:8px;padding:0 8px;margin-left:4px;font-weight:900;letter-spacing:.06em}" +
       "#fl-map{height:62vh;min-height:340px;border-radius:14px;margin:6px 0 10px;border:2px solid #0b3d23}" +
       ".fl-eta{font-size:19px;font-weight:900;text-align:center;margin:6px 0}.fl-row{margin:3px 0;font-size:16px}.fl-row b{display:inline-block;min-width:44px}" +
@@ -101,8 +102,10 @@
   }
   function shell() {
     style();
-    app.innerHTML = '<div class="card" id="fl-live"><p class="fl-status" id="fl-status" role="status" aria-live="polite"></p><p class="fl-bill" id="fl-bill" hidden style="margin:0 0 8px;padding:6px 10px;border-radius:12px;border:2px solid #0b6b3a;background:#fff;color:#0b3d23;font-size:19px;font-weight:900;text-align:center"></p>' +
-      '<div class="fl-drv" id="fl-drv"><img class="fl-photo" id="fl-photo" alt="Your PCS driver" hidden width="64" height="64"><div class="fl-drv-t"><p class="fl-who" id="fl-who"></p><p class="fl-car" id="fl-car"></p></div></div>' +
+    app.innerHTML = '<div class="card" id="fl-live"><p class="fl-status" id="fl-status" role="status" aria-live="polite"></p>' +
+      '<div class="fl-under" id="fl-under"><div class="fl-under-main"><p class="fl-bill" id="fl-bill" hidden style="margin:0 0 8px;padding:6px 10px;border-radius:12px;border:2px solid #0b6b3a;background:#fff;color:#0b3d23;font-size:19px;font-weight:900;text-align:center"></p>' +
+      '<div class="fl-drv" id="fl-drv"><div class="fl-drv-t"><p class="fl-who" id="fl-who"></p><p class="fl-car" id="fl-car"></p></div></div></div>' +
+      '<img class="fl-photo" id="fl-photo" alt="Your PCS driver" hidden width="64" height="64"></div>' +
       '<div class="fl-big" id="fl-big" hidden><div class="fl-spd" id="fl-spd"><b id="fl-mph">--</b><span id="fl-mph-l">mph</span><small id="fl-mph-n"></small></div>' +
       '<div class="fl-arr" id="fl-arr"><span class="k" id="fl-arr-k"></span><b id="fl-arr-t"></b><span id="fl-arr-m"></span><small id="fl-arr-to"></small></div></div>' +
       '<p class="fl-eta" id="fl-eta"></p>' +
@@ -323,12 +326,43 @@
   /* v2.0l item 7 (customer report 10/26): times are the ride's time (Central, the driver's zone), never the phone's zone, with "CT". */
   function ctTime(ms) { try { return new Date(ms).toLocaleTimeString("en-US", { timeZone: "America/Chicago", hour: "numeric", minute: "2-digit" }) + " CT"; } catch (x) { return ""; } }
   if (typeof window !== "undefined") window.__pcsFollowCtTime = ctTime;
+  function squareHttps(v) {
+    var s = String(v || "").trim();
+    if (!s || s.length > 300 || /[\s<>"']/.test(s)) return "";
+    var m = /^https:\/\/([^\/?#:]+)(?:[\/?#]|$)/i.exec(s);
+    if (!m || !/(^|\.)squareup(sandbox)?\.com$|(^|\.)square\.link$/i.test(m[1])) return "";
+    return s;
+  }
+  function billBarModel(d) {
+    d = d || {};
+    var no = String(d.invoiceNo || "").replace(/^#/, "").replace(/\s+/g, "");
+    if (!/^\d{1,20}$/.test(no)) no = "";
+    var pay = d.pay === "paid" || d.pay === "unpaid" ? d.pay : "";
+    var receipt = squareHttps(d.receiptUrl), payUrl = squareHttps(d.payUrl);
+    var legacy = d.bill === "invoiced" ? "Invoiced ride" : d.bill === "prepaid" ? "Prepaid ride" : "";
+    if (pay === "paid" && no && receipt) return { label: "Invoice #" + no + " \u2013 paid", link: { href: receipt, text: "View receipt", id: "fl-receipt" }, show: true, gap: "" };
+    if (pay === "unpaid" && no && payUrl) return { label: "Invoice #" + no + " \u2013 unpaid", link: { href: payUrl, text: "Pay now", id: "fl-pay" }, show: true, gap: "" };
+    var gap = "";
+    if (pay === "paid" && !receipt) gap = "paid-without-receipt";
+    else if (pay === "unpaid" && !payUrl) gap = "unpaid-without-pay-url";
+    else if (no || legacy) gap = "no-verified-payment";
+    return { label: legacy, link: null, show: !!legacy, gap: gap };
+  }
+  function paintBill(d) {
+    var el = $("fl-bill"); if (!el) return;
+    var m = billBarModel(d);
+    if (!m.show) { el.hidden = true; if (el.textContent) el.textContent = ""; return; }
+    if (m.link) {
+      var html = esc(m.label) + " \u00b7 <a id=\"" + m.link.id + "\" href=\"" + esc(m.link.href) + "\" target=\"_blank\" rel=\"noopener\">" + esc(m.link.text) + "</a>";
+      if (el.innerHTML !== html) el.innerHTML = html;
+    } else if (el.textContent !== m.label || (el.querySelector && el.querySelector("a"))) el.textContent = m.label;
+    el.hidden = false;
+  }
   function update(d) {
     if (!$("fl-live")) shell();
     var now = Date.now();
     setText("fl-status", statusText(d));
-    var bl = $("fl-bill"), bt = d.bill === "invoiced" ? "Invoiced ride" : d.bill === "prepaid" ? "Prepaid ride" : ""; /* v2.0l r3: plain word, no amount */
-    if (bl) { if (bl.textContent !== bt) bl.textContent = bt; bl.hidden = !bt; }
+    paintBill(d);
     var who = txt(d.driverFirst, 31);
     setText("fl-who", who ? "Your PCS driver: " + who : "Your PCS driver");
     var car = $("fl-car"), ct = carText(d.car), plate = d.car && typeof d.car === "object" ? txt(d.car.plate, 12) : "";
@@ -522,6 +556,6 @@
   (function qr() { var el = $("fw-qr"); if (!el || typeof window.qrcode !== "function") return; try { var x = window.qrcode(0, "M"); x.addData("https://www.PCSrides.com"); x.make(); el.innerHTML = x.createSvgTag(4, 0); } catch (e) {} })();
   setInterval(function () { if (S.d && !S.ended && $("fl-live")) { try { bigBox(S.d, Date.now(), /^(on_way|arrived|picked_up)$/.test(String(S.d.status))); } catch (e) {} } }, 15000);
   window.__pcsFollowLive = { resume: resume, setPath: setPath, update: update, track: track, state: S, over: over, statusText: statusText,
-    stopsOf: stopsOf, nextTarget: nextTarget, soonDue: soonDue, soonText: SOON_TEXT, photo: trackerPhotoSrc, showPhoto: applyTrackerPhoto };
+    stopsOf: stopsOf, nextTarget: nextTarget, soonDue: soonDue, soonText: SOON_TEXT, photo: trackerPhotoSrc, showPhoto: applyTrackerPhoto, bill: billBarModel };
   poll();
 })();

@@ -9902,6 +9902,13 @@
   }
   function rideInvoiceSlotHtml(r, M) {
     r = r || {};
+    var held = r.id && typeof verInv !== "undefined" ? verInv[r.id] : null;
+    if (held) {
+      var share = invoiceShareFromWorker(held);
+      if (share.pay && share.url) return " \u00b7 Invoice #" + esc(share.invoiceNo) + " \u2013 " + share.pay + " \u00b7 <a id=\"sched-inv-link\" href=\"" + esc(share.url) + "\" target=\"_blank\" rel=\"noopener\">" + (share.pay === "paid" ? "View receipt" : "Pay invoice") + "</a>";
+      var heldNo = String(held.invoiceNo || "").replace(/^#/, "").replace(/\s+/g, "");
+      return /^\d{1,20}$/.test(heldNo) && !held.stale ? " \u00b7 Invoice #" + esc(heldNo) : "";
+    }
     var live = rideLivePay(r, M);
     if (live) return " \u00b7 Invoice #" + esc(live.invoiceNo) + " \u2013 " + live.pay + " \u00b7 <a id=\"sched-inv-link\" href=\"" + esc(live.url) + "\" target=\"_blank\" rel=\"noopener\">" + esc(live.link) + "</a>";
     var no = rideInvoiceNoFrom(r, M);
@@ -10169,9 +10176,58 @@
       try { link = squareInvoiceLink(src); } catch (e) { link = null; }
       var keep = { invoiceNo: String(row.invoiceNo || (link && link.invoiceNo) || ""), amountCents: row.amountCents, taxCents: row.taxCents };
       if (link && link.pay) keep.square = { invoiceNumber: link.invoiceNo, status: link.pay === "paid" ? "PAID" : "UNPAID", public_url: link.pay === "unpaid" ? link.url : "", payments: link.pay === "paid" ? [{ status: "COMPLETED", refundedCents: 0, receipt_url: link.url }] : [] };
+      keep.fetchedAt = Date.now();
       verInv[id] = keep;
     });
     return verInv;
+  }
+  var INV_SHARE_STALE_MS = 45000, invShareSeen = "", invShareGen = {};
+  /* The follow share reads this, never the calendar paid flag, receipt, or pay URL. */
+  function invoiceShareFromWorker(view) {
+    if (!view || view.stale || !view.square || !(view.fetchedAt > 0) || Date.now() - view.fetchedAt > INV_SHARE_STALE_MS) return { invoiceNo: "", pay: "", url: "" };
+    var sq = view.square, no = String(sq.invoiceNumber || "").replace(/^#/, "").replace(/\s+/g, "");
+    if (!/^\d{1,20}$/.test(no)) return { invoiceNo: "", pay: "", url: "" };
+    var receipt = sq.payments && sq.payments[0] && folSquareUrl(sq.payments[0].receipt_url || "");
+    if (sq.status === "PAID" && receipt) return { invoiceNo: no, pay: "paid", url: receipt };
+    var pay = folSquareUrl(sq.public_url || "");
+    if (sq.status === "UNPAID" && pay) return { invoiceNo: no, pay: "unpaid", url: pay };
+    return { invoiceNo: "", pay: "", url: "" };
+  }
+  function driverInvoiceRequest(token, rideIds) {
+    return { path: "/driver/invoice", body: { token: String(token || ""), rideIds: (rideIds || []).map(String).slice(0, 30) } };
+  }
+  function invShareActiveId() {
+    var M = state.meter;
+    if (M && M.status === "running" && M.schedId) return String(M.schedId);
+    try { var t = schedTripNow(); if (t && t.id) return String(t.id); } catch (e) {}
+    return "";
+  }
+  function invShareUnknown(id) { if (id) verInv[id] = { stale: true }; return invoiceShareFromWorker(verInv[id]); }
+  function invShareRefresh(opts) {
+    opts = opts || {};
+    var id = opts.rideId != null ? String(opts.rideId || "") : invShareActiveId();
+    if (!id) return Promise.resolve(null);
+    if (invShareSeen && invShareSeen !== id) invShareUnknown(invShareSeen);
+    invShareSeen = id;
+    var row = null;
+    try { row = schedFind(id); } catch (e) { row = null; }
+    if (row && (row.status === "cancelled" || row.status === "canceled")) return Promise.resolve(invShareUnknown(id));
+    var me = opts.driverId || "";
+    try { if (!me) me = driverPresenceId(); } catch (e2) { me = ""; }
+    if (row && folMyId(row) !== me) return Promise.resolve(null);
+    var token = opts.token != null ? opts.token : "";
+    try { if (opts.token == null) token = qToken(); } catch (e3) { token = ""; }
+    if (!token) return Promise.resolve(invShareUnknown(id));
+    var req = driverInvoiceRequest(token, [id]);
+    var post = opts.post || function (path, body) { return qWorker(path, body); };
+    var gen = (invShareGen[id] = (invShareGen[id] || 0) + 1);
+    return Promise.resolve(post(req.path, req.body)).then(function (d) {
+      if (invShareGen[id] !== gen) return invoiceShareFromWorker(verInv[id]);
+      var got = d && d.invoices && d.invoices[id];
+      if (!got || typeof got !== "object") return invShareUnknown(id);
+      verInvTake([id], d.invoices);
+      return invoiceShareFromWorker(verInv[id]);
+    }, function () { if (invShareGen[id] !== gen) return invoiceShareFromWorker(verInv[id]); return invShareUnknown(id); });
   }
   function verifiedPrepaid(pp, ver) { /* pure (tested) */
     if (!pp) return null;
@@ -11308,9 +11364,8 @@
         if (e && !e.pending) eta = { to: "dest", miles: e.miles, min: e.min };
         if (meterRoute && meterRoute.line) route = meterRoute.line;
       }
-      var livePay = null;
-      try { livePay = rideLivePay(r, onMeter ? M : null); } catch (e) { livePay = null; }
-      out.push(Object.assign({ key: "c_" + r.id, kind: "sched", bill: rideBillKind(r, onMeter ? M : null), pay: livePay ? livePay.pay : ridePayWord(r, onMeter ? M : null), invoiceNo: rideInvoiceNoFrom(r, onMeter ? M : null), receiptUrl: livePay && livePay.pay === "paid" ? livePay.url : (r.receiptUrl || ""), payUrl: livePay && livePay.pay === "unpaid" ? livePay.url : rideCustomerPayUrl(r), status: st, phone: r.riderPhone, pickup: pickup, dest: dest, stops: stops, eta: eta, route: route, pos: here }, base));
+      var share = invoiceShareFromWorker(verInv[r.id]);
+      out.push(Object.assign({ key: "c_" + r.id, kind: "sched", bill: rideBillKind(r, onMeter ? M : null), pay: share.pay, invoiceNo: share.invoiceNo, receiptUrl: share.pay === "paid" ? share.url : "", payUrl: share.pay === "unpaid" ? share.url : "", status: st, phone: r.riderPhone, pickup: pickup, dest: dest, stops: stops, eta: eta, route: route, pos: here }, base));
     });
     var code = state.screen === "trip" ? String(state.driverCode || readDriverCode() || "") : "";
     if (code && FOL_KEY_RE.test("r_" + code)) {
@@ -11346,6 +11401,7 @@
     } else folWrite(folNodeUrl(t), "PUT", snap);
   }
   function folDriverTick() {
+    try { invShareRefresh(); } catch (e) {}
     var now = Date.now(), seen = {};
     folDriverCtxs().forEach(function (c) {
       folMapLoad(c.key, false);
@@ -11545,7 +11601,7 @@
     setInterval(function () { try { folFastTick(); } catch (e) {} }, 500); /* v76f: checks twice a second, sends at most once a second */
     setInterval(function () { try { folSweep(); } catch (e) {} }, 60000);
     setTimeout(function () { try { folSweep(); } catch (e) {} }, 5000);
-    window.__pcsFollow = { bizMsg: folBizMsg, bizSend: folBizSend, autoMsg: folAutoMsg, clean: folClean, token: folNewToken, link: folLink, sms: folSmsHref, msg: folDriverMsg, riderMsg: folRiderMsg, e164: folPhoneE164, photoPick: followDriverPhoto,
+    window.__pcsFollow = { bizMsg: folBizMsg, bizSend: folBizSend, autoMsg: folAutoMsg, clean: folClean, share: invoiceShareFromWorker, refresh: invShareRefresh, request: driverInvoiceRequest, token: folNewToken, link: folLink, sms: folSmsHref, msg: folDriverMsg, riderMsg: folRiderMsg, e164: folPhoneE164, photoPick: followDriverPhoto,
       ctxs: function () { return folDriverCtxs(); }, publish: function (rides) { if (rides) state.scheduledRides = rides; return folDriverCtxs().map(function (c) { return folClean(Object.assign({}, c), Date.now()); }); }, holdPhoto: function (v) { state.driverPhoto = v || ""; }, rider: function () { return folRiderCtx(); }, state: fol, fast: function () { folFastTick(); }, posOut: folPosOut, tick: function () { if (ROLE === "driver") folDriverTick(); else folRiderTick(); },
       sweep: function () { folSweep(); }, mine: folMine, route: folRoute, schedStops: folSchedStops, sig: folSig }; /* test hooks */
   }
