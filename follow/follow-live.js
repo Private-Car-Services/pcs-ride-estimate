@@ -65,7 +65,7 @@
     return { name: name || "Driver name not shared", car: car || "Car not shared", plate: plate || "Plate not shared" };
   }
   function sosPoint(d) {
-    var p = pt(d && d.pos) || pt(d && d.pickup);
+    var p = pt(d && d.pos);
     return p ? { lat: p[0], lng: p[1] } : null;
   }
   function sosReadout(d) {
@@ -129,8 +129,8 @@
       "<p>Tap Call 911 to open the dialer. Read this to the operator. This app cannot call 911 by itself.</p>" +
       '<pre id="fl-sos-read">' + esc(text) + "</pre>" +
       '<div class="row"><a class="call" id="fl-sos-911" href="tel:911">Call 911</a>' +
-      '<button type="button" class="ghost" id="fl-sos-copy">Copy</button>' +
-      (loc ? '<a class="yes" id="fl-sos-maps" href="' + esc(sosMapsHref(loc.lat, loc.lng)) + '">Open in Maps</a>' : "") +
+      (loc ? '<button type="button" class="ghost" id="fl-sos-copy">Copy</button>' +
+      '<a class="yes" id="fl-sos-maps" href="' + esc(sosMapsHref(loc.lat, loc.lng)) + '">Open in Maps</a>' : "") +
       '<button type="button" class="no" id="fl-sos-close">Close</button></div></div>';
     document.body.appendChild(el);
     el.addEventListener("click", function (ev) {

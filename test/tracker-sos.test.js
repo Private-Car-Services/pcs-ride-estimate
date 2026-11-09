@@ -112,6 +112,18 @@ test("390x844 tracker SOS confirms, then shows 911 plus driver car plate and loc
     const ended = await ev("document.getElementById('fl-sos-read').textContent");
     assert.ok(ended.indexOf("PCS 1042") >= 0);
     assert.equal(await ev("document.getElementById('fl-sos-911').getAttribute('href')"), "tel:911");
+    await ev("document.getElementById('fl-sos-close').click()");
+    const pickupOnly = { status: "on_way", driverFirst: "Matt", car: { color: "Black", make: "Cadillac", plate: "PCS 1042" }, pickup: { label: "10 Estancia Pl", lat: 30.1, lng: -95.5 }, updatedAt: Date.now() };
+    await ev("window.__pcsFollowLive.update(" + JSON.stringify(pickupOnly) + ")");
+    await ev("document.getElementById('fl-sos-btn').click(); document.getElementById('fl-sos-yes').click();");
+    const missing = await ev("document.getElementById('fl-sos-read').textContent");
+    assert.ok(missing.indexOf("Location: Location unavailable") >= 0);
+    assert.equal(missing.indexOf("30.100000"), -1);
+    assert.equal(missing.indexOf("-95.500000"), -1);
+    assert.equal(missing.indexOf("30.1"), -1);
+    assert.equal(await ev("!!document.getElementById('fl-sos-copy')"), false);
+    assert.equal(await ev("!!document.getElementById('fl-sos-maps')"), false);
+    assert.equal(await ev("document.getElementById('fl-sos-911').getAttribute('href')"), "tel:911");
     const shot = await send("Page.captureScreenshot", { format: "png" }, sid);
     fs.writeFileSync("/opt/cursor/artifacts/tracker-sos-390.png", Buffer.from(shot.result.data, "base64"));
     ws.close();
