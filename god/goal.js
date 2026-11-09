@@ -171,7 +171,8 @@
      v2.0m-ah: the ledger PIN and the ride and tip totals stay read-only and always use this pad, even if "Use iPad keyboard" was saved.
      v2.0m-an: the same pad holds every typed fuel box (starting odometer, price, current odometer, gallons).
      v2.0m-ao: those boxes stay above the open pad, and a typed zero price stays 0.00.
-     v2.0m-ap: each saved fill stays in the list, with miles, tank, mpg, price per gallon, total, and price per mile. */
+     v2.0m-ap: each saved fill stays in the list, with miles, tank, mpg, price per gallon, total, and price per mile.
+     v2.0m-aq: a Done touch does not leave the pad open. */
   var KP_KEY = "pcsGoalSysKb", kpEl = null, kpCur = null;
   function kpOn() { try { return localStorage.getItem(KP_KEY) !== "1"; } catch (e) { return true; } }
   function kpHold(el) { var id = el && el.id; return id === "gl-pin" || id === "gl-pin1" || id === "gl-pin2" || id === "gl-q-amt" || id === "gl-q-tip" || id === "gl-fuel-odo" || id === "gl-fuel-price" || id === "gl-fuel-gal"; }
@@ -247,13 +248,16 @@
     var m = document.getElementById("gl-app"); if (m) m.style.paddingBottom = (d.offsetHeight + 40) + "px";
     kpReveal(el);
     setTimeout(function () { kpReveal(el); }, 0); }
-  function kpClose() { if (kpEl) kpEl.style.display = "none"; var ov = document.getElementById("gl-screen"); if (ov) ov.classList.remove("kp-open"); var m = document.getElementById("gl-app"); if (m) m.style.paddingBottom = "";
+  /* Done hides the pad on pointerup. The click and focus from that same touch can then hit the fuel box that was underneath and open the pad again. A new touch still opens it. */
+  var kpShutAt = 0;
+  function kpGhost() { return kpShutAt && Date.now() - kpShutAt < 700; }
+  function kpClose() { kpShutAt = Date.now(); if (kpEl) kpEl.style.display = "none"; var ov = document.getElementById("gl-screen"); if (ov) ov.classList.remove("kp-open"); var m = document.getElementById("gl-app"); if (m) m.style.paddingBottom = "";
     if (kpCur) { try { kpCur.blur(); } catch (e) {} } kpCur = null; }
   function kpWire(ov) { kpEl = null; kpCur = null;
-    ov.addEventListener("focusin", function (e) { var t = e.target; if (t && t.getAttribute && t.getAttribute("data-kp")) kpShow(t); });
+    ov.addEventListener("focusin", function (e) { var t = e.target; if (kpGhost()) return; if (t && t.getAttribute && t.getAttribute("data-kp")) kpShow(t); });
     ov.addEventListener("touchstart", function (e) { var t = e.target; if (!t || !t.getAttribute || !kpHold(t)) return; if (e.cancelable !== false && e.preventDefault) e.preventDefault(); kpShow(t); }, { capture: true, passive: false });
     ov.addEventListener("pointerdown", function (e) { var t = e.target; if (t && t.getAttribute && t.getAttribute("data-kp")) { if (kpHold(t) && e.cancelable !== false && e.preventDefault) e.preventDefault(); if (kpEl) kpEl.__eatClick = Date.now() + 500; kpShow(t); return; } /* a tap on the PIN or amount opens the pad even if focus was refused */ if (!kpCur) return; if (kpEl && kpEl.contains(t)) return; if (t && t.closest && t.closest("button")) return; /* v76d: let the button's click land first; it closes the pad itself */ kpClose(); }, true);
-    ov.addEventListener("click", function (e) { var held = kpFromTarget(e.target); if (held) { kpShow(held); return; } var t = e.target; if (kpCur && t && t.closest && t.closest("button") && !(kpEl && kpEl.contains(t))) setTimeout(kpClose, 0); });
+    ov.addEventListener("click", function (e) { var held = kpFromTarget(e.target); if (held) { if (!kpGhost()) kpShow(held); return; } var t = e.target; if (kpCur && t && t.closest && t.closest("button") && !(kpEl && kpEl.contains(t))) setTimeout(kpClose, 0); });
     ov.addEventListener("keydown", function (e) { if (kpCur && e.key === "Escape" && e.target === kpCur) kpClose(); });
     var tg = document.createElement("button"); tg.type = "button"; tg.id = "gl-kb-tog"; tg.onclick = function () { try { localStorage.removeItem(KP_KEY); } catch (e) {} kpRefresh(); }; ov.appendChild(tg); kpRefresh(); }
 

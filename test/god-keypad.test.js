@@ -174,6 +174,34 @@ test("releasing the mouse on the pad after pressing a box does not type", functi
   assert.equal(input.value, "0.09");
 });
 
+test("Done stays closed when the same touch's click lands on the fuel box", function () {
+  const { sandbox, doc } = loadGoal();
+  sandbox.localStorage.getItem = function (k) {
+    if (k === "pcs-god-keep-v1") return JSON.stringify({ email: "mwragge78@gmail.com" });
+    return null;
+  };
+  sandbox.__pcsGoalOpen();
+  sandbox.module.exports._set({ settings: {}, entries: {}, fuel: { seed: { odo: 100000, at: 1 } } });
+  sandbox.module.exports.paint();
+  const ov = doc.getElementById("gl-screen");
+  const price = doc.getElementById("gl-fuel-price");
+  webkitTap(ov, price);
+  const pad = doc.getElementById("gl-kp");
+  assert.equal(pad.style.display, "block");
+  press(pad, "4", "up");
+  press(pad, "0", "up");
+  press(pad, "done", "up");
+  assert.equal(pad.style.display, "none");
+  (ov._l.click || []).forEach(function (fn) { fn({ target: price }); });
+  (ov._l.focusin || []).forEach(function (fn) { fn({ target: price }); });
+  assert.equal(pad.style.display, "none");
+  assert.equal(price.value, "0.40");
+  webkitTap(ov, price);
+  assert.equal(pad.style.display, "block");
+  press(pad, "done", "up");
+  assert.equal(pad.style.display, "none");
+});
+
 test("a click without pointerup still types one price digit", function () {
   const { input, pad } = openPad(null, "price");
   press(pad, "4", "click");
@@ -188,15 +216,15 @@ test("a PIN tap types one digit and does not double it", function () {
   assert.equal(input.value, "1234");
 });
 
-test("v2.0m-ap is what a phone on v2.0m-ai is offered", function () {
+test("v2.0m-aq is what a phone on v2.0m-ai is offered", function () {
   const { sandbox } = loadGoal();
   const version = fs.readFileSync(path.join(__dirname, "../app/version.js"), "utf8");
-  assert.ok(version.indexOf('var APP_VERSION = "v2.0m-ap"') >= 0);
+  assert.ok(version.indexOf('var APP_VERSION = "v2.0m-aq"') >= 0);
   const pages = {
-    "app/driver/index.html": "version.js?v=2.0m-ap",
-    "app/index.html": "version.js?v=2.0m-ap",
-    "god/index.html": "goal.js?v=2.0m-ap",
-    "meter/index.html": "version.js?v=2.0m-ap"
+    "app/driver/index.html": "version.js?v=2.0m-aq",
+    "app/index.html": "version.js?v=2.0m-aq",
+    "god/index.html": "goal.js?v=2.0m-aq",
+    "meter/index.html": "version.js?v=2.0m-aq"
   };
   Object.keys(pages).forEach(function (rel) {
     const html = fs.readFileSync(path.join(__dirname, "..", rel), "utf8");
