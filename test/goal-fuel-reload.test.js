@@ -86,3 +86,40 @@ test("Matthew's fuel fill is still there after the page is loaded again", async 
   assert.equal(opened.fuel.log_1.gallons, 10);
   assert.equal(second.module.exports._get(), null);
 });
+
+test("a later fill on another day keeps the earlier fills in a new page", async function () {
+  const mem = { vault: { iv: [], ct: new Uint8Array([1]) } };
+  const store = { "pcs-god-keep-v1": JSON.stringify({ email: "mwragge78@gmail.com" }) };
+  const first = load(mem, store);
+  const key = await webcrypto.subtle.generateKey({ name: "AES-GCM", length: 256 }, true, ["encrypt", "decrypt"]);
+  const fuel = first.__pcsGoalFuel;
+  const morningAt = Date.parse("2026-11-08T14:55:00Z");
+  const sameAt = Date.parse("2026-11-08T21:40:00Z");
+  const nextAt = Date.parse("2026-11-09T16:05:00Z");
+  const morning = fuel.when(morningAt), same = fuel.when(sameAt), next = fuel.when(nextAt);
+  first.module.exports._set({
+    settings: {}, entries: {},
+    fuel: {
+      seed: { odo: 100000, at: 1 },
+      log_morning: { at: morningAt, date: morning.date, time: morning.time, prev: 100000, odo: 100220, gallons: 10, price: 40 },
+      log_same: { at: sameAt, date: same.date, time: same.time, prev: 100220, odo: 100400, gallons: 8.25, price: 31.5 },
+      log_next: { at: nextAt, date: next.date, time: next.time, prev: 100400, odo: 100640, gallons: 9.5, price: 36 }
+    }
+  });
+  first.module.exports._setDek(key);
+  await first.module.exports.saveLocal();
+  const second = load(mem, store);
+  assert.equal(second.module.exports._get(), null);
+  const opened = await second.module.exports.openData(mem.vault, key);
+  assert.equal(opened.fuel.log_morning.odo, 100220);
+  assert.equal(opened.fuel.log_morning.gallons, 10);
+  assert.equal(opened.fuel.log_morning.price, 40);
+  assert.equal(opened.fuel.log_morning.date, morning.date);
+  assert.equal(opened.fuel.log_same.date, morning.date);
+  assert.notEqual(opened.fuel.log_next.date, morning.date);
+  assert.equal(opened.fuel.log_same.prev, 100220);
+  assert.equal(opened.fuel.log_next.prev, 100400);
+  assert.equal(fuel.prev(opened.fuel), 100640);
+  assert.equal(fuel.rows(opened.fuel).length, 3);
+  assert.equal(fuel.rows(opened.fuel)[0].gallons, 10);
+});

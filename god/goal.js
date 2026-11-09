@@ -168,10 +168,14 @@
     el.setAttribute("autocomplete", "off"); el.setAttribute("autocorrect", "off"); el.setAttribute("spellcheck", "false"); kpMark(el, whole); n++; }); return n; }
   /* v75u: big on-screen 9-key pad (iPadOS has none). Boxes marked by numPad get data-kp="d" (dollars, has a point) or "w" (whole: days, PIN).
      inputmode="none" does not stop iPad Safari from opening the full alphabet keyboard on a focused text or PIN box.
-     v2.0m-ah: the ledger PIN and the ride and tip totals stay read-only and always use this pad, even if "Use iPad keyboard" was saved. */
+     v2.0m-ah: the ledger PIN and the ride and tip totals stay read-only and always use this pad, even if "Use iPad keyboard" was saved.
+     v2.0m-an: the same pad holds every typed fuel box (starting odometer, price, current odometer, gallons).
+     v2.0m-ao: those boxes stay above the open pad, and a typed zero price stays 0.00.
+     v2.0m-ap: each saved fill stays in the list, with miles, tank, mpg, price per gallon, total, and price per mile.
+     v2.0m-aq: a Done touch does not leave the pad open. */
   var KP_KEY = "pcsGoalSysKb", kpEl = null, kpCur = null;
   function kpOn() { try { return localStorage.getItem(KP_KEY) !== "1"; } catch (e) { return true; } }
-  function kpHold(el) { var id = el && el.id; return id === "gl-pin" || id === "gl-pin1" || id === "gl-pin2" || id === "gl-q-amt" || id === "gl-q-tip"; }
+  function kpHold(el) { var id = el && el.id; return id === "gl-pin" || id === "gl-pin1" || id === "gl-pin2" || id === "gl-q-amt" || id === "gl-q-tip" || id === "gl-fuel-odo" || id === "gl-fuel-price" || id === "gl-fuel-gal"; }
   function kpMark(el, whole) { el.setAttribute("data-kp", whole ? "w" : "d"); if (!whole && el.type !== "password") el.setAttribute("data-reg", "1"); else el.removeAttribute("data-reg");
     if (kpHold(el) || kpOn()) el.setAttribute("inputmode", "none"); else el.setAttribute("inputmode", whole ? "numeric" : "decimal"); if (kpHold(el)) el.readOnly = true; }
   function kpRefresh() { var ov = document.getElementById("gl-screen"); if (!ov) return; [].forEach.call(ov.querySelectorAll("input[data-kp]"), function (el) {
@@ -181,16 +185,17 @@
     d.innerHTML = '<div class="kp-top"><button type="button" data-k="sys" class="kp-sm">Use iPad keyboard</button><span id="gl-kp-lbl"></span><button type="button" data-k="clr" class="kp-sm kp-clr">Clear</button></div><div class="kp-g">' +
       ["1","2","3","4","5","6","7","8","9",".","0","bs"].map(function (k) { return '<button type="button" data-k="' + k + '"' + (k === "bs" ? ' aria-label="Delete">\u232b' : ">" + k) + "</button>"; }).join("") +
       '</div><button type="button" data-k="done" class="kp-done">Done</button>';
-    d.addEventListener("pointerdown", function (e) { var b = kpBtn(e); if (b) e.preventDefault(); });
+    d.addEventListener("pointerdown", function (e) { var b = kpBtn(e); if (!b) return; d.__padDown = true; e.preventDefault(); });
     d.addEventListener("mousedown", function (e) { var b = kpBtn(e); if (b) e.preventDefault(); });
-    /* A cancelled pointerdown does not always produce a click (iPhone). Count the key on pointerup, and ignore the click that follows the same tap. */
-    d.addEventListener("pointerup", function (e) { var b = kpBtn(e); if (!b || (e.pointerType === "mouse" && e.button !== 0)) return; b.__kpUp = Date.now(); kpPress(b.getAttribute("data-k")); });
-    d.addEventListener("click", function (e) { var b = kpBtn(e); if (!b || (b.__kpUp && Date.now() - b.__kpUp < 700)) return; kpPress(b.getAttribute("data-k")); });
+    /* A cancelled pointerdown does not always produce a click (iPhone). Count the key on pointerup, and ignore the click that follows the same tap.
+       A pointer that started on a field and was released on the pad (the pad opened under the cursor) is not a key. */
+    d.addEventListener("pointerup", function (e) { var b = kpBtn(e), fromPad = d.__padDown; d.__padDown = false; if (!fromPad || !b || (e.pointerType === "mouse" && e.button !== 0)) return; b.__kpUp = Date.now(); kpPress(b.getAttribute("data-k")); });
+    d.addEventListener("click", function (e) { var b = kpBtn(e); if (!b || (b.__kpUp && Date.now() - b.__kpUp < 700) || (d.__eatClick && Date.now() < d.__eatClick)) return; kpPress(b.getAttribute("data-k")); });
     kpEl = d; return d; }
   /* v75x (Matthew): cash-register money boxes: digits fill from the cents, 9,6,2,5 -> 96.25; Delete drops the last digit; first key after opening a box starts a new amount */
-  function regFmt(v) { var dg = String(v == null ? "" : v).replace(/\D/g, "").replace(/^0+/, ""); if (!dg) return ""; if (dg.length > 7) dg = dg.slice(0, 7); return (Number(dg) / 100).toFixed(2); }
-  function regKey(el, k) { var dg = el.__regFresh ? "" : String(el.value || "").replace(/\D/g, "").replace(/^0+/, ""); el.__regFresh = false;
-    if (k === "clr") dg = ""; else if (k === "bs") dg = dg.slice(0, -1); else if (/^[0-9]$/.test(k)) { if (dg.length < 7) dg += k; } else return;
+  function regFmt(v) { var raw = String(v == null ? "" : v).replace(/\D/g, ""), dg = raw.replace(/^0+/, ""); if (!dg) return raw ? "0.00" : ""; if (dg.length > 7) dg = dg.slice(0, 7); return (Number(dg) / 100).toFixed(2); }
+  function regKey(el, k) { var shown = el.__regFresh ? "" : String(el.value || ""), dg = shown.replace(/\D/g, "").replace(/^0+/, ""); el.__regFresh = false;
+    if (k === "clr" || (k === "bs" && !dg)) dg = ""; else if (k === "bs") dg = dg.slice(0, -1); else if (/^[0-9]$/.test(k)) { if (dg.length < 7) dg += k; } else return;
     el.value = regFmt(dg); try { el.setSelectionRange(el.value.length, el.value.length); } catch (e) {} kpFire(el); }
   if (typeof document !== "undefined") document.addEventListener("input", function (e) { var t = e.target; if (!t || !t.getAttribute || t.getAttribute("data-reg") !== "1" || t.__regIn) return;
     var f = regFmt(t.value); if (t.value !== f) { t.value = f; try { t.setSelectionRange(f.length, f.length); } catch (x) {} } }, true);
@@ -218,16 +223,23 @@
   function kpFromTarget(t) { while (t && t.getAttribute) { if (kpHold(t)) return t; t = t.parentNode; } return null; }
   function kpReveal(el) {
     var ov = document.getElementById("gl-screen"), d = kpEl;
-    if (!ov || !d || !el || !el.getBoundingClientRect) return;
+    if (!ov || !d || d.style.display === "none" || !el || !el.getBoundingClientRect) return;
     var padTop = d.getBoundingClientRect().top;
     if (!(padTop > 40)) return;
-    var nodes = [el], pair = kpPair(el);
+    var nodes = [], fuel = document.getElementById("gl-fuel"), i, r, top = 1e9, bottom = 0;
+    if (fuel && fuel.contains && fuel.contains(el) && fuel.querySelectorAll) {
+      var inputs = fuel.querySelectorAll("input");
+      for (i = 0; i < inputs.length; i++) if (inputs[i].getBoundingClientRect) nodes.push(inputs[i]);
+    }
+    var pair = kpPair(el);
     if (pair && pair.getBoundingClientRect) nodes.push(pair);
-    var top = 1e9, bottom = 0, i, r;
+    if (!nodes.length) nodes.push(el);
     for (i = 0; i < nodes.length; i++) { r = nodes[i].getBoundingClientRect(); if (r.top < top) top = r.top; if (r.bottom > bottom) bottom = r.bottom; }
-    if (bottom > padTop - 12) ov.scrollTop += bottom - padTop + 20;
-    r = nodes[0].getBoundingClientRect();
+    if (bottom > padTop - 16) ov.scrollTop += bottom - (padTop - 16);
+    r = el.getBoundingClientRect();
     if (r.top < 64) ov.scrollTop -= 64 - r.top;
+    r = el.getBoundingClientRect();
+    if (r.bottom > padTop - 16) ov.scrollTop += r.bottom - (padTop - 16);
   }
   function kpShow(el) { if (!el || (!kpOn() && !kpHold(el))) return; var ov = document.getElementById("gl-screen"); if (!ov) return; var d = kpBuild(); if (d.parentNode !== ov) ov.appendChild(d);
     if (kpCur && kpCur !== el) kpCur.dispatchEvent(new Event("change", { bubbles: true }));
@@ -236,13 +248,16 @@
     var m = document.getElementById("gl-app"); if (m) m.style.paddingBottom = (d.offsetHeight + 40) + "px";
     kpReveal(el);
     setTimeout(function () { kpReveal(el); }, 0); }
-  function kpClose() { if (kpEl) kpEl.style.display = "none"; var ov = document.getElementById("gl-screen"); if (ov) ov.classList.remove("kp-open"); var m = document.getElementById("gl-app"); if (m) m.style.paddingBottom = "";
+  /* Done hides the pad on pointerup. The click and focus from that same touch can then hit the fuel box that was underneath and open the pad again. A new touch still opens it. */
+  var kpShutAt = 0;
+  function kpGhost() { return kpShutAt && Date.now() - kpShutAt < 700; }
+  function kpClose() { kpShutAt = Date.now(); if (kpEl) kpEl.style.display = "none"; var ov = document.getElementById("gl-screen"); if (ov) ov.classList.remove("kp-open"); var m = document.getElementById("gl-app"); if (m) m.style.paddingBottom = "";
     if (kpCur) { try { kpCur.blur(); } catch (e) {} } kpCur = null; }
   function kpWire(ov) { kpEl = null; kpCur = null;
-    ov.addEventListener("focusin", function (e) { var t = e.target; if (t && t.getAttribute && t.getAttribute("data-kp")) kpShow(t); });
+    ov.addEventListener("focusin", function (e) { var t = e.target; if (kpGhost()) return; if (t && t.getAttribute && t.getAttribute("data-kp")) kpShow(t); });
     ov.addEventListener("touchstart", function (e) { var t = e.target; if (!t || !t.getAttribute || !kpHold(t)) return; if (e.cancelable !== false && e.preventDefault) e.preventDefault(); kpShow(t); }, { capture: true, passive: false });
-    ov.addEventListener("pointerdown", function (e) { var t = e.target; if (t && t.getAttribute && t.getAttribute("data-kp")) { if (kpHold(t) && e.cancelable !== false && e.preventDefault) e.preventDefault(); kpShow(t); return; } /* a tap on the PIN or amount opens the pad even if focus was refused */ if (!kpCur) return; if (kpEl && kpEl.contains(t)) return; if (t && t.closest && t.closest("button")) return; /* v76d: let the button's click land first; it closes the pad itself */ kpClose(); }, true);
-    ov.addEventListener("click", function (e) { var held = kpFromTarget(e.target); if (held) { kpShow(held); return; } var t = e.target; if (kpCur && t && t.closest && t.closest("button") && !(kpEl && kpEl.contains(t))) setTimeout(kpClose, 0); });
+    ov.addEventListener("pointerdown", function (e) { var t = e.target; if (t && t.getAttribute && t.getAttribute("data-kp")) { if (kpHold(t) && e.cancelable !== false && e.preventDefault) e.preventDefault(); if (kpEl) kpEl.__eatClick = Date.now() + 500; kpShow(t); return; } /* a tap on the PIN or amount opens the pad even if focus was refused */ if (!kpCur) return; if (kpEl && kpEl.contains(t)) return; if (t && t.closest && t.closest("button")) return; /* v76d: let the button's click land first; it closes the pad itself */ kpClose(); }, true);
+    ov.addEventListener("click", function (e) { var held = kpFromTarget(e.target); if (held) { if (!kpGhost()) kpShow(held); return; } var t = e.target; if (kpCur && t && t.closest && t.closest("button") && !(kpEl && kpEl.contains(t))) setTimeout(kpClose, 0); });
     ov.addEventListener("keydown", function (e) { if (kpCur && e.key === "Escape" && e.target === kpCur) kpClose(); });
     var tg = document.createElement("button"); tg.type = "button"; tg.id = "gl-kb-tog"; tg.onclick = function () { try { localStorage.removeItem(KP_KEY); } catch (e) {} kpRefresh(); }; ov.appendChild(tg); kpRefresh(); }
 
@@ -547,12 +562,17 @@
     gallons = Math.round(Number(gallons) * 1000) / 1000; price = Math.round(Number(price) * 100) / 100;
     var miles = odo - prev;
     if (!(prev >= 0) || !(odo > prev) || !(gallons > 0) || !(price >= 0)) return { ok: false, miles: isFinite(miles) ? miles : null, mpg: null, tank: null, ppm: null };
-    var mpg = Math.round((miles / gallons) * 100) / 100;
-    return { ok: true, prev: prev, odo: odo, gallons: gallons, price: price, miles: miles, mpg: mpg, tank: Math.round(mpg * 22 * 100) / 100, ppm: Math.round((price / miles) * 100) / 100 };
+    var mpg = miles / gallons;
+    return { ok: true, prev: prev, odo: odo, gallons: gallons, price: price, miles: miles, mpg: mpg, tank: mpg * 22, ppm: miles ? price / miles : null };
   }
   function fuelFmt(m) {
-    if (!m || !m.ok) return { miles: "", mpg: "", tank: "", ppm: "" };
-    return { miles: String(m.miles), mpg: m.mpg.toFixed(2), tank: m.tank.toFixed(2), ppm: "$" + m.ppm.toFixed(2) };
+    if (!m || !m.ok) return { miles: "", mpg: "", tank: "", ppm: "", ppg: "" };
+    var ppg = m.gallons > 0 ? m.price / m.gallons : NaN;
+    return { miles: String(m.miles), mpg: m.mpg.toFixed(2), tank: m.tank.toFixed(2), ppm: "$" + m.ppm.toFixed(2), ppg: isFinite(ppg) ? "$" + ppg.toFixed(3) : "" };
+  }
+  function fuelHist(r) {
+    var f = fuelFmt(fuelMath(r.prev, r.odo, r.gallons, r.price));
+    return esc(r.date + " " + r.time) + " · odo " + r.odo + " · " + Number(r.gallons).toFixed(3) + " gal · " + f.miles + " mi · " + f.tank + " mi/tank · " + f.mpg + " mpg · " + f.ppg + "/gal · $" + Number(r.price).toFixed(2) + " total · " + f.ppm + "/mi";
   }
   function fuelHtml() {
     if (!fuelForMatthew()) return "";
@@ -567,7 +587,7 @@
       '<label class="fine">Gallons <input id="gl-fuel-gal" data-fuel="gal" type="text" inputmode="decimal" autocomplete="off" aria-label="Gallons" placeholder="0.000" style="' + box + ';width:120px"></label> ' +
       '<button type="button" class="btn" id="gl-fuel-save">Save fill</button><p class="fine" id="gl-fuel-msg"></p>' +
       '<p id="gl-fuel-out">Miles <b id="gl-fuel-miles">' + shown.miles + '</b> · MPG <b id="gl-fuel-mpg">' + shown.mpg + '</b> · Miles per tank <b id="gl-fuel-tank">' + shown.tank + '</b> · Price per mile <b id="gl-fuel-ppm">' + shown.ppm + "</b></p>" +
-      (rows.length ? "<ul>" + rows.slice(-8).reverse().map(function (r) { var f = fuelFmt(fuelMath(r.prev, r.odo, r.gallons, r.price)); return "<li>" + esc(r.date + " " + r.time) + " · $" + Number(r.price).toFixed(2) + " · odo " + r.odo + " · " + Number(r.gallons).toFixed(3) + " gal · " + f.miles + " mi · " + f.mpg + " mpg</li>"; }).join("") + "</ul>" : "") +
+      (rows.length ? '<ul id="gl-fuel-log">' + rows.slice().reverse().map(function (r) { return "<li>" + fuelHist(r) + "</li>"; }).join("") + "</ul>" : "") +
       "</section>";
   }
   function fuelPreview() {
@@ -587,8 +607,11 @@
     var msg = document.getElementById("gl-fuel-msg"), prev = fuelPrevOdo(D.fuel || {});
     var m = fuelMath(prev, document.getElementById("gl-fuel-odo").value, document.getElementById("gl-fuel-gal").value, document.getElementById("gl-fuel-price").value);
     if (!m.ok) { if (msg) msg.textContent = "Current odometer has to be above the previous one, with gallons and a price."; return; }
-    var at = Date.now(), when = fuelWhen(at);
-    D.fuel = D.fuel || {}; D.fuel["log_" + at] = { at: at, date: when.date, time: when.time, prev: m.prev, odo: m.odo, gallons: m.gallons, price: m.price };
+    D.fuel = D.fuel || {};
+    var at = Date.now();
+    while (D.fuel["log_" + at]) at += 1;
+    var when = fuelWhen(at);
+    D.fuel["log_" + at] = { at: at, date: when.date, time: when.time, prev: m.prev, odo: m.odo, gallons: m.gallons, price: m.price };
     save(); paint();
   }
   if (typeof window !== "undefined") window.__pcsGoalFuel = { math: fuelMath, fmt: fuelFmt, when: fuelWhen, prev: fuelPrevOdo, rows: fuelRows, owner: fuelForMatthew };

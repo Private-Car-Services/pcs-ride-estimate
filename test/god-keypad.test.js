@@ -63,6 +63,10 @@ function loadGoal(opts) {
       if (ml) child.setAttribute("maxlength", ml);
       if (ph) child.setAttribute("placeholder", ph);
       if (dk) child.setAttribute("data-k", dk);
+      const fuel = attr(m[2], "data-fuel");
+      if (fuel) child.setAttribute("data-fuel", fuel);
+      const label = attr(m[2], "aria-label");
+      if (label) child.setAttribute("aria-label", label);
       child.parentNode = node;
       node.children.push(child);
     }
@@ -73,7 +77,8 @@ function loadGoal(opts) {
     addEventListener() {},
     getElementById(id) { if (!nodes[id]) { const n = el("div"); n.id = id; } return nodes[id]; },
     createElement: el,
-    querySelector() { return null; }
+    querySelector() { return null; },
+    querySelectorAll() { return []; }
   };
   const timers = [];
   const frames = [];
@@ -85,6 +90,7 @@ function loadGoal(opts) {
     requestAnimationFrame(fn) { if (opts && opts.queueTimers && typeof fn === "function") { frames.push(fn); return frames.length; } return 0; },
     cancelAnimationFrame() {},
     document: doc, localStorage: { getItem() { return null; }, setItem() {}, removeItem() {} },
+    module: { exports: {} },
     location: { search: "", hostname: "localhost", href: "http://localhost/god/" },
     navigator: { userAgent: "test" },
     indexedDB: { open() { throw new Error("no-idb"); } },
@@ -130,7 +136,10 @@ function press(pad, key, how) {
   })(pad);
   assert.ok(btn, key);
   const ev = { target: btn, pointerType: "touch", button: 0, preventDefault() {} };
-  if (how === "up") (pad._l.pointerup || []).forEach(function (fn) { fn(ev); });
+  if (how === "up") {
+    (pad._l.pointerdown || []).forEach(function (fn) { fn(ev); });
+    (pad._l.pointerup || []).forEach(function (fn) { fn(ev); });
+  }
   if (how === "click") (pad._l.click || []).forEach(function (fn) { fn(ev); });
 }
 
@@ -143,6 +152,54 @@ test("a price tap types from the cents when only pointerup arrives", function ()
   press(pad, "2", "up");
   press(pad, "5", "up");
   assert.equal(input.value, "96.25");
+});
+
+test("releasing the mouse on the pad after pressing a box does not type", function () {
+  const { sandbox, doc } = loadGoal();
+  sandbox.__pcsGoalOpen();
+  const ov = doc.getElementById("gl-screen");
+  const input = doc.createElement("input");
+  input.id = "gl-fuel-price";
+  input.setAttribute("data-kp", "d");
+  input.setAttribute("data-reg", "1");
+  ov.appendChild(input);
+  webkitTap(ov, input);
+  const pad = doc.getElementById("gl-kp");
+  let btn = null;
+  (function walk(n) { if (n && n.attrs && n.attrs["data-k"] === "9") btn = n; (n.children || []).forEach(walk); })(pad);
+  (pad._l.pointerup || []).forEach(function (fn) { fn({ target: btn, pointerType: "mouse", button: 0, preventDefault() {} }); });
+  (pad._l.click || []).forEach(function (fn) { fn({ target: btn, preventDefault() {} }); });
+  assert.equal(input.value, "");
+  press(pad, "9", "up");
+  assert.equal(input.value, "0.09");
+});
+
+test("Done stays closed when the same touch's click lands on the fuel box", function () {
+  const { sandbox, doc } = loadGoal();
+  sandbox.localStorage.getItem = function (k) {
+    if (k === "pcs-god-keep-v1") return JSON.stringify({ email: "mwragge78@gmail.com" });
+    return null;
+  };
+  sandbox.__pcsGoalOpen();
+  sandbox.module.exports._set({ settings: {}, entries: {}, fuel: { seed: { odo: 100000, at: 1 } } });
+  sandbox.module.exports.paint();
+  const ov = doc.getElementById("gl-screen");
+  const price = doc.getElementById("gl-fuel-price");
+  webkitTap(ov, price);
+  const pad = doc.getElementById("gl-kp");
+  assert.equal(pad.style.display, "block");
+  press(pad, "4", "up");
+  press(pad, "0", "up");
+  press(pad, "done", "up");
+  assert.equal(pad.style.display, "none");
+  (ov._l.click || []).forEach(function (fn) { fn({ target: price }); });
+  (ov._l.focusin || []).forEach(function (fn) { fn({ target: price }); });
+  assert.equal(pad.style.display, "none");
+  assert.equal(price.value, "0.40");
+  webkitTap(ov, price);
+  assert.equal(pad.style.display, "block");
+  press(pad, "done", "up");
+  assert.equal(pad.style.display, "none");
 });
 
 test("a click without pointerup still types one price digit", function () {
@@ -159,15 +216,15 @@ test("a PIN tap types one digit and does not double it", function () {
   assert.equal(input.value, "1234");
 });
 
-test("v2.0m-am is what a phone on v2.0m-ai is offered", function () {
+test("v2.0m-aq is what a phone on v2.0m-ai is offered", function () {
   const { sandbox } = loadGoal();
   const version = fs.readFileSync(path.join(__dirname, "../app/version.js"), "utf8");
-  assert.ok(version.indexOf('var APP_VERSION = "v2.0m-am"') >= 0);
+  assert.ok(version.indexOf('var APP_VERSION = "v2.0m-aq"') >= 0);
   const pages = {
-    "app/driver/index.html": "version.js?v=2.0m-am",
-    "app/index.html": "version.js?v=2.0m-am",
-    "god/index.html": "goal.js?v=2.0m-am",
-    "meter/index.html": "version.js?v=2.0m-am"
+    "app/driver/index.html": "version.js?v=2.0m-aq",
+    "app/index.html": "version.js?v=2.0m-aq",
+    "god/index.html": "goal.js?v=2.0m-aq",
+    "meter/index.html": "version.js?v=2.0m-aq"
   };
   Object.keys(pages).forEach(function (rel) {
     const html = fs.readFileSync(path.join(__dirname, "..", rel), "utf8");
@@ -408,4 +465,197 @@ test("first-run and unlock PIN screens open the pad before any tap when the iPad
   assert.equal(pin.value, "0123");
   press(unlock, "9", "up");
   assert.equal(pin.value, "0123");
+});
+
+test("every typed fuel box uses the nine-key pad after the iPad keyboard was saved", function () {
+  const { sandbox, doc } = loadGoal();
+  const saved = [];
+  sandbox.localStorage.getItem = function (k) {
+    if (k === "pcsGoalSysKb") return "1";
+    if (k === "pcs-god-keep-v1") return JSON.stringify({ email: "mwragge78@gmail.com" });
+    return null;
+  };
+  sandbox.localStorage.setItem = function () { saved.push("set"); };
+  sandbox.__pcsGoalOpen();
+  sandbox.module.exports._set({ settings: {}, entries: {} });
+  sandbox.module.exports.paint();
+  const ov = doc.getElementById("gl-screen");
+  const html = doc.getElementById("gl-app")._html;
+  assert.ok(html.indexOf("Date and time are saved automatically.") >= 0);
+  assert.equal(html.indexOf('<input id="gl-fuel-prev"'), -1);
+  assert.equal(html.indexOf('<input id="gl-fuel-miles"'), -1);
+  const seed = doc.getElementById("gl-fuel-odo");
+  assert.equal(seed.readOnly, true);
+  assert.equal(seed.getAttribute("data-kp"), "w");
+  assert.equal(seed.getAttribute("data-reg"), null);
+  assert.equal(seed.getAttribute("inputmode"), "none");
+  const seedTap = webkitTap(ov, seed);
+  assert.equal(seedTap.prevented, true);
+  (ov._l.click || []).forEach(function (fn) { fn({ target: seed }); });
+  const pad = doc.getElementById("gl-kp");
+  assert.equal(pad.style.display, "block");
+  assert.ok(String(pad.className).indexOf("whole") >= 0);
+  assert.ok(String(pad.className).indexOf("hold") >= 0);
+  press(pad, "0", "up");
+  assert.equal(seed.value, "0");
+  press(pad, ".", "up");
+  assert.equal(seed.value, "0");
+  press(pad, "clr", "up");
+  ["1", "0", "0", "0", "0", "0"].forEach(function (k) { press(pad, k, "up"); press(pad, k, "click"); });
+  assert.equal(seed.value, "100000");
+  assert.equal(seed.value.indexOf("."), -1);
+  press(pad, "sys", "up");
+  assert.equal(pad.style.display, "block");
+  assert.equal(saved.length, 0);
+  assert.equal(seed.readOnly, true);
+  doc.getElementById("gl-fuel-seed").onclick();
+  sandbox.module.exports.paint();
+  const again = doc.getElementById("gl-app")._html;
+  assert.ok(again.indexOf("Previous odometer") >= 0);
+  assert.ok(again.indexOf(">100000<") >= 0);
+  assert.equal(again.indexOf('<input id="gl-fuel-prev"'), -1);
+  const price = doc.getElementById("gl-fuel-price");
+  const odo = doc.getElementById("gl-fuel-odo");
+  const gal = doc.getElementById("gl-fuel-gal");
+  const year = doc.getElementById("gl-s-year");
+  assert.equal(price.getAttribute("data-kp"), "d");
+  assert.equal(price.getAttribute("data-reg"), "1");
+  assert.equal(odo.getAttribute("data-kp"), "w");
+  assert.equal(gal.getAttribute("data-kp"), "g");
+  assert.equal(gal.getAttribute("data-reg"), null);
+  [price, odo, gal].forEach(function (el) {
+    assert.equal(el.readOnly, true, el.id);
+    assert.equal(el.getAttribute("inputmode"), "none", el.id);
+    const tap = webkitTap(ov, el);
+    assert.equal(tap.prevented, true, el.id);
+    assert.equal(doc.getElementById("gl-kp").style.display, "block");
+  });
+  assert.notEqual(year.readOnly, true);
+  assert.equal(year.getAttribute("inputmode"), "decimal");
+  const yearTap = webkitTap(ov, year);
+  assert.equal(yearTap.prevented, false);
+  webkitTap(ov, price);
+  press(doc.getElementById("gl-kp"), "0", "up");
+  assert.equal(price.value, "0.00");
+  press(doc.getElementById("gl-kp"), "bs", "up");
+  assert.equal(price.value, "");
+  press(doc.getElementById("gl-kp"), "0", "up");
+  assert.equal(price.value, "0.00");
+  press(doc.getElementById("gl-kp"), "5", "up");
+  assert.equal(price.value, "0.05");
+  price.__regFresh = true;
+  ["4", "0", "5", "0"].forEach(function (k) { press(doc.getElementById("gl-kp"), k, "up"); press(doc.getElementById("gl-kp"), k, "click"); });
+  assert.equal(price.value, "40.50");
+  press(doc.getElementById("gl-kp"), ".", "up");
+  assert.equal(price.value, "40.50");
+  webkitTap(ov, gal);
+  ["1", "8", ".", "1", "5", "7"].forEach(function (k) { press(doc.getElementById("gl-kp"), k, "up"); press(doc.getElementById("gl-kp"), k, "click"); });
+  assert.equal(gal.value, "18.157");
+  press(doc.getElementById("gl-kp"), "9", "up");
+  assert.equal(gal.value, "18.157");
+  press(doc.getElementById("gl-kp"), "bs", "up");
+  assert.equal(gal.value, "18.15");
+  press(doc.getElementById("gl-kp"), "clr", "up");
+  assert.equal(gal.value, "");
+  ["1", "8", ".", "1", "5", "7"].forEach(function (k) { press(doc.getElementById("gl-kp"), k, "up"); });
+  assert.equal(gal.value, "18.157");
+  webkitTap(ov, gal);
+  assert.equal(gal.value, "18.157");
+  assert.notEqual(gal.value, "181.57");
+  assert.notEqual(gal.value, "18.16");
+  webkitTap(ov, odo);
+  ["1", "0", "0", "3", "7", "9"].forEach(function (k) { press(doc.getElementById("gl-kp"), k, "up"); });
+  press(doc.getElementById("gl-kp"), ".", "up");
+  assert.equal(odo.value, "100379");
+  press(doc.getElementById("gl-kp"), "sys", "up");
+  assert.equal(doc.getElementById("gl-kp").style.display, "block");
+  assert.equal(saved.length, 0);
+  doc.getElementById("gl-fuel-save").onclick();
+  const book = sandbox.module.exports._get().fuel;
+  const logs = Object.keys(book).filter(function (k) { return k.indexOf("log_") === 0; });
+  assert.equal(logs.length, 1);
+  assert.equal(book[logs[0]].prev, 100000);
+  assert.equal(book[logs[0]].odo, 100379);
+  assert.equal(book[logs[0]].gallons, 18.157);
+  assert.notEqual(book[logs[0]].gallons, 181.57);
+  assert.notEqual(book[logs[0]].gallons, 18.16);
+  assert.equal(book[logs[0]].price, 40.5);
+  const mpg = 379 / 18.157;
+  sandbox.module.exports.paint();
+  const locked = doc.getElementById("gl-app")._html;
+  assert.ok(locked.indexOf(">100379<") >= 0);
+  assert.ok(locked.indexOf("18.157 gal") >= 0);
+  assert.ok(locked.indexOf(mpg.toFixed(2) + " mpg") >= 0);
+  assert.ok(locked.indexOf((mpg * 22).toFixed(2)) >= 0);
+  assert.equal(locked.indexOf("459.14"), -1);
+  assert.equal(locked.indexOf('<input id="gl-fuel-miles"'), -1);
+  assert.equal(locked.indexOf('<input id="gl-fuel-mpg"'), -1);
+  const price2 = doc.getElementById("gl-fuel-price");
+  const odo2 = doc.getElementById("gl-fuel-odo");
+  const gal2 = doc.getElementById("gl-fuel-gal");
+  webkitTap(ov, price2);
+  price2.__regFresh = true;
+  press(doc.getElementById("gl-kp"), "0", "up");
+  assert.equal(price2.value, "0.00");
+  webkitTap(ov, odo2);
+  ["1", "0", "0", "4", "0", "0"].forEach(function (k) { press(doc.getElementById("gl-kp"), k, "up"); });
+  webkitTap(ov, gal2);
+  ["1", ".", "0", "0", "0"].forEach(function (k) { press(doc.getElementById("gl-kp"), k, "up"); });
+  assert.equal(gal2.value, "1.000");
+  doc.getElementById("gl-fuel-save").onclick();
+  const zeroRows = Object.keys(sandbox.module.exports._get().fuel).filter(function (k) { return k.indexOf("log_") === 0; }).map(function (k) { return sandbox.module.exports._get().fuel[k]; });
+  const kept = zeroRows.filter(function (r) { return r.odo === 100379; })[0];
+  const zero = zeroRows.filter(function (r) { return r.odo === 100400; })[0];
+  assert.equal(zeroRows.length, 2);
+  assert.ok(kept);
+  assert.equal(kept.gallons, 18.157);
+  assert.equal(kept.price, 40.5);
+  assert.equal(kept.prev, 100000);
+  assert.ok(zero);
+  assert.equal(zero.prev, 100379);
+  assert.equal(zero.price, 0);
+  assert.equal(zero.gallons, 1);
+  const later = Date.parse("2027-01-15T18:40:00Z");
+  const laterWhen = sandbox.__pcsGoalFuel.when(later);
+  sandbox.Date.now = function () { return later; };
+  doc.getElementById("gl-fuel-price").value = "30.00";
+  doc.getElementById("gl-fuel-odo").value = "100510";
+  doc.getElementById("gl-fuel-gal").value = "8.500";
+  doc.getElementById("gl-fuel-save").onclick();
+  const all = Object.keys(sandbox.module.exports._get().fuel).filter(function (k) { return k.indexOf("log_") === 0; }).map(function (k) { return sandbox.module.exports._get().fuel[k]; });
+  assert.equal(all.length, 3);
+  assert.equal(all.filter(function (r) { return r.odo === 100379; })[0].gallons, 18.157);
+  const third = all.filter(function (r) { return r.odo === 100510; })[0];
+  assert.equal(third.prev, 100400);
+  assert.equal(third.date, laterWhen.date);
+  assert.notEqual(third.date, kept.date);
+  assert.equal(third.gallons, 8.5);
+  assert.equal(third.price, 30);
+  sandbox.module.exports.paint();
+  const hist = doc.getElementById("gl-app")._html;
+  assert.ok(hist.indexOf('id="gl-fuel-log"') >= 0);
+  function row(odo) {
+    const hit = hist.split("<li>").filter(function (p) { return p.indexOf("odo " + odo + " ") >= 0; });
+    assert.equal(hit.length, 1, String(odo));
+    return hit[0];
+  }
+  const morning = row(100379);
+  const noon = row(100400);
+  const next = row(100510);
+  assert.ok(morning.indexOf("18.157 gal") >= 0);
+  assert.ok(morning.indexOf((mpg * 22).toFixed(2) + " mi/tank") >= 0);
+  assert.ok(morning.indexOf(mpg.toFixed(2) + " mpg") >= 0);
+  assert.ok(morning.indexOf("$" + (40.5 / 18.157).toFixed(3) + "/gal") >= 0);
+  assert.ok(morning.indexOf("$40.50 total") >= 0);
+  assert.ok(morning.indexOf("$" + (40.5 / 379).toFixed(2) + "/mi") >= 0);
+  assert.ok(noon.indexOf("1.000 gal") >= 0);
+  assert.ok(noon.indexOf("$0.00 total") >= 0);
+  assert.ok(noon.indexOf("$0.000/gal") >= 0);
+  assert.ok(next.indexOf(laterWhen.date) >= 0);
+  assert.ok(next.indexOf("8.500 gal") >= 0);
+  assert.ok(next.indexOf("$30.00 total") >= 0);
+  assert.ok(next.indexOf(" mi/tank") >= 0);
+  assert.equal(sandbox.module.exports._get().fuel && Object.keys(sandbox.module.exports._get().fuel).filter(function (k) { return k.indexOf("log_") === 0; }).length, 3);
+  assert.equal(year.getAttribute("data-kp"), "d");
+  assert.notEqual(year.readOnly, true);
 });
