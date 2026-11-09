@@ -9890,7 +9890,7 @@
   function rideCustomerPayUrl(r) {
     r = r || {};
     var q = r.sqInvoice && typeof r.sqInvoice === "object" ? r.sqInvoice : null;
-    return String(r.invoicePayUrl || r.payUrl || (q && (q.payUrl || q.publicUrl)) || "");
+    return String(r.invoicePayUrl || r.payUrl || (q && (q.public_url || q.publicUrl || q.payUrl)) || "");
   }
   function schedPickupStatusText(r) {
     return "I\u2019m at the pickup";
@@ -11419,7 +11419,9 @@
           var boardPay = "";
           try { boardPay = ridePayWord(r, onMeter ? M : null); } catch (ePay) { boardPay = ""; }
           if (boardPay !== "paid" && boardPay !== "unpaid") boardPay = "";
-          share = { invoiceNo: boardNo, pay: boardPay, url: boardPay === "paid" ? rideSquareHttps(r.receiptUrl || "") : boardPay === "unpaid" ? rideSquareHttps(rideCustomerPayUrl(r)) : "" };
+          var qShare = r.sqInvoice && typeof r.sqInvoice === "object" ? r.sqInvoice : null;
+          var shareUrl = boardPay === "paid" ? rideSquareHttps(r.receiptUrl || (qShare && (qShare.receipt_url || qShare.receiptUrl)) || "") : boardPay === "unpaid" ? rideSquareHttps(rideCustomerPayUrl(r)) : "";
+          share = { invoiceNo: boardNo, pay: boardPay, url: shareUrl };
         }
       }
       out.push(Object.assign({ key: "c_" + r.id, kind: "sched", bill: rideBillKind(r, onMeter ? M : null), pay: share.pay, invoiceNo: share.invoiceNo, receiptUrl: share.pay === "paid" ? share.url : "", payUrl: share.pay === "unpaid" ? share.url : "", status: st, phone: r.riderPhone, pickup: pickup, dest: dest, stops: stops, eta: eta, route: route, pos: here }, base));

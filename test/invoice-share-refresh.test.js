@@ -119,6 +119,24 @@ test("shared invoice 000560 publishes the number without unpaid or paid", functi
   const owed = follow.publish([positive])[0];
   assert.equal(owed.pay, "unpaid");
   assert.equal(owed.payUrl, PAY);
+  const due = ride("ride-due", {
+    prepaidInvoiceNo: "000574",
+    sqInvoice: { status: "UNPAID", paid: false, amountDueCents: 2066, public_url: PAY, invoiceNumber: "000574" },
+    invoicePayUrl: "", receiptUrl: ""
+  });
+  const duePub = follow.publish([due])[0];
+  assert.equal(duePub.pay, "unpaid");
+  assert.equal(duePub.payUrl, PAY);
+  assert.equal(live.bill(duePub).link.text, "Pay invoice");
+  const paid = ride("ride-paid", {
+    prepaidInvoiceNo: "000554",
+    sqInvoice: { status: "PAID", paid: true, invoiceNumber: "000554", receipt_url: RECEIPT },
+    receiptUrl: "", invoicePayUrl: ""
+  });
+  const paidPub = follow.publish([paid])[0];
+  assert.equal(paidPub.pay, "paid");
+  assert.equal(paidPub.receiptUrl, RECEIPT);
+  assert.equal(live.bill(paidPub).link.text, "View receipt");
 });
 
 test("a known invoice shows unpaid before a Square link arrives", function () {

@@ -112,6 +112,7 @@
       '<div id="fl-map" role="img" aria-label="Map with the car, the pickup and the drop-off"></div>' +
       '<p class="fl-row" id="fl-from"></p><div id="fl-stops"></div><p class="fl-row" id="fl-to"></p>' +
       '<p class="fl-upd" id="fl-upd"></p><p class="error" id="fl-net" role="status"></p>' +
+      /* Bottom bar: a known invoice. With no invoice number the bar stays hidden. */
       '<p class="fl-call" id="fl-call" hidden></p></div>';
     if (window.L) {
       S.map = window.L.map("fl-map", { zoomControl: true, attributionControl: true, zoomSnap: 0.25, zoomDelta: 1 }).setView([29.76, -95.37], 11);
