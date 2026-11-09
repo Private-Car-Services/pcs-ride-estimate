@@ -94,6 +94,11 @@ test("paid and unpaid words follow an actual payment record", function () {
   assert.equal(bill.slot(shared), " \u00b7 Invoice #000560");
   assert.equal(bill.slot(shared).indexOf("unpaid"), -1);
   assert.equal(bill.slot(shared).indexOf("paid"), -1);
+  const dueUnpaid = { prepaidInvoiceNo: "000574", sqInvoice: { status: "UNPAID", paid: false, amountDueCents: 2066, public_url: PAY } };
+  assert.equal(bill.pay(dueUnpaid), "unpaid");
+  assert.equal(bill.slot(dueUnpaid), " \u00b7 Invoice #000574 \u2013 unpaid \u00b7 <a id=\"sched-inv-link\" href=\"" + PAY + "\" target=\"_blank\" rel=\"noopener\">Pay invoice</a>");
+  assert.equal(bill.pay({ prepaidInvoiceNo: "000559", paymentStatus: "unpaid", invoiceStatus: "UNPAID" }), "");
+  assert.equal(bill.slot({ prepaidInvoiceNo: "000559", paymentStatus: "unpaid" }), " \u00b7 Invoice #000559");
 });
 
 test("a live Square read picks the pay page or the receipt, and a saved flag does not", function () {

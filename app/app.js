@@ -9859,7 +9859,7 @@
     return t + " Invoice #" + no;
   }
   /* Paid only from a positive paid record (Square PAID, assigned-driver cash, or a God cash override).
-     Unpaid only from a positive unpaid status: Square status UNPAID, or the ride's own pay state "unpaid".
+     Unpaid only from Square status UNPAID, or a payState of "unpaid". A paymentStatus of "unpaid" is not that.
      invoice_pending, prepaid:true, invoiceStatus UNPAID, and a Square object that is merely not PAID are none of these.
      A shared invoice can be PAID while this ride is still invoice_pending: that ride stays unlabeled. */
   function ridePayWord(r, M) {
@@ -9876,7 +9876,7 @@
       if (ov && typeof ov === "object" && String(ov.reason || "").trim()) return "paid";
     }
     if (q && String(q.status || "").toUpperCase() === "UNPAID") return "unpaid";
-    if (own === "unpaid") return "unpaid";
+    if (String(r.payState || "").toLowerCase() === "unpaid") return "unpaid";
     return "";
   }
   function rideMapBillText(r, M) {
@@ -9930,8 +9930,10 @@
     var no = rideInvoiceNoFrom(r, M);
     if (!no) return "";
     var q = r.sqInvoice && typeof r.sqInvoice === "object" ? r.sqInvoice : null;
-    var st = String((q && q.status) || r.invoiceStatus || "").toUpperCase();
-    if (/PARTIAL|REFUND|CANCEL/.test(st) || (q && isFinite(+q.amountDueCents) && +q.amountDueCents > 0 && String(q.status || "").toUpperCase() !== "PAID")) return " \u00b7 Invoice #" + esc(no);
+    var sqSt = String((q && q.status) || "").toUpperCase();
+    var st = String(sqSt || r.invoiceStatus || "").toUpperCase();
+    if (/PARTIAL|REFUND|CANCEL/.test(st)) return " \u00b7 Invoice #" + esc(no);
+    if (q && sqSt !== "UNPAID" && sqSt !== "PAID" && isFinite(+q.amountDueCents) && +q.amountDueCents > 0) return " \u00b7 Invoice #" + esc(no);
     var w = "";
     try { w = ridePayWord(r, M); } catch (e) { w = ""; }
     if (w !== "paid" && w !== "unpaid") return " \u00b7 Invoice #" + esc(no);
