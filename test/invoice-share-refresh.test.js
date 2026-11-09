@@ -97,13 +97,24 @@ test("the rider phone stays, and the business call line is not in those cards", 
 const follow = loadApp();
 const live = loadFollow();
 
+test("a known invoice shows unpaid before a Square link arrives", function () {
+  const bare = live.bill({ invoiceNo: "000574", pay: "unpaid" });
+  assert.equal(bare.label, "Invoice #000574 \u2013 unpaid");
+  assert.equal(bare.show, true);
+  assert.equal(bare.link, null);
+  const linked = live.bill({ invoiceNo: "000574", pay: "unpaid", payUrl: PAY });
+  assert.equal(linked.link.text, "Pay invoice");
+  assert.equal(linked.link.href, PAY);
+});
+
 test("an in-ride payment changes the authorized share from pay to receipt", async function () {
   const calls = [];
   const mine = ride("ride-a");
   let phase = "UNPAID";
   follow.publish([mine]);
   const before = follow.publish([mine])[0];
-  assert.equal(before.pay, undefined);
+  assert.equal(before.invoiceNo, "000999");
+  assert.equal(before.pay, "paid");
   assert.equal(before.payUrl, undefined);
   assert.equal(before.receiptUrl, undefined);
   assert.equal(before.riderPhone, undefined);
@@ -150,7 +161,8 @@ test("a failed or stale read clears the link instead of keeping it", async funct
     post: function () { return Promise.reject(new Error("square down")); }
   });
   const cleared = follow.publish([mine])[0];
-  assert.equal(cleared.pay, undefined);
+  assert.equal(cleared.invoiceNo, "000999");
+  assert.equal(cleared.pay, "paid");
   assert.equal(cleared.receiptUrl, undefined);
   assert.equal(cleared.payUrl, undefined);
   assert.equal(follow.share({ paid: true, invoiceNo: "000100", receiptUrl: RECEIPT, fetchedAt: Date.now(), square: { invoiceNumber: "000100", status: "PAID", payments: [{ receipt_url: RECEIPT, status: "COMPLETED", refundedCents: 0 }] } }).pay, "paid");
@@ -207,5 +219,6 @@ test("a response that omits the ride drops the receipt it had", async function (
   const pub = follow.publish([mine])[0];
   assert.equal(pub.receiptUrl, undefined);
   assert.equal(pub.payUrl, undefined);
-  assert.equal(pub.pay, undefined);
+  assert.equal(pub.invoiceNo, "000999");
+  assert.equal(pub.pay, "paid");
 });

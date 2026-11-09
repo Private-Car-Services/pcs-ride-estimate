@@ -47,14 +47,14 @@ function loadApp() {
 const bill = loadApp();
 const appSrc = fs.readFileSync(path.join(__dirname, "../app/app.js"), "utf8");
 
-test("000554 and 000574 show the invoice number and do not invent paid or unpaid", function () {
+test("000554 and 000574 show unpaid on the invoice line before a Square read", function () {
   assert.equal(bill.pay(RAHUAL), "");
   assert.equal(bill.bar(RAHUAL), "Invoice #000554");
   assert.equal(bill.pickupLine(RAHUAL), "I\u2019m at the pickup");
-  assert.equal(bill.slot(RAHUAL), " \u00b7 Invoice #000554");
+  assert.equal(bill.slot(RAHUAL), " \u00b7 Invoice #000554 \u2013 unpaid");
   assert.equal(bill.slot(RAHUAL).indexOf("href"), -1);
   assert.equal(bill.pay(CAMARA), "");
-  assert.equal(bill.slot(CAMARA), " \u00b7 Invoice #000574");
+  assert.equal(bill.slot(CAMARA), " \u00b7 Invoice #000574 \u2013 unpaid");
   assert.equal(bill.pickupLine({}), "I\u2019m at the pickup");
   assert.equal(bill.slot({ riderPhone: "9365550100" }), "");
 });
@@ -123,7 +123,8 @@ test("the driver invoice read keeps only the asked ride", function () {
   assert.ok(shown.indexOf("app.squareup.com/pay-invoice/invtmp:example-554") >= 0);
   const stranger = bill.slot({ id: "ride-574", prepaidInvoiceNo: "000574" });
   assert.equal(stranger.indexOf("View receipt"), -1);
-  assert.equal(stranger.indexOf("paid"), -1);
+  assert.equal(stranger.indexOf("\u2013 paid"), -1);
+  assert.ok(stranger.indexOf("\u2013 unpaid") >= 0);
   assert.equal(appSrc.indexOf("rideLineHold(bot)"), -1);
   assert.equal(appSrc.indexOf('id="meter-ride-line"'), -1);
   const riderFn = appSrc.slice(appSrc.indexOf("function schedRiderLineHtml"), appSrc.indexOf("function rideLineRide"));

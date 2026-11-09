@@ -6421,29 +6421,20 @@
     );
   }
 
-  /* Same spot as the old "Questions? Call" business line. A paid or unpaid word and a link
-     come only from a fresh Square read. A known invoice number with no read is the number alone.
-     No number: the line is gone. The rider's own phone is not this line. */
+  /* Same spot as the old "Questions? Call" business line. A known invoice number shows
+     the board's paid or unpaid word (unpaid when the board has no payment word yet).
+     A Square receipt or pay link is added when the board already has one, and a fresh
+     Worker read replaces that with the live receipt or pay page. No number: the line is gone.
+     The rider's own phone is not this line. */
   function questionSlotHtml() {
-    var share = { invoiceNo: "", pay: "", url: "" };
-    try {
-      var ride = typeof currentRide === "function" ? currentRide() : null;
-      if (ride && ride.id && typeof invoiceShareFromWorker === "function") share = invoiceShareFromWorker(verInv[ride.id]);
-    } catch (e) {}
-    if (share.pay && share.url && /^\d{1,20}$/.test(share.invoiceNo)) {
-      return '<p class="fine" id="pcs-question-slot">Invoice #' + esc(share.invoiceNo) + " \u2013 " + share.pay + ' \u00b7 <a id="pcs-question-link" href="' + esc(share.url) + '" target="_blank" rel="noopener">' + (share.pay === "paid" ? "View receipt" : "Pay invoice") + "</a></p>";
-    }
-    var no = "";
-    try {
-      if (state.prepaidInvoice && state.prepaidInvoice.invoiceNo) no = String(state.prepaidInvoice.invoiceNo);
-      else {
-        var row = typeof currentRide === "function" ? currentRide() : null;
-        no = String((row && (row.prepaidInvoiceNo || row.invoiceNo)) || "");
-      }
-    } catch (e2) {}
-    no = no.replace(/^#/, "").replace(/\s+/g, "");
-    if (!/^\d{1,20}$/.test(no)) return "";
-    return '<p class="fine" id="pcs-question-slot">Invoice #' + esc(no) + "</p>";
+    var ride = null;
+    try { ride = typeof currentRide === "function" ? currentRide() : null; } catch (e) { ride = null; }
+    if (!ride && state.prepaidInvoice && state.prepaidInvoice.invoiceNo) ride = { prepaidInvoiceNo: state.prepaidInvoice.invoiceNo };
+    var slot = "";
+    try { slot = rideInvoiceSlotHtml(ride || {}, null); } catch (e2) { slot = ""; }
+    slot = String(slot || "").replace(/^\s*·\s*/, "");
+    if (!slot) return "";
+    return '<p class="fine" id="pcs-question-slot">' + slot + "</p>";
   }
   function cardNeededHtml() {
     var requested = String(state.cardStatus || "") === "link_requested";
@@ -9910,8 +9901,9 @@
     return s;
   }
   /* Invoice text for a caller that already has a place to put it. The rider line keeps the rider phone.
-     Full "Invoice # – paid/unpaid" plus a link only when both the verified word and a Square URL exist.
-     Partial, refund, or a missing URL keeps the number only. */
+     A fresh Worker Square read supplies the receipt or pay link. Otherwise the board's own
+     sqInvoice or payState is shown, and a known number with no payment word is unpaid.
+     A Square link is used only when the board already has one. Partial or refund stays number-only. */
   function rideLivePay(r, M) {
     var live = null;
     try {
@@ -9927,11 +9919,9 @@
   function rideInvoiceSlotHtml(r, M) {
     r = r || {};
     var held = r.id && typeof verInv !== "undefined" ? verInv[r.id] : null;
-    if (held) {
+    if (held && !held.stale) {
       var share = invoiceShareFromWorker(held);
       if (share.pay && share.url) return " \u00b7 Invoice #" + esc(share.invoiceNo) + " \u2013 " + share.pay + " \u00b7 <a id=\"sched-inv-link\" href=\"" + esc(share.url) + "\" target=\"_blank\" rel=\"noopener\">" + (share.pay === "paid" ? "View receipt" : "Pay invoice") + "</a>";
-      var heldNo = String(held.invoiceNo || "").replace(/^#/, "").replace(/\s+/g, "");
-      return /^\d{1,20}$/.test(heldNo) && !held.stale ? " \u00b7 Invoice #" + esc(heldNo) : "";
     }
     var live = rideLivePay(r, M);
     if (live) return " \u00b7 Invoice #" + esc(live.invoiceNo) + " \u2013 " + live.pay + " \u00b7 <a id=\"sched-inv-link\" href=\"" + esc(live.url) + "\" target=\"_blank\" rel=\"noopener\">" + esc(live.link) + "</a>";
@@ -9939,14 +9929,15 @@
     if (!no) return "";
     var q = r.sqInvoice && typeof r.sqInvoice === "object" ? r.sqInvoice : null;
     var st = String((q && q.status) || r.invoiceStatus || "").toUpperCase();
-    if (/PARTIAL|REFUND|CANCEL/.test(st) || (q && isFinite(+q.amountDueCents) && +q.amountDueCents > 0)) return " \u00b7 Invoice #" + esc(no);
+    if (/PARTIAL|REFUND|CANCEL/.test(st) || (q && isFinite(+q.amountDueCents) && +q.amountDueCents > 0 && String(q.status || "").toUpperCase() !== "PAID")) return " \u00b7 Invoice #" + esc(no);
     var w = "";
     try { w = ridePayWord(r, M); } catch (e) { w = ""; }
+    if (w !== "paid" && w !== "unpaid") w = "unpaid";
     var receipt = rideSquareHttps(r.receiptUrl || (q && (q.receipt_url || q.receiptUrl)) || "");
     var pay = rideSquareHttps(r.invoicePayUrl || r.payUrl || (q && (q.public_url || q.publicUrl || q.payUrl)) || "");
     if (w === "paid" && receipt) return " \u00b7 Invoice #" + esc(no) + " \u2013 paid \u00b7 <a id=\"sched-inv-link\" href=\"" + esc(receipt) + "\" target=\"_blank\" rel=\"noopener\">View receipt</a>";
     if (w === "unpaid" && pay) return " \u00b7 Invoice #" + esc(no) + " \u2013 unpaid \u00b7 <a id=\"sched-inv-link\" href=\"" + esc(pay) + "\" target=\"_blank\" rel=\"noopener\">Pay invoice</a>";
-    return " \u00b7 Invoice #" + esc(no);
+    return " \u00b7 Invoice #" + esc(no) + " \u2013 " + w;
   }
   /* A live Square read, not a saved prepaid flag. Paid uses the completed payment receipt. Unpaid uses the invoice pay page.
      A pay-page URL is never treated as a receipt. Partial, refund, or no URL returns no link. */
@@ -10698,7 +10689,9 @@
   function schedRiderLineHtml(r) {
     r = r || {};
     var phone = r.riderPhone ? " \u00b7 <a href=\"tel:" + esc(r.riderPhone) + "\" style=\"color:#0b3d23;font-weight:700\">" + esc(r.riderPhone) + "</a>" : "";
-    return "<p id=\"sched-rider-line\" class=\"pcs-ride-line\" style=\"margin:0;min-height:44px;box-sizing:border-box;padding:8px 10px;background:#fff;color:#1a1a1a;border-radius:10px;font-size:16px;font-weight:700;line-height:1.35;white-space:normal;overflow:visible\"><strong style=\"" + SCHED_LBL + "\">Rider:</strong> " + esc(r.rider || "\u2014") + phone + "</p>";
+    var slot = "";
+    try { slot = rideInvoiceSlotHtml(r, null); } catch (e) { slot = ""; }
+    return "<p id=\"sched-rider-line\" class=\"pcs-ride-line\" style=\"margin:0;min-height:44px;box-sizing:border-box;padding:8px 10px;background:#fff;color:#1a1a1a;border-radius:10px;font-size:16px;font-weight:700;line-height:1.35;white-space:normal;overflow:visible\"><strong style=\"" + SCHED_LBL + "\">Rider:</strong> " + esc(r.rider || "\u2014") + phone + slot + "</p>";
   }
   function rideLineRide() {
     var M = state.meter;
@@ -11368,7 +11361,7 @@
     var base = { driverName: acc.name || state.driverName || "", car: acc, cardKey: folCardKey(), photo: folProfilePhoto() }; /* this driver's jpeg only; card key still displays first */
     (state.scheduledRides || []).forEach(function (r) {
       if (!r || !r.id || folMyId(r) !== me || !FOL_KEY_RE.test("c_" + r.id)) return;
-      var st = r.status === "cancelled" || r.status === "deleted" ? "cancelled" : r.status === "completed" ? "completed" : "assigned";
+      var st = r.status === "cancelled" || r.status === "canceled" || r.status === "deleted" ? "cancelled" : r.status === "completed" ? "completed" : "assigned";
       var onMeter = !!(M && M.schedId === r.id);
       if (onMeter) st = M.status === "running" ? "picked_up" : "completed";
       else if (trip && trip.id === r.id && st === "assigned") st = trip.phase === "arrived" ? "arrived" : "on_way";
@@ -11386,6 +11379,16 @@
         if (meterRoute && meterRoute.line) route = meterRoute.line;
       }
       var share = invoiceShareFromWorker(verInv[r.id]);
+      if (!(share.pay && share.invoiceNo) && st !== "cancelled") {
+        var boardNo = "";
+        try { boardNo = String(rideInvoiceNoFrom(r, onMeter ? M : null) || "").replace(/^#/, "").replace(/\s+/g, ""); } catch (eInv) { boardNo = ""; }
+        if (/^\d{1,20}$/.test(boardNo)) {
+          var boardPay = "";
+          try { boardPay = ridePayWord(r, onMeter ? M : null); } catch (ePay) { boardPay = ""; }
+          if (boardPay !== "paid" && boardPay !== "unpaid") boardPay = "unpaid";
+          share = { invoiceNo: boardNo, pay: boardPay, url: boardPay === "paid" ? rideSquareHttps(r.receiptUrl || "") : rideSquareHttps(rideCustomerPayUrl(r)) };
+        }
+      }
       out.push(Object.assign({ key: "c_" + r.id, kind: "sched", bill: rideBillKind(r, onMeter ? M : null), pay: share.pay, invoiceNo: share.invoiceNo, receiptUrl: share.pay === "paid" ? share.url : "", payUrl: share.pay === "unpaid" ? share.url : "", status: st, phone: r.riderPhone, pickup: pickup, dest: dest, stops: stops, eta: eta, route: route, pos: here }, base));
     });
     var code = state.screen === "trip" ? String(state.driverCode || readDriverCode() || "") : "";
