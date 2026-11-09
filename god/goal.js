@@ -170,7 +170,8 @@
      inputmode="none" does not stop iPad Safari from opening the full alphabet keyboard on a focused text or PIN box.
      v2.0m-ah: the ledger PIN and the ride and tip totals stay read-only and always use this pad, even if "Use iPad keyboard" was saved.
      v2.0m-an: the same pad holds every typed fuel box (starting odometer, price, current odometer, gallons).
-     v2.0m-ao: those boxes stay above the open pad, and a typed zero price stays 0.00. */
+     v2.0m-ao: those boxes stay above the open pad, and a typed zero price stays 0.00.
+     v2.0m-ap: each saved fill stays in the list, with miles, tank, mpg, price per gallon, total, and price per mile. */
   var KP_KEY = "pcsGoalSysKb", kpEl = null, kpCur = null;
   function kpOn() { try { return localStorage.getItem(KP_KEY) !== "1"; } catch (e) { return true; } }
   function kpHold(el) { var id = el && el.id; return id === "gl-pin" || id === "gl-pin1" || id === "gl-pin2" || id === "gl-q-amt" || id === "gl-q-tip" || id === "gl-fuel-odo" || id === "gl-fuel-price" || id === "gl-fuel-gal"; }
@@ -561,8 +562,13 @@
     return { ok: true, prev: prev, odo: odo, gallons: gallons, price: price, miles: miles, mpg: mpg, tank: mpg * 22, ppm: miles ? price / miles : null };
   }
   function fuelFmt(m) {
-    if (!m || !m.ok) return { miles: "", mpg: "", tank: "", ppm: "" };
-    return { miles: String(m.miles), mpg: m.mpg.toFixed(2), tank: m.tank.toFixed(2), ppm: "$" + m.ppm.toFixed(2) };
+    if (!m || !m.ok) return { miles: "", mpg: "", tank: "", ppm: "", ppg: "" };
+    var ppg = m.gallons > 0 ? m.price / m.gallons : NaN;
+    return { miles: String(m.miles), mpg: m.mpg.toFixed(2), tank: m.tank.toFixed(2), ppm: "$" + m.ppm.toFixed(2), ppg: isFinite(ppg) ? "$" + ppg.toFixed(3) : "" };
+  }
+  function fuelHist(r) {
+    var f = fuelFmt(fuelMath(r.prev, r.odo, r.gallons, r.price));
+    return esc(r.date + " " + r.time) + " · odo " + r.odo + " · " + Number(r.gallons).toFixed(3) + " gal · " + f.miles + " mi · " + f.tank + " mi/tank · " + f.mpg + " mpg · " + f.ppg + "/gal · $" + Number(r.price).toFixed(2) + " total · " + f.ppm + "/mi";
   }
   function fuelHtml() {
     if (!fuelForMatthew()) return "";
@@ -577,7 +583,7 @@
       '<label class="fine">Gallons <input id="gl-fuel-gal" data-fuel="gal" type="text" inputmode="decimal" autocomplete="off" aria-label="Gallons" placeholder="0.000" style="' + box + ';width:120px"></label> ' +
       '<button type="button" class="btn" id="gl-fuel-save">Save fill</button><p class="fine" id="gl-fuel-msg"></p>' +
       '<p id="gl-fuel-out">Miles <b id="gl-fuel-miles">' + shown.miles + '</b> · MPG <b id="gl-fuel-mpg">' + shown.mpg + '</b> · Miles per tank <b id="gl-fuel-tank">' + shown.tank + '</b> · Price per mile <b id="gl-fuel-ppm">' + shown.ppm + "</b></p>" +
-      (rows.length ? "<ul>" + rows.slice(-8).reverse().map(function (r) { var f = fuelFmt(fuelMath(r.prev, r.odo, r.gallons, r.price)); return "<li>" + esc(r.date + " " + r.time) + " · $" + Number(r.price).toFixed(2) + " · odo " + r.odo + " · " + Number(r.gallons).toFixed(3) + " gal · " + f.miles + " mi · " + f.mpg + " mpg</li>"; }).join("") + "</ul>" : "") +
+      (rows.length ? '<ul id="gl-fuel-log">' + rows.slice().reverse().map(function (r) { return "<li>" + fuelHist(r) + "</li>"; }).join("") + "</ul>" : "") +
       "</section>";
   }
   function fuelPreview() {
@@ -597,8 +603,11 @@
     var msg = document.getElementById("gl-fuel-msg"), prev = fuelPrevOdo(D.fuel || {});
     var m = fuelMath(prev, document.getElementById("gl-fuel-odo").value, document.getElementById("gl-fuel-gal").value, document.getElementById("gl-fuel-price").value);
     if (!m.ok) { if (msg) msg.textContent = "Current odometer has to be above the previous one, with gallons and a price."; return; }
-    var at = Date.now(), when = fuelWhen(at);
-    D.fuel = D.fuel || {}; D.fuel["log_" + at] = { at: at, date: when.date, time: when.time, prev: m.prev, odo: m.odo, gallons: m.gallons, price: m.price };
+    D.fuel = D.fuel || {};
+    var at = Date.now();
+    while (D.fuel["log_" + at]) at += 1;
+    var when = fuelWhen(at);
+    D.fuel["log_" + at] = { at: at, date: when.date, time: when.time, prev: m.prev, odo: m.odo, gallons: m.gallons, price: m.price };
     save(); paint();
   }
   if (typeof window !== "undefined") window.__pcsGoalFuel = { math: fuelMath, fmt: fuelFmt, when: fuelWhen, prev: fuelPrevOdo, rows: fuelRows, owner: fuelForMatthew };

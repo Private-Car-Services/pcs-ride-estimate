@@ -188,15 +188,15 @@ test("a PIN tap types one digit and does not double it", function () {
   assert.equal(input.value, "1234");
 });
 
-test("v2.0m-ao is what a phone on v2.0m-ai is offered", function () {
+test("v2.0m-ap is what a phone on v2.0m-ai is offered", function () {
   const { sandbox } = loadGoal();
   const version = fs.readFileSync(path.join(__dirname, "../app/version.js"), "utf8");
-  assert.ok(version.indexOf('var APP_VERSION = "v2.0m-ao"') >= 0);
+  assert.ok(version.indexOf('var APP_VERSION = "v2.0m-ap"') >= 0);
   const pages = {
-    "app/driver/index.html": "version.js?v=2.0m-ao",
-    "app/index.html": "version.js?v=2.0m-ao",
-    "god/index.html": "goal.js?v=2.0m-ao",
-    "meter/index.html": "version.js?v=2.0m-ao"
+    "app/driver/index.html": "version.js?v=2.0m-ap",
+    "app/index.html": "version.js?v=2.0m-ap",
+    "god/index.html": "goal.js?v=2.0m-ap",
+    "meter/index.html": "version.js?v=2.0m-ap"
   };
   Object.keys(pages).forEach(function (rel) {
     const html = fs.readFileSync(path.join(__dirname, "..", rel), "utf8");
@@ -576,12 +576,58 @@ test("every typed fuel box uses the nine-key pad after the iPad keyboard was sav
   assert.equal(gal2.value, "1.000");
   doc.getElementById("gl-fuel-save").onclick();
   const zeroRows = Object.keys(sandbox.module.exports._get().fuel).filter(function (k) { return k.indexOf("log_") === 0; }).map(function (k) { return sandbox.module.exports._get().fuel[k]; });
+  const kept = zeroRows.filter(function (r) { return r.odo === 100379; })[0];
   const zero = zeroRows.filter(function (r) { return r.odo === 100400; })[0];
+  assert.equal(zeroRows.length, 2);
+  assert.ok(kept);
+  assert.equal(kept.gallons, 18.157);
+  assert.equal(kept.price, 40.5);
+  assert.equal(kept.prev, 100000);
   assert.ok(zero);
+  assert.equal(zero.prev, 100379);
   assert.equal(zero.price, 0);
   assert.equal(zero.gallons, 1);
+  const later = Date.parse("2027-01-15T18:40:00Z");
+  const laterWhen = sandbox.__pcsGoalFuel.when(later);
+  sandbox.Date.now = function () { return later; };
+  doc.getElementById("gl-fuel-price").value = "30.00";
+  doc.getElementById("gl-fuel-odo").value = "100510";
+  doc.getElementById("gl-fuel-gal").value = "8.500";
+  doc.getElementById("gl-fuel-save").onclick();
+  const all = Object.keys(sandbox.module.exports._get().fuel).filter(function (k) { return k.indexOf("log_") === 0; }).map(function (k) { return sandbox.module.exports._get().fuel[k]; });
+  assert.equal(all.length, 3);
+  assert.equal(all.filter(function (r) { return r.odo === 100379; })[0].gallons, 18.157);
+  const third = all.filter(function (r) { return r.odo === 100510; })[0];
+  assert.equal(third.prev, 100400);
+  assert.equal(third.date, laterWhen.date);
+  assert.notEqual(third.date, kept.date);
+  assert.equal(third.gallons, 8.5);
+  assert.equal(third.price, 30);
   sandbox.module.exports.paint();
-  assert.ok(doc.getElementById("gl-app")._html.indexOf(">100400<") >= 0);
+  const hist = doc.getElementById("gl-app")._html;
+  assert.ok(hist.indexOf('id="gl-fuel-log"') >= 0);
+  function row(odo) {
+    const hit = hist.split("<li>").filter(function (p) { return p.indexOf("odo " + odo + " ") >= 0; });
+    assert.equal(hit.length, 1, String(odo));
+    return hit[0];
+  }
+  const morning = row(100379);
+  const noon = row(100400);
+  const next = row(100510);
+  assert.ok(morning.indexOf("18.157 gal") >= 0);
+  assert.ok(morning.indexOf((mpg * 22).toFixed(2) + " mi/tank") >= 0);
+  assert.ok(morning.indexOf(mpg.toFixed(2) + " mpg") >= 0);
+  assert.ok(morning.indexOf("$" + (40.5 / 18.157).toFixed(3) + "/gal") >= 0);
+  assert.ok(morning.indexOf("$40.50 total") >= 0);
+  assert.ok(morning.indexOf("$" + (40.5 / 379).toFixed(2) + "/mi") >= 0);
+  assert.ok(noon.indexOf("1.000 gal") >= 0);
+  assert.ok(noon.indexOf("$0.00 total") >= 0);
+  assert.ok(noon.indexOf("$0.000/gal") >= 0);
+  assert.ok(next.indexOf(laterWhen.date) >= 0);
+  assert.ok(next.indexOf("8.500 gal") >= 0);
+  assert.ok(next.indexOf("$30.00 total") >= 0);
+  assert.ok(next.indexOf(" mi/tank") >= 0);
+  assert.equal(sandbox.module.exports._get().fuel && Object.keys(sandbox.module.exports._get().fuel).filter(function (k) { return k.indexOf("log_") === 0; }).length, 3);
   assert.equal(year.getAttribute("data-kp"), "d");
   assert.notEqual(year.readOnly, true);
 });
