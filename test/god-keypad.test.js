@@ -216,15 +216,15 @@ test("a PIN tap types one digit and does not double it", function () {
   assert.equal(input.value, "1234");
 });
 
-test("v2.0m-at is what a phone on v2.0m-ai is offered", function () {
+test("v2.0m-au is what a phone on v2.0m-ai is offered", function () {
   const { sandbox } = loadGoal();
   const version = fs.readFileSync(path.join(__dirname, "../app/version.js"), "utf8");
-  assert.ok(version.indexOf('var APP_VERSION = "v2.0m-at"') >= 0);
+  assert.ok(version.indexOf('var APP_VERSION = "v2.0m-au"') >= 0);
   const pages = {
-    "app/driver/index.html": "version.js?v=2.0m-at",
-    "app/index.html": "version.js?v=2.0m-at",
-    "god/index.html": "goal.js?v=2.0m-at",
-    "meter/index.html": "version.js?v=2.0m-at"
+    "app/driver/index.html": "version.js?v=2.0m-au",
+    "app/index.html": "version.js?v=2.0m-au",
+    "god/index.html": "goal.js?v=2.0m-au",
+    "meter/index.html": "version.js?v=2.0m-au"
   };
   Object.keys(pages).forEach(function (rel) {
     const html = fs.readFileSync(path.join(__dirname, "..", rel), "utf8");
@@ -658,4 +658,66 @@ test("every typed fuel box uses the nine-key pad after the iPad keyboard was sav
   assert.equal(sandbox.module.exports._get().fuel && Object.keys(sandbox.module.exports._get().fuel).filter(function (k) { return k.indexOf("log_") === 0; }).length, 3);
   assert.equal(year.getAttribute("data-kp"), "d");
   assert.notEqual(year.readOnly, true);
+});
+
+test("daily total note closes the ride pad, and amount or tip blurs the note", function () {
+  const { sandbox, doc } = loadGoal();
+  sandbox.__pcsGoalOpen();
+  const ov = doc.getElementById("gl-screen");
+  function field(id, mode, label) {
+    const el = doc.createElement("input");
+    el.id = id;
+    el.type = "text";
+    if (mode) el.setAttribute("inputmode", mode);
+    if (label) el.setAttribute("aria-label", label);
+    ov.appendChild(el);
+    return el;
+  }
+  const ride = field("gl-q-amt", "decimal", "Ride amount");
+  const tip = field("gl-q-tip", "decimal", "Tip (optional)");
+  const note = field("gl-q-note", "", "Note (optional)");
+  sandbox.__pcsNumPad(ov);
+  assert.equal(note.getAttribute("data-kp"), null);
+  assert.notEqual(note.readOnly, true);
+  assert.equal(ride.readOnly, true);
+  assert.equal(tip.readOnly, true);
+  assert.equal(ride.getAttribute("inputmode"), "none");
+  assert.equal(tip.getAttribute("inputmode"), "none");
+  note.blur = function () { note._blurred = (note._blurred || 0) + 1; if (doc.activeElement === note) doc.activeElement = doc.body; };
+  ride.blur = function () { ride._blurred = (ride._blurred || 0) + 1; if (doc.activeElement === ride) doc.activeElement = doc.body; };
+  tip.blur = function () { tip._blurred = (tip._blurred || 0) + 1; if (doc.activeElement === tip) doc.activeElement = doc.body; };
+  function label() { const lb = doc.getElementById("gl-kp-lbl"); return lb ? lb.textContent : ""; }
+  function pad() { return doc.getElementById("gl-kp"); }
+  webkitTap(ov, ride);
+  press(pad(), "1", "up");
+  assert.equal(ride.value, "0.01");
+  assert.equal(pad().style.display, "block");
+  assert.equal(label(), "Ride amount");
+  doc.activeElement = note;
+  webkitTap(ov, tip);
+  assert.equal(pad().style.display, "block");
+  assert.equal(label(), "Tip (optional)");
+  assert.ok(note._blurred >= 1);
+  assert.notEqual(doc.activeElement, note);
+  assert.equal(tip.readOnly, true);
+  assert.equal(tip.getAttribute("inputmode"), "none");
+  doc.activeElement = note;
+  note.focus();
+  assert.equal(pad().style.display, "none");
+  assert.equal(note._focusCalls || 0, 1);
+  assert.equal(doc.activeElement, note);
+  doc.activeElement = note;
+  webkitTap(ov, ride);
+  assert.equal(pad().style.display, "block");
+  assert.equal(label(), "Ride amount");
+  assert.ok(note._blurred >= 2);
+  assert.notEqual(doc.activeElement, note);
+  assert.equal(ride.getAttribute("inputmode"), "none");
+  press(pad(), "done", "up");
+  assert.equal(pad().style.display, "none");
+  (ov._l.focusin || []).forEach(function (fn) { fn({ target: ride }); });
+  assert.equal(pad().style.display, "none");
+  webkitTap(ov, ride);
+  assert.equal(pad().style.display, "block");
+  assert.equal(label(), "Ride amount");
 });
