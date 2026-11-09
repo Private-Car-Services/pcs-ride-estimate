@@ -1622,7 +1622,7 @@
     var red = function (t) { return '<strong style="background:#b91c1c;color:#fff;padding:2px 6px;border-radius:6px">' + t + "</strong>"; };
     return (h.fare ? red("Fare over the limit: " + esc(fmtCents(h.fare)) + " held (no Square charge/invoice on file)") + btn("fare", h.fare, "Approve hold") + "<br>" : "") +
       (h.toll ? red("Tolls over $50: " + esc(fmtCents(h.toll)) + " held") + btn("toll", h.toll, "Approve hold") + "<br>" : "") +
-      (h.collect ? red("No proof PCS was paid (no Square charge or invoice on file): counted as cash the driver owes") + btn("pcs_collected", 0, "Approve: PCS was paid (card / Zelle / check)") + "<br>" : "") +
+      (e.payUnknown ? red("Payment not confirmed (no Square payment, paid invoice, or QR charge, and not recorded as cash). Left as-is. Not counted either way.") + btn("pcs_collected", 0, "Approve: PCS was paid (card / Zelle / check)") + "<br>" : "") +
       (h.driver ? red("Square charge on file, but the driver isn't confirmed yet: counted as cash owed") + ' <button type="button" class="btn-chg-driver" data-chg-key="' + esc(key) + '" style="background:#2e7d32;color:#fff;border:0;border-radius:10px;font-weight:800;font-size:16px;min-height:44px;padding:6px 14px">Confirm driver</button><br>' : "") +
       (h.dup ? red("Same Square charge as another ride (" + esc(String(e.dupSuspect || "")) + "): counted as cash owed until checked") + "<br>" : "");
   }
@@ -8566,6 +8566,18 @@
     var pm = String(e.payMethod || "").toLowerCase();
     return pm === "card_failed" || String(e.paymentStatus || "").toLowerCase() === "failed";
   }
+  /* Square invoice marked paid, or a meter QR / card charge with a Square payment. An unpaid or unverified record is not this. */
+  function pcsCardProof(e) {
+    if (!e) return false;
+    var via = String(e.paidVia || "").toLowerCase();
+    var ps = String(e.paymentStatus || "").toLowerCase();
+    var inv = String(e.invoiceStatus || "").toUpperCase();
+    if (e.squarePaymentId) return true;
+    if (ps === "charged" || ps === "paid_square" || via === "square_link") return true;
+    if (inv === "PAID") return true;
+    if ((via === "square_invoice" || via === "square") && ps === "paid_other") return true;
+    return false;
+  }
   function isCashEntry(e) {
     if (!e) return false;
     if (typeof Symbol === "function" && typeof e[Symbol.for("pcsAsCash")] === "boolean") return e[Symbol.for("pcsAsCash")]; /* r6: normalizer's Worker-checked answer */
@@ -8655,12 +8667,12 @@
       if (Math.abs(appCom - com) > 1) e.commissionAdjusted = { app: appCom, now: com }; else delete e.commissionAdjusted;
       e.commissionCents = com; e.commissionPct = pct; e.pctSource = src; e.fareSource = fareSrc === "invoice" ? "square_invoice" : fareSrc;
       if (fareSrc === "logged" || fareSrc === "estimate") e.fareUnverified = true; else delete e.fareUnverified;
-      /* PCS-collected only with proof (r7, fail closed): a Worker charge record for this driver, a Worker-verified invoice, or
-         God's "pcs_collected" approval (Zelle / check / card / other paid to PCS; legacy "card" approval counts). Cash rides stay
-         cash; everything else (blank, unknown words, "square_invoice" without the Worker record) = cash owed + red hold. */
+      /* PCS-collected with proof: a Worker charge, a Worker-verified invoice, God's approval, or the ride's own
+         Square/QR record (paid Square invoice, or a completed meter card payment). Cash the driver collected stays cash.
+         Anything else is unknown: it is not rewritten and it is not counted as the driver owing PCS. */
       var asCash = isCashEntry(o);
-      var proof = !!chg || e[INV] != null || ok("pcs_collected") != null || ok("card") != null;
-      if (!asCash && !proof) { asCash = true; holds.collect = true; }
+      var proof = !!chg || e[INV] != null || ok("pcs_collected") != null || ok("card") != null || pcsCardProof(o);
+      if (!asCash && !proof) e.payUnknown = true; else delete e.payUnknown;
       if (holds.dup) asCash = true;
       e[ASCASH] = asCash;
       if (asCash) {
@@ -8678,6 +8690,7 @@
     (entries || []).forEach(function (e) {
       if (e && (e.isTest === true || e.testRide === true || (String(e.paidVia || "") === "test" || String(e.paidVia || "") === "comparison" || e.comparisonRide === true) || e.testKind)) return; /* v76d: test rides count for nothing (same as isTestRide) */
       payNormalize(e);
+      if (e.payUnknown) { out.unknown = (out.unknown || 0) + 1; return; }
       /* v72s: cash tips are the driver's own money (100% kept, not part of the 30% owed, not fare): record only */
       if (isCashEntry(e)) { out.owedByDriver += cashDriverOwesCents(e); out.cashRides += 1; out.cashTips += Number(e.tipCents) || 0; }
       else out.owedToDriver += (Number(e.commissionCents) || 0) + (Number(e.tipCents) || 0) + tollReimbCents(e); /* v76b: + tolls paid back */
@@ -8688,6 +8701,7 @@
     out.net = out.owedToDriver - out.owedByDriver;
     return out;
   }
+  if (typeof window !== "undefined") window.__pcsPayBalance = { balance: payBalance, cardProof: pcsCardProof, cash: isCashEntry };
   function payNetText(b) {
     if (b && b.loading) return "Loading ride % and payment records… (payout shows when they are loaded)"; /* r5/r6 */
     return b.net >= 0 ? "PCS owes driver " + fmtCents(b.net) : "Driver owes PCS " + fmtCents(-b.net);
