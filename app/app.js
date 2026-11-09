@@ -3338,8 +3338,40 @@
   }
   /* v72v (Matthew): the server is the source of truth for whether a shift is open. If this phone still has a shift open
      but the server row says that shift was closed (logout on another device), the local open shift is discarded. */
+  /* v2.0m-ay: last server miles row, so a later local save cannot put an owner correction back. */
+  var milesSnap = {}, dutyHistFresh = false;
+  function dutyOfflineNow() { try { return hosOffline(Date.now()); } catch (e) { return []; } }
+  function rememberMilesSnap(day, row) { if (day && row && typeof row === "object") milesSnap[day] = row; }
+  function noteAdoptedShiftStart(before, after) {
+    if (!after || !(Number(after.shiftStartAt) > Number(before && before.shiftStartAt))) return;
+    try {
+      var sh = readShift();
+      if (sh && Number(sh.shiftStartedAt) === Number(before.shiftStartAt)) { sh.shiftStartedAt = Number(after.shiftStartAt); writeShift(sh); }
+    } catch (e) {}
+  }
+  function adoptLocalMiles(loc, srv) {
+    var DL = window.PCSDriverLog;
+    if (!DL || !DL.adoptDutyRow || !loc || !srv) return loc;
+    var next = DL.adoptDutyRow(loc, srv, dutyOfflineNow());
+    if (next !== loc) noteAdoptedShiftStart(loc, next);
+    return next;
+  }
+  function dutyHistReady() { return dutyHistFresh; }
+  function reapplyDutySnap() {
+    var map = readMilesLocal(), changed = false;
+    Object.keys(milesSnap).forEach(function (d) {
+      var loc = map[d]; if (!loc || typeof loc !== "object") return;
+      var next = adoptLocalMiles(loc, milesSnap[d]);
+      if (next !== loc) { map[d] = next; changed = true; }
+    });
+    if (!changed) return false;
+    writeMilesLocal(map);
+    try { var row = todayMilesRow(); if (row) state.milesToday = Number(row.gpsMiles) || 0; } catch (e) {}
+    return true;
+  }
   function serverClosedLocalShift(loc, srv) {
     if (!loc || !srv || !shiftOpen(loc)) return false;
+    if (shiftOpen(srv)) return false; /* v2.0m-ay: an owner split leaves this day open on the later shiftStartAt */
     var ls = Number(loc.shiftStartAt) || 0;
     if (!ls) return false;
     var sh = srv.shifts && typeof srv.shifts === "object" ? srv.shifts : {};
@@ -3361,10 +3393,15 @@
         var d = days[i];
         if (!row || typeof row !== "object") return;
         var loc = map[d];
+        rememberMilesSnap(d, row);
         try { noteServerOdometer(row); } catch (e) {} /* v2.0m-n */
         if (loc && odoFieldsServerWins(loc, row).odoFromServer) changed = true; /* v2.0m-n: server odometer wins */
-        if (!loc || (Number(row.lastUpdate) || 0) > (Number(loc.lastUpdate) || 0) + 1000) { map[d] = row; changed = true; }
+        if (!loc || (Number(row.lastUpdate) || 0) > (Number(loc.lastUpdate) || 0) + 1000) {
+          if (loc) noteAdoptedShiftStart(loc, row);
+          map[d] = row; changed = true;
+        }
         else if (serverClosedLocalShift(loc, row)) { map[d] = row; changed = true; state.shiftClosedElsewhere = true; } /* v72v: logged out on another device */
+        else { var next = adoptLocalMiles(loc, row); if (next !== loc) { map[d] = next; changed = true; } } /* v2.0m-ay: keep an owner split / removed gap fill without closing the open shift */
       });
       if (changed) writeMilesLocal(map);
       return changed;
@@ -3431,31 +3468,46 @@
       return Promise.resolve();
     }
     var day = dayKey || milesDay(); /* v72r: the shift's start day, not the calendar day */
-    var map = readMilesLocal();
-    map[day] = row;
-    writeMilesLocal(map);
-    state.milesToday = Number(row.gpsMiles) || 0;
-    state.milesStartOdo = row.startOdometer != null ? Number(row.startOdometer) : null;
-    if (!syncOn()) return Promise.resolve();
-    /* v72w (Matthew 4:49 AM): a whole-row PUT from a stale phone wiped server-side shift edits (closed / hosExcluded shifts).
-       PATCH field by field instead, so shifts and flags this phone doesn't know about stay on the server. */
-    var patch = {};
-    Object.keys(row).forEach(function (k) {
-      var v = row[k];
-      if (k === "shifts" && v && typeof v === "object") {
-        Object.keys(v).forEach(function (sk) { var x = v[sk]; if (x && typeof x === "object") Object.keys(x).forEach(function (f) { if (x[f] !== undefined) patch["shifts/" + sk + "/" + f] = x[f]; }); });
-      } else if (v !== undefined) patch[k] = v;
-    });
-    /* closing fields this phone dropped (a reopened shift) must be cleared on the server too, like the old whole-row PUT did */
-    ["endOdometer", "staleClosedAt", "closedAt", "skippedEnd"].forEach(function (k) { if (row[k] === undefined || row[k] === null) patch[k] = null; });
-    return authFetch(milesUrl(driverPresenceId(), day), {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(patch)
-    }).then(function (res) {
-      if (!res.ok) throw new Error("miles");
-      return res.text().then(function () {});
-    }).catch(function () {});
+    var send = function (snap) {
+      if (snap) {
+        var next = adoptLocalMiles(row, snap);
+        if (next !== row) ["shiftStartAt", "onlineMs", "gapFills", "gpsMiles", "filledMiles", "shifts"].forEach(function (k) { if (next[k] !== undefined) row[k] = next[k]; });
+      }
+      var map = readMilesLocal();
+      map[day] = row;
+      writeMilesLocal(map);
+      state.milesToday = Number(row.gpsMiles) || 0;
+      state.milesStartOdo = row.startOdometer != null ? Number(row.startOdometer) : null;
+      if (!syncOn()) return Promise.resolve();
+      /* v72w (Matthew 4:49 AM): a whole-row PUT from a stale phone wiped server-side shift edits (closed / hosExcluded shifts).
+         PATCH field by field instead, so shifts and flags this phone doesn't know about stay on the server.
+         v2.0m-ay: that PATCH was also putting a stale shiftStartAt, onlineMs, and a removed gap fill back over an owner correction. */
+      var patch = {};
+      Object.keys(row).forEach(function (k) {
+        var v = row[k];
+        if (k === "shifts" && v && typeof v === "object") {
+          Object.keys(v).forEach(function (sk) { var x = v[sk]; if (x && typeof x === "object") Object.keys(x).forEach(function (f) { if (x[f] !== undefined) patch["shifts/" + sk + "/" + f] = x[f]; }); });
+        } else if (v !== undefined) patch[k] = v;
+      });
+      /* closing fields this phone dropped (a reopened shift) must be cleared on the server too, like the old whole-row PUT did */
+      ["endOdometer", "staleClosedAt", "closedAt", "skippedEnd"].forEach(function (k) { if (row[k] === undefined || row[k] === null) patch[k] = null; });
+      try { if (window.PCSDriverLog && window.PCSDriverLog.guardDutyPatch) window.PCSDriverLog.guardDutyPatch(patch, row, snap, dutyOfflineNow()); } catch (eG) {}
+      if (snap && !dutyHistReady() && Number(row.gpsMiles) > Number(snap.gpsMiles) + 0.001) { delete patch.gpsMiles; delete patch.filledMiles; delete patch.gapFills; }
+      return authFetch(milesUrl(driverPresenceId(), day), {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(patch)
+      }).then(function (res) {
+        if (!res.ok) throw new Error("miles");
+        return res.text().then(function () {});
+      }).catch(function () {});
+    };
+    if (milesSnap[day]) return send(milesSnap[day]);
+    if (!syncOn()) return send(null);
+    return authFetch(milesUrl(driverPresenceId(), day)).then(function (r) { return r.ok ? r.json() : null; }).then(function (snap) {
+      if (snap && typeof snap === "object") rememberMilesSnap(day, snap);
+      return send(snap);
+    }).catch(function () { return send(null); });
   }
 
   function shiftClosed(row) {
@@ -3677,6 +3729,7 @@
       state.milesGapRejected = { at: now, mi: round2(dist), mph: hours > 0 ? Math.round(dist / hours) : null };
       return;
     }
+    try { if (window.PCSDriverLog && window.PCSDriverLog.fillHitsOffline && window.PCSDriverLog.fillHitsOffline({ from: fromAt, at: now }, dutyOfflineNow())) return; } catch (eOff) {} /* v2.0m-ay: do not refill miles across a recorded Offline interval */
     var est = round2(Math.min(dist * GAP_ROAD_FACTOR, GAP_FILL_MAX_MPH * hours));
     /* v72x (10:36 PM ghost shift, Oct 11): GPS never creates or REOPENS a shift. Only the opening-odometer form opens one.
        A closed row (logged out here or on another device) stops the miles writer and brings back the opening-odometer gate. */
@@ -4384,7 +4437,7 @@
     try { dvirCfgPull(); } catch (e) {} /* God-mode checklist for the next inspection */
     var paint = function () { var d = driverLogData(); d.inspDay = state.availAfterMissed || null; var days = window.PCSDriverLog.build(d); dlSaveDays(days); window.PCSDriverLog.open(days, d, mode); };
     paint();
-    try { hosPullHistory().then(function () { dlRepaintSoon(); }); } catch (e) {}
+    try { Promise.all([hosPullHistory().catch(function () {}), trkPullToday().catch(function () {})]).then(function () { dlRepaintSoon(); }); } catch (e) {}
   }
   /* v74e hotfix (Oct 14): background repaints (server history, city names) used to rebuild the whole Driver's Log overlay at
      any moment; a tap on the Close button that landed during a rebuild was lost, so the log looked impossible to close.
@@ -5019,6 +5072,8 @@
       var rowsByDay = {}; days.forEach(function (d, j) { if (res[j]) rowsByDay[d] = res[j]; });
       var h = { segs: hosHistFromRows(res), drv: drv, brk: brk, off: off, ovr: ovr, rows: rowsByDay, days: daysObj && typeof daysObj === "object" ? daysObj : {}, signs: sgObj || {}, dvir: dvObj || {}, at: Date.now() };
       try { localStorage.setItem(hosHistKey(), JSON.stringify(h)); } catch (e) {}
+      dutyHistFresh = true;
+      try { if (reapplyDutySnap()) { ensureMilesDayReady(); refreshMilesTodayDom(); } } catch (e) {} /* v2.0m-ay: offline records just arrived; drop miles that crossed them */
       return true;
     });
   }
@@ -5061,7 +5116,9 @@
       if (s0 > 0 && e0 >= s0 && (Math.min(e0, now) - s0 >= HOS_MIN_PIECE_MS || (mine && e0 === now))) segs.push([s0, Math.min(e0, now)]); /* v75: closed pieces under 2 min don't count */
     });
     if (st && !log[String(st)] && !log.__cur) segs.push([st, Math.min(now, st + HOS_HEARTBEAT_GAP_MS)]);
-    return hosMerge(segs.filter(function (x) { return x[1] >= x[0]; }));
+    var merged = hosMerge(segs.filter(function (x) { return x[1] >= x[0]; }));
+    try { merged = hosSubtract(merged, hosOffline(now)); } catch (e) {} /* v2.0m-ay: an open shiftStartAt→lastUpdate segment must not count a recorded Offline interval */
+    return merged;
   }
   function hosOverlap(list, from, to) {
     var t = 0;
@@ -5455,6 +5512,8 @@
   function onlineMsToday() {
     var row = todayMilesRow();
     if (!row) return 0;
+    var off = dutyOfflineNow();
+    if (window.PCSDriverLog && window.PCSDriverLog.onlineMsCut) return window.PCSDriverLog.onlineMsCut(row.onlineMs, row.shiftStartAt, Date.now(), shiftOpen(row), off);
     var ms = Number(row.onlineMs) || 0;
     var start = Number(row.shiftStartAt) || 0;
     if (start > 0 && shiftOpen(row)) ms += Math.max(0, Date.now() - start);
@@ -21266,12 +21325,14 @@
       hosLoadCfg().then(hosPollOvr).then(function () { hosCheck(); render(); });
       hosPullHistory().then(function () { hosCheck(); render(); }); /* v72u: full duty history from Firebase */
       try { repairLowOpeningOdo(); } catch (e) {}
-      setInterval(function () { hosPullHistory(); }, 10 * 60000);
+      setInterval(function () { hosPullHistory(); try { trkPullToday(); } catch (e) {} }, 10 * 60000);
       var shiftSyncFn = function () { /* v72v: pick up a logout from another device quickly */
+        try { trkPullToday(); } catch (e) {}
         pullRecentMilesRows().then(function (ch) { if (ch) { if (state.shiftClosedElsewhere) { try { writeShift(null); } catch (e) {} } ensureMilesDayReady(); hosPullHistory().then(function () { hosCheck(); render(); }); } });
       };
       setInterval(shiftSyncFn, 2 * 60000);
       document.addEventListener("visibilitychange", function () { if (document.visibilityState === "visible") shiftSyncFn(); });
+      try { trkPullToday(); } catch (e) {}
       pullRecentMilesRows().then(function (changed) { /* v72r: recover a shift row this phone lost; then re-check */
         var merged = mergeMidnightSplit();
         if (changed || merged) { ensureMilesDayReady(); render(); }
@@ -21718,7 +21779,8 @@
   function trkStatus() {
     if (!signedIn()) return "o";
     /* v2.0m-u (Matthew 11/4): nothing driven while the shift is open is personal. Gray only after the shift ends / logout.
-       Offline "pause" with the shift open = Available (business).
+       Offline "pause" with the shift open = Available (business). v2.0m-ay: that stored letter is unchanged. A recorded
+       Offline interval is removed when the log is drawn, so today's map and the online clock do not show it as Available.
        A live assigned PCS ride records On a ride even if the slider is still Break, Offline, or Available. */
     var open = false, assigned = false, offline = false, brk = false, manual = false, auto = false;
     try { open = !!hosShiftStart(); } catch (e) {}
@@ -21753,18 +21815,51 @@
     trkBuf.push(p);
     if (now - trkSentAt >= 60000) trkFlush(id, day, now);
   }
+  var trkSrvRaw = {}, trkSrvPts = {};
+  function trkPullDay(id, day) {
+    if (ROLE !== "driver" || !syncOn() || !id || !day) return Promise.resolve(false);
+    return authFetch(milesUrl(id, day).replace(/\.json$/, "/track.json")).then(function (r) { return r.ok ? r.json() : null; }).then(function (raw) {
+      var DL = window.PCSDriverLog;
+      trkSrvRaw[day] = raw && typeof raw === "object" ? raw : {};
+      trkSrvPts[day] = DL && DL.trkDecodeRaw ? DL.trkDecodeRaw(trkSrvRaw[day]) : [];
+      try { if (day === chicagoToday() && document.getElementById("dl-overlay")) dlRepaintSoon(); } catch (e) {}
+      return true;
+    }).catch(function () { return false; });
+  }
+  function trkPullToday() {
+    var id = ""; try { id = driverPresenceId(); } catch (e) {}
+    return trkPullDay(id, chicagoToday());
+  }
   function trkFlush(id, day, now) {
     if (!trkBuf.length || !signedIn()) return;
-    var pts = trkBuf, body = {}; trkBuf = []; trkSentAt = now || Date.now();
-    body["track/" + pts[0][0]] = pts.map(function (p) { return p.join(","); }).join(";");
-    try { authFetch(milesUrl(id, day), { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }).then(function (r) { if (!r.ok) trkBuf = pts.concat(trkBuf); }).catch(function () { trkBuf = pts.concat(trkBuf); }); } catch (e) { trkBuf = pts.concat(trkBuf); }
+    var pts = trkBuf; trkBuf = []; trkSentAt = now || Date.now();
+    var write = function () {
+      var DL = window.PCSDriverLog, key = String(pts[0][0]), merged = pts, body = {};
+      try {
+        var raw = trkSrvRaw[day] && trkSrvRaw[day][key];
+        if (DL && DL.trkMergePts) merged = DL.trkMergePts(pts, DL.trkDecodeRaw ? DL.trkDecodeRaw(raw) : []);
+      } catch (eM) { merged = pts; }
+      body["track/" + key] = DL && DL.trkEncode ? DL.trkEncode(merged) : merged.map(function (p) { return p.join(","); }).join(";");
+      trkSrvRaw[day] = trkSrvRaw[day] || {};
+      trkSrvRaw[day][key] = body["track/" + key];
+      try { if (DL && DL.trkDecodeRaw) trkSrvPts[day] = DL.trkDecodeRaw(trkSrvRaw[day]); } catch (eD) {}
+      try { authFetch(milesUrl(id, day), { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }).then(function (r) { if (!r.ok) trkBuf = pts.concat(trkBuf); }).catch(function () { trkBuf = pts.concat(trkBuf); }); } catch (e) { trkBuf = pts.concat(trkBuf); }
+    };
+    if (trkSrvRaw[day]) write();
+    else trkPullDay(id, day).then(function (ok) { if (ok) write(); else trkBuf = pts.concat(trkBuf); }, function () { trkBuf = pts.concat(trkBuf); }); /* v2.0m-ay: don't replace an owner "o" chunk this phone has not read yet */
   }
   function trkRelabel(sinceMs, from, to) { /* v2.0m-s: re-color points from sinceMs on (local copy + not-yet-sent buffer) */
     var id = trkId(), d = chicagoToday(), m = trkRead(id), sec = Math.floor((sinceMs - trkDS.t0) / 1000) - 1, fix = function (p) { if (p[0] >= sec && p[3] === from) p[3] = to; };
     (m[d] || []).forEach(fix); trkBuf.forEach(fix); if (trkLast && trkLast.s === from) trkLast.s = to;
     try { localStorage.setItem(trkKey(id), JSON.stringify(m)); } catch (e) {}
   }
-  function trkToday() { var id = trkId(), d = chicagoToday(); if (trkDS.day !== d) trkDS = { day: d, t0: trkDayStart(Date.now()) }; return { t0: trkDS.t0, pts: (trkRead(id)[d] || []).slice(), personal: trkPersonalOn(id), canToggle: id !== TRK_OWNER }; }
+  function trkToday() {
+    var id = trkId(), d = chicagoToday(); if (trkDS.day !== d) trkDS = { day: d, t0: trkDayStart(Date.now()) };
+    var local = (trkRead(id)[d] || []).slice(), DL = window.PCSDriverLog;
+    var pts = DL && DL.trkMergePts ? DL.trkMergePts(local, trkSrvPts[d] || []) : local;
+    var off = []; try { off = hosOffline(Date.now()); } catch (e) {}
+    return { t0: trkDS.t0, pts: pts, offline: off, personal: trkPersonalOn(id), canToggle: id !== TRK_OWNER };
+  }
   function rtToday() { return (rtRead()[chicagoToday()] || []).slice(); }
   function qQueuedOpenCount() { return (qd.order || []).length; }
   function qSortOffers(list) {

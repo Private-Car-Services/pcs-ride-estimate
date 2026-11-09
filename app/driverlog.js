@@ -556,15 +556,61 @@
   }
   function trkPts(tr) { return ((tr && tr.pts) || []).map(function (p) { return { t: tr.t0 + p[0] * 1000, lat: p[1] / 1e5, lng: p[2] / 1e5, s: p[3] }; }); }
   function mi(a, b) { var R = 3958.8, r = Math.PI / 180, dLa = (b.lat - a.lat) * r, dLo = (b.lng - a.lng) * r, x = Math.sin(dLa / 2) * Math.sin(dLa / 2) + Math.cos(a.lat * r) * Math.cos(b.lat * r) * Math.sin(dLo / 2) * Math.sin(dLo / 2); return 2 * R * Math.asin(Math.sqrt(x)); }
-  /* runs of the same status; a run ends at the first point of the next one (so the line has no gaps) */
-  function trkRuns(pts) {
+  /* v2.0m-ay: a recorded Offline interval is Off on today's map even when the phone's own points stay Available across the hole.
+     Boundary points use the last coordinates already on the track (no invented place). Display only; stored letters stay as written. */
+  var TRK_BRIDGE_MS = 600000;
+  function gapHitsOffline(t0, t1, offline) {
+    return norm(offline).some(function (iv) { return Math.min(t1, iv[1]) - Math.max(t0, iv[0]) > 0; });
+  }
+  function offlineCovering(t, offline) {
+    var hit = null;
+    norm(offline).forEach(function (iv) { if (t >= iv[0] && t <= iv[1]) hit = iv; });
+    return hit;
+  }
+  function canBridge(cur, p, offline) {
+    if (!cur) return false;
+    if (!norm(offline).length) return true; /* no recorded Offline: keep connecting the line across a status change */
+    var gap = p.t - cur.end;
+    if (!(gap >= 0) || gap > TRK_BRIDGE_MS) return false;
+    if (gapHitsOffline(cur.end, p.t, offline)) return false;
+    if (cur.s === "o") { var iv = offlineCovering(cur.end, offline) || offlineCovering(cur.start, offline); if (iv && p.t > iv[1]) return false; }
+    return true;
+  }
+  function trkApplyOffline(pts, offline) {
+    var offs = norm(offline);
+    if (!offs.length) return pts || []; /* no recorded Offline: leave the caller's points untouched */
+    var list = (pts || []).map(function (p) { return { t: Number(p.t), lat: Number(p.lat), lng: Number(p.lng), s: p.s }; }).filter(function (p) { return isFinite(p.t); });
+    list.sort(function (a, b) { return a.t - b.t; });
+    list.forEach(function (p) { if (offs.some(function (iv) { return p.t >= iv[0] && p.t <= iv[1]; })) p.s = "o"; });
+    offs.forEach(function (iv) {
+      [iv[0], iv[1]].forEach(function (t) {
+        if (list.some(function (p) { return p.s === "o" && Math.abs(p.t - t) < 1000; })) return;
+        var prev = null, next = null;
+        list.forEach(function (p) { if (p.t <= t) prev = p; else if (!next) next = p; });
+        var a = prev || next;
+        if (!a || !isFinite(a.lat) || !isFinite(a.lng)) return;
+        list.push({ t: t, lat: a.lat, lng: a.lng, s: "o" });
+      });
+    });
+    list.sort(function (a, b) { return a.t - b.t || (a.s === "o" ? -1 : 1); });
+    return list;
+  }
+  function addRunMiles(runs) {
+    runs.forEach(function (r) { var m = 0; for (var i = 1; i < r.pts.length; i++) { var gap = r.pts[i].t - r.pts[i - 1].t; if (gap <= TRK_BRIDGE_MS) m += mi(r.pts[i - 1], r.pts[i]); } r.miles = r.s === "b" ? 0 : m; });
+    return runs;
+  }
+  /* runs of the same status; a run ends at the first point of the next one (so the line has no gaps).
+     With recorded Offline intervals, a multi-hour same-status hole is not one Available run. */
+  function trkRuns(pts, offline) {
+    pts = trkApplyOffline(pts, offline);
     var runs = [], cur = null;
-    pts.forEach(function (p, i) {
-      if (!cur || cur.s !== p.s) { if (cur) { cur.pts.push(p); cur.end = p.t; } cur = { s: p.s, start: p.t, end: p.t, pts: [p], miles: 0 }; runs.push(cur); }
+    pts.forEach(function (p) {
+      var split = !cur || cur.s !== p.s;
+      if (!split && cur.s !== "o" && gapHitsOffline(cur.end, p.t, offline)) split = true;
+      if (split) { if (cur && canBridge(cur, p, offline)) { cur.pts.push(p); cur.end = p.t; } cur = { s: p.s, start: p.t, end: p.t, pts: [p], miles: 0 }; runs.push(cur); }
       else { cur.pts.push(p); cur.end = p.t; }
     });
-    runs.forEach(function (r) { var m = 0; for (var i = 1; i < r.pts.length; i++) { var gap = r.pts[i].t - r.pts[i - 1].t; if (gap <= 600000) m += mi(r.pts[i - 1], r.pts[i]); } r.miles = r.s === "b" ? 0 : m; });
-    return runs;
+    return addRunMiles(runs);
   }
   function rideCovering(rides, t) {
     var hit = null;
@@ -576,7 +622,8 @@
     return hit;
   }
   /* On a ride points pick up a stored segment. Other statuses stay themselves. No stored type -> no trip color. */
-  function trkDisplayRuns(pts, rides) {
+  function trkDisplayRuns(pts, rides, offline) {
+    pts = trkApplyOffline(pts, offline);
     var runs = [], cur = null;
     function cls(p) {
       var ride = p.s === "r" ? rideCovering(rides, p.t) : null;
@@ -585,14 +632,15 @@
     }
     (pts || []).forEach(function (p) {
       var k = cls(p);
-      if (!cur || cur.key !== k.key) {
-        if (cur) { cur.pts.push(p); cur.end = p.t; }
+      var split = !cur || cur.key !== k.key;
+      if (!split && cur.s !== "o" && gapHitsOffline(cur.end, p.t, offline)) split = true;
+      if (split) {
+        if (cur && canBridge(cur, p, offline)) { cur.pts.push(p); cur.end = p.t; }
         cur = { s: k.s, type: k.type, ride: k.ride, key: k.key, start: p.t, end: p.t, pts: [p], miles: 0 };
         runs.push(cur);
       } else { cur.pts.push(p); cur.end = p.t; }
     });
-    runs.forEach(function (r) { var m = 0; for (var i = 1; i < r.pts.length; i++) { var gap = r.pts[i].t - r.pts[i - 1].t; if (gap <= 600000) m += mi(r.pts[i - 1], r.pts[i]); } r.miles = r.s === "b" ? 0 : m; });
-    return runs;
+    return addRunMiles(runs);
   }
   function runColor(run) { return (run && run.type && TRIP_COL[run.type]) || TRK_COL[run.s] || TRK_COL.o; }
   function runLabel(run, fmt) {
@@ -662,7 +710,8 @@
   function hmin(m) { return m >= 60 ? Math.floor(m / 60) + " hr " + (m % 60) + " min" : m + " min"; }
   function mapHtml(meta) {
     var tr = meta && meta.track; if (!tr) return "";
-    var runs = trkRuns(trkPts(tr)), tot = trkTotals(runs);
+    var off = tr.offline || [];
+    var runs = trkRuns(trkPts(tr), off), tot = trkTotals(runs);
     var dot = function (c, pin) { return '<span style="display:inline-block;width:' + (pin ? 10 : 16) + 'px;height:' + (pin ? 10 : 4) + 'px;border-radius:' + (pin ? "50%" : "2px") + ';background:' + c + ';vertical-align:middle;margin:0 4px 0 8px"></span>'; };
     return "<p " + SEC + ">TODAY'S MAP</p>" +
       '<div id="dl-map" style="height:300px;margin:0 12px;border:1px solid #bbb;border-radius:8px;background:#fbfbfb"></div>' +
@@ -714,7 +763,8 @@
     if (w._dlMap && w._dlMap.remove) { try { w._dlMap.remove(); } catch (e0) {} }
     var hold = { map: null, dead: false };
     w._dlMap = { remove: function () { hold.dead = true; if (hold.map) { try { hold.map.remove(); } catch (e1) {} hold.map = null; } }, getMap: function () { return hold.map; } };
-    var runs = trkDisplayRuns(trkPts(meta.track), meta.rides || []), geo = trackGeo(runs), spec = historyMapSpec(), tap = w.querySelector("#dl-map-tap");
+    var off = (meta.track && meta.track.offline) || [];
+    var runs = trkDisplayRuns(trkPts(meta.track), meta.rides || [], off), geo = trackGeo(runs), spec = historyMapSpec(), tap = w.querySelector("#dl-map-tap");
     ensureMapLibre().then(function (ml) {
       if (hold.dead || !document.body || !document.body.contains(el)) return;
       var map = new ml.Map({ container: el, style: historyMapStyle(), minZoom: spec.minZoom, maxZoom: spec.maxZoom, attributionControl: true, fadeDuration: 0 });
@@ -911,5 +961,130 @@
     if (mk === "mdy" && (d.length > 4 || (d.length === 4 && !del))) out = d.slice(0, 2) + "/" + d.slice(2, 4) + "/" + d.slice(4);
     if (out !== t.value) t.value = out;
   }, true);
-  window.PCSDriverLog = { newerWash: newerWash, washWarnText: washWarnText, washLastText: washLastText, WASH_WARN: WASH_WARN, recView: recView, washLine: washLine, minTimeGate: minTimeGate, fmtDur: fmtDur, motionGate: motionGate, fluidsDue: fluidsDue, readDvir: readDvir, parseMdy: parseMdy, expiryState: expiryState, washState: washState, EXTRAS: DVIR_EXTRAS, items: items, DVIR: DVIR, CERT: CERT, dayHash: dayHash, snapshot: snapshot, historyHtml: historyHtml, build: build, html: html, gridSvg: gridSvg, listHtml: listHtml, mapHtml: mapHtml, drawMap: drawMap, ridesHtml: ridesHtml, mapReset: function () { mapView = null; }, stopTimeAt: function (d, v) { return stopTimeAt(d, v); }, /* v2.0m-s: God day map */ trkRuns: trkRuns, trkTotals: trkTotals, trkPts: trkPts, trkDisplayRuns: trkDisplayRuns, runColor: runColor, runLabel: runLabel, rideTypeCanon: rideTypeCanon, rideDisplay: rideDisplay, pcsAutoRecord: pcsAutoRecord, rideSegmentStaysOpen: rideSegmentStaysOpen, foldRideSegments: foldRideSegments, trackLetter: trackLetter, historyMapSpec: historyMapSpec, historyMapStyle: historyMapStyle, trackLayers: trackLayers, trackGeo: trackGeo, detailHtml: detailHtml, csv: csv, open: open, close: close, download: download, midnight: midnight, CARRIER: CARRIER };
+  /* v2.0m-ay: server track chunks ("sec,lat,lng,s;...") merge with this phone. An owner "o" point wins that second. */
+  function trkDecodeRaw(raw) {
+    var seen = {}, pts = [];
+    function add(q) {
+      var p = String(q || "").split(",");
+      if (p.length < 4) return;
+      var a = [Number(p[0]), Number(p[1]), Number(p[2]), String(p[3]).charAt(0)];
+      if (!isFinite(a[0]) || !isFinite(a[1]) || !isFinite(a[2]) || "arbo".indexOf(a[3]) < 0 || seen[a[0]]) return;
+      seen[a[0]] = 1; pts.push(a);
+    }
+    if (raw && typeof raw === "object") Object.keys(raw).forEach(function (k) { String(raw[k] == null ? "" : raw[k]).split(";").forEach(add); });
+    else String(raw == null ? "" : raw).split(";").forEach(add);
+    pts.sort(function (x, y) { return x[0] - y[0]; });
+    return pts;
+  }
+  function trkEncode(pts) { return (pts || []).map(function (p) { return [p[0], p[1], p[2], p[3]].join(","); }).join(";"); }
+  function trkMergePts(local, server) {
+    var by = {};
+    function put(p, forceOff) {
+      if (!p || p.length < 4 || !isFinite(Number(p[0]))) return;
+      var sec = Number(p[0]), nxt = [sec, Number(p[1]), Number(p[2]), String(p[3]).charAt(0)];
+      if ("arbo".indexOf(nxt[3]) < 0) return;
+      var cur = by[sec];
+      if (!cur || (forceOff && nxt[3] === "o" && cur[3] !== "o")) by[sec] = nxt;
+    }
+    (local || []).forEach(function (p) { put(p, false); });
+    (server || []).forEach(function (p) { put(p, true); });
+    return Object.keys(by).map(function (k) { return by[k]; }).sort(function (a, b) { return a[0] - b[0]; });
+  }
+  function dutyRowOpen(row) {
+    if (!row || typeof row !== "object" || row.shiftClosed) return false;
+    if (row.endOdometer != null && row.endOdometer !== "" && isFinite(Number(row.endOdometer))) return false;
+    return row.startOdometer != null && row.startOdometer !== "" && isFinite(Number(row.startOdometer));
+  }
+  function fillHitsOffline(f, offline) {
+    var a = Number(f && f.from) || 0, b = Number(f && f.at) || 0;
+    if (!(b > a)) return false;
+    return norm(offline).some(function (iv) { return Math.min(b, iv[1]) - Math.max(a, iv[0]) > 60000; });
+  }
+  function onlineMsCut(banked, shiftStartAt, now, open, offline) {
+    var ms = Number(banked) || 0, start = Number(shiftStartAt) || 0;
+    now = Number(now) || 0;
+    if (open && start > 0 && now > start) {
+      var add = now - start;
+      norm(offline).forEach(function (iv) { add -= Math.max(0, Math.min(now, iv[1]) - Math.max(start, iv[0])); });
+      ms += Math.max(0, add);
+    }
+    return Math.max(0, Math.round(ms));
+  }
+  /* Copy an owner correction onto the phone's open miles row. Does not close the shift or copy an ending odometer. */
+  function adoptDutyRow(loc, srv, offline) {
+    if (!loc || typeof loc !== "object" || !srv || typeof srv !== "object") return loc;
+    var out = Object.assign({}, loc), changed = false, r2 = function (n) { return Math.round((Number(n) || 0) * 100) / 100; };
+    var locStart = Number(loc.shiftStartAt) || 0, srvStart = Number(srv.shiftStartAt) || 0;
+    if (dutyRowOpen(loc) && dutyRowOpen(srv) && srvStart > locStart) {
+      out.shiftStartAt = srvStart;
+      if (srv.onlineMs != null && isFinite(Number(srv.onlineMs))) out.onlineMs = Number(srv.onlineMs);
+      changed = true;
+    }
+    var ss = srv.shifts && typeof srv.shifts === "object" ? srv.shifts : {};
+    var ls = loc.shifts && typeof loc.shifts === "object" ? Object.assign({}, loc.shifts) : {};
+    var shiftChanged = false;
+    Object.keys(ss).forEach(function (k) {
+      var sv = ss[k];
+      if (!sv || typeof sv !== "object") return;
+      var lv = ls[k];
+      if (!lv) { ls[k] = Object.assign({}, sv); shiftChanged = true; return; }
+      if (Number(sv.shiftEndedAt) > 0 && (!(Number(lv.shiftEndedAt) > 0) || Number(sv.shiftEndedAt) < Number(lv.shiftEndedAt))) {
+        ls[k] = Object.assign({}, lv, { shiftEndedAt: Number(sv.shiftEndedAt) });
+        if (sv.endOdo != null) ls[k].endOdo = sv.endOdo;
+        shiftChanged = true;
+      }
+    });
+    if (shiftChanged) { out.shifts = ls; changed = true; }
+    if (Array.isArray(loc.gapFills)) {
+      var kept = [], removed = 0;
+      loc.gapFills.forEach(function (f) {
+        if (!f) return;
+        if (fillHitsOffline(f, offline)) { removed += Number(f.mi) || 0; return; }
+        kept.push(f);
+      });
+      removed = r2(removed);
+      if (removed > 0 || kept.length !== loc.gapFills.length) {
+        out.gapFills = kept;
+        var next = r2((Number(loc.gpsMiles) || 0) - removed), srvMi = Number(srv.gpsMiles);
+        if (isFinite(srvMi) && srvMi >= 0) next = Math.max(srvMi, next);
+        out.gpsMiles = next < 0 ? 0 : next;
+        var nextF = r2((Number(loc.filledMiles) || 0) - removed), srvF = Number(srv.filledMiles);
+        if (isFinite(srvF) && srvF >= 0) nextF = Math.max(srvF, nextF);
+        out.filledMiles = nextF < 0 ? 0 : nextF;
+        changed = true;
+      }
+    }
+    return changed ? out : loc;
+  }
+  /* Drop fields that would put a stale phone copy back on top of an owner correction. No snap yet: do not send those fields. */
+  function guardDutyPatch(patch, row, snap, offline) {
+    if (!patch || typeof patch !== "object") return patch;
+    function stripShifts() { Object.keys(patch).forEach(function (k) { if (k.indexOf("shifts/") === 0) delete patch[k]; }); }
+    if (!snap || typeof snap !== "object") {
+      delete patch.shiftStartAt; delete patch.onlineMs; delete patch.gapFills; delete patch.filledMiles;
+      stripShifts();
+      if (row && Array.isArray(row.gapFills) && row.gapFills.length) delete patch.gpsMiles;
+      return patch;
+    }
+    var locStart = Number(row && row.shiftStartAt) || 0, srvStart = Number(snap.shiftStartAt) || 0;
+    if (dutyRowOpen(snap) && dutyRowOpen(row) && srvStart > locStart) {
+      delete patch.shiftStartAt;
+      if (snap.onlineMs != null && isFinite(Number(snap.onlineMs))) patch.onlineMs = Number(snap.onlineMs) || 0;
+    }
+    var ss = snap.shifts && typeof snap.shifts === "object" ? snap.shifts : {};
+    Object.keys(ss).forEach(function (k) {
+      var sv = ss[k];
+      if (!sv || !(Number(sv.shiftEndedAt) > 0)) return;
+      var endKey = "shifts/" + k + "/shiftEndedAt";
+      if (Object.prototype.hasOwnProperty.call(patch, endKey) && (!(Number(patch[endKey]) > 0) || Number(patch[endKey]) > Number(sv.shiftEndedAt))) patch[endKey] = Number(sv.shiftEndedAt);
+    });
+    if (row && Array.isArray(row.gapFills) && (Array.isArray(snap.gapFills) || norm(offline).length)) {
+      var adopted = adoptDutyRow(row, snap, offline);
+      patch.gapFills = adopted && Array.isArray(adopted.gapFills) ? adopted.gapFills : row.gapFills;
+      if (adopted && adopted !== row && adopted.gpsMiles != null) patch.gpsMiles = adopted.gpsMiles;
+      if (adopted && adopted !== row && adopted.filledMiles != null) patch.filledMiles = adopted.filledMiles;
+    }
+    return patch;
+  }
+  window.PCSDriverLog = { newerWash: newerWash, washWarnText: washWarnText, washLastText: washLastText, WASH_WARN: WASH_WARN, recView: recView, washLine: washLine, minTimeGate: minTimeGate, fmtDur: fmtDur, motionGate: motionGate, fluidsDue: fluidsDue, readDvir: readDvir, parseMdy: parseMdy, expiryState: expiryState, washState: washState, EXTRAS: DVIR_EXTRAS, items: items, DVIR: DVIR, CERT: CERT, dayHash: dayHash, snapshot: snapshot, historyHtml: historyHtml, build: build, html: html, gridSvg: gridSvg, listHtml: listHtml, mapHtml: mapHtml, drawMap: drawMap, ridesHtml: ridesHtml, mapReset: function () { mapView = null; }, stopTimeAt: function (d, v) { return stopTimeAt(d, v); }, /* v2.0m-s: God day map */ trkRuns: trkRuns, trkTotals: trkTotals, trkPts: trkPts, trkDisplayRuns: trkDisplayRuns, runColor: runColor, runLabel: runLabel, rideTypeCanon: rideTypeCanon, rideDisplay: rideDisplay, pcsAutoRecord: pcsAutoRecord, rideSegmentStaysOpen: rideSegmentStaysOpen, foldRideSegments: foldRideSegments, trackLetter: trackLetter, historyMapSpec: historyMapSpec, historyMapStyle: historyMapStyle, trackLayers: trackLayers, trackGeo: trackGeo, detailHtml: detailHtml, csv: csv, open: open, close: close, download: download, midnight: midnight, CARRIER: CARRIER, trkApplyOffline: trkApplyOffline, trkDecodeRaw: trkDecodeRaw, trkMergePts: trkMergePts, trkEncode: trkEncode, onlineMsCut: onlineMsCut, adoptDutyRow: adoptDutyRow, guardDutyPatch: guardDutyPatch, fillHitsOffline: fillHitsOffline };
 })();
