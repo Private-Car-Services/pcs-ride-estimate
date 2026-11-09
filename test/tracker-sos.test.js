@@ -117,7 +117,8 @@ test("390x844 tracker SOS confirms, then shows 911 plus driver car plate and loc
     await ev("window.__pcsFollowLive.update(" + JSON.stringify(pickupOnly) + ")");
     await ev("document.getElementById('fl-sos-btn').click(); document.getElementById('fl-sos-yes').click();");
     const missing = await ev("document.getElementById('fl-sos-read').textContent");
-    assert.ok(missing.indexOf("Location: Location unavailable") >= 0);
+    assert.ok(missing.indexOf("Location unavailable") >= 0);
+    assert.equal(missing.indexOf("Location:"), -1);
     assert.equal(missing.indexOf("30.100000"), -1);
     assert.equal(missing.indexOf("-95.500000"), -1);
     assert.equal(missing.indexOf("30.1"), -1);

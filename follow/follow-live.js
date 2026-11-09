@@ -70,7 +70,7 @@
   }
   function sosReadout(d) {
     var v = sosVehicle(d), loc = sosPoint(d);
-    return ["Driver: " + v.name, "Car: " + v.car, "Plate: " + v.plate, "Location: " + (loc ? loc.lat.toFixed(6) + ", " + loc.lng.toFixed(6) : "Location unavailable")].join("\n");
+    return ["Driver: " + v.name, "Car: " + v.car, "Plate: " + v.plate, loc ? "Location: " + loc.lat.toFixed(6) + ", " + loc.lng.toFixed(6) : "Location unavailable"].join("\n");
   }
   function sosMapsHref(lat, lng) {
     var dest = (+lat).toFixed(6) + "," + (+lng).toFixed(6);
