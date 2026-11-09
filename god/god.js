@@ -7922,7 +7922,7 @@
   function gfolLink(t) { try { return new URL("../follow/?t=" + t, window.location.href).href; } catch (e) { return ""; } }
   function gfolFirst(name) { var w = String(name || "").trim().split(/\s+/)[0] || ""; return /^[A-Za-z][A-Za-z'.-]{0,30}$/.test(w) ? w.charAt(0).toUpperCase() + w.slice(1) : ""; }
   function gfolE164(raw) { var d = String(raw || "").replace(/\D/g, ""); if (d.length === 11 && d.charAt(0) === "1") d = d.slice(1); return d.length === 10 && /^[2-9]/.test(d) ? "+1" + d : ""; }
-  function gfolMsg(r, t) { var f = gfolFirst(r.assignedDriverName); return "Your PCS driver " + (f ? f + " " : "") + "is on the way. Follow along live: " + gfolLink(t) + " - www.PCSrides.com"; }
+  function gfolMsg(r, t) { return gfolLink(t); } /* v2.0m-ax: Messages body is the tracker URL only */
   function gfolTxt(v, n) { return String(v == null ? "" : v).replace(/[\u0000-\u001f\u007f<>]/g, " ").replace(/\s+/g, " ").trim().slice(0, n); }
   function gfolPlace(text, lat, lng) {
     var p = {}, l = gfolTxt(text, 120);

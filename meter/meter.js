@@ -238,7 +238,8 @@
         '<p class="fine" id="rm-share-msg" role="status">' + esc(sh.msg || "") + "</p></div>" : "") +
       (sh.err ? '<p class="error" id="rm-share-err">' + esc(sh.err) + "</p>" : "") + "</div>";
   }
-  function shareText(url) { return "Follow my Private Car Services ride live: " + url; }
+  function shareText(url) { return String(url || ""); } /* v2.0m-ax: the text is the tracker URL only */
+  if (typeof window !== "undefined") window.__pcsMeterShare = { text: shareText };
   function shareUrl(tok) { return new URL("../follow/?t=" + tok, window.location.href).href; }
   function shareRedraw() { var el = $("rm-share"); if (el) { el.outerHTML = shareHtml(); bindShare(); } }
   function shareOpen() {

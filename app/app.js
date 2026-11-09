@@ -11520,11 +11520,9 @@
   }
   function folPhoneShow(e) { var d = String(e || "").replace(/\D/g, "").slice(-10); return d.length === 10 ? "(" + d.slice(0, 3) + ") " + d.slice(3, 6) + "-" + d.slice(6) : ""; }
   function folSmsHref(phone, body) { return "sms:" + folPhoneE164(phone) + "?&body=" + encodeURIComponent(body); }
-  function folDriverMsg(link, name) {
-    var f = folFirst(name);
-    return "Your PCS driver " + (f ? f + " " : "") + "is on the way. Follow along live: " + link + " - www.PCSrides.com";
-  }
-  function folRiderMsg(link) { return "Follow my PCS ride live: " + link + " - www.PCSrides.com"; }
+  /* v2.0m-ax: the text itself is the tracker URL only, so iMessage/RCS shows the link card and not a lead-in sentence. */
+  function folDriverMsg(link) { return String(link || ""); }
+  function folRiderMsg(link) { return String(link || ""); }
   function folStyle() {
     if (typeof document === "undefined" || document.getElementById("pcs-fol-style")) return;
     var st = document.createElement("style"); st.id = "pcs-fol-style";
@@ -11579,7 +11577,8 @@
     var live = FOL_TOKEN_RE.test(t || "") && folTokenFor(k) !== t ? folCommit(k, t, "driver", folDriverCtx(k) || { status: "assigned" }) : Promise.resolve(true);
     return Promise.resolve(live).then(function () {
       var tk = typeof qToken === "function" ? qToken() : ""; if (!tk) throw new Error("sign in again");
-      return qWorker("/sms/tracker", { token: tk, rideId: id });
+      var link = folLink(folTokenFor(k) || t);
+      return qWorker("/sms/tracker", { token: tk, rideId: id, body: folDriverMsg(link) });
     }).then(function (res) {
       if (res && res.cardKey) folCardKey(res.cardKey);
       if (res && res.why === "line_inactive") fol.bizInactive = true; else if (res && res.sent) fol.bizInactive = false;
@@ -12074,7 +12073,8 @@
     var live = folTokenFor(k) === t ? Promise.resolve(true) : folCommit(k, t, "driver", folDriverCtx(k) || { status: "assigned" });
     return live.then(function () {
       var tk = typeof qToken === "function" ? qToken() : ""; if (!tk) return null;
-      return qWorker("/notify/onway", { token: tk, rideId: schedId, link: folLink(t) });
+      var link = folLink(t);
+      return qWorker("/notify/onway", { token: tk, rideId: schedId, link: link, body: folDriverMsg(link) });
     }).then(function (res) { if (res && res.cardKey) folCardKey(res.cardKey); if (res && res.why === "not_configured") fol.bizInactive = true; var m = folAutoMsg(res); if (m) schedMsgFor(schedId, m); return res; }).catch(function () { return null; });
   }
   function folCardKey(set) { /* v77.3b: this driver's picture-card key, from the Worker (/notify/onway) */
