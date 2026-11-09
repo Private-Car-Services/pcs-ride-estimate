@@ -25,6 +25,7 @@
   function num(v) { var n = Number(v); return isFinite(n) ? n : null; }
   function pt(p) { if (!p || typeof p !== "object") return null; var a = num(p.lat), b = num(p.lng); return a !== null && b !== null && Math.abs(a) <= 90 && Math.abs(b) <= 180 && !(a === 0 && b === 0) ? [a, b] : null; }
   function style() {
+    ensureFlSos();
     if ($("fl-style")) return;
     var st = document.createElement("style"); st.id = "fl-style";
     st.textContent = "#fl-live{background:#f0fdf4;color:#0b3d23;border:3px solid #2e9d4f;border-radius:16px;padding:12px}" +
@@ -54,6 +55,94 @@
     app.innerHTML = '<div class="card fl-msg" id="fl-msg"><p class="tag">' + esc(title) + '</p><p class="lede">' + esc(body) + "</p>" +
       '<a class="fl-call" id="fl-call" href="' + PCS_TEL + '">Call PCS ' + PCS_PHONE + "</a>" +
       '<p class="fine">Need a ride of your own? Visit <a href="https://www.PCSrides.com" style="color:#0b3d23;font-weight:800">www.PCSrides.com</a>.</p></div>';
+    ensureFlSos();
+  }
+  function sosVehicle(d) {
+    d = d || {};
+    var name = txt(d.driverFirst, 40);
+    var car = carText(d.car);
+    var plate = d.car && typeof d.car === "object" ? txt(d.car.plate, 12) : "";
+    return { name: name || "Driver name not shared", car: car || "Car not shared", plate: plate || "Plate not shared" };
+  }
+  function sosPoint(d) {
+    var p = pt(d && d.pos) || pt(d && d.pickup);
+    return p ? { lat: p[0], lng: p[1] } : null;
+  }
+  function sosReadout(d) {
+    var v = sosVehicle(d), loc = sosPoint(d);
+    return ["Driver: " + v.name, "Car: " + v.car, "Plate: " + v.plate, "Location: " + (loc ? loc.lat.toFixed(6) + ", " + loc.lng.toFixed(6) : "Location unavailable")].join("\n");
+  }
+  function sosMapsHref(lat, lng) {
+    var dest = (+lat).toFixed(6) + "," + (+lng).toFixed(6);
+    var apple = false;
+    try { apple = /iPad|iPhone|iPod/.test(navigator.userAgent || "") || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1); } catch (e) {}
+    return apple ? "maps://?ll=" + encodeURIComponent(dest) + "&q=" + encodeURIComponent(dest) : "https://www.google.com/maps?q=" + encodeURIComponent(dest);
+  }
+  function ensureFlSos() {
+    if ($("fl-sos-btn")) return;
+    if (!$("fl-sos-style")) {
+      var st = document.createElement("style");
+      st.id = "fl-sos-style";
+      st.textContent = "#fl-sos-btn{position:fixed;top:calc(env(safe-area-inset-top,0px) + 64px);right:8px;z-index:3000;width:64px;height:64px;border-radius:50%;border:3px solid #fff;background:#c0161b;color:#fff;font:900 13px/1.05 system-ui,sans-serif;box-shadow:0 4px 16px rgba(0,0,0,.45);cursor:pointer;-webkit-tap-highlight-color:transparent;touch-action:manipulation}" +
+        "#fl-sos-ask,#fl-sos-sheet{position:fixed;inset:0;z-index:4000;background:rgba(5,14,28,.94);display:flex;align-items:center;justify-content:center;padding:16px}" +
+        "#fl-sos-ask .box,#fl-sos-sheet .box{background:#0b1c33;color:#fff;border:2px solid #c0161b;border-radius:18px;max-width:420px;width:100%;padding:20px;text-align:center}" +
+        "#fl-sos-ask h2,#fl-sos-sheet h2{color:#ff6b6b;margin:0 0 10px;font-size:24px}" +
+        "#fl-sos-ask p,#fl-sos-sheet p{color:#fff;font-size:16px}" +
+        "#fl-sos-sheet pre{white-space:pre-wrap;text-align:left;background:#071426;border-radius:12px;padding:10px;font:700 16px/1.35 system-ui,sans-serif;color:#fff}" +
+        "#fl-sos-ask .row,#fl-sos-sheet .row{display:flex;flex-wrap:wrap;gap:10px;margin-top:14px}" +
+        "#fl-sos-ask .row a,#fl-sos-ask .row button,#fl-sos-sheet .row a,#fl-sos-sheet .row button{flex:1;min-width:110px;min-height:48px;padding:12px 8px;border:0;border-radius:12px;font-size:18px;font-weight:800;color:#fff;text-decoration:none;cursor:pointer}" +
+        "#fl-sos-ask .yes,#fl-sos-sheet .yes{background:#2e9d4f}#fl-sos-ask .no,#fl-sos-sheet .no{background:#8a2323}#fl-sos-sheet .call{background:#c0161b}#fl-sos-sheet .ghost{background:#345}";
+      document.head.appendChild(st);
+    }
+    var b = document.createElement("button");
+    b.type = "button";
+    b.id = "fl-sos-btn";
+    b.setAttribute("aria-label", "SOS — request police help");
+    b.textContent = "SOS";
+    b.addEventListener("click", function (ev) { try { ev.preventDefault(); ev.stopPropagation(); } catch (e) {} openFlSosAsk(); });
+    (document.body || document.documentElement).appendChild(b);
+  }
+  function openFlSosAsk() {
+    if ($("fl-sos-ask") || $("fl-sos-sheet")) return;
+    ensureFlSos();
+    var el = document.createElement("div");
+    el.id = "fl-sos-ask";
+    el.innerHTML = '<div class="box" role="dialog" aria-modal="true"><h2>SOS</h2>' +
+      "<p>Request police help? We will show the 911 dialer link and your driver's name, car, plate, and live location for the operator. This app cannot call 911 by itself.</p>" +
+      '<div class="row"><button type="button" class="yes" id="fl-sos-yes">Yes</button><button type="button" class="no" id="fl-sos-no">No</button></div></div>';
+    document.body.appendChild(el);
+    el.addEventListener("click", function (ev) {
+      var t = ev.target;
+      if (!t || !t.id) return;
+      if (t.id === "fl-sos-no") { if (el.parentNode) el.parentNode.removeChild(el); return; }
+      if (t.id !== "fl-sos-yes") return;
+      if (el.parentNode) el.parentNode.removeChild(el);
+      openFlSosSheet();
+    });
+  }
+  function openFlSosSheet() {
+    if ($("fl-sos-sheet")) return;
+    var d = S.d || {}, text = sosReadout(d), loc = sosPoint(d);
+    var el = document.createElement("div");
+    el.id = "fl-sos-sheet";
+    el.innerHTML = '<div class="box" role="dialog" aria-modal="true"><h2>Police assistance</h2>' +
+      "<p>Tap Call 911 to open the dialer. Read this to the operator. This app cannot call 911 by itself.</p>" +
+      '<pre id="fl-sos-read">' + esc(text) + "</pre>" +
+      '<div class="row"><a class="call" id="fl-sos-911" href="tel:911">Call 911</a>' +
+      '<button type="button" class="ghost" id="fl-sos-copy">Copy</button>' +
+      (loc ? '<a class="yes" id="fl-sos-maps" href="' + esc(sosMapsHref(loc.lat, loc.lng)) + '">Open in Maps</a>' : "") +
+      '<button type="button" class="no" id="fl-sos-close">Close</button></div></div>';
+    document.body.appendChild(el);
+    el.addEventListener("click", function (ev) {
+      var t = ev.target;
+      if (!t || !t.id) return;
+      if (t.id === "fl-sos-close") { if (el.parentNode) el.parentNode.removeChild(el); return; }
+      if (t.id !== "fl-sos-copy") return;
+      try {
+        if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).then(function () { t.textContent = "Copied"; }).catch(function () { t.textContent = "Copied"; });
+        else t.textContent = "Copied";
+      } catch (e) { t.textContent = "Copied"; }
+    });
   }
   function statusText(d) {
     var st = d.status, e = d.eta, to = e && e.to;
@@ -361,6 +450,7 @@
     el.hidden = false;
   }
   function update(d) {
+    S.d = d;
     if (!$("fl-live")) shell();
     var now = Date.now();
     setText("fl-status", statusText(d));
@@ -558,6 +648,8 @@
   (function qr() { var el = $("fw-qr"); if (!el || typeof window.qrcode !== "function") return; try { var x = window.qrcode(0, "M"); x.addData("https://www.PCSrides.com"); x.make(); el.innerHTML = x.createSvgTag(4, 0); } catch (e) {} })();
   setInterval(function () { if (S.d && !S.ended && $("fl-live")) { try { bigBox(S.d, Date.now(), /^(on_way|arrived|picked_up)$/.test(String(S.d.status))); } catch (e) {} } }, 15000);
   window.__pcsFollowLive = { resume: resume, setPath: setPath, update: update, track: track, state: S, over: over, statusText: statusText,
-    stopsOf: stopsOf, nextTarget: nextTarget, soonDue: soonDue, soonText: SOON_TEXT, photo: trackerPhotoSrc, showPhoto: applyTrackerPhoto, bill: billBarModel };
+    stopsOf: stopsOf, nextTarget: nextTarget, soonDue: soonDue, soonText: SOON_TEXT, photo: trackerPhotoSrc, showPhoto: applyTrackerPhoto, bill: billBarModel,
+    sosText: sosReadout, notice: message };
+  ensureFlSos();
   poll();
 })();
