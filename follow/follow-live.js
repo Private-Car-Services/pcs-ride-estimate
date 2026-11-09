@@ -112,6 +112,7 @@
       '<div id="fl-map" role="img" aria-label="Map with the car, the pickup and the drop-off"></div>' +
       '<p class="fl-row" id="fl-from"></p><div id="fl-stops"></div><p class="fl-row" id="fl-to"></p>' +
       '<p class="fl-upd" id="fl-upd"></p><p class="error" id="fl-net" role="status"></p>' +
+      /* Bottom bar: a known invoice. With no invoice number the bar stays hidden. */
       '<p class="fl-call" id="fl-call" hidden></p></div>';
     if (window.L) {
       S.map = window.L.map("fl-map", { zoomControl: true, attributionControl: true, zoomSnap: 0.25, zoomDelta: 1 }).setView([29.76, -95.37], 11);
@@ -341,8 +342,7 @@
     var receipt = squareHttps(d.receiptUrl), payUrl = squareHttps(d.payUrl);
     var legacy = d.bill === "invoiced" ? "Invoiced ride" : d.bill === "prepaid" ? "Prepaid ride" : "";
     if (pay === "paid" && no && receipt) return { label: "Invoice #" + no + " \u2013 paid", link: { href: receipt, text: "View receipt", id: "fl-receipt" }, show: true, gap: "" };
-    if (pay === "paid" && no) return { label: "Invoice #" + no + " \u2013 paid", link: null, show: true, gap: receipt ? "" : "paid-without-receipt" };
-    if (pay === "unpaid" && no) return { label: "Invoice #" + no + " \u2013 unpaid", link: payUrl ? { href: payUrl, text: "Pay invoice", id: "fl-pay" } : null, show: true, gap: payUrl ? "" : "unpaid-without-pay-url" };
+    if (pay === "unpaid" && no && payUrl) return { label: "Invoice #" + no + " \u2013 unpaid", link: { href: payUrl, text: "Pay invoice", id: "fl-pay" }, show: true, gap: "" };
     if (no) return { label: "Invoice #" + no, link: null, show: true, gap: "number-only" };
     var gap = "";
     if (pay === "paid" && !receipt) gap = "paid-without-receipt";
