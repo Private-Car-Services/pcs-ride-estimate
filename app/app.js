@@ -6422,16 +6422,17 @@
   }
 
   /* Same spot as the old "Questions? Call" business line. A known invoice number shows
-     the board's paid or unpaid word (unpaid when the board has no payment word yet).
-     A Square receipt or pay link is added when the board already has one, and a fresh
-     Worker read replaces that with the live receipt or pay page. No number: the line is gone.
-     The rider's own phone is not this line. */
-  function questionSlotHtml() {
-    var ride = null;
-    try { ride = typeof currentRide === "function" ? currentRide() : null; } catch (e) { ride = null; }
-    if (!ride && state.prepaidInvoice && state.prepaidInvoice.invoiceNo) ride = { prepaidInvoiceNo: state.prepaidInvoice.invoiceNo };
+     here by itself. "Unpaid" only when Square status is UNPAID (or the ride says unpaid).
+     "Paid" only from a positive paid record. A Square link is added only for that word.
+     No number: the line is gone. The rider's own phone is not this line. */
+  function questionSlotHtml(ride) {
+    var row = ride || null;
+    if (!row) {
+      try { row = typeof currentRide === "function" ? currentRide() : null; } catch (e) { row = null; }
+      if (!row && state.prepaidInvoice && state.prepaidInvoice.invoiceNo) row = { prepaidInvoiceNo: state.prepaidInvoice.invoiceNo };
+    }
     var slot = "";
-    try { slot = rideInvoiceSlotHtml(ride || {}, null); } catch (e2) { slot = ""; }
+    try { slot = rideInvoiceSlotHtml(row || {}, null); } catch (e2) { slot = ""; }
     slot = String(slot || "").replace(/^\s*·\s*/, "");
     if (!slot) return "";
     return '<p class="fine" id="pcs-question-slot">' + slot + "</p>";
@@ -9857,24 +9858,25 @@
     if (!no) return t;
     return t + " Invoice #" + no;
   }
-  /* Paid only from a verified record (Square paid, assigned-driver cash, or a God cash override with a reason).
-     Unpaid only from an explicit not-paid record (Square status, invoice_pending, prepaid billed, or unverified).
-     A bare invoice number is neither. prepaid:false and prepaidVia alone are not a payment record. */
+  /* Paid only from a positive paid record (Square PAID, assigned-driver cash, or a God cash override).
+     Unpaid only from a positive unpaid status: Square status UNPAID, or the ride's own pay state "unpaid".
+     invoice_pending, prepaid:true, invoiceStatus UNPAID, and a Square object that is merely not PAID are none of these.
+     A shared invoice can be PAID while this ride is still invoice_pending: that ride stays unlabeled. */
   function ridePayWord(r, M) {
     r = r || {};
     var q = r.sqInvoice && typeof r.sqInvoice === "object" ? r.sqInvoice : null;
-    if (q && (q.paid === true || String(q.status || "").toUpperCase() === "PAID")) return "paid";
-    if (M && M.prepaid && M.prepaid.squarePaid) return "paid";
-    if (String(r.invoiceStatus || "").toUpperCase() === "PAID") return "paid";
-    var pc = r.paidCash;
-    if (pc && typeof pc === "object" && pc.by === "driver" && pc.driverId && r.assignedDriverId && pc.driverId === r.assignedDriverId) return "paid";
-    var ov = r.paidCashOverride;
-    if (ov && typeof ov === "object" && String(ov.reason || "").trim()) return "paid";
-    if (q && (q.paid === false || (String(q.status || "").trim() && String(q.status || "").toUpperCase() !== "PAID"))) return "unpaid";
-    if (String(r.invoiceStatus || "").toUpperCase() === "UNPAID") return "unpaid";
-    if (r.payState === "invoice_pending") return "unpaid";
-    if (r.prepaid === true) return "unpaid";
-    if (r.payUnverified && typeof r.payUnverified === "object") return "unpaid";
+    var own = String(r.payState || r.paymentStatus || "").toLowerCase();
+    if (own !== "invoice_pending") {
+      if (q && (q.paid === true || String(q.status || "").toUpperCase() === "PAID")) return "paid";
+      if (M && M.prepaid && M.prepaid.squarePaid) return "paid";
+      if (String(r.invoiceStatus || "").toUpperCase() === "PAID") return "paid";
+      var pc = r.paidCash;
+      if (pc && typeof pc === "object" && pc.by === "driver" && pc.driverId && r.assignedDriverId && pc.driverId === r.assignedDriverId) return "paid";
+      var ov = r.paidCashOverride;
+      if (ov && typeof ov === "object" && String(ov.reason || "").trim()) return "paid";
+    }
+    if (q && String(q.status || "").toUpperCase() === "UNPAID") return "unpaid";
+    if (own === "unpaid") return "unpaid";
     return "";
   }
   function rideMapBillText(r, M) {
@@ -9900,10 +9902,10 @@
     if (!m || !/(^|\.)squareup(sandbox)?\.com$|(^|\.)square\.link$/i.test(m[1])) return "";
     return s;
   }
-  /* Invoice text for a caller that already has a place to put it. The rider line keeps the rider phone.
+  /* Invoice text for the Questions slot. The rider name and phone stay on their own line.
      A fresh Worker Square read supplies the receipt or pay link. Otherwise the board's own
-     sqInvoice or payState is shown, and a known number with no payment word is unpaid.
-     A Square link is used only when the board already has one. Partial or refund stays number-only. */
+     positive paid or unpaid word is shown. A known number with no positive word is the number only.
+     A Square link is used only with that word. Partial or refund stays number-only. */
   function rideLivePay(r, M) {
     var live = null;
     try {
@@ -9932,7 +9934,7 @@
     if (/PARTIAL|REFUND|CANCEL/.test(st) || (q && isFinite(+q.amountDueCents) && +q.amountDueCents > 0 && String(q.status || "").toUpperCase() !== "PAID")) return " \u00b7 Invoice #" + esc(no);
     var w = "";
     try { w = ridePayWord(r, M); } catch (e) { w = ""; }
-    if (w !== "paid" && w !== "unpaid") w = "unpaid";
+    if (w !== "paid" && w !== "unpaid") return " \u00b7 Invoice #" + esc(no);
     var receipt = rideSquareHttps(r.receiptUrl || (q && (q.receipt_url || q.receiptUrl)) || "");
     var pay = rideSquareHttps(r.invoicePayUrl || r.payUrl || (q && (q.public_url || q.publicUrl || q.payUrl)) || "");
     if (w === "paid" && receipt) return " \u00b7 Invoice #" + esc(no) + " \u2013 paid \u00b7 <a id=\"sched-inv-link\" href=\"" + esc(receipt) + "\" target=\"_blank\" rel=\"noopener\">View receipt</a>";
@@ -10689,9 +10691,19 @@
   function schedRiderLineHtml(r) {
     r = r || {};
     var phone = r.riderPhone ? " \u00b7 <a href=\"tel:" + esc(r.riderPhone) + "\" style=\"color:#0b3d23;font-weight:700\">" + esc(r.riderPhone) + "</a>" : "";
-    var slot = "";
-    try { slot = rideInvoiceSlotHtml(r, null); } catch (e) { slot = ""; }
-    return "<p id=\"sched-rider-line\" class=\"pcs-ride-line\" style=\"margin:0;min-height:44px;box-sizing:border-box;padding:8px 10px;background:#fff;color:#1a1a1a;border-radius:10px;font-size:16px;font-weight:700;line-height:1.35;white-space:normal;overflow:visible\"><strong style=\"" + SCHED_LBL + "\">Rider:</strong> " + esc(r.rider || "\u2014") + phone + slot + "</p>";
+    return "<p id=\"sched-rider-line\" class=\"pcs-ride-line\" style=\"margin:0;min-height:44px;box-sizing:border-box;padding:8px 10px;background:#fff;color:#1a1a1a;border-radius:10px;font-size:16px;font-weight:700;line-height:1.35;white-space:normal;overflow:visible\"><strong style=\"" + SCHED_LBL + "\">Rider:</strong> " + esc(r.rider || "\u2014") + phone + "</p>";
+  }
+  function schedBillHostHtml(r, primary) {
+    var inner = "";
+    try { inner = questionSlotHtml(r); } catch (e) { inner = ""; }
+    if (!inner) return "";
+    return '<div class="sched-bill-host"' + (primary ? ' id="sched-bill-host"' : "") + ">" + inner + "</div>";
+  }
+  function schedBillHome() {
+    if (typeof document === "undefined") return;
+    var host = document.getElementById("sched-bill-host");
+    var home = document.getElementById("sched-bill-home");
+    if (host && home && host.parentNode !== home) home.appendChild(host);
   }
   function rideLineRide() {
     var M = state.meter;
@@ -10720,11 +10732,25 @@
   }
   function schedMapBillPlace(bot) {
     if (!bot || typeof document === "undefined") return;
-    var host = bot.querySelector ? bot.querySelector("#sched-bill-host") : null;
-    if (host && host.remove) host.remove(); /* no second row above the buttons */
+    var t = null, r = null, html = "";
+    try { t = schedNavTrip(); r = t ? schedFind(t.id) : null; } catch (e) { r = null; }
+    try { html = r ? questionSlotHtml(r) : ""; } catch (e2) { html = ""; }
+    var host = document.getElementById("sched-bill-host");
+    if (html) {
+      if (!host) {
+        host = document.createElement("div");
+        host.id = "sched-bill-host";
+        host.className = "sched-bill-host";
+      }
+      if (host.__h !== html) { host.innerHTML = html; host.__h = html; }
+      if (host.parentNode !== bot) {
+        if (bot.firstChild && bot.insertBefore) bot.insertBefore(host, bot.firstChild);
+        else if (bot.appendChild) bot.appendChild(host);
+      }
+    } else if (host && bot.contains && bot.contains(host)) schedBillHome();
     var btn = bot.querySelector ? bot.querySelector("#sched-fs-arrived") : null;
     if (!btn) return;
-    var t = schedNavTrip(), r = t ? schedFind(t.id) : null, text = schedPickupStatusText(r);
+    var text = schedPickupStatusText(r);
     if (btn.textContent !== text) btn.textContent = text;
     if (btn.getAttribute && btn.getAttribute("aria-label") !== text) btn.setAttribute("aria-label", text);
   }
@@ -10749,6 +10775,10 @@
       "#sched-fs-top{position:absolute;left:max(8px, calc(var(--pcs-safe-left, env(safe-area-inset-left, 0px)) + 8px));right:max(8px, calc(var(--pcs-safe-right, env(safe-area-inset-right, 0px)) + 8px));top:calc(var(--pcs-safe-top, env(safe-area-inset-top, 0px)) + 8px);z-index:1002}#sched-fs-top #sched-turn-fs{margin:0;box-shadow:0 2px 8px rgba(0,0,0,.4)}" +
       "#sched-fs-bottom{position:absolute;left:max(8px, calc(var(--pcs-safe-left, env(safe-area-inset-left, 0px)) + 8px));right:max(8px, calc(var(--pcs-safe-right, env(safe-area-inset-right, 0px)) + 8px));bottom:calc(var(--pcs-safe-bottom, env(safe-area-inset-bottom, 0px)) + 22px);z-index:1002;display:flex;flex-direction:column;gap:8px;pointer-events:none}#sched-fs-bottom button{pointer-events:auto}.pcs-map-green{pointer-events:auto}" +
       "#sched-fs-bottom #sched-rider-line,#rfs-bar #sched-rider-line{pointer-events:auto;position:relative;z-index:1}" +
+      ".sched-bill-host{margin:6px 0;background:#fff;color:#1a1a1a;border:2px solid #0b3d23;border-radius:10px;padding:8px 10px;font-size:16px;font-weight:700;line-height:1.35}" +
+      "#sched-fs-bottom #sched-bill-host{pointer-events:auto;position:relative;z-index:1;margin:0}" +
+      ".sched-bill-host .fine,.sched-bill-host #pcs-question-slot{margin:0;color:#1a1a1a;font-size:16px;font-weight:700}" +
+      ".sched-bill-host a{color:#0b3d23;font-weight:800}" +
       "#sched-fs-bottom,#rfs-bar{container-type:inline-size}.pcs-map-green,#sched-fs-arrived{display:block;width:100%;box-sizing:border-box;height:62px;min-height:62px;margin:0;padding:0 10px;font-size:clamp(12px,calc(100cqw / 26),20px);font-weight:800;line-height:58px;text-align:center;background:#0b6b3a;color:#fff;border:2px solid #fff;border-radius:14px;white-space:nowrap;overflow:hidden;text-overflow:clip;position:relative;z-index:1;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.4)}" +
       "#sched-fs-close{display:block;width:100%;min-height:58px;font-size:21px;font-weight:800;background:#d1fae5;color:#0b3d23;border:3px solid #0b3d23;border-radius:14px;margin:0;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.4)}";
     document.head.appendChild(st);
@@ -10777,6 +10807,7 @@
     var leg = !!(ROLE === "driver" && schedNavTrip() && stage);
     var openB = document.getElementById("sched-fs-open"), top = document.getElementById("sched-fs-top"), bot = document.getElementById("sched-fs-bottom");
     if (!leg) {
+      schedBillHome();
       if (openB) openB.remove(); if (top) top.remove(); if (bot) bot.remove(); if (stage) fsMphDrop(stage); /* v76b */
       if (stage && stage.classList.contains("pcs-fullmap")) { stage.classList.remove("pcs-fullmap"); document.body.style.overflow = ""; schedFullResize(); }
       return;
@@ -10809,7 +10840,7 @@
       else schedMapBillPlace(bot);
       schedFsMeasure();
       fsMphPlace(stage, (navTestOn() ? 262 : 172) + "px"); /* v76b: MPH badge */
-    } else { rideLineHome(); if (top) top.remove(); if (bot) bot.remove(); fsMphDrop(stage); }
+    } else { schedBillHome(); rideLineHome(); if (top) top.remove(); if (bot) bot.remove(); fsMphDrop(stage); }
     if (full !== was) {
       stage.classList.toggle("pcs-fullmap", full);
       document.body.style.overflow = full ? "hidden" : "";
@@ -11385,8 +11416,8 @@
         if (/^\d{1,20}$/.test(boardNo)) {
           var boardPay = "";
           try { boardPay = ridePayWord(r, onMeter ? M : null); } catch (ePay) { boardPay = ""; }
-          if (boardPay !== "paid" && boardPay !== "unpaid") boardPay = "unpaid";
-          share = { invoiceNo: boardNo, pay: boardPay, url: boardPay === "paid" ? rideSquareHttps(r.receiptUrl || "") : rideSquareHttps(rideCustomerPayUrl(r)) };
+          if (boardPay !== "paid" && boardPay !== "unpaid") boardPay = "";
+          share = { invoiceNo: boardNo, pay: boardPay, url: boardPay === "paid" ? rideSquareHttps(r.receiptUrl || "") : boardPay === "unpaid" ? rideSquareHttps(rideCustomerPayUrl(r)) : "" };
         }
       }
       out.push(Object.assign({ key: "c_" + r.id, kind: "sched", bill: rideBillKind(r, onMeter ? M : null), pay: share.pay, invoiceNo: share.invoiceNo, receiptUrl: share.pay === "paid" ? share.url : "", payUrl: share.pay === "unpaid" ? share.url : "", status: st, phone: r.riderPhone, pickup: pickup, dest: dest, stops: stops, eta: eta, route: route, pos: here }, base));
@@ -11968,6 +11999,7 @@
         prepaidBadgeHtml(prepaidOf(r)) + /* v75v */
         (rateOvOf(r) ? rateOvBadgeHtml("sched-contract-" + esc(r.id)) : "") + /* v76j */
         '<div id="sched-rider-home">' + schedRiderLineHtml(r) + "</div>" +
+        '<div id="sched-bill-home">' + schedBillHostHtml(r, inTrip || onMeter) + "</div>" +
         '<p style="margin:0 0 6px;color:#1a1a1a"><strong style="' + SCHED_LBL + '">Pickup:</strong> ' + esc(r.pickup || "\u2014") + "</p>" +
         (st ? '<p style="margin:0 0 6px;color:#1a1a1a"><strong style="' + SCHED_LBL + '">Stop:</strong> ' + esc(st.address) + "</p>" : "") +
         '<p style="margin:0 0 6px;color:#1a1a1a"><strong style="' + SCHED_LBL + '">Drop-off:</strong> ' + (r.dropoff ? esc(r.dropoff) : '<span style="color:#7c2d12;font-weight:700">Add the drop-off</span>') + "</p>" +

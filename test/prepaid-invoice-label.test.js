@@ -129,8 +129,9 @@ test("the pickup status keeps Invoice #000574 on the same line and does not add 
   assert.equal(bill.bar({ prepaidInvoiceNo: "000554" }), "Invoice #000554");
   const src = fs.readFileSync(path.join(__dirname, "../app/app.js"), "utf8");
   const place = src.slice(src.indexOf("function schedMapBillPlace"), src.indexOf("function schedFsMeasure"));
-  assert.match(place, /host\.remove/);
-  assert.doesNotMatch(place, /insertBefore/);
+  assert.match(place, /questionSlotHtml/);
+  assert.match(place, /insertBefore/);
+  assert.doesNotMatch(place, /host\.remove/);
   assert.match(place, /sched-fs-arrived/);
   assert.match(src, /nav-toggle\{bottom:calc\(var\(--pcs-safe-bottom/);
   assert.match(src, /leaflet-top\.leaflet-left\{top:calc\(var\(--pcs-safe-top/);

@@ -75,9 +75,14 @@ function ride(id, extra) {
 
 test("the rider phone stays, and the business call line is not in those cards", function () {
   const src = fs.readFileSync(path.join(__dirname, "../app/app.js"), "utf8");
-  const rider = src.slice(src.indexOf("function schedRiderLineHtml"), src.indexOf("function rideLineRide"));
+  const rider = src.slice(src.indexOf("function schedRiderLineHtml"), src.indexOf("function schedBillHostHtml"));
   assert.ok(rider.indexOf("href=\\\"tel:") >= 0);
   assert.equal(rider.indexOf("slot ?"), -1);
+  assert.equal(rider.indexOf("rideInvoiceSlotHtml"), -1);
+  assert.equal(rider.indexOf("Invoice #"), -1);
+  const place = src.slice(src.indexOf("function schedMapBillPlace"), src.indexOf("function schedFsMeasure"));
+  assert.ok(place.indexOf("questionSlotHtml") >= 0 && place.indexOf("sched-bill-host") >= 0);
+  assert.equal(place.indexOf("host.remove"), -1);
   ["function cardNeededHtml", "function cardSheetEl", "function payAfterRideHtmlInner"].forEach(function (name) {
     const at = src.indexOf(name);
     assert.ok(at > 0, name);
@@ -96,6 +101,25 @@ test("the rider phone stays, and the business call line is not in those cards", 
 
 const follow = loadApp();
 const live = loadFollow();
+
+test("shared invoice 000560 publishes the number without unpaid or paid", function () {
+  const row = ride("ride-560", {
+    prepaid: true, prepaidInvoiceNo: "000560", payState: "invoice_pending", paymentStatus: "invoice_pending",
+    invoiceStatus: "UNPAID", sqInvoice: { paid: true, status: "PAID", invoiceNumber: "000560" },
+    receiptUrl: "https://evil.example/receipt", invoicePayUrl: "https://evil.example/pay"
+  });
+  const pub = follow.publish([row])[0];
+  assert.equal(pub.invoiceNo, "000560");
+  assert.ok(!pub.pay);
+  assert.equal(pub.receiptUrl, undefined);
+  assert.equal(pub.payUrl, undefined);
+  assert.equal(live.bill(pub).label, "Invoice #000560");
+  assert.equal(live.bill(pub).link, null);
+  const positive = ride("ride-unpaid", { prepaidInvoiceNo: "000559", sqInvoice: { status: "UNPAID", paid: false, invoiceNumber: "000559" }, invoicePayUrl: PAY, receiptUrl: "" });
+  const owed = follow.publish([positive])[0];
+  assert.equal(owed.pay, "unpaid");
+  assert.equal(owed.payUrl, PAY);
+});
 
 test("a known invoice shows unpaid before a Square link arrives", function () {
   const bare = live.bill({ invoiceNo: "000574", pay: "unpaid" });
