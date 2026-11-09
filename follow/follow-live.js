@@ -342,8 +342,7 @@
     var receipt = squareHttps(d.receiptUrl), payUrl = squareHttps(d.payUrl);
     var legacy = d.bill === "invoiced" ? "Invoiced ride" : d.bill === "prepaid" ? "Prepaid ride" : "";
     if (pay === "paid" && no && receipt) return { label: "Invoice #" + no + " \u2013 paid", link: { href: receipt, text: "View receipt", id: "fl-receipt" }, show: true, gap: "" };
-    if (pay === "paid" && no) return { label: "Invoice #" + no + " \u2013 paid", link: null, show: true, gap: receipt ? "" : "paid-without-receipt" };
-    if (pay === "unpaid" && no) return { label: "Invoice #" + no + " \u2013 unpaid", link: payUrl ? { href: payUrl, text: "Pay invoice", id: "fl-pay" } : null, show: true, gap: payUrl ? "" : "unpaid-without-pay-url" };
+    if (pay === "unpaid" && no && payUrl) return { label: "Invoice #" + no + " \u2013 unpaid", link: { href: payUrl, text: "Pay invoice", id: "fl-pay" }, show: true, gap: "" };
     if (no) return { label: "Invoice #" + no, link: null, show: true, gap: "number-only" };
     var gap = "";
     if (pay === "paid" && !receipt) gap = "paid-without-receipt";

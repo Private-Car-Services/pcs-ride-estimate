@@ -103,6 +103,12 @@ test("390x844 tracker bottom bar is the invoice line, not the call button", asyn
     assert.equal(num.text, "Invoice #000574");
     assert.equal(num.href, "");
     assert.equal(num.phone, false);
+    const unpaidBare = await show({ invoiceNo: "000574", pay: "unpaid" });
+    assert.equal(unpaidBare.text, "Invoice #000574");
+    assert.equal(unpaidBare.href, "");
+    const paidBare = await show({ invoiceNo: "000554", pay: "paid" });
+    assert.equal(paidBare.text, "Invoice #000554");
+    assert.equal(paidBare.href, "");
     const unpaid = await show({ invoiceNo: "000574", pay: "unpaid", payUrl: PAY });
     assert.equal(unpaid.text, "Invoice #000574 – unpaid · Pay invoice");
     assert.equal(unpaid.href, PAY);

@@ -141,9 +141,10 @@ test("shared invoice 000560 publishes the number without unpaid or paid", functi
 
 test("a known invoice shows unpaid before a Square link arrives", function () {
   const bare = live.bill({ invoiceNo: "000574", pay: "unpaid" });
-  assert.equal(bare.label, "Invoice #000574 \u2013 unpaid");
+  assert.equal(bare.label, "Invoice #000574");
   assert.equal(bare.show, true);
   assert.equal(bare.link, null);
+  assert.equal(bare.label.indexOf("unpaid"), -1);
   const linked = live.bill({ invoiceNo: "000574", pay: "unpaid", payUrl: PAY });
   assert.equal(linked.link.text, "Pay invoice");
   assert.equal(linked.link.href, PAY);
