@@ -104,14 +104,13 @@ test("verified paid and unpaid rows publish only a matching Square link", functi
   assert.equal(owedShown.link.href, PAY);
   assert.equal(owedShown.link.text, "Pay invoice");
   const noLink = live.bill({ bill: "invoiced", pay: "unpaid", invoiceNo: "000574" });
-  assert.equal(noLink.label, "Invoice #000574");
+  assert.equal(noLink.label, "Invoice #000574 \u2013 unpaid");
   assert.equal(noLink.link, null);
-  assert.equal(noLink.gap, "number-only");
-  assert.equal(noLink.label.indexOf("unpaid"), -1);
+  assert.equal(noLink.show, true);
   const noReceipt = live.bill({ bill: "invoiced", pay: "paid", invoiceNo: "000210" });
-  assert.equal(noReceipt.label, "Invoice #000210");
-  assert.equal(noReceipt.gap, "number-only");
-  assert.equal(noReceipt.label.indexOf("paid"), -1);
+  assert.equal(noReceipt.label, "Invoice #000210 \u2013 paid");
+  assert.equal(noReceipt.link, null);
+  assert.equal(noReceipt.show, true);
 });
 
 test("partial, refund, and non-Square links are not a paid or unpaid href", function () {
@@ -123,6 +122,5 @@ test("partial, refund, and non-Square links are not a paid or unpaid href", func
   assert.equal(evil.payUrl, undefined);
   const script = live.bill({ bill: "invoiced", pay: "unpaid", invoiceNo: "000574", payUrl: "javascript:alert(1)" });
   assert.equal(script.link, null);
-  assert.equal(script.label, "Invoice #000574");
-  assert.equal(script.label.indexOf("unpaid"), -1);
+  assert.equal(script.label, "Invoice #000574 \u2013 unpaid");
 });

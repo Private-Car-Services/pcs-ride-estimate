@@ -34,7 +34,7 @@ test("portrait and landscape keep Follow, North, and zoom clear of the pickup ba
     { name: "landscape", w: 1024, h: 768, safe: { top: 24, bottom: 21, left: 47 } }
   ];
   cases.forEach(function (c) {
-    const box = rects(c.w, c.h, c.safe, 96, 128);
+    const box = rects(c.w, c.h, c.safe, 96, 190);
     assert.ok(box.toggleBottomY <= box.barTop - 4, c.name + " Follow/North overlap the pickup buttons");
     assert.ok(box.recenterTop + 48 <= box.toggleTop - 4, c.name + " recenter overlaps Follow");
     assert.ok(box.zoomTop >= c.safe.top + 59, c.name + " zoom sits in the top corner");
@@ -74,7 +74,8 @@ function page(w, h, safe) {
     </div>
     <button type="button" id="map-recenter" class="nav-recenter" style="position:absolute;right:8px;width:48px;height:48px">recenter</button>
     <div id="sched-fs-bottom">
-      <button type="button" id="sched-fs-arrived">I’m at the pickup · Prepaid ride Invoice #000574</button>
+      <div id="sched-bill-host" class="sched-bill-host"><p class="fine" id="pcs-question-slot">Invoice #000574</p></div>
+      <button type="button" id="sched-fs-arrived">I’m at the pickup</button>
       <button type="button" id="sched-fs-close">Close map</button>
     </div>
   </div>
@@ -155,9 +156,12 @@ test("clicks land on Follow, North, zoom out, and Close in portrait and landscap
       assert.equal(got.orient, "Heading up");
       assert.equal(got.zoom, "1");
       assert.equal(got.close, "1");
-      assert.ok(got.bill.indexOf("Invoice #000574") >= 0);
-      assert.equal(got.bill.indexOf("\\n"), -1);
-      assert.equal(got.host, false);
+      assert.equal(got.bill, "I’m at the pickup");
+      assert.equal(got.bill.indexOf("Invoice #"), -1);
+      assert.equal(got.host, true);
+      const hostText = await send("Runtime.evaluate", { expression: "document.getElementById('sched-bill-host').textContent", returnByValue: true }, sid);
+      assert.ok(String(hostText.result.result.value).indexOf("Invoice #000574") >= 0);
+      assert.equal(String(hostText.result.result.value).indexOf("unpaid"), -1);
       const shot = await send("Page.captureScreenshot", { format: "png" }, sid);
       fs.writeFileSync("/opt/cursor/artifacts/pickup-" + (w > h ? "landscape" : "portrait") + ".png", Buffer.from(shot.result.data, "base64"));
     }
