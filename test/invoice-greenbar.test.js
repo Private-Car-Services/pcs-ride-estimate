@@ -350,14 +350,20 @@ test("full-page map and tracker keep the invoice on one line and the controls hi
 
 test("the white invoice bar is gone and the invoice text is in the dark green bar", async function () {
   const place = appSrc.slice(appSrc.indexOf("function schedMapBillPlace"), appSrc.indexOf("function schedFsMeasure"));
-  const turn = appSrc.slice(appSrc.indexOf("function meterTurnHtml"), appSrc.indexOf("function meterTurnPaint"));
+  const turn = appSrc.slice(appSrc.indexOf("function meterTurnHtml"), appSrc.indexOf("function meterEstFetch"));
+  const rfsCss = appSrc.slice(appSrc.indexOf("function fsStyle"), appSrc.indexOf("function rfsKey"));
+  const rfsApply = appSrc.slice(appSrc.indexOf("function rfsApply"), appSrc.indexOf("window.__pcsRideFull"));
   assert.match(place, /schedBillHome/);
   assert.match(place, /fsMapInvoiceHtml/);
   assert.match(place, /#sched-fs-arrived/);
   assert.doesNotMatch(place, /sched-bill-host|insertBefore/);
-  assert.match(turn, /rfsOn\(\)/);
-  assert.match(turn, /fsMapInvoiceHtml\(rideLineRide\(\)\)/);
   assert.match(turn, /id="meter-turn"/);
+  assert.equal(turn.indexOf("fsMapInvoiceHtml"), -1);
+  assert.equal(turn.indexOf("sched-fs-inv"), -1);
+  assert.equal(turn.indexOf("Invoice"), -1);
+  assert.equal(rfsCss.indexOf("sched-fs-inv"), -1);
+  assert.equal(rfsApply.indexOf("meterTurnPaint"), -1);
+  assert.equal(rfsApply.indexOf("fsMapInvoiceHtml"), -1);
   assert.equal(bill.fsInv({}), "");
   assert.equal(bill.fsInv({ riderPhone: "9365550100" }), "");
   const paid = bill.fsInv({ prepaidInvoiceNo: "000584", sqInvoice: { paid: true, status: "PAID", amountDueCents: 0 }, receiptUrl: RECEIPT });
@@ -373,20 +379,17 @@ test("the white invoice bar is gone and the invoice text is in the dark green ba
   assert.equal(bare.indexOf("Unpaid"), -1);
   assert.equal(bare.indexOf("href"), -1);
   const css = quotedCss(appSrc.slice(appSrc.indexOf("function schedFullStyle"), appSrc.indexOf("function schedFullResize"))) +
-    quotedCss(appSrc.slice(appSrc.indexOf("function fsStyle"), appSrc.indexOf("function rfsKey"))) +
     quotedCss(appSrc.slice(appSrc.indexOf("function ensureMeterSplitStyle"), appSrc.indexOf("function meterDestHtml")));
-  function page(kind, inv) {
-    const rfs = kind === "rfs";
-    const stage = rfs
-      ? '<div id="meter-map-stage" class="pcs-rfs" style="position:relative;width:768px;height:900px"><div class="meter-turn" id="meter-turn"><small>In 0.3 mi</small>Continue on Grogans Mill' + inv + '</div><div id="rfs-bar"><div class="rfs-row"><div class="rfs-stats"><span><b>1.20</b> mi</span></div></div><div class="rfs-actions"><button type="button" class="rfs-end" id="rfs-end">End ride</button><button type="button" class="rfs-close" id="rfs-close">Close map</button></div></div></div>'
-      : '<div id="home-map-stage" class="pcs-fullmap" style="position:relative;width:768px;height:900px"><div id="sched-fs-bottom"><div id="sched-fs-arrived" class="pcs-map-green has-inv" role="button" tabindex="0" aria-label="I\u2019m at the pickup"><span class="pcs-arrived-label">I\u2019m at the pickup</span>' + inv + '</div><button type="button" id="sched-fs-close">Close map</button></div></div>';
-    return '<!doctype html><html><head><meta charset="utf-8"><style>html,body{margin:0}' + css + '</style></head><body class="' + (rfs ? "pcs-rfs-body" : "") + '">' + stage + '<script>' +
+  function page(inv) {
+    const stage = '<div id="home-map-stage" class="pcs-fullmap" style="position:relative;width:768px;height:900px"><div id="sched-fs-bottom"><div id="sched-fs-arrived" class="pcs-map-green has-inv" role="button" tabindex="0" aria-label="I\u2019m at the pickup"><span class="pcs-arrived-label">I\u2019m at the pickup</span>' + inv + '</div><button type="button" id="sched-fs-close">Close map</button></div></div>' +
+      '<div id="meter-map-stage" class="pcs-rfs" style="position:relative;width:768px;height:200px"><div class="meter-turn" id="meter-turn"><small>In 0.3 mi</small>Continue on Grogans Mill</div></div>';
+    return '<!doctype html><html><head><meta charset="utf-8"><style>html,body{margin:0}' + css + '</style></head><body>' + stage + '<script>' +
       'var arrived=0;var btn=document.getElementById("sched-fs-arrived");if(btn)btn.addEventListener("click",function(e){if(e.target&&e.target.closest&&e.target.closest("a"))return;arrived+=1;document.body.dataset.arrived=String(arrived);});' +
       'var link=document.getElementById("sched-inv-link");if(link)link.addEventListener("click",function(e){e.preventDefault();link.dataset.n="1";});' +
       'var invEl=document.getElementById("sched-fs-inv");var green=invEl?invEl.closest("#sched-fs-arrived,#meter-turn"):null;' +
       'var bg=green?getComputedStyle(green).backgroundColor:"";' +
       'var white=Array.prototype.some.call(document.querySelectorAll("#home-map-stage *,#meter-map-stage *"),function(el){var c=getComputedStyle(el).backgroundColor;return (c==="rgb(255, 255, 255)"||c==="rgb(255,255,255)")&&(el.textContent||"").indexOf("Invoice #")>=0;});' +
-      'document.body.dataset.report=JSON.stringify({white:white,host:!!document.querySelector(".sched-bill-host,#sched-bill-host"),bg:bg,text:invEl?invEl.textContent:"",parent:green?green.id:"",href:link?link.getAttribute("href"):"",label:btn&&btn.querySelector(".pcs-arrived-label")?btn.querySelector(".pcs-arrived-label").textContent:"",end:(document.getElementById("rfs-end")||{}).textContent||"",endBg:document.getElementById("rfs-end")?getComputedStyle(document.getElementById("rfs-end")).backgroundColor:""});' +
+      'var turnEl=document.getElementById("meter-turn");document.body.dataset.report=JSON.stringify({white:white,host:!!document.querySelector(".sched-bill-host,#sched-bill-host"),bg:bg,text:invEl?invEl.textContent:"",parent:green?green.id:"",href:link?link.getAttribute("href"):"",label:btn&&btn.querySelector(".pcs-arrived-label")?btn.querySelector(".pcs-arrived-label").textContent:"",turn:turnEl?turnEl.textContent:"",turnInvoice:turnEl?(turnEl.textContent||"").indexOf("Invoice"):-1});' +
       '</script></body></html>';
   }
   const port = 8796;
@@ -424,7 +427,7 @@ test("the white invoice bar is gone and the invoice text is in the dark green ba
       assert.ok(report, name + " did not report");
       return JSON.parse(report);
     }
-    const pickup = await open("green-pickup.html", page("pickup", paid));
+    const pickup = await open("green-pickup.html", page(paid));
     assert.equal(pickup.white, false, "white invoice bar " + JSON.stringify(pickup));
     assert.equal(pickup.host, false);
     assert.equal(pickup.parent, "sched-fs-arrived");
@@ -439,16 +442,8 @@ test("the white invoice bar is gone and the invoice text is in the dark green ba
     assert.equal(tapped.inside, true);
     const arrivedAfterLink = await send("Runtime.evaluate", { expression: "document.body.dataset.arrived || '0'", returnByValue: true }, sid);
     assert.equal(arrivedAfterLink.result.result.value, "0");
-    const ride = await open("green-rfs.html", page("rfs", unpaid));
-    assert.equal(ride.white, false, "in-ride white invoice bar " + JSON.stringify(ride));
-    assert.equal(ride.host, false);
-    assert.equal(ride.parent, "meter-turn");
-    assert.equal(ride.bg.replace(/\s/g, ""), "rgb(32,55,29)");
-    assert.ok(ride.text.indexOf("Invoice #000584") >= 0 && ride.text.indexOf("Unpaid") >= 0 && ride.text.indexOf("Pay invoice") >= 0);
-    assert.equal(ride.href, PAY);
-    assert.equal(ride.end, "End ride");
-    assert.equal(ride.endBg.replace(/\s/g, ""), "rgb(139,28,28)");
-    const none = await open("green-none.html", page("pickup", ""));
+    assert.equal(pickup.turnInvoice, -1, "in-ride turn bar has an invoice " + pickup.turn);
+    const none = await open("green-none.html", page(""));
     assert.equal(none.text, "");
     assert.equal(none.host, false);
     assert.equal(none.white, false);

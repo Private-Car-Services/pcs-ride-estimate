@@ -10952,9 +10952,7 @@
       "#rfs-bar .rfs-close{flex:1 1 0;min-height:62px;margin:0;font-size:20px;font-weight:900;border-radius:14px;background:#d1fae5;color:#0b3d23;border:3px solid #0b3d23;cursor:pointer}" +
       "#rfs-bar .rfs-keep{flex:1 1 0;min-height:62px;margin:0;font-size:17px;font-weight:800;border-radius:14px;background:#fff;color:#0b3d23;border:3px solid #0b3d23;cursor:pointer}" +
       ".rfs-ask{margin:0 0 6px;font-size:18px;font-weight:800;color:#0b3d23;text-align:center}" +
-      "body.pcs-rfs-body #pcs-sos-btn{z-index:2147482100 !important;bottom:auto !important;right:12px !important;top:250px;top:var(--pcs-sos-top,calc(env(safe-area-inset-top,0px) + 250px))}" +
-      "#meter-map-stage.pcs-rfs #meter-turn #sched-fs-inv{display:block;margin-top:4px;font-size:16px;font-weight:800;line-height:1.3;text-align:center;color:inherit}" +
-      "#meter-map-stage.pcs-rfs #meter-turn #sched-fs-inv a{color:inherit;font-weight:800;text-decoration:underline}";
+      "body.pcs-rfs-body #pcs-sos-btn{z-index:2147482100 !important;bottom:auto !important;right:12px !important;top:250px;top:var(--pcs-sos-top,calc(env(safe-area-inset-top,0px) + 250px))}";
     document.head.appendChild(st);
   }
   /* in-ride full screen (metered ride / scheduled ride after pickup) */
@@ -11117,8 +11115,7 @@
       var sig = rfsSig(M);
       if (bar.__sig !== sig) { bar.__sig = sig; bar.innerHTML = rfsBarHtml(M); }
       fsMphPlace(stage, (bar.getBoundingClientRect && stage.getBoundingClientRect ? Math.round(stage.getBoundingClientRect().bottom - bar.getBoundingClientRect().top + 12) : ((bar.offsetHeight || 148) + 34)) + "px");
-      try { meterTurnPaint(); } catch (e) {}
-    } else { rideLineHome(); if (bar) bar.remove(); fsMphDrop(stage); try { meterTurnPaint(); } catch (e) {} }
+    } else { rideLineHome(); if (bar) bar.remove(); fsMphDrop(stage); }
     if (full !== was) {
       stage.classList.toggle("pcs-rfs", full);
       document.body.classList.toggle("pcs-rfs-body", full);
@@ -17640,25 +17637,17 @@
   }
   function meterTurnHtml() {
     var t = meterNextTurn();
-    var inv = "";
-    try { if (rfsOn()) inv = fsMapInvoiceHtml(rideLineRide()); } catch (e) { inv = ""; }
-    if (!t && !inv) return '<div class="meter-turn" id="meter-turn" style="display:none"></div>';
-    var turn = "";
-    if (t) {
-      var d = t.mi < 0.1 ? Math.max(50, Math.round(t.mi * 5280 / 50) * 50) + " ft" : t.mi.toFixed(1) + " mi";
-      turn = "<small>In " + esc(d) + "</small>" + esc(t.text);
-    }
-    return '<div class="meter-turn" id="meter-turn" role="status" aria-live="polite">' + turn + inv + "</div>";
-  }
-  function meterTurnPaint() {
-    if (typeof document === "undefined") return;
-    var el = document.getElementById("meter-turn");
-    if (!el) return;
-    var html = meterTurnHtml();
-    if (el.outerHTML !== html) el.outerHTML = html;
+    if (!t) return '<div class="meter-turn" id="meter-turn" style="display:none"></div>';
+    var d = t.mi < 0.1 ? Math.max(50, Math.round(t.mi * 5280 / 50) * 50) + " ft" : t.mi.toFixed(1) + " mi";
+    return '<div class="meter-turn" id="meter-turn" role="status" aria-live="polite"><small>In ' + esc(d) + "</small>" + esc(t.text) + "</div>";
   }
   if (typeof window !== "undefined") setInterval(function () {
-    try { meterTurnPaint(); } catch (e) {}
+    try {
+      var el = document.getElementById("meter-turn");
+      if (!el) return;
+      var html = meterTurnHtml();
+      if (el.outerHTML !== html) el.outerHTML = html;
+    } catch (e) {}
   }, 2000);
   function meterEstFetch() {
     var key = meterEstKey();
