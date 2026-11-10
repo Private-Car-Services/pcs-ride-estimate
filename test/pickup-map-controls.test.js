@@ -69,7 +69,7 @@ function page(w, h, safe) {
   </style></head><body>
   <div id="home-map-stage" class="pcs-fullmap" style="position:relative;width:${w}px;height:${h}px">
     <div class="leaflet-top leaflet-left"><div class="leaflet-control-zoom leaflet-bar"><a id="zoom-in" href="#">+</a><a id="zoom-out" href="#">−</a></div></div>
-    <div id="sched-fs-top" style="background:#0b3d23;color:#fff"><div id="sched-turn" style="background:#0b3d23;color:#fff;border-radius:12px;padding:10px 12px;font-weight:800">Continue onto Rayford Rd<span id="nav-inv" style="display:block;margin-top:6px;font-size:18px;line-height:1.35;font-weight:900;color:#fff">Invoice #000562 · Unpaid</span></div></div>
+    <div id="sched-fs-top"><div id="sched-turn" style="background:#0b3d23;color:#fff;border-radius:12px;padding:10px 12px;font-weight:800">Continue onto Rayford Rd</div><div class="nav-eta" id="sched-eta-fs"><div class="nav-eta-at">Arrive 3:40 PM</div></div></div>
     <div class="nav-toggle" style="position:absolute;right:8px;display:flex;gap:6px">
       <button type="button" id="map-orient-toggle" style="min-height:36px;padding:6px 12px">North up</button>
       <button type="button" id="map-mode-toggle" style="min-height:36px;padding:6px 12px">Follow</button>
@@ -77,6 +77,7 @@ function page(w, h, safe) {
     <button type="button" id="map-recenter" class="nav-recenter" style="position:absolute;right:8px;width:48px;height:48px">recenter</button>
     <div id="fs-mph" class="fs-mph"><b>32</b><span>MPH</span></div>
     <div id="sched-fs-bottom">
+      <div id="nav-inv" style="display:block;width:100%;box-sizing:border-box;margin:0;padding:10px 12px;background:#0b3d23;color:#fff;border-radius:12px;font-size:18px;line-height:1.35;font-weight:900;text-align:center">Invoice #000562 · Unpaid</div>
       <button type="button" id="sched-fs-arrived">I’m at the pickup</button>
       <button type="button" id="sched-fs-close">Close map</button>
     </div>
@@ -85,6 +86,9 @@ function page(w, h, safe) {
     var stage = document.getElementById("home-map-stage");
     stage.style.setProperty("--sched-fs-bar", document.getElementById("sched-fs-bottom").offsetHeight + "px");
     stage.style.setProperty("--sched-fs-top", document.getElementById("sched-fs-top").offsetHeight + "px");
+    var mph = document.getElementById("fs-mph");
+    var bar = document.getElementById("sched-fs-bottom");
+    if (mph && bar) mph.style.bottom = Math.round(stage.getBoundingClientRect().bottom - bar.getBoundingClientRect().top + 12) + "px";
     var mode = document.getElementById("map-mode-toggle");
     var orient = document.getElementById("map-orient-toggle");
     mode.addEventListener("click", function () { mode.textContent = mode.textContent === "Follow" ? "Full route" : "Follow"; mode.dataset.n = String(Number(mode.dataset.n || 0) + 1); });

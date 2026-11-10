@@ -169,7 +169,9 @@ test("the ride map bar does not add a second invoice row", function () {
   assert.doesNotMatch(place, /insertBefore/);
   assert.doesNotMatch(place, /host\.remove/);
   assert.doesNotMatch(place, /rideBillLabelHtml|schedMapBillHtml/);
-  assert.match(turn, /navTurnInvoice/);
+  assert.doesNotMatch(turn, /navTurnInvoice/);
+  assert.match(place, /schedMapInvPlace/);
+  assert.match(rfs, /navTurnInvoice/);
   assert.match(appSrc, /sqInvoice: raw\.sqInvoice/);
 });
 
@@ -235,22 +237,24 @@ function driverPage(kind, text, w, h, safe, row) {
   </style></head><body>
   <div id="${rfs ? "meter-map-stage" : "home-map-stage"}" class="${rfs ? "pcs-rfs" : "pcs-fullmap"}" style="${stageStyle}">
     <div class="leaflet-top leaflet-left"><div class="leaflet-control-zoom leaflet-bar"><a id="zoom-out" href="#">−</a></div></div>
-    ${rfs ? "" : '<div id="sched-fs-top"><div id="sched-turn" style="background:#0b3d23;color:#fff;border-radius:12px;padding:10px 12px;font-size:20px;font-weight:800">Continue onto Rayford Rd' + inv + '</div></div>'}
+    ${rfs ? "" : '<div id="sched-fs-top"><div id="sched-turn" style="background:#0b3d23;color:#fff;border-radius:12px;padding:10px 12px;font-size:20px;font-weight:800">Continue onto Rayford Rd</div><div class="nav-eta" id="sched-eta-fs"><div class="nav-eta-at">Arrive 3:40 PM</div><div class="nav-eta-left">9 min · 5 mi</div><div class="nav-eta-to">to pickup</div></div></div>'}
     <div class="nav-toggle" style="position:absolute;right:8px;display:flex;gap:6px;z-index:1004">
       <button type="button" id="map-orient-toggle" style="min-height:36px">North up</button>
       <button type="button" id="map-mode-toggle" style="min-height:36px">Follow</button>
     </div>
     <div id="fs-mph" class="fs-mph" style="bottom:172px"><b id="fs-mph-num">32</b><span>MPH</span></div>
     ${rfs
-      ? '<div id="rfs-bar" role="region" aria-label="Ride"><div class="rfs-row"><div class="rfs-stats"><span><b>1.20</b> mi</span><span><b>0:12</b></span></div></div><div class="rfs-actions"><button type="button" class="rfs-end" id="rfs-end">End ride</button><button type="button" class="rfs-close" id="sched-fs-close">Close map</button></div></div>'
-      : '<div id="sched-fs-bottom"><button type="button" class="pcs-map-green" id="sched-fs-arrived">' + text + '</button><button type="button" id="sched-fs-close">Close map</button></div>'}
+      ? '<div id="rfs-bar" role="region" aria-label="Ride"><div class="rfs-row"><div class="rfs-stats"><span><b>1.20</b> mi</span><span><b>0:12</b></span></div></div>' + inv + '<div class="rfs-actions"><button type="button" class="rfs-end" id="rfs-end">End ride</button><button type="button" class="rfs-close" id="sched-fs-close">Close map</button></div></div>'
+      : '<div id="sched-fs-bottom">' + inv + '<button type="button" class="pcs-map-green" id="sched-fs-arrived">' + text + '</button><button type="button" id="sched-fs-close">Close map</button></div>'}
   </div>
   <p id="sched-rider-line" style="margin:8px">Rider: Rahual · <a href="tel:9365550100">9365550100</a></p>
   <script>
     var stage = document.getElementById("${rfs ? "meter-map-stage" : "home-map-stage"}");
     var bar = document.getElementById("${rfs ? "rfs-bar" : "sched-fs-bottom"}");
     if (stage.style.setProperty) stage.style.setProperty("${rfs ? "--rfs-bar" : "--sched-fs-bar"}", bar.offsetHeight + "px");
-    if (!${rfs ? "true" : "false"} && stage.style.setProperty) stage.style.setProperty("--sched-fs-top", "84px");
+    if (!${rfs ? "true" : "false"} && stage.style.setProperty) stage.style.setProperty("--sched-fs-top", document.getElementById("sched-fs-top").offsetHeight + "px");
+    var mph = document.getElementById("fs-mph");
+    if (mph && bar) mph.style.bottom = Math.round(stage.getBoundingClientRect().bottom - bar.getBoundingClientRect().top + 12) + "px";
     ["map-mode-toggle","map-orient-toggle","zoom-out","sched-fs-close","rfs-end","sched-fs-arrived","nav-inv-link"].forEach(function (id) {
       var el = document.getElementById(id);
       if (!el) return;
@@ -280,7 +284,9 @@ function driverPage(kind, text, w, h, safe, row) {
       }
       var turn = document.getElementById("sched-turn");
       var turnBg = turn ? getComputedStyle(turn).backgroundColor : "";
+      var invParent = inv && inv.parentElement ? inv.parentElement.id : "";
       return { id: id, x: x, y: y, top: r.top, bottom: r.bottom, left: r.left, hit: got ? (got.id || got.className || got.tagName) : "",
+        invParent: invParent,
         bill: bill ? bill.textContent : "", clip: bill ? bill.scrollWidth > bill.clientWidth + 2 : false,
         links: document.querySelectorAll("#home-map-stage a[href],#meter-map-stage a[href]").length, invoiceLinks: invoiceLinks,
         host: !!host, hostText: host ? host.textContent : "", riderText: rider ? rider.textContent : "",
@@ -369,6 +375,7 @@ test("full-page map and tracker keep the invoice on one line and the controls hi
           assert.equal(row.bill.indexOf("Invoice #"), -1, pair[0] + " invoice is on the arrive button");
           assert.equal(row.mphOverlap, false, pair[0] + " MPH covers the invoice");
           assert.equal(row.turnBg, "rgb(11, 61, 35)", pair[0] + " turn bar is not dark green");
+          assert.equal((row.invParent || ""), "sched-fs-bottom", pair[0] + " invoice is not in the bottom stack");
           assert.equal(row.riderText.indexOf("Invoice #"), -1, pair[0] + " invoice is on the rider line");
         }
       });
@@ -384,14 +391,15 @@ test("full-page map and tracker keep the invoice on one line and the controls hi
     const paidPage = pages.filter(function (pair) { return pair[0] === "554-landscape.html"; })[0];
     await open(paidPage[0], paidPage[1]);
     await send("Runtime.evaluate", { expression: "document.getElementById('map-mode-toggle').click(); document.getElementById('map-orient-toggle').click(); document.getElementById('zoom-out').click(); document.getElementById('nav-inv-link').click(); document.getElementById('sched-fs-close').click();", returnByValue: true }, sid);
-    const tapped = await send("Runtime.evaluate", { expression: "JSON.stringify({mode:document.getElementById('map-mode-toggle').dataset.n,orient:document.getElementById('map-orient-toggle').dataset.n,zoom:document.getElementById('zoom-out').dataset.n,link:document.getElementById('nav-inv-link').dataset.n,href:document.getElementById('nav-inv-link').getAttribute('href'),inv:document.getElementById('nav-inv').textContent,line:document.getElementById('sched-rider-line').textContent,close:document.getElementById('sched-fs-close').dataset.n,parent:document.getElementById('nav-inv-link').closest('#sched-turn') ? 'top' : '',host:!!document.getElementById('sched-bill-host')})", returnByValue: true }, sid);
+    const tapped = await send("Runtime.evaluate", { expression: "JSON.stringify({mode:document.getElementById('map-mode-toggle').dataset.n,orient:document.getElementById('map-orient-toggle').dataset.n,zoom:document.getElementById('zoom-out').dataset.n,link:document.getElementById('nav-inv-link').dataset.n,href:document.getElementById('nav-inv-link').getAttribute('href'),inv:document.getElementById('nav-inv').textContent,turn:document.getElementById('sched-turn').textContent,line:document.getElementById('sched-rider-line').textContent,close:document.getElementById('sched-fs-close').dataset.n,parent:document.getElementById('nav-inv').parentElement.id,host:!!document.getElementById('sched-bill-host')})", returnByValue: true }, sid);
     const got = JSON.parse(tapped.result.result.value);
     assert.equal(got.mode, "1");
     assert.equal(got.orient, "1");
     assert.equal(got.zoom, "1");
     assert.equal(got.link, "1");
     assert.equal(got.href, RECEIPT);
-    assert.equal(got.parent, "top");
+    assert.equal(got.parent, "sched-fs-bottom");
+    assert.equal(got.turn.indexOf("Invoice"), -1);
     assert.ok(got.inv.indexOf("Invoice #000554") >= 0 && got.inv.indexOf("Paid") >= 0);
     assert.equal(got.host, false);
     assert.equal(got.line.indexOf("Invoice #"), -1);

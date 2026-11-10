@@ -29,7 +29,7 @@
     if ($("fl-style")) return;
     var st = document.createElement("style"); st.id = "fl-style";
     st.textContent = "#fl-live{background:#f0fdf4;color:#0b3d23;border:3px solid #2e9d4f;border-radius:16px;padding:12px}" +
-      "#fl-live p{color:#0b3d23}.fl-status{display:block;margin:0 0 8px;padding:10px 12px;border-radius:12px;background:#0b6b3a;color:#fff !important;font-size:21px;font-weight:900;text-align:center;line-height:1.25;white-space:normal;overflow:visible;height:auto}#fl-status a{color:#fff;font-weight:900;text-decoration:underline}#fl-status .fl-status-ride{display:block}#fl-status .fl-status-inv{display:block;white-space:nowrap}" +
+      "#fl-live p{color:#0b3d23}.fl-status{display:block;margin:0 0 8px;padding:10px 12px;border-radius:12px;background:#0b6b3a;color:#fff !important;font-size:21px;font-weight:900;text-align:center}" +
       ".fl-under{display:flex;align-items:flex-start;gap:8px;margin:0 0 6px}.fl-under-main{flex:1 1 auto;min-width:0}#fl-call a{color:#0b3d23;font-weight:900;text-decoration:underline}#fl-live #fl-call{background:#0b6b3a;color:#fff !important;border:2px solid #b8f0c8;line-height:1.35;min-height:0;height:auto;padding:8px 10px;white-space:normal}#fl-live #fl-call a{color:#fff !important}" +
       ".fl-drv{display:flex;align-items:center;gap:10px;background:#0b3d23;color:#f3ead2;border:2px solid #d4b15a;border-radius:14px;padding:6px 10px;margin:0}#fl-live .fl-drv .fl-who,#fl-live .fl-drv .fl-car{color:#f3ead2}.fl-photo{width:64px;height:64px;border-radius:50%;object-fit:cover;border:3px solid #d4b15a;flex:none;background:#20371d}.fl-drv-t{min-width:0}.fl-drv .fl-plate{color:#0b3d23}" +
       ".fl-who{font-size:18px;font-weight:800;margin:4px 0}.fl-car{font-size:16px;font-weight:700;margin:2px 0 8px}.fl-plate{display:inline-block;background:#fff;border:2px solid #0b3d23;border-radius:8px;padding:0 8px;margin-left:4px;font-weight:900;letter-spacing:.06em}" +
@@ -203,7 +203,7 @@
       '<div id="fl-map" role="img" aria-label="Map with the car, the pickup and the drop-off"></div>' +
       '<p class="fl-row" id="fl-from"></p><div id="fl-stops"></div><p class="fl-row" id="fl-to"></p>' +
       '<p class="fl-upd" id="fl-upd"></p><p class="error" id="fl-net" role="status"></p>' +
-      /* Dark-green payment alert only. The invoice number itself is on the status bar. Hidden when there is no fresh Square word. */
+      /* Dark-green payment bar is the only invoice on this page. The status line stays the ride sentence. */
       '<p class="fl-call" id="fl-call" hidden></p></div>';
     if (window.L) {
       S.map = window.L.map("fl-map", { zoomControl: true, attributionControl: true, zoomSnap: 0.25, zoomDelta: 1 }).setView([29.76, -95.37], 11);
@@ -456,30 +456,10 @@
     var label = no ? "Invoice #" + no : "";
     if (word) label = label ? label + " \u00b7 " + word : word;
     var gap = !no && !word ? (d.bill === "invoiced" || d.bill === "prepaid" ? "no-verified-payment" : "") : !word ? (hasSquare && !fresh ? "stale" : "number-only") : link ? "" : "word-only";
-    return { no: no, word: word, label: label, link: link, show: !!word, gap: gap };
+    return { no: no, word: word, label: label, link: link, show: !!(no || word), gap: gap };
   }
-  function statusLine(d, now) {
-    var m = billBarModel(d, now);
-    var line = statusText(d || {});
-    if (m.no) line += " \u00b7 Invoice #" + m.no;
-    if (m.word) line += " \u00b7 " + m.word;
-    return line;
-  }
-  function paintStatus(d) {
-    var el = $("fl-status"); if (!el) return;
-    var m = billBarModel(d);
-    var html = '<span class="fl-status-ride">' + esc(statusText(d)) + "</span>";
-    if (m.no || m.word) {
-      var inv = m.no ? "Invoice #" + esc(m.no) : "";
-      if (m.word) {
-        if (inv) inv += " \u00b7 ";
-        if (m.link) inv += '<a id="fl-status-word" href="' + esc(m.link.href) + '" target="_blank" rel="noopener">' + esc(m.word) + "</a>";
-        else inv += esc(m.word);
-      }
-      html += '<span class="fl-status-inv">' + inv + "</span>";
-    }
-    if (el.__h !== html) { el.innerHTML = html; el.__h = html; }
-  }
+  function statusLine(d) { return statusText(d || {}); }
+  function paintStatus(d) { setText("fl-status", statusText(d || {})); }
   function paintBill(d) {
     var el = $("fl-call"); if (!el) return;
     var live = $("fl-live");
@@ -488,8 +468,8 @@
       if (S.map) { try { S.map.invalidateSize(); } catch (e) {} }
     }
     var m = billBarModel(d);
-    if (!m.word) { el.hidden = true; if (el.__h) { el.innerHTML = ""; el.__h = ""; } return; }
-    var html = esc(m.word);
+    if (!m.show) { el.hidden = true; if (el.__h) { el.innerHTML = ""; el.__h = ""; } return; }
+    var html = esc(m.label);
     if (m.link) html += " \u00b7 <a id=\"" + m.link.id + "\" href=\"" + esc(m.link.href) + "\" target=\"_blank\" rel=\"noopener\">" + esc(m.link.text) + "</a>";
     if (el.__h !== html) { el.innerHTML = html; el.__h = html; }
     el.hidden = false;

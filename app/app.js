@@ -10039,7 +10039,7 @@
     var inner = esc(m.text);
     if (m.href && m.word && m.no) inner = esc("Invoice #" + m.no + " \u00b7 ") + '<a id="nav-inv-link" href="' + esc(m.href) + '" target="_blank" rel="noopener" style="color:#fff;font-weight:900;text-decoration:underline">' + esc(m.word) + "</a>";
     else if (m.href && m.word) inner = '<a id="nav-inv-link" href="' + esc(m.href) + '" target="_blank" rel="noopener" style="color:#fff;font-weight:900;text-decoration:underline">' + esc(m.word) + "</a>";
-    return '<span id="nav-inv" style="display:block;margin-top:6px;font-size:18px;line-height:1.35;font-weight:900;color:#fff;white-space:normal">' + inner + "</span>";
+    return '<div id="nav-inv" class="nav-inv-bar" style="display:block;width:100%;box-sizing:border-box;margin:0;padding:10px 12px;background:#0b3d23;color:#fff;border:3px solid #2e9d4f;border-radius:14px;font-family:system-ui,-apple-system,sans-serif;font-size:18px;line-height:1.35;font-weight:900;text-align:center;pointer-events:auto">' + inner + "</div>";
   }
   if (typeof window !== "undefined") window.__pcsV20lBill = { kind: rideBillKind, text: rideBillText, label: rideBillLabelHtml, invoiceNo: rideInvoiceDisplayNo, from: rideInvoiceNoFrom, fit: rideBillLabelFitCss, map: schedMapBillHtml, pickupLine: schedPickupStatusText, pay: ridePayWord, bar: rideMapBillText, payUrl: rideCustomerPayUrl, slot: rideInvoiceSlotHtml, square: squareInvoiceLink, take: verInvTake, live: rideLivePay, nav: squareNavModel, navHtml: navInvoiceHtml };
   function meterInvInfo(M) { return rideInvoiceInfo(M && M.schedId ? schedFind(M.schedId) : null, M); }
@@ -10329,8 +10329,8 @@
   function navTurnInvoice() {
     var r = null, held = null, id = "";
     try {
-      var t = schedNavTrip();
-      if (t && t.id) { id = String(t.id); r = schedFind(id); held = verInv[id]; }
+      r = rideLineRide();
+      if (r && r.id) { id = String(r.id); held = verInv[id]; }
     } catch (e) { r = null; }
     if (id) {
       var now = Date.now();
@@ -10700,14 +10700,12 @@
   function schedTurnHtml() {
     var n = schedNextTurn(), R = schedNavRoute;
     var box = "background:#0b3d23;color:#fff;border-radius:12px;padding:10px 12px;margin:0 0 8px;font-size:20px;font-weight:800";
-    var inv = "";
-    try { inv = navTurnInvoice(); } catch (eInv) { inv = ""; }
-    if (!n) return '<div id="sched-turn" role="status" style="' + box + '">' + (meterHerePt() ? "Finding the route to the pickup\u2026" : "Allow location to see the route to the pickup.") + inv + "</div>";
+    if (!n) return '<div id="sched-turn" role="status" style="' + box + '">' + (meterHerePt() ? "Finding the route to the pickup\u2026" : "Allow location to see the route to the pickup.") + "</div>";
     var dd = n.mi == null ? "" : n.mi < 0.1 ? Math.max(50, Math.round(n.mi * 5280 / 50) * 50) + " ft" : n.mi.toFixed(1) + " mi";
     var mins = R && R.miles > 0 ? Math.max(1, Math.round(R.minutes * Math.min(1, n.left * 1.3 / Math.max(0.01, R.miles)))) : null;
     return '<div id="sched-turn" role="status" aria-live="polite" style="' + box + '">' +
       (n.text ? '<small style="display:block;font-size:14px;font-weight:700;color:#d1fae5">In ' + esc(dd) + "</small>" + esc(n.text) : "Head to the pickup") +
-      '<small style="display:block;font-size:14px;font-weight:700;color:#d1fae5;margin-top:4px">' + esc((Math.round(n.left * 10) / 10) + " mi to the pickup" + (mins ? " \u00b7 about " + mins + " min" : "")) + "</small>" + inv + "</div>";
+      '<small style="display:block;font-size:14px;font-weight:700;color:#d1fae5;margin-top:4px">' + esc((Math.round(n.left * 10) / 10) + " mi to the pickup" + (mins ? " \u00b7 about " + mins + " min" : "")) + "</small></div>";
   }
   /* v77.8 (Matthew 10/20, circled spot): big ETA box top-right of the nav map, below the turn banner.
      "Arrive 1:55 PM" / "9 min \u00b7 5 mi" + "to pickup" / "to drop-off". Minutes come from the route duration (Google
@@ -10747,7 +10745,7 @@
     var fe = document.getElementById("sched-eta-fs"), top = document.getElementById("sched-fs-top");
     if (top) { var h2 = schedEtaHtml("sched-eta-fs"); if (!fe) top.insertAdjacentHTML("beforeend", h2); else if (fe.outerHTML !== h2) fe.outerHTML = h2; }
   }
-  function schedNavPaint() { var el = document.getElementById("sched-turn"); if (el) { var h = schedTurnHtml(); if (el.outerHTML !== h) el.outerHTML = h; } var fs = document.getElementById("sched-turn-fs"); if (fs) { var h2 = schedTurnHtml().replace('id="sched-turn"', 'id="sched-turn-fs"'); if (fs.outerHTML !== h2) fs.outerHTML = h2; } try { schedEtaPaint(); } catch (e) {} if (!schedNavTrip()) schedFullApply(); if (navTestOn()) try { navTestPaint(); } catch (e) {} } /* v75x: full screen banner too; v75y test flag: Uber-style card + bar */
+  function schedNavPaint() { var el = document.getElementById("sched-turn"); if (el) { var h = schedTurnHtml(); if (el.outerHTML !== h) el.outerHTML = h; } var fs = document.getElementById("sched-turn-fs"); if (fs) { var h2 = schedTurnHtml().replace('id="sched-turn"', 'id="sched-turn-fs"'); if (fs.outerHTML !== h2) fs.outerHTML = h2; } try { schedEtaPaint(); } catch (e) {} if (!schedNavTrip()) schedFullApply(); try { schedFullLift(); } catch (eLift) {} if (navTestOn()) try { navTestPaint(); } catch (e) {} } /* v75x: full screen banner too; v75y test flag: Uber-style card + bar */
   /* v75x (Matthew 10/16): on the way to the pickup the map can fill the whole screen. A big "Full screen map" button on the
      small map (or a tap on the map) opens it; the next-turn banner stays on top, the pickup pin, Follow / Heading up and the
      v75w arrow freeze are the SAME map (resized, never recreated). Big "I'm at the pickup" + Close. The choice is remembered
@@ -10821,18 +10819,37 @@
     } else if (line.parentNode !== host) host.insertBefore(line, host.firstChild);
     return line;
   }
+  function schedMapInvPlace(bot) {
+    /* Dark green invoice bar, full width, directly above the main action button. No white strip. */
+    if (!bot || typeof document === "undefined") return;
+    var html = "";
+    try { html = navTurnInvoice(); } catch (e) { html = ""; }
+    var el = document.getElementById("nav-inv");
+    var inBot = !!(el && bot.contains && bot.contains(el));
+    if (!html) { if (inBot) el.remove(); return; }
+    var before = bot.querySelector ? (bot.querySelector("#sched-fs-arrived") || bot.querySelector(".rfs-actions") || bot.querySelector("#rfs-ask")) : null;
+    if (!inBot) {
+      if (before && before.insertAdjacentHTML) before.insertAdjacentHTML("beforebegin", html);
+      else bot.insertAdjacentHTML("afterbegin", html);
+      return;
+    }
+    if (el.outerHTML !== html) { el.outerHTML = html; el = document.getElementById("nav-inv"); }
+    if (el && before && before.parentNode === bot && el.nextElementSibling !== before && before.before) before.before(el);
+  }
   function schedMapBillPlace(bot) {
-    /* The white invoice strip is not on the nav map. Invoice # and Paid/Unpaid sit on the dark green turn card. */
+    /* The white invoice strip is not on the nav map. Invoice # and Paid/Unpaid sit on the bottom bar. */
     if (!bot || typeof document === "undefined") return;
     var host = document.getElementById("sched-bill-host");
     if (host && bot.contains && bot.contains(host)) schedBillHome();
     var btn = bot.querySelector ? bot.querySelector("#sched-fs-arrived") : null;
-    if (!btn) return;
-    var r = null;
-    try { var t = schedNavTrip(); r = t ? schedFind(t.id) : null; } catch (e) { r = null; }
-    var text = schedPickupStatusText(r);
-    if (btn.textContent !== text) btn.textContent = text;
-    if (btn.getAttribute && btn.getAttribute("aria-label") !== text) btn.setAttribute("aria-label", text);
+    if (btn) {
+      var r = null;
+      try { var t = schedNavTrip(); r = t ? schedFind(t.id) : null; } catch (e) { r = null; }
+      var text = schedPickupStatusText(r);
+      if (btn.textContent !== text) btn.textContent = text;
+      if (btn.getAttribute && btn.getAttribute("aria-label") !== text) btn.setAttribute("aria-label", text);
+    }
+    schedMapInvPlace(bot);
   }
   function schedFsMeasure() {
     var stage = document.getElementById("home-map-stage");
@@ -10841,7 +10858,19 @@
     if (bot && bot.offsetHeight) stage.style.setProperty("--sched-fs-bar", bot.offsetHeight + "px");
     if (top && top.offsetHeight) stage.style.setProperty("--sched-fs-top", top.offsetHeight + "px");
   }
+  /* Arrive card is the reference: solid #0b3d23, 3px #2e9d4f border, 14px corners, system-ui, white text. */
+  function navUniformStyle() {
+    if (typeof document === "undefined" || document.getElementById("pcs-nav-uniform")) return;
+    var st = document.createElement("style");
+    st.id = "pcs-nav-uniform";
+    st.textContent =
+      "#home-map-stage.pcs-fullmap #sched-turn-fs,#meter-map-stage.pcs-rfs .meter-turn,#home-map-stage.pcs-fullmap .nav-eta,#meter-map-stage.pcs-rfs .nav-eta,#home-map-stage.pcs-fullmap #nav-inv,#meter-map-stage.pcs-rfs #nav-inv,#rfs-bar #nav-inv,#meter-map-stage.pcs-rfs .rfs-row,#home-map-stage.pcs-fullmap .nav-toggle button,#meter-map-stage.pcs-rfs .nav-toggle button,#home-map-stage.pcs-fullmap #sched-fs-arrived,#home-map-stage.pcs-fullmap #sched-fs-close,#rfs-bar .rfs-close,#rfs-bar .rfs-toll-add{background:#0b3d23 !important;color:#fff !important;border:3px solid #2e9d4f !important;border-radius:14px !important;font-family:system-ui,-apple-system,sans-serif !important}" +
+      "#meter-map-stage.pcs-rfs .rfs-row .rfs-fare,#meter-map-stage.pcs-rfs .rfs-row .rfs-stats,#meter-map-stage.pcs-rfs .rfs-row .rfs-stats b,#meter-map-stage.pcs-rfs .rfs-row .rfs-tier{color:#fff !important;font-family:system-ui,-apple-system,sans-serif !important}" +
+      "#rfs-bar .rfs-end{border-width:3px !important;border-style:solid !important;border-radius:14px !important;font-family:system-ui,-apple-system,sans-serif !important}";
+    (document.head || document.documentElement).appendChild(st);
+  }
   function schedFullStyle() {
+    navUniformStyle();
     if (document.getElementById("pcs-fullmap-style")) return;
     var st = document.createElement("style"); st.id = "pcs-fullmap-style";
     st.textContent = "#home-map-stage.pcs-fullmap{position:fixed !important;left:0;right:0;top:0;bottom:0;width:100vw;height:100vh !important;height:100dvh !important;margin:0 !important;z-index:2147482000;background:#0b3d23;border-radius:0}" +
@@ -10860,7 +10889,9 @@
       ".sched-bill-host .fine,.sched-bill-host #pcs-question-slot{margin:0;color:#1a1a1a;font-size:16px;font-weight:700}" +
       ".sched-bill-host a{color:#0b3d23;font-weight:800}" +
       "#sched-fs-bottom,#rfs-bar{container-type:inline-size}.pcs-map-green,#sched-fs-arrived{display:block;width:100%;box-sizing:border-box;height:62px;min-height:62px;margin:0;padding:0 10px;font-size:clamp(12px,calc(100cqw / 26),20px);font-weight:800;line-height:58px;text-align:center;background:#0b6b3a;color:#fff;border:2px solid #fff;border-radius:14px;white-space:nowrap;overflow:hidden;text-overflow:clip;position:relative;z-index:1;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.4)}" +
-      "#sched-fs-close{display:block;width:100%;min-height:58px;font-size:21px;font-weight:800;background:#d1fae5;color:#0b3d23;border:3px solid #0b3d23;border-radius:14px;margin:0;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.4)}";
+      "#sched-fs-close{display:block;width:100%;min-height:58px;font-size:21px;font-weight:800;background:#d1fae5;color:#0b3d23;border:3px solid #0b3d23;border-radius:14px;margin:0;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.4)}" +
+      "#sched-fs-bottom #nav-inv,#rfs-bar #nav-inv{pointer-events:auto;position:relative;z-index:1}" +
+      "body.pcs-fullmap-body #pcs-sos-btn{z-index:2147482100 !important;bottom:auto !important;right:12px !important;top:250px;top:var(--pcs-sos-top,calc(env(safe-area-inset-top,0px) + 250px))}";
     document.head.appendChild(st);
   }
   function schedFullResize() {
@@ -10890,6 +10921,7 @@
       schedBillHome();
       if (openB) openB.remove(); if (top) top.remove(); if (bot) bot.remove(); if (stage) fsMphDrop(stage); /* v76b */
       if (stage && stage.classList.contains("pcs-fullmap")) { stage.classList.remove("pcs-fullmap"); document.body.style.overflow = ""; schedFullResize(); }
+      schedFullMark(stage);
       return;
     }
     schedFullStyle();
@@ -10919,7 +10951,12 @@
       if (navTestOn()) navTestBottom(bot); /* v75y test flag */
       else schedMapBillPlace(bot);
       schedFsMeasure();
-      fsMphPlace(stage, (navTestOn() ? 262 : 172) + "px"); /* v76b: MPH badge */
+      var mphBottom = (navTestOn() ? 262 : 172) + "px";
+      if (bot && bot.getBoundingClientRect && stage.getBoundingClientRect) {
+        var lift = Math.round(stage.getBoundingClientRect().bottom - bot.getBoundingClientRect().top + 12);
+        if (lift > 0) mphBottom = lift + "px"; /* above the invoice bar and the action buttons */
+      }
+      fsMphPlace(stage, mphBottom); /* v76b: MPH badge */
     } else { schedBillHome(); rideLineHome(); if (top) top.remove(); if (bot) bot.remove(); fsMphDrop(stage); }
     if (full !== was) {
       stage.classList.toggle("pcs-fullmap", full);
@@ -10928,6 +10965,25 @@
       setTimeout(schedFullResize, 120);
       if (!full) { var card = document.getElementById("sched-trip"); if (card && card.scrollIntoView) try { card.scrollIntoView({ block: "start" }); } catch (e) {} }
     }
+    schedFullMark(stage);
+  }
+  function schedFullMark(stage) {
+    if (typeof document === "undefined" || !document.body || !document.body.classList) return;
+    var on = !!(stage && stage.classList && stage.classList.contains("pcs-fullmap"));
+    if (document.body.classList.contains("pcs-fullmap-body") !== on) document.body.classList.toggle("pcs-fullmap-body", on);
+    if (on) { try { sosPlace(); } catch (e) {} }
+  }
+  function schedFullLift() {
+    if (typeof document === "undefined") return;
+    var stage = document.getElementById("home-map-stage"), bot = document.getElementById("sched-fs-bottom");
+    if (!stage || !stage.classList.contains("pcs-fullmap") || !bot) { schedFullMark(stage); return; }
+    schedMapInvPlace(bot);
+    schedFsMeasure();
+    if (bot.getBoundingClientRect && stage.getBoundingClientRect) {
+      var lift = Math.round(stage.getBoundingClientRect().bottom - bot.getBoundingClientRect().top + 12);
+      if (lift > 0) fsMphPlace(stage, lift + "px");
+    }
+    schedFullMark(stage);
   }
   /* ---------- v76b (Matthew 10/17, his screenshots): SPEED on the full-screen map + FULL SCREEN during the ride ----------
      1) A big MPH badge on the full-screen map in every phase. Same GPS speed math as the meter's MPH box (meterSpeedSample /
@@ -10973,6 +11029,7 @@
   }
   function fsMphDrop(stage) { var el = typeof document !== "undefined" ? document.getElementById("fs-mph") : null; if (el && (!stage || el.parentNode === stage)) el.remove(); }
   function fsStyle() {
+    navUniformStyle();
     if (document.getElementById("pcs-fs76b-style")) return;
     var st = document.createElement("style"); st.id = "pcs-fs76b-style";
     st.textContent =
@@ -11001,6 +11058,7 @@
       "#rfs-bar .rfs-close{flex:1 1 0;min-height:62px;margin:0;font-size:20px;font-weight:900;border-radius:14px;background:#d1fae5;color:#0b3d23;border:3px solid #0b3d23;cursor:pointer}" +
       "#rfs-bar .rfs-keep{flex:1 1 0;min-height:62px;margin:0;font-size:17px;font-weight:800;border-radius:14px;background:#fff;color:#0b3d23;border:3px solid #0b3d23;cursor:pointer}" +
       ".rfs-ask{margin:0 0 6px;font-size:18px;font-weight:800;color:#0b3d23;text-align:center}" +
+      "#rfs-bar #nav-inv{pointer-events:auto;position:relative;z-index:1}" +
       "body.pcs-rfs-body #pcs-sos-btn{z-index:2147482100 !important;bottom:auto !important;right:12px !important;top:250px;top:var(--pcs-sos-top,calc(env(safe-area-inset-top,0px) + 250px))}";
     document.head.appendChild(st);
   }
@@ -11040,7 +11098,12 @@
   }
   function rfsSig(M) {
     var t = meterTollView(M), ed = meterTollEditable(M) && t.on;
-    return [state.meterConfirmEnd ? 1 : 0, ed ? 1 : 0, t.count, t.cents, t.kind, state.meterTollEdit ? 1 : 0, M.prepaid ? 1 : 0, M.tierLabel || "", meterShown(M) ? "m" : rideInvoiceSig(meterInvInfo(M)), state.meterBusy ? 1 : 0, rideEstHtml(M, "x")].join("|");
+    var inv = "";
+    try {
+      var rr = rideLineRide(), held = rr && rr.id ? verInv[rr.id] : null, nm = squareNavModel(rr || {}, held, Date.now());
+      inv = (nm.text || "") + "|" + (nm.href || "");
+    } catch (e) { inv = ""; }
+    return [state.meterConfirmEnd ? 1 : 0, ed ? 1 : 0, t.count, t.cents, t.kind, state.meterTollEdit ? 1 : 0, M.prepaid ? 1 : 0, M.tierLabel || "", meterShown(M) ? "m" : rideInvoiceSig(meterInvInfo(M)), inv, state.meterBusy ? 1 : 0, rideEstHtml(M, "x")].join("|");
   }
   /* v2.0k r5 (Matthew 10/25: "THE ONLY TIME THAT I WANTED THE ESTIMATED PRICE WAS UNDER METERED RIDE OR CASH RIDE"):
      the "Estimated cost" line shows ONLY on a Metered ride and on a Cash calendar ride. Card, Square / invoice and set-fare rides: no line.
@@ -11109,12 +11172,14 @@
         (t.count && po ? '<button type="button" class="rfs-toll-line" id="rfs-toll-line" data-rfs="tollline" aria-label="' + esc(t.label + " " + money(t.cents) + ". Tap to change the amount") + '">' + esc(t.label) + " <b>" + money(t.cents) + "</b></button>" +
           '<button type="button" class="rfs-toll-undo" id="rfs-toll-undo" data-rfs="tollundo">Undo</button>' : "") + "</div>";
     }
+    var inv = "";
+    try { inv = navTurnInvoice(); } catch (eInv) { inv = ""; }
     if (state.meterConfirmEnd) {
-      html += '<p class="rfs-ask" id="rfs-ask">End this ride?' + (!ridePriceOk(M) ? "" : M.prepaid ? " " + invoiceFareText(M.prepaid) + "." : shown ? " Meter " + money(f.sub) + "." : "") + "</p>" +
+      html += '<p class="rfs-ask" id="rfs-ask">End this ride?' + (!ridePriceOk(M) ? "" : M.prepaid ? " " + invoiceFareText(M.prepaid) + "." : shown ? " Meter " + money(f.sub) + "." : "") + "</p>" + inv +
         '<div class="rfs-actions"><button type="button" class="rfs-end" id="rfs-end-yes" data-rfs="endyes">Yes, end ride</button>' +
         '<button type="button" class="rfs-keep" id="rfs-end-keep" data-rfs="endkeep">' + (shown ? "Keep the meter running" : "Keep driving") + "</button></div>"; /* v2.0d.5 r5 */
     } else {
-      html += '<div class="rfs-actions"><button type="button" class="rfs-end" id="rfs-end" data-rfs="end"' + (state.meterBusy ? " disabled" : "") + ">End ride</button>" +
+      html += inv + '<div class="rfs-actions"><button type="button" class="rfs-end" id="rfs-end" data-rfs="end"' + (state.meterBusy ? " disabled" : "") + ">End ride</button>" +
         '<button type="button" class="rfs-close" id="rfs-close" data-rfs="close">Close map</button></div>';
     }
     return html;
@@ -11977,6 +12042,7 @@
     var was = stage.classList.contains("pcs-fullmap");
     stage.classList.add("pcs-navtest"); stage.classList.add("pcs-navarr");
     if (!was) { stage.classList.add("pcs-fullmap"); document.body.style.overflow = "hidden"; schedFullResize(); setTimeout(schedFullResize, 120); }
+    schedFullMark(stage);
     return true;
   }
   if (typeof window !== "undefined") window.__pcsNavTest = { on: function () { return navTestOn(); }, parse: navTurnParse, mph: navMph, limitParse: navLimitParse, limitAt: navLimitAt,

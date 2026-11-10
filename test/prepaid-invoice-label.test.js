@@ -135,7 +135,9 @@ test("the pickup button stays I'm at the pickup and the invoice is not on a whit
   assert.doesNotMatch(place, /insertBefore/);
   assert.doesNotMatch(place, /host\.remove/);
   assert.match(place, /sched-fs-arrived/);
-  assert.match(turn, /navTurnInvoice/);
+  assert.match(place, /schedMapInvPlace/);
+  assert.doesNotMatch(turn, /navTurnInvoice/);
+  assert.doesNotMatch(turn, /nav-inv/);
   assert.match(src, /nav-toggle\{bottom:calc\(var\(--pcs-safe-bottom/);
   assert.match(src, /leaflet-top\.leaflet-left\{top:calc\(var\(--pcs-safe-top/);
   assert.doesNotMatch(src.slice(src.indexOf("function schedFullStyle"), src.indexOf("function schedFullResize")), /nav-toggle\{bottom:172px/);

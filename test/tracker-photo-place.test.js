@@ -197,8 +197,9 @@ test("the synthetic driver photo stays under the green bar and off the map contr
       assert.equal(got.text, "Your PCS driver: Matt");
       const bareBill = await send("Runtime.evaluate", { expression: billOnScreen, returnByValue: true }, sid);
       const bare = JSON.parse(bareBill.result.result.value);
-      assert.ok(bare.status.indexOf("Invoice #000562 · Unpaid") >= 0, size[0] + " " + bareBill.result.result.value);
-      assert.equal(bare.text, "Unpaid", size[0] + " bottom alert " + bare.text);
+      assert.equal(bare.status, "Your driver is on the way", size[0] + " " + bareBill.result.result.value);
+      assert.equal(bare.status.indexOf("Invoice"), -1, size[0] + " invoice is on the status bar");
+      assert.equal(bare.text, "Invoice #000562 · Unpaid", size[0] + " bottom alert " + bare.text);
       assert.equal(bare.hidden, false, size[0] + " unpaid alert hidden");
       assert.equal(bare.pinned, false, size[0] + " light bill bar is pinned");
       assert.equal(bare.overlap, false, size[0] + " invoice bar covers the photo");
@@ -247,8 +248,8 @@ test("the synthetic driver photo stays under the green bar and off the map contr
       return JSON.parse(msg.result.result.value);
     }
     const paid = await showBill("paid", "tracker-green-paid.png");
-    assert.ok(paid.status.indexOf("Invoice #000562 · Paid") >= 0, paid.status);
-    assert.equal(paid.text, "Paid · View receipt");
+    assert.equal(paid.status.indexOf("Invoice"), -1, paid.status);
+    assert.equal(paid.text, "Invoice #000562 · Paid · View receipt");
     assert.equal(paid.href, "https://squareup.com/receipt/preview/rcpt210");
     assert.equal(paid.id, "fl-receipt");
     assert.equal(paid.overlapBill, false);
@@ -258,19 +259,40 @@ test("the synthetic driver photo stays under the green bar and off the map contr
     const paidClick = await send("Runtime.evaluate", { expression: "document.getElementById('fl-receipt').dataset.n", returnByValue: true }, sid);
     assert.equal(paidClick.result.result.value, "1");
     const owed = await showBill("unpaid", "tracker-green-unpaid.png");
-    assert.ok(owed.status.indexOf("Invoice #000562 · Unpaid") >= 0, owed.status);
-    assert.equal(owed.text, "Unpaid · Pay invoice");
+    assert.equal(owed.status.indexOf("Invoice"), -1, owed.status);
+    assert.equal(owed.text, "Invoice #000562 · Unpaid · Pay invoice");
     assert.equal(owed.href, "https://squareup.com/pay-invoice/inv574");
     assert.equal(owed.id, "fl-pay");
     await send("Runtime.evaluate", { expression: "document.getElementById('fl-pay').click()", returnByValue: true }, sid);
     const payClick = await send("Runtime.evaluate", { expression: "document.getElementById('fl-pay').dataset.n", returnByValue: true }, sid);
     assert.equal(payClick.result.result.value, "1");
     const unknown = await showBill("bare", "tracker-green-number.png");
-    assert.equal(unknown.hidden, true);
-    assert.ok(unknown.status.indexOf("Invoice #000562") >= 0, unknown.status);
+    assert.equal(unknown.hidden, false);
+    assert.equal(unknown.status.indexOf("Invoice"), -1, unknown.status);
+    assert.equal(unknown.text, "Invoice #000562");
     assert.equal(unknown.status.indexOf("Unpaid"), -1);
     assert.equal(unknown.status.indexOf("Paid"), -1);
     assert.equal(unknown.href, "");
+    await send("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 1, mobile: true }, sid);
+    async function phoneShot(kind, file) {
+      const now = Date.now();
+      const extra = kind === "paid"
+        ? { sqInvoice: { status: "PAID", paid: true, checkedAt: now }, receiptUrl: "https://squareup.com/receipt/preview/rcpt210" }
+        : { sqInvoice: { status: "UNPAID", paid: false, checkedAt: now }, payUrl: "https://squareup.com/pay-invoice/inv574" };
+      const ride = Object.assign({ status: "on_way", driverFirst: "Matt", bill: "invoiced", invoiceNo: "000562", car: { color: "Black", make: "Cadillac" }, pickup: { label: "10 Estancia Pl, Spring", lat: 30.1, lng: -95.5 }, dest: { label: "26 Veilwood Cir, Spring", lat: 30.2, lng: -95.4 }, eta: { min: 43, miles: 21.7, to: "pickup" }, etaAt: now, pos: { lat: 30.05, lng: -95.45, at: now }, updatedAt: now }, extra);
+      await send("Runtime.evaluate", { expression: "window.__pcsFollowLive.update(" + JSON.stringify(ride) + ")", returnByValue: true }, sid);
+      await wait(80);
+      const shot = await send("Page.captureScreenshot", { format: "png" }, sid);
+      fs.writeFileSync("/opt/cursor/artifacts/" + file, Buffer.from(shot.result.data, "base64"));
+      const text = await send("Runtime.evaluate", { expression: "JSON.stringify({status:document.getElementById('fl-status').textContent,bill:document.getElementById('fl-call').textContent})", returnByValue: true }, sid);
+      return JSON.parse(text.result.result.value);
+    }
+    const phoneUnpaid = await phoneShot("unpaid", "tracker-iphone-390-unpaid.png");
+    assert.equal(phoneUnpaid.status, "Your driver is on the way");
+    assert.equal(phoneUnpaid.bill, "Invoice #000562 · Unpaid · Pay invoice");
+    const phonePaid = await phoneShot("paid", "tracker-iphone-390-paid.png");
+    assert.equal(phonePaid.status, "Your driver is on the way");
+    assert.equal(phonePaid.bill, "Invoice #000562 · Paid · View receipt");
     ws.close();
   } finally {
     session.chrome.kill("SIGKILL");

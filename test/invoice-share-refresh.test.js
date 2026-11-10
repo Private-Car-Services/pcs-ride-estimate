@@ -85,7 +85,8 @@ test("the rider phone stays, and the business call line is not in those cards", 
   assert.equal(place.indexOf("questionSlotHtml"), -1);
   assert.equal(place.indexOf("host.remove"), -1);
   const turn = src.slice(src.indexOf("function schedTurnHtml"), src.indexOf("function navEtaClock"));
-  assert.ok(turn.indexOf("navTurnInvoice") >= 0);
+  assert.equal(turn.indexOf("navTurnInvoice"), -1);
+  assert.ok(place.indexOf("schedMapInvPlace") >= 0);
   ["function cardNeededHtml", "function cardSheetEl", "function payAfterRideHtmlInner"].forEach(function (name) {
     const at = src.indexOf(name);
     assert.ok(at > 0, name);
@@ -118,9 +119,9 @@ test("shared invoice 000560 publishes the number without unpaid or paid", functi
   assert.equal(pub.payUrl, undefined);
   assert.equal(live.bill(pub).label, "Invoice #000560");
   assert.equal(live.bill(pub).word, "");
-  assert.equal(live.bill(pub).show, false);
+  assert.equal(live.bill(pub).show, true);
   assert.equal(live.bill(pub).link, null);
-  assert.ok(live.statusLine(pub).indexOf("Invoice #000560") >= 0);
+  assert.equal(live.statusLine(pub).indexOf("Invoice"), -1);
   assert.equal(live.statusLine(pub).indexOf("Unpaid"), -1);
   assert.equal(live.statusLine(pub).indexOf("Paid"), -1);
   const stale = ride("ride-unpaid", { prepaidInvoiceNo: "000559", sqInvoice: { status: "UNPAID", paid: false, invoiceNumber: "000559", checkedAt: Date.parse("2026-11-03T12:00:00Z") }, invoicePayUrl: PAY, receiptUrl: "" });
@@ -144,7 +145,8 @@ test("shared invoice 000560 publishes the number without unpaid or paid", functi
   assert.equal(live.bill(draftPub).word, "Unpaid");
   assert.equal(live.bill(draftPub).link, null);
   assert.equal(live.bill(draftPub).show, true);
-  assert.ok(live.statusLine(draftPub).indexOf("Invoice #000562 · Unpaid") >= 0);
+  assert.equal(live.statusLine(draftPub).indexOf("Invoice"), -1);
+  assert.ok(live.bill(draftPub).label.indexOf("Invoice #000562 · Unpaid") >= 0);
   const paid = ride("ride-paid", {
     prepaidInvoiceNo: "000554",
     sqInvoice: { status: "PAID", paid: true, invoiceNumber: "000554", receipt_url: RECEIPT, checkedAt: now },
@@ -155,17 +157,19 @@ test("shared invoice 000560 publishes the number without unpaid or paid", functi
   assert.equal(paidPub.receiptUrl, RECEIPT);
   assert.equal(live.bill(paidPub).word, "Paid");
   assert.equal(live.bill(paidPub).link.text, "View receipt");
-  assert.ok(live.statusLine(paidPub).indexOf("Invoice #000554 · Paid") >= 0);
+  assert.equal(live.statusLine(paidPub).indexOf("Invoice"), -1);
+  assert.ok(live.bill(paidPub).label.indexOf("Invoice #000554 · Paid") >= 0);
 });
 
 test("a fresh Square status shows Unpaid with or without a pay link, and a stale check shows neither", function () {
   const now = Date.now();
   const bare = live.bill({ invoiceNo: "000574", pay: "unpaid" });
-  assert.equal(bare.show, false);
+  assert.equal(bare.show, true);
+  assert.equal(bare.label, "Invoice #000574");
   assert.equal(bare.word, "");
   assert.equal(bare.link, null);
-  assert.ok(live.statusLine({ status: "on_way", invoiceNo: "000574" }).indexOf("Invoice #000574") >= 0);
-  assert.equal(live.statusLine({ status: "on_way", invoiceNo: "000574" }).indexOf("Unpaid"), -1);
+  assert.equal(live.statusLine({ status: "on_way", invoiceNo: "000574" }), "Your driver is on the way");
+  assert.equal(live.statusLine({ status: "on_way", invoiceNo: "000574" }).indexOf("Invoice"), -1);
   const draft = live.bill({ invoiceNo: "000562", sqInvoice: { status: "DRAFT", paid: false, checkedAt: now } });
   assert.equal(draft.word, "Unpaid");
   assert.equal(draft.show, true);
@@ -176,7 +180,9 @@ test("a fresh Square status shows Unpaid with or without a pay link, and a stale
   assert.equal(linked.link.href, PAY);
   const old = live.bill({ invoiceNo: "000562", sqInvoice: { status: "UNPAID", paid: false, checkedAt: now - 11 * 60000 }, payUrl: PAY });
   assert.equal(old.word, "");
-  assert.equal(old.show, false);
+  assert.equal(old.show, true);
+  assert.equal(old.label, "Invoice #000562");
+  assert.equal(old.label.indexOf("Unpaid"), -1);
   assert.equal(old.gap, "stale");
 });
 
@@ -212,7 +218,8 @@ test("an in-ride payment changes the authorized share from pay to receipt", asyn
   assert.equal(pub.riderPhone, undefined);
   assert.equal(live.bill(pub).word, "Unpaid");
   assert.equal(live.bill(pub).link.text, "Pay invoice");
-  assert.ok(live.statusLine(pub).indexOf("Invoice #000100 · Unpaid") >= 0);
+  assert.equal(live.statusLine(pub).indexOf("Invoice"), -1);
+  assert.ok(live.bill(pub).label.indexOf("Invoice #000100 · Unpaid") >= 0);
   phase = "PAID";
   await read();
   pub = follow.publish([mine])[0];
@@ -222,7 +229,8 @@ test("an in-ride payment changes the authorized share from pay to receipt", asyn
   assert.equal(live.bill(pub).word, "Paid");
   assert.equal(live.bill(pub).link.text, "View receipt");
   assert.equal(live.bill(pub).link.href, RECEIPT);
-  assert.ok(live.statusLine(pub).indexOf("Invoice #000100 · Paid") >= 0);
+  assert.equal(live.statusLine(pub).indexOf("Invoice"), -1);
+  assert.ok(live.bill(pub).label.indexOf("Invoice #000100 · Paid") >= 0);
   assert.equal(calls.length, 2);
 });
 
