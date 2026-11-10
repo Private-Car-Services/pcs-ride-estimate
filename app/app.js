@@ -10802,7 +10802,9 @@
       "#sched-fs-bottom:not(.nt-bot) #sched-fs-arrived.has-inv{height:auto;min-height:62px;line-height:1.25;white-space:normal;overflow:visible;padding:8px 12px}" +
       "#sched-fs-bottom:not(.nt-bot) #sched-fs-arrived.has-inv .pcs-arrived-label{line-height:1.25}" +
       "#sched-fs-arrived #sched-fs-inv{display:block;margin:2px 0 0;font-size:16px;font-weight:800;line-height:1.3;text-align:center;color:#fff;white-space:normal}" +
-      "#sched-fs-arrived #sched-fs-inv a{color:#fff;font-weight:800;text-decoration:underline}";
+      "#sched-fs-arrived #sched-fs-inv a{color:#fff;font-weight:800;text-decoration:underline}" +
+      /* v2.0m-bf: this full map sits above the SOS button. Same raise and spot as the in-ride full screen. */
+      "body.pcs-fullmap-body #pcs-sos-btn{z-index:2147482100 !important;bottom:auto !important;right:12px !important;top:250px;top:var(--pcs-sos-top,calc(env(safe-area-inset-top,0px) + 250px))}";
     document.head.appendChild(st);
   }
   function schedFullResize() {
@@ -10831,7 +10833,9 @@
     if (!leg) {
       schedBillHome();
       if (openB) openB.remove(); if (top) top.remove(); if (bot) bot.remove(); if (stage) fsMphDrop(stage); /* v76b */
+      if (document.body && document.body.classList) document.body.classList.remove("pcs-fullmap-body"); /* v2.0m-bf */
       if (stage && stage.classList.contains("pcs-fullmap")) { stage.classList.remove("pcs-fullmap"); document.body.style.overflow = ""; schedFullResize(); }
+      try { sosPlace(); } catch (eSos) {}
       return;
     }
     schedFullStyle();
@@ -10872,13 +10876,15 @@
       schedFsMeasure();
       fsMphPlace(stage, (navTestOn() ? 262 : 172) + "px"); /* v76b: MPH badge */
     } else { schedBillHome(); rideLineHome(); if (top) top.remove(); if (bot) bot.remove(); fsMphDrop(stage); }
+    if (document.body && document.body.classList) document.body.classList.toggle("pcs-fullmap-body", !!full); /* v2.0m-bf */
     if (full !== was) {
       stage.classList.toggle("pcs-fullmap", full);
       document.body.style.overflow = full ? "hidden" : "";
       schedFullResize();
-      setTimeout(schedFullResize, 120);
+      setTimeout(function () { schedFullResize(); try { sosPlace(); } catch (eSos2) {} }, 120);
       if (!full) { var card = document.getElementById("sched-trip"); if (card && card.scrollIntoView) try { card.scrollIntoView({ block: "start" }); } catch (e) {} }
     }
+    try { sosPlace(); } catch (eSos) {}
   }
   /* ---------- v76b (Matthew 10/17, his screenshots): SPEED on the full-screen map + FULL SCREEN during the ride ----------
      1) A big MPH badge on the full-screen map in every phase. Same GPS speed math as the meter's MPH box (meterSpeedSample /
