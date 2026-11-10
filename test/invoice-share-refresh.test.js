@@ -81,7 +81,8 @@ test("the rider phone stays, and the business call line is not in those cards", 
   assert.equal(rider.indexOf("rideInvoiceSlotHtml"), -1);
   assert.equal(rider.indexOf("Invoice #"), -1);
   const place = src.slice(src.indexOf("function schedMapBillPlace"), src.indexOf("function schedFsMeasure"));
-  assert.ok(place.indexOf("questionSlotHtml") >= 0 && place.indexOf("sched-bill-host") >= 0);
+  assert.ok(place.indexOf("schedBillHome") >= 0 && place.indexOf("fsMapInvoiceHtml") >= 0);
+  assert.equal(place.indexOf("sched-bill-host"), -1);
   assert.equal(place.indexOf("host.remove"), -1);
   ["function cardNeededHtml", "function cardSheetEl", "function payAfterRideHtmlInner"].forEach(function (name) {
     const at = src.indexOf(name);

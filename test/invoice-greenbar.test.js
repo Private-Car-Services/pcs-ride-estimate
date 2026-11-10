@@ -162,10 +162,10 @@ test("the ride map bar does not add a second invoice row", function () {
   assert.equal(rfs.indexOf("rideBillLabelHtml"), -1);
   assert.equal(rfs.indexOf("pcs-map-green"), -1);
   assert.equal(rfs.indexOf("rfs-bill"), -1);
-  assert.match(place, /questionSlotHtml/);
-  assert.match(place, /sched-bill-host/);
-  assert.match(place, /insertBefore/);
-  assert.doesNotMatch(place, /host\.remove/);
+  assert.match(place, /schedBillHome/);
+  assert.match(place, /fsMapInvoiceHtml/);
+  assert.match(place, /#sched-fs-arrived/);
+  assert.doesNotMatch(place, /sched-bill-host|insertBefore|host\.remove/);
   assert.doesNotMatch(place, /rideBillLabelHtml|schedMapBillHtml/);
   assert.match(appSrc, /sqInvoice: raw\.sqInvoice/);
 });
@@ -341,6 +341,117 @@ test("full-page map and tracker keep the invoice on one line and the controls hi
     assert.ok(got.host.indexOf("View receipt") >= 0);
     assert.equal(got.line.indexOf("Invoice #"), -1);
     assert.equal(got.close, "1");
+    ws.close();
+  } finally {
+    session.chrome.kill("SIGKILL");
+    session.server.kill("SIGKILL");
+  }
+});
+
+test("the white invoice bar is gone and the invoice text is in the dark green bar", async function () {
+  const place = appSrc.slice(appSrc.indexOf("function schedMapBillPlace"), appSrc.indexOf("function schedFsMeasure"));
+  const turn = appSrc.slice(appSrc.indexOf("function meterTurnHtml"), appSrc.indexOf("function meterTurnPaint"));
+  assert.match(place, /schedBillHome/);
+  assert.match(place, /fsMapInvoiceHtml/);
+  assert.match(place, /#sched-fs-arrived/);
+  assert.doesNotMatch(place, /sched-bill-host|insertBefore/);
+  assert.match(turn, /rfsOn\(\)/);
+  assert.match(turn, /fsMapInvoiceHtml\(rideLineRide\(\)\)/);
+  assert.match(turn, /id="meter-turn"/);
+  assert.equal(bill.fsInv({}), "");
+  assert.equal(bill.fsInv({ riderPhone: "9365550100" }), "");
+  const paid = bill.fsInv({ prepaidInvoiceNo: "000584", sqInvoice: { paid: true, status: "PAID", amountDueCents: 0 }, receiptUrl: RECEIPT });
+  const unpaid = bill.fsInv({ prepaidInvoiceNo: "000584", sqInvoice: { status: "UNPAID", paid: false, amountDueCents: 100, public_url: PAY } });
+  const bare = bill.fsInv({ prepaidInvoiceNo: "000584" });
+  assert.ok(paid.indexOf('id="sched-fs-inv"') >= 0);
+  assert.ok(paid.indexOf("Invoice #000584") >= 0 && paid.indexOf("\u00b7 Paid") >= 0 && paid.indexOf("View receipt") >= 0);
+  assert.ok(paid.indexOf(RECEIPT) >= 0);
+  assert.equal(paid.indexOf("sched-bill-host"), -1);
+  assert.ok(unpaid.indexOf("\u00b7 Unpaid") >= 0 && unpaid.indexOf("Pay invoice") >= 0 && unpaid.indexOf(PAY) >= 0);
+  assert.ok(bare.indexOf("Invoice #000584") >= 0);
+  assert.equal(bare.indexOf("Paid"), -1);
+  assert.equal(bare.indexOf("Unpaid"), -1);
+  assert.equal(bare.indexOf("href"), -1);
+  const css = quotedCss(appSrc.slice(appSrc.indexOf("function schedFullStyle"), appSrc.indexOf("function schedFullResize"))) +
+    quotedCss(appSrc.slice(appSrc.indexOf("function fsStyle"), appSrc.indexOf("function rfsKey"))) +
+    quotedCss(appSrc.slice(appSrc.indexOf("function ensureMeterSplitStyle"), appSrc.indexOf("function meterDestHtml")));
+  function page(kind, inv) {
+    const rfs = kind === "rfs";
+    const stage = rfs
+      ? '<div id="meter-map-stage" class="pcs-rfs" style="position:relative;width:768px;height:900px"><div class="meter-turn" id="meter-turn"><small>In 0.3 mi</small>Continue on Grogans Mill' + inv + '</div><div id="rfs-bar"><div class="rfs-row"><div class="rfs-stats"><span><b>1.20</b> mi</span></div></div><div class="rfs-actions"><button type="button" class="rfs-end" id="rfs-end">End ride</button><button type="button" class="rfs-close" id="rfs-close">Close map</button></div></div></div>'
+      : '<div id="home-map-stage" class="pcs-fullmap" style="position:relative;width:768px;height:900px"><div id="sched-fs-bottom"><div id="sched-fs-arrived" class="pcs-map-green has-inv" role="button" tabindex="0" aria-label="I\u2019m at the pickup"><span class="pcs-arrived-label">I\u2019m at the pickup</span>' + inv + '</div><button type="button" id="sched-fs-close">Close map</button></div></div>';
+    return '<!doctype html><html><head><meta charset="utf-8"><style>html,body{margin:0}' + css + '</style></head><body class="' + (rfs ? "pcs-rfs-body" : "") + '">' + stage + '<script>' +
+      'var arrived=0;var btn=document.getElementById("sched-fs-arrived");if(btn)btn.addEventListener("click",function(e){if(e.target&&e.target.closest&&e.target.closest("a"))return;arrived+=1;document.body.dataset.arrived=String(arrived);});' +
+      'var link=document.getElementById("sched-inv-link");if(link)link.addEventListener("click",function(e){e.preventDefault();link.dataset.n="1";});' +
+      'var invEl=document.getElementById("sched-fs-inv");var green=invEl?invEl.closest("#sched-fs-arrived,#meter-turn"):null;' +
+      'var bg=green?getComputedStyle(green).backgroundColor:"";' +
+      'var white=Array.prototype.some.call(document.querySelectorAll("#home-map-stage *,#meter-map-stage *"),function(el){var c=getComputedStyle(el).backgroundColor;return (c==="rgb(255, 255, 255)"||c==="rgb(255,255,255)")&&(el.textContent||"").indexOf("Invoice #")>=0;});' +
+      'document.body.dataset.report=JSON.stringify({white:white,host:!!document.querySelector(".sched-bill-host,#sched-bill-host"),bg:bg,text:invEl?invEl.textContent:"",parent:green?green.id:"",href:link?link.getAttribute("href"):"",label:btn&&btn.querySelector(".pcs-arrived-label")?btn.querySelector(".pcs-arrived-label").textContent:"",end:(document.getElementById("rfs-end")||{}).textContent||"",endBg:document.getElementById("rfs-end")?getComputedStyle(document.getElementById("rfs-end")).backgroundColor:""});' +
+      '</script></body></html>';
+  }
+  const port = 8796;
+  const session = chromeSession(port);
+  const wait = (ms) => new Promise(function (r) { setTimeout(r, ms); });
+  try {
+    let ver;
+    for (let i = 0; i < 40 && !ver; i++) {
+      try { ver = await fetch("http://127.0.0.1:" + session.debug + "/json/version").then(function (r) { return r.json(); }); } catch (e) { await wait(200); }
+    }
+    assert.ok(ver, "chrome did not start");
+    const ws = new WebSocket(ver.webSocketDebuggerUrl);
+    const pending = new Map();
+    let seq = 0;
+    ws.onmessage = function (ev) { const msg = JSON.parse(ev.data); if (msg.id && pending.has(msg.id)) { pending.get(msg.id)(msg); pending.delete(msg.id); } };
+    await new Promise(function (res, rej) { ws.onopen = res; ws.onerror = rej; });
+    function send(method, params, sessionId) {
+      const id = ++seq;
+      return new Promise(function (resolve) { pending.set(id, resolve); ws.send(JSON.stringify({ id: id, sessionId: sessionId, method: method, params: params || {} })); });
+    }
+    const created = await send("Target.createTarget", { url: "about:blank" });
+    const attached = await send("Target.attachToTarget", { targetId: created.result.targetId, flatten: true });
+    const sid = attached.result.sessionId;
+    await send("Page.enable", {}, sid);
+    await send("Runtime.enable", {}, sid);
+    async function open(name, html) {
+      fs.writeFileSync(path.join(session.dir, name), html);
+      await send("Page.navigate", { url: "http://127.0.0.1:" + port + "/" + name }, sid);
+      let report = "";
+      for (let i = 0; i < 30 && !report; i++) {
+        const msg = await send("Runtime.evaluate", { expression: "document.body && document.body.dataset.report || ''", returnByValue: true }, sid);
+        report = msg.result && msg.result.result ? msg.result.result.value : "";
+        if (!report) await wait(150);
+      }
+      assert.ok(report, name + " did not report");
+      return JSON.parse(report);
+    }
+    const pickup = await open("green-pickup.html", page("pickup", paid));
+    assert.equal(pickup.white, false, "white invoice bar " + JSON.stringify(pickup));
+    assert.equal(pickup.host, false);
+    assert.equal(pickup.parent, "sched-fs-arrived");
+    assert.equal(pickup.bg.replace(/\s/g, ""), "rgb(11,107,58)");
+    assert.ok(pickup.text.indexOf("Invoice #000584") >= 0 && pickup.text.indexOf("Paid") >= 0 && pickup.text.indexOf("View receipt") >= 0);
+    assert.equal(pickup.href, RECEIPT);
+    assert.equal(pickup.label, "I\u2019m at the pickup");
+    await send("Runtime.evaluate", { expression: "document.getElementById('sched-inv-link').click();", returnByValue: true }, sid);
+    const after = await send("Runtime.evaluate", { expression: "JSON.stringify({link:document.getElementById('sched-inv-link').dataset.n,inside:!!document.getElementById('sched-inv-link').closest('#sched-fs-arrived')})", returnByValue: true }, sid);
+    const tapped = JSON.parse(after.result.result.value);
+    assert.equal(tapped.link, "1");
+    assert.equal(tapped.inside, true);
+    const arrivedAfterLink = await send("Runtime.evaluate", { expression: "document.body.dataset.arrived || '0'", returnByValue: true }, sid);
+    assert.equal(arrivedAfterLink.result.result.value, "0");
+    const ride = await open("green-rfs.html", page("rfs", unpaid));
+    assert.equal(ride.white, false, "in-ride white invoice bar " + JSON.stringify(ride));
+    assert.equal(ride.host, false);
+    assert.equal(ride.parent, "meter-turn");
+    assert.equal(ride.bg.replace(/\s/g, ""), "rgb(32,55,29)");
+    assert.ok(ride.text.indexOf("Invoice #000584") >= 0 && ride.text.indexOf("Unpaid") >= 0 && ride.text.indexOf("Pay invoice") >= 0);
+    assert.equal(ride.href, PAY);
+    assert.equal(ride.end, "End ride");
+    assert.equal(ride.endBg.replace(/\s/g, ""), "rgb(139,28,28)");
+    const none = await open("green-none.html", page("pickup", ""));
+    assert.equal(none.text, "");
+    assert.equal(none.host, false);
+    assert.equal(none.white, false);
     ws.close();
   } finally {
     session.chrome.kill("SIGKILL");

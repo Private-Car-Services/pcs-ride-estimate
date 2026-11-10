@@ -9943,6 +9943,16 @@
     if (w === "unpaid" && pay) return " \u00b7 Invoice #" + esc(no) + " \u2013 unpaid \u00b7 <a id=\"sched-inv-link\" href=\"" + esc(pay) + "\" target=\"_blank\" rel=\"noopener\">Pay invoice</a>";
     return " \u00b7 Invoice #" + esc(no) + " \u2013 " + w;
   }
+  /* v2.0m-be: the same invoice line the white bar used, for the full-screen map's existing dark green bar.
+     Paid / Unpaid are capitalized. No invoice number means nothing extra. */
+  function fsMapInvoiceHtml(r) {
+    var slot = "";
+    try { slot = rideInvoiceSlotHtml(r || {}, null); } catch (e) { slot = ""; }
+    slot = String(slot || "").replace(/^\s*\u00b7\s*/, "");
+    if (!slot) return "";
+    slot = slot.replace(" \u2013 paid", " \u00b7 Paid").replace(" \u2013 unpaid", " \u00b7 Unpaid");
+    return '<span class="pcs-fs-inv" id="sched-fs-inv">' + slot + "</span>";
+  }
   /* A live Square read, not a saved prepaid flag. Paid uses the completed payment receipt. Unpaid uses the invoice pay page.
      A pay-page URL is never treated as a receipt. Partial, refund, or no URL returns no link. */
   function squareInvoiceLink(live) {
@@ -9985,7 +9995,7 @@
     try { if (M && M.schedId) r = schedFind(M.schedId); } catch (e) {}
     return rideInvoiceNoFrom(r, M);
   }
-  if (typeof window !== "undefined") window.__pcsV20lBill = { kind: rideBillKind, text: rideBillText, label: rideBillLabelHtml, invoiceNo: rideInvoiceDisplayNo, from: rideInvoiceNoFrom, fit: rideBillLabelFitCss, map: schedMapBillHtml, pickupLine: schedPickupStatusText, pay: ridePayWord, bar: rideMapBillText, payUrl: rideCustomerPayUrl, slot: rideInvoiceSlotHtml, square: squareInvoiceLink, take: verInvTake, live: rideLivePay };
+  if (typeof window !== "undefined") window.__pcsV20lBill = { kind: rideBillKind, text: rideBillText, label: rideBillLabelHtml, invoiceNo: rideInvoiceDisplayNo, from: rideInvoiceNoFrom, fit: rideBillLabelFitCss, map: schedMapBillHtml, pickupLine: schedPickupStatusText, pay: ridePayWord, bar: rideMapBillText, payUrl: rideCustomerPayUrl, slot: rideInvoiceSlotHtml, square: squareInvoiceLink, take: verInvTake, live: rideLivePay, fsInv: fsMapInvoiceHtml };
   function meterInvInfo(M) { return rideInvoiceInfo(M && M.schedId ? schedFind(M.schedId) : null, M); }
   function meterInvRefresh(M) { /* live: the 15-min Square sync / refreshScheduledRides flips the badge without a re-render */
     if (typeof document === "undefined" || meterShown(M)) return;
@@ -10734,27 +10744,32 @@
   }
   function schedMapBillPlace(bot) {
     if (!bot || typeof document === "undefined") return;
-    var t = null, r = null, html = "";
+    schedBillHome();
+    var t = null, r = null;
     try { t = schedNavTrip(); r = t ? schedFind(t.id) : null; } catch (e) { r = null; }
-    try { html = r ? questionSlotHtml(r) : ""; } catch (e2) { html = ""; }
-    var host = document.getElementById("sched-bill-host");
-    if (html) {
-      if (!host) {
-        host = document.createElement("div");
-        host.id = "sched-bill-host";
-        host.className = "sched-bill-host";
-      }
-      if (host.__h !== html) { host.innerHTML = html; host.__h = html; }
-      if (host.parentNode !== bot) {
-        if (bot.firstChild && bot.insertBefore) bot.insertBefore(host, bot.firstChild);
-        else if (bot.appendChild) bot.appendChild(host);
-      }
-    } else if (host && bot.contains && bot.contains(host)) schedBillHome();
     var btn = bot.querySelector ? bot.querySelector("#sched-fs-arrived") : null;
     if (!btn) return;
     var text = schedPickupStatusText(r);
-    if (btn.textContent !== text) btn.textContent = text;
-    if (btn.getAttribute && btn.getAttribute("aria-label") !== text) btn.setAttribute("aria-label", text);
+    var label = btn.querySelector ? btn.querySelector(".pcs-arrived-label") : null;
+    if (!label) {
+      label = document.createElement("span");
+      label.className = "pcs-arrived-label";
+      btn.textContent = "";
+      if (btn.appendChild) btn.appendChild(label);
+    }
+    if (label.textContent !== text) label.textContent = text;
+    if (btn.setAttribute && (!btn.getAttribute || btn.getAttribute("aria-label") !== text)) btn.setAttribute("aria-label", text);
+    var inv = "";
+    try { inv = fsMapInvoiceHtml(r); } catch (e2) { inv = ""; }
+    var slot = btn.querySelector ? btn.querySelector("#sched-fs-inv") : null;
+    if (inv) {
+      if (!slot && btn.insertAdjacentHTML) btn.insertAdjacentHTML("beforeend", inv);
+      else if (slot && slot.outerHTML !== inv) slot.outerHTML = inv;
+      if (btn.classList && btn.classList.add) btn.classList.add("has-inv");
+    } else {
+      if (slot && slot.parentNode) slot.parentNode.removeChild(slot);
+      if (btn.classList && btn.classList.remove) btn.classList.remove("has-inv");
+    }
   }
   function schedFsMeasure() {
     var stage = document.getElementById("home-map-stage");
@@ -10782,7 +10797,12 @@
       ".sched-bill-host .fine,.sched-bill-host #pcs-question-slot{margin:0;color:#1a1a1a;font-size:16px;font-weight:700}" +
       ".sched-bill-host a{color:#0b3d23;font-weight:800}" +
       "#sched-fs-bottom,#rfs-bar{container-type:inline-size}.pcs-map-green,#sched-fs-arrived{display:block;width:100%;box-sizing:border-box;height:62px;min-height:62px;margin:0;padding:0 10px;font-size:clamp(12px,calc(100cqw / 26),20px);font-weight:800;line-height:58px;text-align:center;background:#0b6b3a;color:#fff;border:2px solid #fff;border-radius:14px;white-space:nowrap;overflow:hidden;text-overflow:clip;position:relative;z-index:1;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.4)}" +
-      "#sched-fs-close{display:block;width:100%;min-height:58px;font-size:21px;font-weight:800;background:#d1fae5;color:#0b3d23;border:3px solid #0b3d23;border-radius:14px;margin:0;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.4)}";
+      "#sched-fs-close{display:block;width:100%;min-height:58px;font-size:21px;font-weight:800;background:#d1fae5;color:#0b3d23;border:3px solid #0b3d23;border-radius:14px;margin:0;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.4)}" +
+      "#sched-fs-arrived .pcs-arrived-label{display:block;line-height:58px;white-space:nowrap;overflow:hidden;text-overflow:clip}" +
+      "#sched-fs-bottom:not(.nt-bot) #sched-fs-arrived.has-inv{height:auto;min-height:62px;line-height:1.25;white-space:normal;overflow:visible;padding:8px 12px}" +
+      "#sched-fs-bottom:not(.nt-bot) #sched-fs-arrived.has-inv .pcs-arrived-label{line-height:1.25}" +
+      "#sched-fs-arrived #sched-fs-inv{display:block;margin:2px 0 0;font-size:16px;font-weight:800;line-height:1.3;text-align:center;color:#fff;white-space:normal}" +
+      "#sched-fs-arrived #sched-fs-inv a{color:#fff;font-weight:800;text-decoration:underline}";
     document.head.appendChild(st);
   }
   function schedFullResize() {
@@ -10832,9 +10852,18 @@
       top.innerHTML = schedTurnHtml().replace('id="sched-turn"', 'id="sched-turn-fs"') + schedEtaHtml("sched-eta-fs"); /* v77.8 ETA box below the banner */
       if (!bot) {
         bot = document.createElement("div"); bot.id = "sched-fs-bottom";
-        bot.innerHTML = '<button type="button" id="sched-fs-arrived" class="pcs-map-green">I\u2019m at the pickup</button><button type="button" id="sched-fs-close">Close map</button>';
+        bot.innerHTML = '<div id="sched-fs-arrived" class="pcs-map-green" role="button" tabindex="0" aria-label="I\u2019m at the pickup"><span class="pcs-arrived-label">I\u2019m at the pickup</span></div><button type="button" id="sched-fs-close">Close map</button>';
         ["touchstart", "pointerdown", "mousedown", "wheel"].forEach(function (ev) { bot.addEventListener(ev, function (e) { e.stopPropagation(); }, { passive: true }); });
-        bot.querySelector("#sched-fs-arrived").addEventListener("click", function (e) { e.stopPropagation(); schedArrivedNow(); });
+        var arrived = bot.querySelector("#sched-fs-arrived");
+        arrived.addEventListener("click", function (e) {
+          if (e.target && e.target.closest && e.target.closest("a")) { e.stopPropagation(); return; }
+          e.stopPropagation();
+          schedArrivedNow();
+        });
+        arrived.addEventListener("keydown", function (e) {
+          if (e.target && e.target.closest && e.target.closest("a")) return;
+          if (e.key === "Enter" || e.key === " ") { e.preventDefault(); schedArrivedNow(); }
+        });
         bot.querySelector("#sched-fs-close").addEventListener("click", function (e) { e.stopPropagation(); schedFullSet(false); });
         stage.appendChild(bot);
       }
@@ -10923,7 +10952,9 @@
       "#rfs-bar .rfs-close{flex:1 1 0;min-height:62px;margin:0;font-size:20px;font-weight:900;border-radius:14px;background:#d1fae5;color:#0b3d23;border:3px solid #0b3d23;cursor:pointer}" +
       "#rfs-bar .rfs-keep{flex:1 1 0;min-height:62px;margin:0;font-size:17px;font-weight:800;border-radius:14px;background:#fff;color:#0b3d23;border:3px solid #0b3d23;cursor:pointer}" +
       ".rfs-ask{margin:0 0 6px;font-size:18px;font-weight:800;color:#0b3d23;text-align:center}" +
-      "body.pcs-rfs-body #pcs-sos-btn{z-index:2147482100 !important;bottom:auto !important;right:12px !important;top:250px;top:var(--pcs-sos-top,calc(env(safe-area-inset-top,0px) + 250px))}";
+      "body.pcs-rfs-body #pcs-sos-btn{z-index:2147482100 !important;bottom:auto !important;right:12px !important;top:250px;top:var(--pcs-sos-top,calc(env(safe-area-inset-top,0px) + 250px))}" +
+      "#meter-map-stage.pcs-rfs #meter-turn #sched-fs-inv{display:block;margin-top:4px;font-size:16px;font-weight:800;line-height:1.3;text-align:center;color:inherit}" +
+      "#meter-map-stage.pcs-rfs #meter-turn #sched-fs-inv a{color:inherit;font-weight:800;text-decoration:underline}";
     document.head.appendChild(st);
   }
   /* in-ride full screen (metered ride / scheduled ride after pickup) */
@@ -11086,7 +11117,8 @@
       var sig = rfsSig(M);
       if (bar.__sig !== sig) { bar.__sig = sig; bar.innerHTML = rfsBarHtml(M); }
       fsMphPlace(stage, (bar.getBoundingClientRect && stage.getBoundingClientRect ? Math.round(stage.getBoundingClientRect().bottom - bar.getBoundingClientRect().top + 12) : ((bar.offsetHeight || 148) + 34)) + "px");
-    } else { rideLineHome(); if (bar) bar.remove(); fsMphDrop(stage); }
+      try { meterTurnPaint(); } catch (e) {}
+    } else { rideLineHome(); if (bar) bar.remove(); fsMphDrop(stage); try { meterTurnPaint(); } catch (e) {} }
     if (full !== was) {
       stage.classList.toggle("pcs-rfs", full);
       document.body.classList.toggle("pcs-rfs-body", full);
@@ -11665,7 +11697,7 @@
   }
   if (typeof window !== "undefined" && typeof location !== "undefined") try { var ntq = /[?&]navtest=([01])\b/.exec(location.search || ""); if (ntq) { if (ntq[1] === "1") localStorage.setItem(NAVTEST_KEY, "1"); else localStorage.removeItem(NAVTEST_KEY); } } catch (e) {} /* v75y */
   if (typeof window !== "undefined") window.__pcsSchedFull = { key: schedFullKey, on: function () { return schedFullOn(); }, set: function (v) { schedFullSet(v); }, apply: function () { schedFullApply(); } }; /* test hook */
-  if (typeof window !== "undefined") setInterval(function () { try { if (schedNavTrip()) { schedNavPaint(); schedNavOffCheck(Date.now()); schedNavFetch(false); } } catch (e) {} }, 2000);
+  if (typeof window !== "undefined") setInterval(function () { try { if (schedNavTrip()) { schedNavPaint(); schedNavOffCheck(Date.now()); schedNavFetch(false); var bot = document.getElementById("sched-fs-bottom"); if (bot && !navTestOn()) { schedMapBillPlace(bot); schedFsMeasure(); } } } catch (e) {} }, 2000);
   /* ---------- v75y TEST FLAG ONLY (Matthew 10/16, Uber reference screenshots): every function below runs only when
      navTestOn() is true (see NAVTEST_KEY). Pickup leg: big black turn card (arrow, distance, street, "toward" the next street),
      heading-up map with the arrow marker, speed-limit badge on the left (only when the road's limit is known), slim bottom bar
@@ -17608,17 +17640,25 @@
   }
   function meterTurnHtml() {
     var t = meterNextTurn();
-    if (!t) return '<div class="meter-turn" id="meter-turn" style="display:none"></div>';
-    var d = t.mi < 0.1 ? Math.max(50, Math.round(t.mi * 5280 / 50) * 50) + " ft" : t.mi.toFixed(1) + " mi";
-    return '<div class="meter-turn" id="meter-turn" role="status" aria-live="polite"><small>In ' + esc(d) + "</small>" + esc(t.text) + "</div>";
+    var inv = "";
+    try { if (rfsOn()) inv = fsMapInvoiceHtml(rideLineRide()); } catch (e) { inv = ""; }
+    if (!t && !inv) return '<div class="meter-turn" id="meter-turn" style="display:none"></div>';
+    var turn = "";
+    if (t) {
+      var d = t.mi < 0.1 ? Math.max(50, Math.round(t.mi * 5280 / 50) * 50) + " ft" : t.mi.toFixed(1) + " mi";
+      turn = "<small>In " + esc(d) + "</small>" + esc(t.text);
+    }
+    return '<div class="meter-turn" id="meter-turn" role="status" aria-live="polite">' + turn + inv + "</div>";
+  }
+  function meterTurnPaint() {
+    if (typeof document === "undefined") return;
+    var el = document.getElementById("meter-turn");
+    if (!el) return;
+    var html = meterTurnHtml();
+    if (el.outerHTML !== html) el.outerHTML = html;
   }
   if (typeof window !== "undefined") setInterval(function () {
-    try {
-      var el = document.getElementById("meter-turn");
-      if (!el) return;
-      var html = meterTurnHtml();
-      if (el.outerHTML !== html) el.outerHTML = html;
-    } catch (e) {}
+    try { meterTurnPaint(); } catch (e) {}
   }, 2000);
   function meterEstFetch() {
     var key = meterEstKey();
