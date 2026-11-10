@@ -1,4 +1,4 @@
-/* Full-screen pickup: invoice stays on the green pickup line, and Follow, North, zoom, and Close stay hittable. */
+/* Full-screen pickup: invoice sits on the dark green turn card, clear of the MPH badge. Follow, North, zoom, and Close stay hittable. */
 const assert = require("assert");
 const fs = require("fs");
 const os = require("os");
@@ -63,18 +63,20 @@ function page(w, h, safe) {
     .leaflet-control{pointer-events:auto}
     .leaflet-bar a{display:block;background:#fff;color:#000;text-align:center;text-decoration:none;border-bottom:1px solid #ccc}
     ${css}
+    .fs-mph{position:absolute;left:10px;bottom:172px;z-index:1003;min-width:86px;padding:6px 10px 5px;background:#fff;color:#0b3d23;border:3px solid #0b3d23;border-radius:16px;text-align:center}
+    .fs-mph b{display:block;font-size:40px;line-height:1;font-weight:900}
     #home-map-stage{--pcs-safe-top:${safe.top}px;--pcs-safe-bottom:${safe.bottom}px;--pcs-safe-left:${safe.left}px;--pcs-safe-right:0px}
   </style></head><body>
   <div id="home-map-stage" class="pcs-fullmap" style="position:relative;width:${w}px;height:${h}px">
     <div class="leaflet-top leaflet-left"><div class="leaflet-control-zoom leaflet-bar"><a id="zoom-in" href="#">+</a><a id="zoom-out" href="#">−</a></div></div>
-    <div id="sched-fs-top" style="height:96px;background:#20371d;color:#fff">In 0.4 mi · about 2 min</div>
+    <div id="sched-fs-top" style="background:#0b3d23;color:#fff"><div id="sched-turn" style="background:#0b3d23;color:#fff;border-radius:12px;padding:10px 12px;font-weight:800">Continue onto Rayford Rd<span id="nav-inv" style="display:block;margin-top:6px;font-size:18px;line-height:1.35;font-weight:900;color:#fff">Invoice #000562 · Unpaid</span></div></div>
     <div class="nav-toggle" style="position:absolute;right:8px;display:flex;gap:6px">
       <button type="button" id="map-orient-toggle" style="min-height:36px;padding:6px 12px">North up</button>
       <button type="button" id="map-mode-toggle" style="min-height:36px;padding:6px 12px">Follow</button>
     </div>
     <button type="button" id="map-recenter" class="nav-recenter" style="position:absolute;right:8px;width:48px;height:48px">recenter</button>
+    <div id="fs-mph" class="fs-mph"><b>32</b><span>MPH</span></div>
     <div id="sched-fs-bottom">
-      <div id="sched-bill-host" class="sched-bill-host"><p class="fine" id="pcs-question-slot">Invoice #000574</p></div>
       <button type="button" id="sched-fs-arrived">I’m at the pickup</button>
       <button type="button" id="sched-fs-close">Close map</button>
     </div>
@@ -158,10 +160,12 @@ test("clicks land on Follow, North, zoom out, and Close in portrait and landscap
       assert.equal(got.close, "1");
       assert.equal(got.bill, "I’m at the pickup");
       assert.equal(got.bill.indexOf("Invoice #"), -1);
-      assert.equal(got.host, true);
-      const hostText = await send("Runtime.evaluate", { expression: "document.getElementById('sched-bill-host').textContent", returnByValue: true }, sid);
-      assert.ok(String(hostText.result.result.value).indexOf("Invoice #000574") >= 0);
-      assert.equal(String(hostText.result.result.value).indexOf("unpaid"), -1);
+      assert.equal(got.host, false);
+      const cover = await send("Runtime.evaluate", { expression: "(function(){var inv=document.getElementById('nav-inv').getBoundingClientRect();var mph=document.getElementById('fs-mph').getBoundingClientRect();var overlap=!(inv.bottom<=mph.top+1||inv.top>=mph.bottom-1||inv.right<=mph.left+1||inv.left>=mph.right-1);return JSON.stringify({overlap:overlap,inv:document.getElementById('nav-inv').textContent,bg:getComputedStyle(document.getElementById('sched-turn')).backgroundColor});})()", returnByValue: true }, sid);
+      const lay = JSON.parse(cover.result.result.value);
+      assert.equal(lay.overlap, false);
+      assert.equal(lay.inv, "Invoice #000562 · Unpaid");
+      assert.equal(lay.bg, "rgb(11, 61, 35)");
       const shot = await send("Page.captureScreenshot", { format: "png" }, sid);
       fs.writeFileSync("/opt/cursor/artifacts/pickup-" + (w > h ? "landscape" : "portrait") + ".png", Buffer.from(shot.result.data, "base64"));
     }

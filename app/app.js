@@ -9985,7 +9985,63 @@
     try { if (M && M.schedId) r = schedFind(M.schedId); } catch (e) {}
     return rideInvoiceNoFrom(r, M);
   }
-  if (typeof window !== "undefined") window.__pcsV20lBill = { kind: rideBillKind, text: rideBillText, label: rideBillLabelHtml, invoiceNo: rideInvoiceDisplayNo, from: rideInvoiceNoFrom, fit: rideBillLabelFitCss, map: schedMapBillHtml, pickupLine: schedPickupStatusText, pay: ridePayWord, bar: rideMapBillText, payUrl: rideCustomerPayUrl, slot: rideInvoiceSlotHtml, square: squareInvoiceLink, take: verInvTake, live: rideLivePay };
+  /* Paid / Unpaid for the nav bar and the public tracker. Square truth only.
+     A successful /driver/invoice read is fresh for 10 minutes (fetchedAt). A stored sqInvoice is used only when
+     its own checkedAt or fetchedAt is inside that window. Anything older (Patti's Nov 3 check) shows the number and no payment word.
+     God /sq/invoice is not called from here: it needs a God password. */
+  var SQ_PAY_FRESH_MS = 10 * 60 * 1000;
+  function sqPayTime(v) { var n = Number(v); return isFinite(n) ? n : 0; }
+  function sqPayFresh(t, now) { return t > 0 && now - t <= SQ_PAY_FRESH_MS && t - now <= 60000; }
+  function sqPayWord(q) {
+    if (!q || typeof q !== "object") return "";
+    var status = String(q.status || "").toUpperCase();
+    if (q.paid === true || status === "PAID") return "paid";
+    if (status || q.paid === false) return "unpaid";
+    return "";
+  }
+  function squareNavModel(r, held, now) {
+    now = now || Date.now();
+    r = r || {};
+    var no = "";
+    try { no = String(rideInvoiceNoFrom(r, null) || "").replace(/^#/, "").trim(); } catch (e) { no = ""; }
+    var q = null, checked = 0;
+    if (held && !held.stale && !held.staleSquare && held.square && typeof held.square === "object" && sqPayFresh(sqPayTime(held.fetchedAt), now)) {
+      q = held.square;
+      checked = sqPayTime(held.checkedAt) || sqPayTime(held.fetchedAt);
+      var wn = String(q.invoiceNumber || q.number || q.invoiceNo || "").replace(/^#/, "").replace(/\s+/g, "");
+      if (/^\d{1,20}$/.test(wn)) no = wn;
+    } else if (r.sqInvoice && typeof r.sqInvoice === "object") {
+      var stamp = sqPayTime(r.sqInvoice.checkedAt) || sqPayTime(r.sqInvoice.fetchedAt);
+      if (sqPayFresh(stamp, now)) { q = r.sqInvoice; checked = stamp; }
+    }
+    var pay = sqPayWord(q);
+    var status = q ? String(q.status || "").toUpperCase() : "";
+    var href = "", linkText = "";
+    if (pay === "paid") {
+      var rec = "";
+      if (q && q.payments && q.payments[0]) rec = rideSquareHttps(q.payments[0].receipt_url || q.payments[0].receiptUrl || "");
+      if (!rec && q) rec = rideSquareHttps(q.receipt_url || q.receiptUrl || "");
+      if (!rec) rec = rideSquareHttps(r.receiptUrl || "");
+      if (rec) { href = rec; linkText = "View receipt"; }
+    } else if (pay === "unpaid") {
+      var payUrl = rideSquareHttps((q && (q.public_url || q.publicUrl || q.payUrl)) || r.invoicePayUrl || r.payUrl || "");
+      if (payUrl) { href = payUrl; linkText = "Pay invoice"; }
+    }
+    var word = pay === "paid" ? "Paid" : pay === "unpaid" ? "Unpaid" : "";
+    var text = "";
+    if (no && word) text = "Invoice #" + no + " \u00b7 " + word;
+    else if (no) text = "Invoice #" + no;
+    else if (word) text = word;
+    return { text: text, word: word, pay: pay, no: no, href: href, linkText: linkText, status: status, checkedAt: pay ? checked : 0 };
+  }
+  function navInvoiceHtml(m) {
+    if (!m || !m.text) return "";
+    var inner = esc(m.text);
+    if (m.href && m.word && m.no) inner = esc("Invoice #" + m.no + " \u00b7 ") + '<a id="nav-inv-link" href="' + esc(m.href) + '" target="_blank" rel="noopener" style="color:#fff;font-weight:900;text-decoration:underline">' + esc(m.word) + "</a>";
+    else if (m.href && m.word) inner = '<a id="nav-inv-link" href="' + esc(m.href) + '" target="_blank" rel="noopener" style="color:#fff;font-weight:900;text-decoration:underline">' + esc(m.word) + "</a>";
+    return '<span id="nav-inv" style="display:block;margin-top:6px;font-size:18px;line-height:1.35;font-weight:900;color:#fff;white-space:normal">' + inner + "</span>";
+  }
+  if (typeof window !== "undefined") window.__pcsV20lBill = { kind: rideBillKind, text: rideBillText, label: rideBillLabelHtml, invoiceNo: rideInvoiceDisplayNo, from: rideInvoiceNoFrom, fit: rideBillLabelFitCss, map: schedMapBillHtml, pickupLine: schedPickupStatusText, pay: ridePayWord, bar: rideMapBillText, payUrl: rideCustomerPayUrl, slot: rideInvoiceSlotHtml, square: squareInvoiceLink, take: verInvTake, live: rideLivePay, nav: squareNavModel, navHtml: navInvoiceHtml };
   function meterInvInfo(M) { return rideInvoiceInfo(M && M.schedId ? schedFind(M.schedId) : null, M); }
   function meterInvRefresh(M) { /* live: the 15-min Square sync / refreshScheduledRides flips the badge without a re-render */
     if (typeof document === "undefined" || meterShown(M)) return;
@@ -10201,8 +10257,17 @@
       var link = null;
       try { link = squareInvoiceLink(src); } catch (e) { link = null; }
       var keep = { invoiceNo: String(row.invoiceNo || (link && link.invoiceNo) || ""), amountCents: row.amountCents, taxCents: row.taxCents };
-      if (link && link.pay) keep.square = { invoiceNumber: link.invoiceNo, status: link.pay === "paid" ? "PAID" : "UNPAID", public_url: link.pay === "unpaid" ? link.url : "", payments: link.pay === "paid" ? [{ status: "COMPLETED", refundedCents: 0, receipt_url: link.url }] : [] };
-      keep.fetchedAt = Date.now();
+      var srcStatus = String((src && src.status) || "").toUpperCase();
+      var srcNo = String((src && (src.invoiceNumber || src.number || src.invoiceNo)) || (link && link.invoiceNo) || "").replace(/^#/, "").replace(/\s+/g, "");
+      if (link && link.pay) keep.square = { invoiceNumber: link.invoiceNo, status: link.pay === "paid" ? "PAID" : "UNPAID", paid: link.pay === "paid", public_url: link.pay === "unpaid" ? link.url : "", payments: link.pay === "paid" ? [{ status: "COMPLETED", refundedCents: 0, receipt_url: link.url }] : [] };
+      else if (/^\d{1,20}$/.test(srcNo) && (srcStatus || (src && (src.paid === true || src.paid === false)))) {
+        keep.square = { invoiceNumber: srcNo, status: srcStatus, paid: !!(src && (src.paid === true || srcStatus === "PAID")), public_url: "", payments: [] };
+        try { keep.square.public_url = rideSquareHttps((src && (src.public_url || src.publicUrl)) || ""); } catch (e2) { keep.square.public_url = ""; }
+      }
+      /* A timestamp on the worker row is Square's own check. An old one is not treated as a fresh read. */
+      var serverChecked = sqPayTime(row.checkedAt) || sqPayTime(src && src.checkedAt) || sqPayTime(src && src.fetchedAt);
+      if (serverChecked > 1e12 && !sqPayFresh(serverChecked, Date.now())) { keep.staleSquare = true; keep.fetchedAt = serverChecked; keep.checkedAt = serverChecked; }
+      else { keep.fetchedAt = Date.now(); keep.checkedAt = serverChecked > 1e12 ? serverChecked : Date.now(); }
       verInv[id] = keep;
     });
     return verInv;
@@ -10252,8 +10317,26 @@
       var got = d && d.invoices && d.invoices[id];
       if (!got || typeof got !== "object") return invShareUnknown(id);
       verInvTake([id], d.invoices);
+      try { schedNavPaint(); } catch (ePaint) {}
       return invoiceShareFromWorker(verInv[id]);
     }, function () { if (invShareGen[id] !== gen) return invoiceShareFromWorker(verInv[id]); return invShareUnknown(id); });
+  }
+  var navInvAt = {};
+  function navTurnInvoice() {
+    var r = null, held = null, id = "";
+    try {
+      var t = schedNavTrip();
+      if (t && t.id) { id = String(t.id); r = schedFind(id); held = verInv[id]; }
+    } catch (e) { r = null; }
+    if (id) {
+      var now = Date.now();
+      var freshHeld = held && !held.stale && !held.staleSquare && held.fetchedAt && now - held.fetchedAt < 60000;
+      if (!freshHeld && !(navInvAt[id] && now - navInvAt[id] < 60000)) {
+        navInvAt[id] = now;
+        try { invShareRefresh({ rideId: id }); } catch (e2) {}
+      }
+    }
+    return navInvoiceHtml(squareNavModel(r || {}, held, Date.now()));
   }
   function verifiedPrepaid(pp, ver) { /* pure (tested) */
     if (!pp) return null;
@@ -10613,12 +10696,14 @@
   function schedTurnHtml() {
     var n = schedNextTurn(), R = schedNavRoute;
     var box = "background:#0b3d23;color:#fff;border-radius:12px;padding:10px 12px;margin:0 0 8px;font-size:20px;font-weight:800";
-    if (!n) return '<div id="sched-turn" role="status" style="' + box + '">' + (meterHerePt() ? "Finding the route to the pickup\u2026" : "Allow location to see the route to the pickup.") + "</div>";
+    var inv = "";
+    try { inv = navTurnInvoice(); } catch (eInv) { inv = ""; }
+    if (!n) return '<div id="sched-turn" role="status" style="' + box + '">' + (meterHerePt() ? "Finding the route to the pickup\u2026" : "Allow location to see the route to the pickup.") + inv + "</div>";
     var dd = n.mi == null ? "" : n.mi < 0.1 ? Math.max(50, Math.round(n.mi * 5280 / 50) * 50) + " ft" : n.mi.toFixed(1) + " mi";
     var mins = R && R.miles > 0 ? Math.max(1, Math.round(R.minutes * Math.min(1, n.left * 1.3 / Math.max(0.01, R.miles)))) : null;
     return '<div id="sched-turn" role="status" aria-live="polite" style="' + box + '">' +
       (n.text ? '<small style="display:block;font-size:14px;font-weight:700;color:#d1fae5">In ' + esc(dd) + "</small>" + esc(n.text) : "Head to the pickup") +
-      '<small style="display:block;font-size:14px;font-weight:700;color:#d1fae5;margin-top:4px">' + esc((Math.round(n.left * 10) / 10) + " mi to the pickup" + (mins ? " \u00b7 about " + mins + " min" : "")) + "</small></div>";
+      '<small style="display:block;font-size:14px;font-weight:700;color:#d1fae5;margin-top:4px">' + esc((Math.round(n.left * 10) / 10) + " mi to the pickup" + (mins ? " \u00b7 about " + mins + " min" : "")) + "</small>" + inv + "</div>";
   }
   /* v77.8 (Matthew 10/20, circled spot): big ETA box top-right of the nav map, below the turn banner.
      "Arrive 1:55 PM" / "9 min \u00b7 5 mi" + "to pickup" / "to drop-off". Minutes come from the route duration (Google
@@ -10733,25 +10818,14 @@
     return line;
   }
   function schedMapBillPlace(bot) {
+    /* The white invoice strip is not on the nav map. Invoice # and Paid/Unpaid sit on the dark green turn card. */
     if (!bot || typeof document === "undefined") return;
-    var t = null, r = null, html = "";
-    try { t = schedNavTrip(); r = t ? schedFind(t.id) : null; } catch (e) { r = null; }
-    try { html = r ? questionSlotHtml(r) : ""; } catch (e2) { html = ""; }
     var host = document.getElementById("sched-bill-host");
-    if (html) {
-      if (!host) {
-        host = document.createElement("div");
-        host.id = "sched-bill-host";
-        host.className = "sched-bill-host";
-      }
-      if (host.__h !== html) { host.innerHTML = html; host.__h = html; }
-      if (host.parentNode !== bot) {
-        if (bot.firstChild && bot.insertBefore) bot.insertBefore(host, bot.firstChild);
-        else if (bot.appendChild) bot.appendChild(host);
-      }
-    } else if (host && bot.contains && bot.contains(host)) schedBillHome();
+    if (host && bot.contains && bot.contains(host)) schedBillHome();
     var btn = bot.querySelector ? bot.querySelector("#sched-fs-arrived") : null;
     if (!btn) return;
+    var r = null;
+    try { var t = schedNavTrip(); r = t ? schedFind(t.id) : null; } catch (e) { r = null; }
     var text = schedPickupStatusText(r);
     if (btn.textContent !== text) btn.textContent = text;
     if (btn.getAttribute && btn.getAttribute("aria-label") !== text) btn.setAttribute("aria-label", text);
@@ -11216,12 +11290,20 @@
     var out = { v: 1, status: st, kind: o.kind === "sched" ? "sched" : "app", updatedAt: now };
     if (st === "ended" || st === "stopped") { out.endedAt = Number(o.endedAt) || now; return out; }
     if (o.bill === "invoiced" || o.bill === "prepaid") out.bill = o.bill; /* v2.0l r3: a plain word only ("Invoiced ride" / "Prepaid ride"), never an amount */
-    if (o.pay === "paid" || o.pay === "unpaid") out.pay = o.pay;
     var invNo = String(o.invoiceNo || "").replace(/^#/, "").replace(/\s+/g, "");
     if (/^\d{1,20}$/.test(invNo)) out.invoiceNo = invNo;
+    /* Payment word only with a check from the last 10 minutes. A stored Square status with an old checkedAt is not republished. */
+    var chk = sqPayTime(o.checkedAt), payOk = (o.pay === "paid" || o.pay === "unpaid") && sqPayFresh(chk, now) ? o.pay : "";
+    if (payOk) {
+      out.pay = payOk;
+      out.checkedAt = chk;
+      var stt = String(o.sqStatus || "").toUpperCase().replace(/[^A-Z_]/g, "").slice(0, 40);
+      if (stt) out.sqStatus = stt;
+      out.sqInvoice = { status: stt || (payOk === "paid" ? "PAID" : "UNPAID"), paid: payOk === "paid", checkedAt: chk };
+    }
     var recUrl = folSquareUrl(o.receiptUrl), payUrl = folSquareUrl(o.payUrl);
-    if (o.pay === "paid" && recUrl) out.receiptUrl = recUrl; /* receipt link only after a verified paid record */
-    if (o.pay === "unpaid" && payUrl) out.payUrl = payUrl; /* pay link only with an explicit unpaid record */
+    if (payOk === "paid" && recUrl) out.receiptUrl = recUrl; /* receipt link only after a fresh paid record */
+    if (payOk === "unpaid" && payUrl) out.payUrl = payUrl; /* pay link only with a fresh unpaid record */
     var df = folFirst(o.driverName); if (df) out.driverFirst = df;
     var car = folCar(o.car); if (car) out.car = car;
     if (/^[A-Za-z0-9_-]{24}$/.test(String(o.cardKey || ""))) out.cardKey = String(o.cardKey); /* v77.3b: random key of the driver's picture card (photo shown on /follow/); never the driver id */
@@ -11316,7 +11398,7 @@
     if (!m || !/(^|\.)squareup(sandbox)?\.com$|(^|\.)square\.link$/i.test(m[1])) return "";
     return s;
   }
-  function folSig(c) { return JSON.stringify([c.bill || "", c.pay || "", c.invoiceNo || "", c.receiptUrl || "", c.payUrl || "", c.status, c.pos ? [c.pos.lat, c.pos.lng] : 0, c.eta || 0, c.pickup || 0, c.dest || 0, c.car || 0, c.driverFirst || "", c.cardKey || "", folPhotoSig(c.photo), c.route ? c.route.length + ":" + c.route[c.route.length - 1] : 0, c.stops || 0]); }
+  function folSig(c) { return JSON.stringify([c.bill || "", c.pay || "", c.invoiceNo || "", c.receiptUrl || "", c.payUrl || "", c.checkedAt || 0, c.sqStatus || "", c.status, c.pos ? [c.pos.lat, c.pos.lng] : 0, c.eta || 0, c.pickup || 0, c.dest || 0, c.car || 0, c.driverFirst || "", c.cardKey || "", folPhotoSig(c.photo), c.route ? c.route.length + ":" + c.route[c.route.length - 1] : 0, c.stops || 0]); }
   function folHere() {
     if (!isCoord(state.hereLat) || !isCoord(state.hereLng)) return null;
     var at = Number(state.gpsAt) || 0;
@@ -11411,20 +11493,8 @@
         if (e && !e.pending) eta = { to: "dest", miles: e.miles, min: e.min };
         if (meterRoute && meterRoute.line) route = meterRoute.line;
       }
-      var share = invoiceShareFromWorker(verInv[r.id]);
-      if (!(share.pay && share.invoiceNo) && st !== "cancelled") {
-        var boardNo = "";
-        try { boardNo = String(rideInvoiceNoFrom(r, onMeter ? M : null) || "").replace(/^#/, "").replace(/\s+/g, ""); } catch (eInv) { boardNo = ""; }
-        if (/^\d{1,20}$/.test(boardNo)) {
-          var boardPay = "";
-          try { boardPay = ridePayWord(r, onMeter ? M : null); } catch (ePay) { boardPay = ""; }
-          if (boardPay !== "paid" && boardPay !== "unpaid") boardPay = "";
-          var qShare = r.sqInvoice && typeof r.sqInvoice === "object" ? r.sqInvoice : null;
-          var shareUrl = boardPay === "paid" ? rideSquareHttps(r.receiptUrl || (qShare && (qShare.receipt_url || qShare.receiptUrl)) || "") : boardPay === "unpaid" ? rideSquareHttps(rideCustomerPayUrl(r)) : "";
-          share = { invoiceNo: boardNo, pay: boardPay, url: shareUrl };
-        }
-      }
-      out.push(Object.assign({ key: "c_" + r.id, kind: "sched", bill: rideBillKind(r, onMeter ? M : null), pay: share.pay, invoiceNo: share.invoiceNo, receiptUrl: share.pay === "paid" ? share.url : "", payUrl: share.pay === "unpaid" ? share.url : "", status: st, phone: r.riderPhone, pickup: pickup, dest: dest, stops: stops, eta: eta, route: route, pos: here }, base));
+      var share = st === "cancelled" ? { no: "", pay: "", href: "", status: "", checkedAt: 0 } : squareNavModel(r, verInv[r.id], Date.now());
+      out.push(Object.assign({ key: "c_" + r.id, kind: "sched", bill: rideBillKind(r, onMeter ? M : null), pay: share.pay, invoiceNo: share.no, receiptUrl: share.pay === "paid" ? share.href : "", payUrl: share.pay === "unpaid" ? share.href : "", checkedAt: share.checkedAt || 0, sqStatus: share.status || "", status: st, phone: r.riderPhone, pickup: pickup, dest: dest, stops: stops, eta: eta, route: route, pos: here }, base));
     });
     var code = state.screen === "trip" ? String(state.driverCode || readDriverCode() || "") : "";
     if (code && FOL_KEY_RE.test("r_" + code)) {

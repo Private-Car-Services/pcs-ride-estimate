@@ -14,7 +14,7 @@
   if (!q) return; /* the older 22-character links (rider meter "Share this ride") run follow.js */
   var token = q[1];
   var DB = "https://pts-maps-rides-default-rtdb.firebaseio.com";
-  var POLL_MS = 1000, END_SHOW_MS = 30 * 60000, MAX_AGE_MS = 24 * 3600000, STALE_MS = 6 * 3600000;
+  var POLL_MS = 1000, END_SHOW_MS = 30 * 60000, MAX_AGE_MS = 24 * 3600000, STALE_MS = 6 * 3600000, PAY_FRESH_MS = 10 * 60000;
   var PCS_PHONE = "936-261-7878", PCS_TEL = "tel:+19362617878";
   var app = document.getElementById("app");
   var S = { trk: [], mph: null, brg: null, d: null, map: null, layers: null, fitted: false, timer: 0, ended: false, misses: 0, lastKey: "" };
@@ -29,8 +29,8 @@
     if ($("fl-style")) return;
     var st = document.createElement("style"); st.id = "fl-style";
     st.textContent = "#fl-live{background:#f0fdf4;color:#0b3d23;border:3px solid #2e9d4f;border-radius:16px;padding:12px}" +
-      "#fl-live p{color:#0b3d23}.fl-status{display:block;margin:0 0 8px;padding:10px 12px;border-radius:12px;background:#0b6b3a;color:#fff !important;font-size:21px;font-weight:900;text-align:center}" +
-      ".fl-under{display:flex;align-items:flex-start;gap:8px;margin:0 0 6px}.fl-under-main{flex:1 1 auto;min-width:0}#fl-call a{color:#0b3d23;font-weight:900;text-decoration:underline}" +
+      "#fl-live p{color:#0b3d23}.fl-status{display:block;margin:0 0 8px;padding:10px 12px;border-radius:12px;background:#0b6b3a;color:#fff !important;font-size:21px;font-weight:900;text-align:center;line-height:1.25;white-space:normal;overflow:visible;height:auto}#fl-status a{color:#fff;font-weight:900;text-decoration:underline}" +
+      ".fl-under{display:flex;align-items:flex-start;gap:8px;margin:0 0 6px}.fl-under-main{flex:1 1 auto;min-width:0}#fl-call a{color:#0b3d23;font-weight:900;text-decoration:underline}#fl-live #fl-call{background:#0b6b3a;color:#fff !important;border:2px solid #b8f0c8;line-height:1.35;min-height:0;height:auto;padding:8px 10px;white-space:normal}#fl-live #fl-call a{color:#fff !important}" +
       ".fl-drv{display:flex;align-items:center;gap:10px;background:#0b3d23;color:#f3ead2;border:2px solid #d4b15a;border-radius:14px;padding:6px 10px;margin:0}#fl-live .fl-drv .fl-who,#fl-live .fl-drv .fl-car{color:#f3ead2}.fl-photo{width:64px;height:64px;border-radius:50%;object-fit:cover;border:3px solid #d4b15a;flex:none;background:#20371d}.fl-drv-t{min-width:0}.fl-drv .fl-plate{color:#0b3d23}" +
       ".fl-who{font-size:18px;font-weight:800;margin:4px 0}.fl-car{font-size:16px;font-weight:700;margin:2px 0 8px}.fl-plate{display:inline-block;background:#fff;border:2px solid #0b3d23;border-radius:8px;padding:0 8px;margin-left:4px;font-weight:900;letter-spacing:.06em}" +
       "#fl-map{height:62vh;min-height:340px;border-radius:14px;margin:6px 0 10px;border:2px solid #0b3d23}" +
@@ -84,7 +84,8 @@
       var st = document.createElement("style");
       st.id = "fl-sos-style";
       /* v2.0m-az: flush to the tracker corner. The old 64px inset sat on the driver photo. */
-      st.textContent = "body[data-app=\"follow\"] .phone{position:relative}#fl-sos-btn{position:absolute;top:0;right:0;z-index:3000;width:64px;height:64px;border-radius:50%;border:3px solid #fff;background:#c0161b;color:#fff;font:900 13px/1.05 system-ui,sans-serif;box-shadow:0 1px 2px rgba(0,0,0,.45);cursor:pointer;-webkit-tap-highlight-color:transparent;touch-action:manipulation}" +
+      /* Below the notch: top/right use the safe area, with a 6px floor when the inset is 0. */
+      st.textContent = "body[data-app=\"follow\"] .phone{position:relative}#fl-sos-btn{position:absolute;top:max(6px, env(safe-area-inset-top, 0px));right:max(6px, env(safe-area-inset-right, 0px));z-index:3000;width:64px;height:64px;border-radius:50%;border:3px solid #fff;background:#c0161b;color:#fff;font:900 13px/1.05 system-ui,sans-serif;box-shadow:0 1px 2px rgba(0,0,0,.45);cursor:pointer;-webkit-tap-highlight-color:transparent;touch-action:manipulation}" +
         "#fl-sos-ask,#fl-sos-sheet{position:fixed;inset:0;z-index:4000;background:rgba(5,14,28,.94);display:flex;align-items:center;justify-content:center;padding:16px}" +
         "#fl-sos-ask .box,#fl-sos-sheet .box{background:#0b1c33;color:#fff;border:2px solid #c0161b;border-radius:18px;max-width:420px;width:100%;padding:20px;text-align:center}" +
         "#fl-sos-ask h2,#fl-sos-sheet h2{color:#ff6b6b;margin:0 0 10px;font-size:24px}" +
@@ -202,7 +203,7 @@
       '<div id="fl-map" role="img" aria-label="Map with the car, the pickup and the drop-off"></div>' +
       '<p class="fl-row" id="fl-from"></p><div id="fl-stops"></div><p class="fl-row" id="fl-to"></p>' +
       '<p class="fl-upd" id="fl-upd"></p><p class="error" id="fl-net" role="status"></p>' +
-      /* Bottom bar: a known invoice. With no invoice number the bar stays hidden. */
+      /* Dark-green payment alert only. The invoice number itself is on the status bar. Hidden when there is no fresh Square word. */
       '<p class="fl-call" id="fl-call" hidden></p></div>';
     if (window.L) {
       S.map = window.L.map("fl-map", { zoomControl: true, attributionControl: true, zoomSnap: 0.25, zoomDelta: 1 }).setView([29.76, -95.37], 11);
@@ -424,50 +425,77 @@
     if (!m || !/(^|\.)squareup(sandbox)?\.com$|(^|\.)square\.link$/i.test(m[1])) return "";
     return s;
   }
-  function billBarModel(d) {
+  /* Paid only from Square paid:true or status PAID. Any other Square status (DRAFT, UNPAID, SENT, …) is Unpaid.
+     No Square object and no published status: say nothing about payment. A word is shown only when checkedAt
+     (or sqInvoice.checkedAt / fetchedAt) is within 10 minutes. The public page has no Square secret and no
+     driver token, so it cannot refresh Square itself; the driver app stamps checkedAt after /driver/invoice. */
+  function payCheckedAt(d) {
     d = d || {};
-    var no = String(d.invoiceNo || "").replace(/^#/, "").replace(/\s+/g, "");
+    var q = d.sqInvoice && typeof d.sqInvoice === "object" ? d.sqInvoice : null;
+    return num(d.checkedAt) || num(q && q.checkedAt) || num(q && q.fetchedAt) || 0;
+  }
+  function payFresh(t, now) { return t > 0 && now - t <= PAY_FRESH_MS && t - now <= 60000; }
+  function billBarModel(d, now) {
+    d = d || {};
+    now = now || Date.now();
+    var q = d.sqInvoice && typeof d.sqInvoice === "object" ? d.sqInvoice : null;
+    var no = String(d.invoiceNo || d.prepaidInvoiceNo || "").replace(/^#/, "").replace(/\s+/g, "");
+    if (!/^\d{1,20}$/.test(no) && q) no = String(q.invoiceNumber || q.number || "").replace(/^#/, "").replace(/\s+/g, "");
     if (!/^\d{1,20}$/.test(no)) no = "";
-    var pay = d.pay === "paid" || d.pay === "unpaid" ? d.pay : "";
-    var receipt = squareHttps(d.receiptUrl), payUrl = squareHttps(d.payUrl);
-    /* A known invoice number is enough to show the bar. A Square link is added only with a confirmed paid or unpaid word. Missing URLs and the old gap names never hide that number. */
+    var status = String((q && q.status) || d.sqStatus || "").toUpperCase();
+    var hasSquare = !!(q && (status || q.paid === true || q.paid === false)) || !!status;
+    var fresh = payFresh(payCheckedAt(d), now);
+    var word = "";
+    if (hasSquare && fresh) word = (q && q.paid === true) || status === "PAID" ? "Paid" : "Unpaid";
+    else if (!hasSquare && fresh && (d.pay === "paid" || d.pay === "unpaid")) word = d.pay === "paid" ? "Paid" : "Unpaid";
+    var receipt = squareHttps(d.receiptUrl) || (q ? squareHttps(q.receipt_url || q.receiptUrl) : "");
+    var payUrl = squareHttps(d.payUrl) || (q ? squareHttps(q.public_url || q.publicUrl || q.payUrl) : "");
     var link = null;
-    if (no && pay === "paid" && receipt) link = { href: receipt, text: "View receipt", id: "fl-receipt" };
-    else if (no && pay === "unpaid" && payUrl) link = { href: payUrl, text: "Pay invoice", id: "fl-pay" };
-    if (no) {
-      var label = "Invoice #" + no;
-      if (link) label += pay === "paid" ? " \u2013 paid" : " \u2013 unpaid";
-      return { label: label, link: link, show: true, gap: link ? "" : "number-only" };
+    if (word === "Paid" && receipt) link = { href: receipt, text: "View receipt", id: "fl-receipt" };
+    else if (word === "Unpaid" && payUrl) link = { href: payUrl, text: "Pay invoice", id: "fl-pay" };
+    var label = no ? "Invoice #" + no : "";
+    if (word) label = label ? label + " \u00b7 " + word : word;
+    var gap = !no && !word ? (d.bill === "invoiced" || d.bill === "prepaid" ? "no-verified-payment" : "") : !word ? (hasSquare && !fresh ? "stale" : "number-only") : link ? "" : "word-only";
+    return { no: no, word: word, label: label, link: link, show: !!word, gap: gap };
+  }
+  function statusLine(d, now) {
+    var m = billBarModel(d, now);
+    var line = statusText(d || {});
+    if (m.no) line += " \u00b7 Invoice #" + m.no;
+    if (m.word) line += " \u00b7 " + m.word;
+    return line;
+  }
+  function paintStatus(d) {
+    var el = $("fl-status"); if (!el) return;
+    var m = billBarModel(d);
+    var html = esc(statusText(d));
+    if (m.no) html += " \u00b7 Invoice #" + esc(m.no);
+    if (m.word) {
+      html += " \u00b7 ";
+      if (m.link) html += '<a id="fl-status-word" href="' + esc(m.link.href) + '" target="_blank" rel="noopener">' + esc(m.word) + "</a>";
+      else html += esc(m.word);
     }
-    var gap = "";
-    if (pay === "paid" && !receipt) gap = "paid-without-receipt";
-    else if (pay === "unpaid" && !payUrl) gap = "unpaid-without-pay-url";
-    else if (d.bill === "invoiced" || d.bill === "prepaid") gap = "no-verified-payment";
-    return { label: "", link: null, show: false, gap: gap };
+    if (el.__h !== html) { el.innerHTML = html; el.__h = html; }
   }
   function paintBill(d) {
     var el = $("fl-call"); if (!el) return;
-    var m = billBarModel(d);
     var live = $("fl-live");
-    function mark(on) {
-      if (!live || !live.classList) return;
-      var had = live.classList.contains("fl-has-bill");
-      if (on) live.classList.add("fl-has-bill"); else live.classList.remove("fl-has-bill");
-      if (had !== on && S.map) { try { S.map.invalidateSize(); } catch (e) {} }
+    if (live && live.classList && live.classList.contains("fl-has-bill")) {
+      live.classList.remove("fl-has-bill");
+      if (S.map) { try { S.map.invalidateSize(); } catch (e) {} }
     }
-    if (!m.show) { el.hidden = true; if (el.textContent) el.textContent = ""; mark(false); return; }
-    if (m.link) {
-      var html = esc(m.label) + " \u00b7 <a id=\"" + m.link.id + "\" href=\"" + esc(m.link.href) + "\" target=\"_blank\" rel=\"noopener\">" + esc(m.link.text) + "</a>";
-      if (el.innerHTML !== html) el.innerHTML = html;
-    } else if (el.textContent !== m.label || (el.querySelector && el.querySelector("a"))) el.textContent = m.label;
+    var m = billBarModel(d);
+    if (!m.word) { el.hidden = true; if (el.__h) { el.innerHTML = ""; el.__h = ""; } return; }
+    var html = esc(m.word);
+    if (m.link) html += " \u00b7 <a id=\"" + m.link.id + "\" href=\"" + esc(m.link.href) + "\" target=\"_blank\" rel=\"noopener\">" + esc(m.link.text) + "</a>";
+    if (el.__h !== html) { el.innerHTML = html; el.__h = html; }
     el.hidden = false;
-    mark(true);
   }
   function update(d) {
     S.d = d;
     if (!$("fl-live")) shell();
     var now = Date.now();
-    setText("fl-status", statusText(d));
+    paintStatus(d);
     paintBill(d);
     var who = txt(d.driverFirst, 31);
     setText("fl-who", who ? "Your PCS driver: " + who : "Your PCS driver");
@@ -662,7 +690,7 @@
   (function qr() { var el = $("fw-qr"); if (!el || typeof window.qrcode !== "function") return; try { var x = window.qrcode(0, "M"); x.addData("https://www.PCSrides.com"); x.make(); el.innerHTML = x.createSvgTag(4, 0); } catch (e) {} })();
   setInterval(function () { if (S.d && !S.ended && $("fl-live")) { try { bigBox(S.d, Date.now(), /^(on_way|arrived|picked_up)$/.test(String(S.d.status))); } catch (e) {} } }, 15000);
   window.__pcsFollowLive = { resume: resume, setPath: setPath, update: update, track: track, state: S, over: over, statusText: statusText,
-    stopsOf: stopsOf, nextTarget: nextTarget, soonDue: soonDue, soonText: SOON_TEXT, photo: trackerPhotoSrc, showPhoto: applyTrackerPhoto, bill: billBarModel,
+    stopsOf: stopsOf, nextTarget: nextTarget, soonDue: soonDue, soonText: SOON_TEXT, photo: trackerPhotoSrc, showPhoto: applyTrackerPhoto, bill: billBarModel, statusLine: statusLine,
     sosText: sosReadout, notice: message };
   ensureFlSos();
   poll();
