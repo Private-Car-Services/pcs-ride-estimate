@@ -11040,7 +11040,7 @@
       "#meter-map-stage.pcs-rfs .map-caption{display:none}" +
       "#meter-map-stage.pcs-rfs .meter-topstack{top:8px;top:calc(env(safe-area-inset-top,0px) + 8px)}" +
       "#meter-map-stage.pcs-rfs .nav-toggle{bottom:calc(var(--pcs-safe-bottom, env(safe-area-inset-bottom, 0px)) + 22px + var(--rfs-bar, 148px) + 14px) !important;z-index:1004;pointer-events:auto}#meter-map-stage.pcs-rfs .nav-recenter{bottom:calc(var(--pcs-safe-bottom, env(safe-area-inset-bottom, 0px)) + 22px + var(--rfs-bar, 148px) + 62px) !important;z-index:1004;pointer-events:auto}" +
-      "#meter-map-stage.pcs-rfs .leaflet-top.leaflet-left{top:calc(var(--pcs-safe-top, env(safe-area-inset-top, 0px)) + 12px) !important;left:calc(var(--pcs-safe-left, env(safe-area-inset-left, 0px)) + 10px) !important;z-index:1005;pointer-events:auto}" +
+      "#meter-map-stage.pcs-rfs .leaflet-top.leaflet-left{top:calc(var(--pcs-safe-top, env(safe-area-inset-top, 0px)) + var(--rfs-top, 168px) + 12px) !important;left:calc(var(--pcs-safe-left, env(safe-area-inset-left, 0px)) + 10px) !important;z-index:1005;pointer-events:auto}" +
       "#meter-map-stage.pcs-rfs #rfs-open{display:none}" +
       "#rfs-open{position:absolute;left:8px;bottom:34px;z-index:1002;width:auto;min-height:52px;margin:0;padding:10px 16px;font-size:18px;font-weight:800;border-radius:12px;border:2px solid #0b3d23;background:#d1fae5;color:#0b3d23;box-shadow:0 2px 6px rgba(0,0,0,.35);cursor:pointer}" +
       "#rfs-bar{position:absolute;left:max(8px, calc(var(--pcs-safe-left, env(safe-area-inset-left, 0px)) + 8px));right:max(8px, calc(var(--pcs-safe-right, env(safe-area-inset-right, 0px)) + 8px));bottom:calc(var(--pcs-safe-bottom, env(safe-area-inset-bottom, 0px)) + 22px);z-index:1003;display:flex;flex-direction:column;gap:8px;background:transparent;padding:0;margin:0;border:0;box-shadow:none;pointer-events:none}" +
@@ -11197,12 +11197,20 @@
     else if (a === "close") rfsSet(false);
     rfsApply();
   }
+  function rfsTopMeasure(stage) {
+    stage = stage || rfsStage();
+    if (!stage || !stage.style || !stage.style.setProperty) return;
+    var top = document.getElementById("meter-topstack");
+    var h = top && top.offsetHeight;
+    if (h) stage.style.setProperty("--rfs-top", h + "px");
+  }
   function rfsTick() {
     var bar = document.getElementById("rfs-bar"), M = state.meter;
     if (!bar || !M || M.status !== "running") return;
     var f = meterFare(M), set = function (id, v) { var el = document.getElementById(id); if (el && el.textContent !== v) el.textContent = v; };
     if (meterShown(M)) set("rfs-fare", meterMoneyShown(M, f.sub)); else meterInvRefresh(M); set("rfs-miles", f.miles.toFixed(2)); set("rfs-time", meterClock(Date.now() - M.startedAt));
     var h = bar.offsetHeight, stage = rfsStage();
+    rfsTopMeasure(stage);
     if (stage && h && stage.__rfsBarH !== h) { stage.__rfsBarH = h; stage.style.setProperty("--rfs-bar", h + "px"); var mp = document.getElementById("fs-mph"); if (mp && bar.getBoundingClientRect && stage.getBoundingClientRect) mp.style.bottom = Math.round(stage.getBoundingClientRect().bottom - bar.getBoundingClientRect().top + 12) + "px"; }
   }
   function rfsApply() {
@@ -11237,7 +11245,7 @@
       rfsResize();
       setTimeout(rfsResize, 120);
     }
-    if (full) rfsTick();
+    if (full) { rfsTick(); setTimeout(function () { rfsTopMeasure(); }, 120); }
   }
   if (typeof window !== "undefined") {
     window.__pcsRideFull = { on: function () { return rfsOn(); }, set: function (v) { rfsSet(!!v); }, apply: function () { rfsApply(); }, mph: function () { return fsMphNow(); },
