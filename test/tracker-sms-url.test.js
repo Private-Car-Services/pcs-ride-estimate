@@ -170,5 +170,5 @@ test("tracking message sources no longer add a sentence or a site suffix", funct
   assert.ok(meter.indexOf('meter.js?v=') === -1);
   const meterHtml = fs.readFileSync(path.join(__dirname, "../meter/index.html"), "utf8");
   assert.ok(meterHtml.indexOf("meter.js?v=2.0m-ax") >= 0);
-  assert.ok(meterHtml.indexOf("version.js?v=2.0m-az") >= 0);
+  assert.ok(meterHtml.indexOf("version.js?v=2.0m-ba") >= 0);
 });

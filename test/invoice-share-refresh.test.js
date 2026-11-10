@@ -52,7 +52,7 @@ function loadFollow() {
     console: console, Date: Date, Math: Math, JSON: JSON, Promise: Promise, Number: Number, String: String, Object: Object,
     Array: Array, RegExp: RegExp, Error: Error, parseInt: parseInt, isFinite: isFinite, encodeURIComponent: encodeURIComponent,
     setTimeout: function () { return 0; }, clearTimeout: function () {}, setInterval: function () { return 0; }, clearInterval: function () {},
-    document: { visibilityState: "visible", getElementById: function (id) { return nodes[id] || null; }, createElement: function () { return make("made"); }, addEventListener: function () {}, head: { appendChild: function () {} }, body: {} },
+    document: { visibilityState: "visible", getElementById: function (id) { return nodes[id] || null; }, querySelector: function () { return null; }, createElement: function () { return make("made"); }, addEventListener: function () {}, head: { appendChild: function () {} }, body: { appendChild: function () {} } },
     location: { search: "?t=" + "c".repeat(32) },
     fetch: function () { return new Promise(function () {}); },
     navigator: {}, addEventListener: function () {}, removeEventListener: function () {}
