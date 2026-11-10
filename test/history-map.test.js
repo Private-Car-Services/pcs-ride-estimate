@@ -329,12 +329,13 @@ test("God day view keeps a missing stored type blank and does not call it PCS", 
 });
 
 
-test("v2.0m-ba is the update phones on v2.0m-az will accept", function () {
+test("v2.0m-bc is the update phones on v2.0m-az will accept", function () {
   const box = loadScript("app/version.js");
-  assert.equal(box.PCS_APP_VERSION, "v2.0m-ba");
-  assert.ok(box.pcsVersionCmp("v2.0m-ba", "v2.0m-az") >= 0);
-  assert.ok(box.pcsVersionCmp("v2.0m-ba", "v2.0m-ax") >= 0);
-  assert.ok(box.pcsVersionCmp("v2.0m-ba", "v2.0m-ay") >= 0);
+  assert.equal(box.PCS_APP_VERSION, "v2.0m-bc");
+  assert.ok(box.pcsVersionCmp("v2.0m-bc", "v2.0m-az") >= 0);
+  assert.ok(box.pcsVersionCmp("v2.0m-bc", "v2.0m-ax") >= 0);
+  assert.ok(box.pcsVersionCmp("v2.0m-bc", "v2.0m-ay") >= 0);
+  assert.ok(box.pcsVersionCmp("v2.0m-bc", "v2.0m-ba") >= 0);
   assert.notEqual(box.PCS_APP_VERSION, "v2.0m-az");
   assert.notEqual(box.PCS_APP_VERSION, "v2.0m-ay");
   const pages = {

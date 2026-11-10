@@ -35,14 +35,31 @@ window.L = {
 window.__show = function (d) { window.__pcsFollowLive.update(d); };
 window.__bar = function () {
   var el = document.getElementById("fl-call");
+  var status = document.getElementById("fl-status");
+  var invEl = status && status.querySelector(".fl-status-inv");
+  var rideEl = status && status.querySelector(".fl-status-ride");
   var a = el && el.querySelector("a");
+  var word = status && status.querySelector("a");
+  var bg = el ? getComputedStyle(el).backgroundColor : "";
+  var live = document.getElementById("fl-live");
+  var sr = status ? status.getBoundingClientRect() : null;
+  var phone = (live || document.body).getBoundingClientRect();
   return JSON.stringify({
     hidden: !el || !!el.hidden,
     text: el ? el.textContent : "",
+    status: status ? status.textContent : "",
+    ride: rideEl ? rideEl.textContent : "",
+    inv: invEl ? invEl.textContent : "",
+    invNowrap: invEl ? getComputedStyle(invEl).whiteSpace : "",
+    invDisplay: invEl ? getComputedStyle(invEl).display : "",
     href: a ? a.getAttribute("href") : "",
     link: a ? a.textContent : "",
-    phone: (document.getElementById("fl-live") || document.body).textContent.indexOf("936-261-7878") >= 0,
-    questions: (document.getElementById("fl-live") || document.body).textContent.indexOf("Questions?") >= 0
+    wordHref: word ? word.getAttribute("href") : "",
+    bg: bg,
+    pinned: !!(live && live.classList.contains("fl-has-bill")),
+    statusInView: !!(sr && sr.height > 20 && sr.top >= phone.top - 1 && sr.bottom <= phone.bottom + 1 && sr.right <= phone.right + 1),
+    phone: (live || document.body).textContent.indexOf("936-261-7878") >= 0,
+    questions: (live || document.body).textContent.indexOf("Questions?") >= 0
   });
 };
 </script></body></html>`;
@@ -94,31 +111,58 @@ test("390x844 tracker bottom bar is the invoice line, not the call button", asyn
       await wait(50);
       return JSON.parse((await send("Runtime.evaluate", { expression: "window.__bar()", returnByValue: true }, sid)).result.result.value);
     }
+    const now = Date.now();
     const none = await show({});
     assert.equal(none.hidden, true);
+    assert.equal(none.pinned, false);
     assert.equal(none.phone, false);
     assert.equal(none.questions, false);
-    const num = await show({ invoiceNo: "000574" });
+    const num = await show({ invoiceNo: "000562" });
     assert.equal(num.hidden, false);
-    assert.equal(num.text, "Invoice #000574");
-    assert.equal(num.href, "");
+    assert.equal(num.pinned, false);
+    assert.equal(num.text, "Invoice #000562");
+    assert.equal(num.status, "Your driver is on the way");
+    assert.equal(num.inv, "");
+    assert.equal(num.status.indexOf("Invoice"), -1);
+    assert.equal(num.status.indexOf("Unpaid"), -1);
+    assert.equal(num.status.indexOf("Paid"), -1);
+    assert.equal(num.statusInView, true);
     assert.equal(num.phone, false);
-    const unpaidBare = await show({ invoiceNo: "000574", pay: "unpaid" });
-    assert.equal(unpaidBare.text, "Invoice #000574");
-    assert.equal(unpaidBare.href, "");
-    const paidBare = await show({ invoiceNo: "000554", pay: "paid" });
-    assert.equal(paidBare.text, "Invoice #000554");
-    assert.equal(paidBare.href, "");
-    const unpaid = await show({ invoiceNo: "000574", pay: "unpaid", payUrl: PAY });
-    assert.equal(unpaid.text, "Invoice #000574 – unpaid · Pay invoice");
+    const stale = await show({ invoiceNo: "000562", sqInvoice: { status: "DRAFT", paid: false, checkedAt: Date.parse("2026-11-03T12:00:00Z") }, payUrl: PAY });
+    assert.equal(stale.hidden, false);
+    assert.equal(stale.text, "Invoice #000562");
+    assert.equal(stale.status, "Your driver is on the way");
+    assert.equal(stale.status.indexOf("Unpaid"), -1);
+    const draft = await show({ invoiceNo: "000562", sqInvoice: { status: "DRAFT", paid: false, checkedAt: now } });
+    assert.equal(draft.hidden, false);
+    assert.equal(draft.text, "Invoice #000562 · Unpaid");
+    assert.equal(draft.href, "");
+    assert.equal(draft.status, "Your driver is on the way");
+    assert.equal(draft.inv, "");
+    assert.equal(draft.status.indexOf("Invoice"), -1);
+    assert.equal(draft.bg, "rgb(11, 107, 58)");
+    assert.equal(draft.pinned, false);
+    assert.equal(draft.statusInView, true);
+    const unpaid = await show({ invoiceNo: "000562", sqInvoice: { status: "UNPAID", paid: false, checkedAt: now }, payUrl: PAY });
+    assert.equal(unpaid.text, "Invoice #000562 · Unpaid · Pay invoice");
     assert.equal(unpaid.href, PAY);
     assert.equal(unpaid.link, "Pay invoice");
+    assert.equal(unpaid.wordHref, "");
+    assert.equal(unpaid.status, "Your driver is on the way");
+    assert.equal(unpaid.bg, "rgb(11, 107, 58)");
     assert.equal(unpaid.phone, false);
-    const paid = await show({ invoiceNo: "000554", pay: "paid", receiptUrl: RECEIPT });
-    assert.equal(paid.text, "Invoice #000554 – paid · View receipt");
+    assert.equal(unpaid.statusInView, true);
+    const unpaidShot = await send("Page.captureScreenshot", { format: "png" }, sid);
+    fs.writeFileSync("/opt/cursor/artifacts/tracker-iphone-390-unpaid.png", Buffer.from(unpaidShot.result.data, "base64"));
+    const paid = await show({ invoiceNo: "000562", sqInvoice: { status: "PAID", paid: true, checkedAt: now }, receiptUrl: RECEIPT });
+    assert.equal(paid.text, "Invoice #000562 · Paid · View receipt");
     assert.equal(paid.href, RECEIPT);
     assert.equal(paid.link, "View receipt");
+    assert.equal(paid.status, "Your driver is on the way");
+    assert.equal(paid.status.indexOf("Invoice"), -1);
+    assert.equal(paid.bg, "rgb(11, 107, 58)");
     const shot = await send("Page.captureScreenshot", { format: "png" }, sid);
+    fs.writeFileSync("/opt/cursor/artifacts/tracker-iphone-390-paid.png", Buffer.from(shot.result.data, "base64"));
     fs.writeFileSync("/opt/cursor/artifacts/tracker-invoice-390.png", Buffer.from(shot.result.data, "base64"));
     ws.close();
   } finally {

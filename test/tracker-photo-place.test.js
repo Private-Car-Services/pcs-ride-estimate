@@ -69,7 +69,8 @@ test("the synthetic driver photo stays under the green bar and off the map contr
       (function () {
         var now = Date.now();
         window.__pcsFollowLive.update({
-          status: "on_way", driverFirst: "Matt", bill: "invoiced", invoiceNo: "000574", pay: "unpaid",
+          status: "on_way", driverFirst: "Matt", bill: "invoiced", invoiceNo: "000562",
+          sqInvoice: { status: "DRAFT", paid: false, checkedAt: now },
           car: { color: "Black", year: "2022", make: "Cadillac", model: "XTS", plate: "PCS1" },
           photo: document.getElementById("fl-photo").src,
           pickup: { label: "1200 Smith St, Houston", lat: 29.76, lng: -95.36 },
@@ -78,19 +79,23 @@ test("the synthetic driver photo stays under the green bar and off the map contr
           pos: { lat: 29.75, lng: -95.37, at: now }, updatedAt: now
         });
         var bill = document.getElementById("fl-call");
+        var status = document.getElementById("fl-status");
         var photo = document.getElementById("fl-photo").getBoundingClientRect();
         var br = bill.getBoundingClientRect();
+        var sr = status.getBoundingClientRect();
         var phone = document.querySelector(".phone").getBoundingClientRect();
         var sos = getComputedStyle(document.getElementById("fl-sos-btn"));
         var overlap = !(photo.bottom <= br.top + 1 || photo.top >= br.bottom - 1 || photo.right <= br.left + 1 || photo.left >= br.right - 1);
         var bg = getComputedStyle(bill).backgroundColor;
+        var statusBg = getComputedStyle(status).backgroundColor;
         return JSON.stringify({
-          text: bill.textContent, hidden: !!bill.hidden, bg: bg,
-          top: Math.round(br.top), bottom: Math.round(br.bottom), h: Math.round(br.height),
+          text: bill.textContent, status: status.textContent, hidden: !!bill.hidden, bg: bg, statusBg: statusBg,
+          top: Math.round(sr.top), bottom: Math.round(sr.bottom), h: Math.round(sr.height),
           phoneTop: Math.round(phone.top), phoneBottom: Math.round(phone.bottom),
-          inView: br.height >= 30 && br.top >= phone.top - 1 && br.bottom <= phone.bottom + 1 && br.left >= phone.left - 1 && br.right <= phone.right + 1,
-          overlap: overlap, sosPos: sos.position, sosTop: Math.round(parseFloat(sos.top) || 0),
-          green: bg === "rgb(190, 241, 198)"
+          inView: sr.height >= 20 && sr.top >= phone.top - 1 && sr.bottom <= phone.bottom + 1 && sr.left >= phone.left - 1 && sr.right <= phone.right + 1,
+          overlap: overlap, pinned: document.getElementById("fl-live").classList.contains("fl-has-bill"),
+          sosPos: sos.position, sosTop: Math.round(parseFloat(sos.top) || 0), sosRight: sos.right,
+          green: statusBg === "rgb(11, 107, 58)" && bg === "rgb(11, 107, 58)"
         });
       })()
     `;
@@ -182,8 +187,8 @@ test("the synthetic driver photo stays under the green bar and off the map contr
       assert.equal(got.overZoom, false, size[0] + " photo covers zoom");
       assert.equal(got.overSos, false, size[0] + " SOS covers the photo " + report);
       assert.ok(got.sos && got.sos.w >= 44 && got.sos.h >= 44, size[0] + " SOS is too small " + report);
-      assert.ok(got.sos.top <= 1, size[0] + " SOS is not flush to the top " + report);
-      assert.ok(Math.abs(got.sos.right - got.phone.right) <= 1, size[0] + " SOS is not flush to the tracker edge " + report);
+      assert.ok(got.sos.top >= 6, size[0] + " SOS is under the top edge " + report);
+      assert.ok(Math.abs(got.phone.right - got.sos.right - 6) <= 2, size[0] + " SOS is not inset from the right edge " + report);
       assert.ok(got.sos.left >= -1 && got.sos.bottom <= got.vh + 1 && got.sos.right <= got.vw + 1, size[0] + " SOS is off screen " + report);
       assert.equal(got.sosHit, "fl-sos-btn", size[0] + " SOS is not the top control " + report);
       assert.ok(got.photoHits.every(function (id) { return id === "fl-photo"; }), size[0] + " photo is covered " + JSON.stringify(got.photoHits));
@@ -192,13 +197,17 @@ test("the synthetic driver photo stays under the green bar and off the map contr
       assert.equal(got.text, "Your PCS driver: Matt");
       const bareBill = await send("Runtime.evaluate", { expression: billOnScreen, returnByValue: true }, sid);
       const bare = JSON.parse(bareBill.result.result.value);
-      assert.equal(bare.text, "Invoice #000574", size[0] + " " + bareBill.result.result.value);
-      assert.equal(bare.hidden, false, size[0] + " invoice bar hidden");
+      assert.equal(bare.status, "Your driver is on the way", size[0] + " " + bareBill.result.result.value);
+      assert.equal(bare.status.indexOf("Invoice"), -1, size[0] + " invoice is on the status bar");
+      assert.equal(bare.text, "Invoice #000562 · Unpaid", size[0] + " bottom alert " + bare.text);
+      assert.equal(bare.hidden, false, size[0] + " unpaid alert hidden");
+      assert.equal(bare.pinned, false, size[0] + " light bill bar is pinned");
       assert.equal(bare.overlap, false, size[0] + " invoice bar covers the photo");
-      assert.equal(bare.inView, true, size[0] + " invoice bar is off the phone " + bareBill.result.result.value);
-      assert.equal(bare.green, true, size[0] + " invoice bar is not green " + bare.bg);
+      assert.equal(bare.inView, true, size[0] + " status line is off the phone " + bareBill.result.result.value);
+      assert.equal(bare.green, true, size[0] + " bars are not dark green " + bare.statusBg + " " + bare.bg);
       assert.equal(bare.sosPos, "absolute", size[0] + " SOS position changed");
-      assert.ok(bare.sosTop <= 1, size[0] + " SOS moved off the top corner");
+      assert.ok(bare.sosTop >= 6, size[0] + " SOS is not below the safe area");
+      assert.equal(bare.sosRight, "6px", size[0] + " SOS right " + bare.sosRight);
     }
     const billExpr = `
       (function (kind) {
@@ -206,9 +215,9 @@ test("the synthetic driver photo stays under the green bar and off the map contr
         var base = { status: "picked_up", driverFirst: "Matt", bill: "invoiced",
           car: { color: "Black", make: "Cadillac" }, photo: document.getElementById("fl-photo").src,
           pickup: { label: "1200 Smith St", lat: 29.76, lng: -95.36 }, updatedAt: now };
-        if (kind === "paid") Object.assign(base, { invoiceNo: "000210", pay: "paid", receiptUrl: "https://squareup.com/receipt/preview/rcpt210" });
-        else if (kind === "unpaid") Object.assign(base, { invoiceNo: "000574", pay: "unpaid", payUrl: "https://squareup.com/pay-invoice/inv574" });
-        else Object.assign(base, { invoiceNo: "000554" });
+        if (kind === "paid") Object.assign(base, { invoiceNo: "000562", sqInvoice: { status: "PAID", paid: true, checkedAt: now }, receiptUrl: "https://squareup.com/receipt/preview/rcpt210" });
+        else if (kind === "unpaid") Object.assign(base, { invoiceNo: "000562", sqInvoice: { status: "UNPAID", paid: false, checkedAt: now }, payUrl: "https://squareup.com/pay-invoice/inv574" });
+        else Object.assign(base, { invoiceNo: "000562" });
         window.__pcsFollowLive.update(base);
         ["fl-pay","fl-receipt"].forEach(function (id) {
           var el = document.getElementById(id);
@@ -216,15 +225,17 @@ test("the synthetic driver photo stays under the green bar and off the map contr
           el.addEventListener("click", function (e) { e.preventDefault(); el.dataset.n = "1"; });
         });
         var bill = document.getElementById("fl-call");
+        var statusEl = document.getElementById("fl-status");
         if (document.getElementById("fl-bill")) throw new Error("extra bill row");
+        if (document.getElementById("fl-live").classList.contains("fl-has-bill")) throw new Error("light bill bar");
         if (document.body.textContent.indexOf("Questions? Call") >= 0) throw new Error("business call line remains");
         var a = bill.querySelector("a");
         var photo = document.getElementById("fl-photo").getBoundingClientRect();
-        var status = document.getElementById("fl-status").getBoundingClientRect();
+        var status = statusEl.getBoundingClientRect();
         var map = document.getElementById("fl-map").getBoundingClientRect();
         var br = bill.getBoundingClientRect();
-        var overlap = !(photo.bottom <= br.top + 1 || photo.top >= br.bottom - 1 || photo.right <= br.left + 1 || photo.left >= br.right - 1);
-        return JSON.stringify({ text: bill.textContent, href: a ? a.getAttribute("href") : "", id: a ? a.id : "",
+        var overlap = !bill.hidden && !(photo.bottom <= br.top + 1 || photo.top >= br.bottom - 1 || photo.right <= br.left + 1 || photo.left >= br.right - 1);
+        return JSON.stringify({ text: bill.textContent, status: statusEl.textContent, hidden: !!bill.hidden, href: a ? a.getAttribute("href") : "", id: a ? a.id : "",
           photoTop: Math.round(photo.top), statusBottom: Math.round(status.bottom), mapTop: Math.round(map.top),
           photoRight: Math.round(photo.right), liveRight: Math.round(document.getElementById("fl-live").getBoundingClientRect().right),
           overlapBill: overlap });
@@ -236,8 +247,9 @@ test("the synthetic driver photo stays under the green bar and off the map contr
       fs.writeFileSync("/opt/cursor/artifacts/" + file, Buffer.from(shot.result.data, "base64"));
       return JSON.parse(msg.result.result.value);
     }
-    const paid = await showBill("paid", "tracker-white-paid.png");
-    assert.equal(paid.text, "Invoice #000210 – paid · View receipt");
+    const paid = await showBill("paid", "tracker-green-paid.png");
+    assert.equal(paid.status.indexOf("Invoice"), -1, paid.status);
+    assert.equal(paid.text, "Invoice #000562 · Paid · View receipt");
     assert.equal(paid.href, "https://squareup.com/receipt/preview/rcpt210");
     assert.equal(paid.id, "fl-receipt");
     assert.equal(paid.overlapBill, false);
@@ -246,18 +258,41 @@ test("the synthetic driver photo stays under the green bar and off the map contr
     await send("Runtime.evaluate", { expression: "document.getElementById('fl-receipt').click()", returnByValue: true }, sid);
     const paidClick = await send("Runtime.evaluate", { expression: "document.getElementById('fl-receipt').dataset.n", returnByValue: true }, sid);
     assert.equal(paidClick.result.result.value, "1");
-    const owed = await showBill("unpaid", "tracker-white-unpaid.png");
-    assert.equal(owed.text, "Invoice #000574 – unpaid · Pay invoice");
+    const owed = await showBill("unpaid", "tracker-green-unpaid.png");
+    assert.equal(owed.status.indexOf("Invoice"), -1, owed.status);
+    assert.equal(owed.text, "Invoice #000562 · Unpaid · Pay invoice");
     assert.equal(owed.href, "https://squareup.com/pay-invoice/inv574");
     assert.equal(owed.id, "fl-pay");
     await send("Runtime.evaluate", { expression: "document.getElementById('fl-pay').click()", returnByValue: true }, sid);
     const payClick = await send("Runtime.evaluate", { expression: "document.getElementById('fl-pay').dataset.n", returnByValue: true }, sid);
     assert.equal(payClick.result.result.value, "1");
-    const unknown = await showBill("bare", "tracker-white-unknown.png");
-    assert.equal(unknown.text, "Invoice #000554");
+    const unknown = await showBill("bare", "tracker-green-number.png");
+    assert.equal(unknown.hidden, false);
+    assert.equal(unknown.status.indexOf("Invoice"), -1, unknown.status);
+    assert.equal(unknown.text, "Invoice #000562");
+    assert.equal(unknown.status.indexOf("Unpaid"), -1);
+    assert.equal(unknown.status.indexOf("Paid"), -1);
     assert.equal(unknown.href, "");
-    assert.equal(unknown.text.indexOf("unpaid"), -1);
-    assert.equal(unknown.text.indexOf("paid"), -1);
+    await send("Emulation.setDeviceMetricsOverride", { width: 390, height: 844, deviceScaleFactor: 1, mobile: true }, sid);
+    async function phoneShot(kind, file) {
+      const now = Date.now();
+      const extra = kind === "paid"
+        ? { sqInvoice: { status: "PAID", paid: true, checkedAt: now }, receiptUrl: "https://squareup.com/receipt/preview/rcpt210" }
+        : { sqInvoice: { status: "UNPAID", paid: false, checkedAt: now }, payUrl: "https://squareup.com/pay-invoice/inv574" };
+      const ride = Object.assign({ status: "on_way", driverFirst: "Matt", bill: "invoiced", invoiceNo: "000562", car: { color: "Black", make: "Cadillac" }, pickup: { label: "10 Estancia Pl, Spring", lat: 30.1, lng: -95.5 }, dest: { label: "26 Veilwood Cir, Spring", lat: 30.2, lng: -95.4 }, eta: { min: 43, miles: 21.7, to: "pickup" }, etaAt: now, pos: { lat: 30.05, lng: -95.45, at: now }, updatedAt: now }, extra);
+      await send("Runtime.evaluate", { expression: "window.__pcsFollowLive.update(" + JSON.stringify(ride) + ")", returnByValue: true }, sid);
+      await wait(80);
+      const shot = await send("Page.captureScreenshot", { format: "png" }, sid);
+      fs.writeFileSync("/opt/cursor/artifacts/" + file, Buffer.from(shot.result.data, "base64"));
+      const text = await send("Runtime.evaluate", { expression: "JSON.stringify({status:document.getElementById('fl-status').textContent,bill:document.getElementById('fl-call').textContent})", returnByValue: true }, sid);
+      return JSON.parse(text.result.result.value);
+    }
+    const phoneUnpaid = await phoneShot("unpaid", "tracker-iphone-390-unpaid.png");
+    assert.equal(phoneUnpaid.status, "Your driver is on the way");
+    assert.equal(phoneUnpaid.bill, "Invoice #000562 · Unpaid · Pay invoice");
+    const phonePaid = await phoneShot("paid", "tracker-iphone-390-paid.png");
+    assert.equal(phonePaid.status, "Your driver is on the way");
+    assert.equal(phonePaid.bill, "Invoice #000562 · Paid · View receipt");
     ws.close();
   } finally {
     session.chrome.kill("SIGKILL");

@@ -159,15 +159,55 @@ test("the driver invoice read keeps only the asked ride", function () {
 test("the ride map bar does not add a second invoice row", function () {
   const rfs = appSrc.slice(appSrc.indexOf("function rfsBarHtml"), appSrc.indexOf("function rfsBarClick"));
   const place = appSrc.slice(appSrc.indexOf("function schedMapBillPlace"), appSrc.indexOf("function schedFsMeasure"));
+  const turn = appSrc.slice(appSrc.indexOf("function schedTurnHtml"), appSrc.indexOf("function navEtaClock"));
   assert.equal(rfs.indexOf("rideBillLabelHtml"), -1);
   assert.equal(rfs.indexOf("pcs-map-green"), -1);
   assert.equal(rfs.indexOf("rfs-bill"), -1);
-  assert.match(place, /questionSlotHtml/);
+  assert.equal(place.indexOf("questionSlotHtml"), -1);
+  assert.match(place, /schedBillHome/);
   assert.match(place, /sched-bill-host/);
-  assert.match(place, /insertBefore/);
+  assert.doesNotMatch(place, /insertBefore/);
   assert.doesNotMatch(place, /host\.remove/);
   assert.doesNotMatch(place, /rideBillLabelHtml|schedMapBillHtml/);
+  assert.doesNotMatch(turn, /navTurnInvoice/);
+  assert.match(place, /schedMapInvPlace/);
+  assert.match(rfs, /navTurnInvoice/);
   assert.match(appSrc, /sqInvoice: raw\.sqInvoice/);
+});
+
+test("the dark green nav line uses fresh Square truth for 000562", function () {
+  const now = Date.now();
+  const draft = bill.nav({ prepaidInvoiceNo: "000562", sqInvoice: { status: "DRAFT", paid: false, checkedAt: now } }, null, now);
+  assert.equal(draft.text, "Invoice #000562 · Unpaid");
+  assert.equal(draft.href, "");
+  const owed = bill.nav({ prepaidInvoiceNo: "000562", sqInvoice: { status: "UNPAID", paid: false, checkedAt: now, public_url: PAY } }, null, now);
+  assert.equal(owed.text, "Invoice #000562 · Unpaid");
+  assert.equal(owed.href, PAY);
+  const paid = bill.nav({ prepaidInvoiceNo: "000562", sqInvoice: { paid: true, status: "PAID", checkedAt: now, receipt_url: RECEIPT } }, null, now);
+  assert.equal(paid.text, "Invoice #000562 · Paid");
+  assert.equal(paid.href, RECEIPT);
+  const stale = bill.nav({ prepaidInvoiceNo: "000562", sqInvoice: { status: "UNPAID", paid: false, checkedAt: Date.parse("2026-11-03T12:00:00Z"), public_url: PAY } }, null, now);
+  assert.equal(stale.text, "Invoice #000562");
+  assert.equal(stale.word, "");
+  assert.equal(stale.href, "");
+  const none = bill.nav({ prepaidInvoiceNo: "000562" }, null, now);
+  assert.equal(none.word, "");
+  assert.equal(none.text, "Invoice #000562");
+  const held = bill.nav({ prepaidInvoiceNo: "000999" }, { fetchedAt: now, checkedAt: now, square: { invoiceNumber: "000562", status: "DRAFT", paid: false } }, now);
+  assert.equal(held.text, "Invoice #000562 · Unpaid");
+  const html = bill.navHtml(owed);
+  assert.ok(html.indexOf("nav-inv") >= 0);
+  assert.ok(html.indexOf(PAY) >= 0);
+  assert.ok(html.indexOf(">Unpaid<") >= 0);
+  assert.equal(bill.navHtml(none).indexOf("nav-inv-link"), -1);
+  const flat = bill.take(["ride-562"], { "ride-562": { number: "000562", status: "DRAFT", paid: false, payUrl: "", receiptUrl: "", checkedAt: now } });
+  assert.equal(flat["ride-562"].square.status, "DRAFT");
+  assert.equal(flat["ride-562"].square.paid, false);
+  assert.equal(bill.nav({ prepaidInvoiceNo: "000999" }, flat["ride-562"], now).text, "Invoice #000562 · Unpaid");
+  const paidFlat = bill.take(["ride-paid"], { "ride-paid": { number: "000562", status: "PAID", paid: true, payUrl: PAY, receiptUrl: RECEIPT, checkedAt: now } });
+  const paidNav = bill.nav({ prepaidInvoiceNo: "000999" }, paidFlat["ride-paid"], now);
+  assert.equal(paidNav.text, "Invoice #000562 · Paid");
+  assert.equal(paidNav.href, RECEIPT);
 });
 
 function quotedCss(fnSrc) {
@@ -181,11 +221,13 @@ function quotedCss(fnSrc) {
   return parts.join("");
 }
 
-function driverPage(kind, text, w, h, safe, slot) {
+function driverPage(kind, text, w, h, safe, row) {
   safe = safe || { top: 47, bottom: 34, left: 0, right: 0 };
   const css = quotedCss(appSrc.slice(appSrc.indexOf("function schedFullStyle"), appSrc.indexOf("function schedFullResize"))) +
     quotedCss(appSrc.slice(appSrc.indexOf("function fsStyle"), appSrc.indexOf("function rfsKey")));
   const rfs = kind === "rfs";
+  const model = row && typeof row === "object" ? bill.nav(row, null, Date.now()) : { text: "", href: "" };
+  const inv = bill.navHtml(model);
   const stageStyle = "position:relative;width:" + w + "px;height:" + h + "px;--pcs-safe-top:" + safe.top + "px;--pcs-safe-bottom:" + safe.bottom + "px;--pcs-safe-left:" + safe.left + "px;--pcs-safe-right:" + safe.right + "px";
   return `<!doctype html><html><head><meta charset="utf-8"><style>
     html,body{margin:0;background:#123}
@@ -195,22 +237,25 @@ function driverPage(kind, text, w, h, safe, slot) {
   </style></head><body>
   <div id="${rfs ? "meter-map-stage" : "home-map-stage"}" class="${rfs ? "pcs-rfs" : "pcs-fullmap"}" style="${stageStyle}">
     <div class="leaflet-top leaflet-left"><div class="leaflet-control-zoom leaflet-bar"><a id="zoom-out" href="#">−</a></div></div>
-    ${rfs ? "" : '<div id="sched-fs-top" style="height:72px;background:#20371d;color:#fff">In 0.4 mi · about 2 min</div>'}
+    ${rfs ? "" : '<div id="sched-fs-top"><div id="sched-turn" style="background:#0b3d23;color:#fff;border-radius:12px;padding:10px 12px;font-size:20px;font-weight:800">Continue onto Rayford Rd</div><div class="nav-eta" id="sched-eta-fs"><div class="nav-eta-at">Arrive 3:40 PM</div><div class="nav-eta-left">9 min · 5 mi</div><div class="nav-eta-to">to pickup</div></div></div>'}
     <div class="nav-toggle" style="position:absolute;right:8px;display:flex;gap:6px;z-index:1004">
       <button type="button" id="map-orient-toggle" style="min-height:36px">North up</button>
       <button type="button" id="map-mode-toggle" style="min-height:36px">Follow</button>
     </div>
+    <div id="fs-mph" class="fs-mph" style="bottom:172px"><b id="fs-mph-num">32</b><span>MPH</span></div>
     ${rfs
-      ? '<div id="rfs-bar" role="region" aria-label="Ride"><div class="rfs-row"><div class="rfs-stats"><span><b>1.20</b> mi</span><span><b>0:12</b></span></div></div><div class="rfs-actions"><button type="button" class="rfs-end" id="rfs-end">End ride</button><button type="button" class="rfs-close" id="sched-fs-close">Close map</button></div></div>'
-      : '<div id="sched-fs-bottom"><div id="sched-bill-host" class="sched-bill-host"><p class="fine" id="pcs-question-slot">' + String(slot || "").replace(/^\\s*·\\s*/, "") + '</p></div><button type="button" class="pcs-map-green" id="sched-fs-arrived">' + text + '</button><button type="button" id="sched-fs-close">Close map</button></div>'}
+      ? '<div id="rfs-bar" role="region" aria-label="Ride"><div class="rfs-row"><div class="rfs-stats"><span><b>1.20</b> mi</span><span><b>0:12</b></span></div></div>' + inv + '<div class="rfs-actions"><button type="button" class="rfs-end" id="rfs-end">End ride</button><button type="button" class="rfs-close" id="sched-fs-close">Close map</button></div></div>'
+      : '<div id="sched-fs-bottom">' + inv + '<button type="button" class="pcs-map-green" id="sched-fs-arrived">' + text + '</button><button type="button" id="sched-fs-close">Close map</button></div>'}
   </div>
   <p id="sched-rider-line" style="margin:8px">Rider: Rahual · <a href="tel:9365550100">9365550100</a></p>
   <script>
     var stage = document.getElementById("${rfs ? "meter-map-stage" : "home-map-stage"}");
     var bar = document.getElementById("${rfs ? "rfs-bar" : "sched-fs-bottom"}");
     if (stage.style.setProperty) stage.style.setProperty("${rfs ? "--rfs-bar" : "--sched-fs-bar"}", bar.offsetHeight + "px");
-    if (!${rfs ? "true" : "false"} && stage.style.setProperty) stage.style.setProperty("--sched-fs-top", "84px");
-    ["map-mode-toggle","map-orient-toggle","zoom-out","sched-fs-close","rfs-end","sched-fs-arrived","sched-inv-link"].forEach(function (id) {
+    if (!${rfs ? "true" : "false"} && stage.style.setProperty) stage.style.setProperty("--sched-fs-top", document.getElementById("sched-fs-top").offsetHeight + "px");
+    var mph = document.getElementById("fs-mph");
+    if (mph && bar) mph.style.bottom = Math.round(stage.getBoundingClientRect().bottom - bar.getBoundingClientRect().top + 12) + "px";
+    ["map-mode-toggle","map-orient-toggle","zoom-out","sched-fs-close","rfs-end","sched-fs-arrived","nav-inv-link"].forEach(function (id) {
       var el = document.getElementById(id);
       if (!el) return;
       el.addEventListener("click", function (e) { if (e.preventDefault) e.preventDefault(); el.dataset.n = String(Number(el.dataset.n || 0) + 1); });
@@ -229,11 +274,23 @@ function driverPage(kind, text, w, h, safe, slot) {
       var bill = document.getElementById("sched-fs-arrived") || document.getElementById("rfs-bill");
       var host = document.getElementById("sched-bill-host");
       var rider = document.getElementById("sched-rider-line");
-      var invoiceLinks = document.querySelectorAll("#sched-bill-host a[href]").length;
+      var inv = document.getElementById("nav-inv");
+      var mph = document.getElementById("fs-mph");
+      var invoiceLinks = document.querySelectorAll("#nav-inv a[href]").length;
+      var mphOverlap = false;
+      if (inv && mph) {
+        var ib = inv.getBoundingClientRect(), mb = mph.getBoundingClientRect();
+        mphOverlap = ib.height > 0 && mb.height > 0 && !(ib.bottom <= mb.top + 1 || ib.top >= mb.bottom - 1 || ib.right <= mb.left + 1 || ib.left >= mb.right - 1);
+      }
+      var turn = document.getElementById("sched-turn");
+      var turnBg = turn ? getComputedStyle(turn).backgroundColor : "";
+      var invParent = inv && inv.parentElement ? inv.parentElement.id : "";
       return { id: id, x: x, y: y, top: r.top, bottom: r.bottom, left: r.left, hit: got ? (got.id || got.className || got.tagName) : "",
+        invParent: invParent,
         bill: bill ? bill.textContent : "", clip: bill ? bill.scrollWidth > bill.clientWidth + 2 : false,
         links: document.querySelectorAll("#home-map-stage a[href],#meter-map-stage a[href]").length, invoiceLinks: invoiceLinks,
         host: !!host, hostText: host ? host.textContent : "", riderText: rider ? rider.textContent : "",
+        inv: inv ? inv.textContent : "", turnBg: turnBg, mphOverlap: mphOverlap,
         label: !!document.querySelector(".pcs-bill-label,#rfs-bill"),
         overlap: overlap, greenBottom: greenBottom, endTop: endTop, greenH: greenH };
     }
@@ -295,14 +352,15 @@ test("full-page map and tracker keep the invoice on one line and the controls hi
     }
     const ipadSafe = { top: 24, bottom: 20, left: 0, right: 0 };
     const ipadLand = { top: 24, bottom: 20, left: 24, right: 24 };
+    const now = Date.now();
     const pages = [
-      ["554-portrait.html", driverPage("pickup", bill.pickupLine(RAHUAL), 768, 1024, ipadSafe, bill.slot(RAHUAL))],
-      ["574-portrait.html", driverPage("pickup", bill.pickupLine(CAMARA), 768, 1024, ipadSafe, bill.slot(CAMARA))],
-      ["554-landscape.html", driverPage("pickup", bill.pickupLine(RAHUAL), 1024, 768, ipadLand, bill.slot(Object.assign({ receiptUrl: RECEIPT, sqInvoice: { paid: true, status: "PAID", amountDueCents: 0 } }, RAHUAL)))],
-      ["574-rfs.html", driverPage("rfs", "", 768, 1024, ipadSafe, bill.slot(CAMARA))],
-      ["554-rfs-landscape.html", driverPage("rfs", "", 1024, 768, ipadLand, bill.slot(RAHUAL))],
-      ["574-unpaid-rfs.html", driverPage("rfs", "", 1024, 768, ipadLand, bill.slot({ prepaidInvoiceNo: "000574", payState: "invoice_pending", invoicePayUrl: PAY }))],
-      ["554-paid-rfs.html", driverPage("rfs", "", 768, 1024, ipadSafe, bill.slot({ prepaidInvoiceNo: "000554", sqInvoice: { paid: true, status: "PAID", amountDueCents: 0 }, receiptUrl: RECEIPT }))]
+      ["554-portrait.html", driverPage("pickup", bill.pickupLine(RAHUAL), 768, 1024, ipadSafe, RAHUAL)],
+      ["574-portrait.html", driverPage("pickup", bill.pickupLine(CAMARA), 768, 1024, ipadSafe, Object.assign({}, CAMARA, { sqInvoice: { status: "DRAFT", paid: false, checkedAt: now } }))],
+      ["554-landscape.html", driverPage("pickup", bill.pickupLine(RAHUAL), 1024, 768, ipadLand, Object.assign({}, RAHUAL, { receiptUrl: RECEIPT, sqInvoice: { paid: true, status: "PAID", checkedAt: now, receipt_url: RECEIPT } }))],
+      ["574-rfs.html", driverPage("rfs", "", 768, 1024, ipadSafe, null)],
+      ["554-rfs-landscape.html", driverPage("rfs", "", 1024, 768, ipadLand, null)],
+      ["574-unpaid-rfs.html", driverPage("rfs", "", 1024, 768, ipadLand, null)],
+      ["554-paid-rfs.html", driverPage("rfs", "", 768, 1024, ipadSafe, null)]
     ];
     for (const pair of pages) {
       const hits = await open(pair[0], pair[1]);
@@ -310,10 +368,14 @@ test("full-page map and tracker keep the invoice on one line and the controls hi
         assert.equal(row.hit, row.id, pair[0] + " " + row.id + " hit " + row.hit + " @" + row.x + "," + row.y);
         assert.equal(row.clip, false, pair[0] + " clipped " + row.bill);
         assert.equal(row.links, 1 + (row.invoiceLinks || 0), pair[0] + " unexpected link");
-        assert.equal(row.host, pair[0].indexOf("rfs") < 0, pair[0] + " host");
+        assert.equal(row.host, false, pair[0] + " white bill bar is on the map");
         assert.equal(row.label, false);
         if (pair[0].indexOf("rfs") < 0) {
-          assert.ok(row.hostText.indexOf("Invoice #") >= 0, pair[0] + " invoice missing from the bottom bar");
+          assert.ok(row.inv.indexOf("Invoice #") >= 0, pair[0] + " invoice missing from the green bar " + row.inv);
+          assert.equal(row.bill.indexOf("Invoice #"), -1, pair[0] + " invoice is on the arrive button");
+          assert.equal(row.mphOverlap, false, pair[0] + " MPH covers the invoice");
+          assert.equal(row.turnBg, "rgb(11, 61, 35)", pair[0] + " turn bar is not dark green");
+          assert.equal((row.invParent || ""), "sched-fs-bottom", pair[0] + " invoice is not in the bottom stack");
           assert.equal(row.riderText.indexOf("Invoice #"), -1, pair[0] + " invoice is on the rider line");
         }
       });
@@ -328,17 +390,18 @@ test("full-page map and tracker keep the invoice on one line and the controls hi
     }
     const paidPage = pages.filter(function (pair) { return pair[0] === "554-landscape.html"; })[0];
     await open(paidPage[0], paidPage[1]);
-    await send("Runtime.evaluate", { expression: "document.getElementById('map-mode-toggle').click(); document.getElementById('map-orient-toggle').click(); document.getElementById('zoom-out').click(); document.getElementById('sched-inv-link').click(); document.getElementById('sched-fs-close').click();", returnByValue: true }, sid);
-    const tapped = await send("Runtime.evaluate", { expression: "JSON.stringify({mode:document.getElementById('map-mode-toggle').dataset.n,orient:document.getElementById('map-orient-toggle').dataset.n,zoom:document.getElementById('zoom-out').dataset.n,link:document.getElementById('sched-inv-link').dataset.n,href:document.getElementById('sched-inv-link').getAttribute('href'),host:document.getElementById('sched-bill-host').textContent,line:document.getElementById('sched-rider-line').textContent,close:document.getElementById('sched-fs-close').dataset.n,parent:document.getElementById('sched-inv-link').closest('#sched-fs-bottom') ? 'bar' : ''})", returnByValue: true }, sid);
+    await send("Runtime.evaluate", { expression: "document.getElementById('map-mode-toggle').click(); document.getElementById('map-orient-toggle').click(); document.getElementById('zoom-out').click(); document.getElementById('nav-inv-link').click(); document.getElementById('sched-fs-close').click();", returnByValue: true }, sid);
+    const tapped = await send("Runtime.evaluate", { expression: "JSON.stringify({mode:document.getElementById('map-mode-toggle').dataset.n,orient:document.getElementById('map-orient-toggle').dataset.n,zoom:document.getElementById('zoom-out').dataset.n,link:document.getElementById('nav-inv-link').dataset.n,href:document.getElementById('nav-inv-link').getAttribute('href'),inv:document.getElementById('nav-inv').textContent,turn:document.getElementById('sched-turn').textContent,line:document.getElementById('sched-rider-line').textContent,close:document.getElementById('sched-fs-close').dataset.n,parent:document.getElementById('nav-inv').parentElement.id,host:!!document.getElementById('sched-bill-host')})", returnByValue: true }, sid);
     const got = JSON.parse(tapped.result.result.value);
     assert.equal(got.mode, "1");
     assert.equal(got.orient, "1");
     assert.equal(got.zoom, "1");
     assert.equal(got.link, "1");
     assert.equal(got.href, RECEIPT);
-    assert.equal(got.parent, "bar");
-    assert.ok(got.host.indexOf("Invoice #000554") >= 0 && got.host.indexOf("paid") >= 0);
-    assert.ok(got.host.indexOf("View receipt") >= 0);
+    assert.equal(got.parent, "sched-fs-bottom");
+    assert.equal(got.turn.indexOf("Invoice"), -1);
+    assert.ok(got.inv.indexOf("Invoice #000554") >= 0 && got.inv.indexOf("Paid") >= 0);
+    assert.equal(got.host, false);
     assert.equal(got.line.indexOf("Invoice #"), -1);
     assert.equal(got.close, "1");
     ws.close();

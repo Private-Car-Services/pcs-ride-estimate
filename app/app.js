@@ -9985,7 +9985,63 @@
     try { if (M && M.schedId) r = schedFind(M.schedId); } catch (e) {}
     return rideInvoiceNoFrom(r, M);
   }
-  if (typeof window !== "undefined") window.__pcsV20lBill = { kind: rideBillKind, text: rideBillText, label: rideBillLabelHtml, invoiceNo: rideInvoiceDisplayNo, from: rideInvoiceNoFrom, fit: rideBillLabelFitCss, map: schedMapBillHtml, pickupLine: schedPickupStatusText, pay: ridePayWord, bar: rideMapBillText, payUrl: rideCustomerPayUrl, slot: rideInvoiceSlotHtml, square: squareInvoiceLink, take: verInvTake, live: rideLivePay };
+  /* Paid / Unpaid for the nav bar and the public tracker. Square truth only.
+     A successful /driver/invoice read is fresh for 10 minutes (fetchedAt). A stored sqInvoice is used only when
+     its own checkedAt or fetchedAt is inside that window. Anything older (Patti's Nov 3 check) shows the number and no payment word.
+     God /sq/invoice is not called from here: it needs a God password. */
+  var SQ_PAY_FRESH_MS = 10 * 60 * 1000;
+  function sqPayTime(v) { var n = Number(v); return isFinite(n) ? n : 0; }
+  function sqPayFresh(t, now) { return t > 0 && now - t <= SQ_PAY_FRESH_MS && t - now <= 60000; }
+  function sqPayWord(q) {
+    if (!q || typeof q !== "object") return "";
+    var status = String(q.status || "").toUpperCase();
+    if (q.paid === true || status === "PAID") return "paid";
+    if (status || q.paid === false) return "unpaid";
+    return "";
+  }
+  function squareNavModel(r, held, now) {
+    now = now || Date.now();
+    r = r || {};
+    var no = "";
+    try { no = String(rideInvoiceNoFrom(r, null) || "").replace(/^#/, "").trim(); } catch (e) { no = ""; }
+    var q = null, checked = 0;
+    if (held && !held.stale && !held.staleSquare && held.square && typeof held.square === "object" && sqPayFresh(sqPayTime(held.fetchedAt), now)) {
+      q = held.square;
+      checked = sqPayTime(held.checkedAt) || sqPayTime(held.fetchedAt);
+      var wn = String(q.invoiceNumber || q.number || q.invoiceNo || "").replace(/^#/, "").replace(/\s+/g, "");
+      if (/^\d{1,20}$/.test(wn)) no = wn;
+    } else if (r.sqInvoice && typeof r.sqInvoice === "object") {
+      var stamp = sqPayTime(r.sqInvoice.checkedAt) || sqPayTime(r.sqInvoice.fetchedAt);
+      if (sqPayFresh(stamp, now)) { q = r.sqInvoice; checked = stamp; }
+    }
+    var pay = sqPayWord(q);
+    var status = q ? String(q.status || "").toUpperCase() : "";
+    var href = "", linkText = "";
+    if (pay === "paid") {
+      var rec = "";
+      if (q && q.payments && q.payments[0]) rec = rideSquareHttps(q.payments[0].receipt_url || q.payments[0].receiptUrl || "");
+      if (!rec && q) rec = rideSquareHttps(q.receipt_url || q.receiptUrl || "");
+      if (!rec) rec = rideSquareHttps(r.receiptUrl || "");
+      if (rec) { href = rec; linkText = "View receipt"; }
+    } else if (pay === "unpaid") {
+      var payUrl = rideSquareHttps((q && (q.public_url || q.publicUrl || q.payUrl)) || r.invoicePayUrl || r.payUrl || "");
+      if (payUrl) { href = payUrl; linkText = "Pay invoice"; }
+    }
+    var word = pay === "paid" ? "Paid" : pay === "unpaid" ? "Unpaid" : "";
+    var text = "";
+    if (no && word) text = "Invoice #" + no + " \u00b7 " + word;
+    else if (no) text = "Invoice #" + no;
+    else if (word) text = word;
+    return { text: text, word: word, pay: pay, no: no, href: href, linkText: linkText, status: status, checkedAt: pay ? checked : 0 };
+  }
+  function navInvoiceHtml(m) {
+    if (!m || !m.text) return "";
+    var inner = esc(m.text);
+    if (m.href && m.word && m.no) inner = esc("Invoice #" + m.no + " \u00b7 ") + '<a id="nav-inv-link" href="' + esc(m.href) + '" target="_blank" rel="noopener" style="color:#fff;font-weight:900;text-decoration:underline">' + esc(m.word) + "</a>";
+    else if (m.href && m.word) inner = '<a id="nav-inv-link" href="' + esc(m.href) + '" target="_blank" rel="noopener" style="color:#fff;font-weight:900;text-decoration:underline">' + esc(m.word) + "</a>";
+    return '<div id="nav-inv" class="nav-inv-bar" style="display:block;width:100%;box-sizing:border-box;margin:0;padding:10px 12px;background:#0b3d23;color:#fff;border:3px solid #2e9d4f;border-radius:14px;font-family:system-ui,-apple-system,sans-serif;font-size:18px;line-height:1.35;font-weight:900;text-align:center;pointer-events:auto">' + inner + "</div>";
+  }
+  if (typeof window !== "undefined") window.__pcsV20lBill = { kind: rideBillKind, text: rideBillText, label: rideBillLabelHtml, invoiceNo: rideInvoiceDisplayNo, from: rideInvoiceNoFrom, fit: rideBillLabelFitCss, map: schedMapBillHtml, pickupLine: schedPickupStatusText, pay: ridePayWord, bar: rideMapBillText, payUrl: rideCustomerPayUrl, slot: rideInvoiceSlotHtml, square: squareInvoiceLink, take: verInvTake, live: rideLivePay, nav: squareNavModel, navHtml: navInvoiceHtml };
   function meterInvInfo(M) { return rideInvoiceInfo(M && M.schedId ? schedFind(M.schedId) : null, M); }
   function meterInvRefresh(M) { /* live: the 15-min Square sync / refreshScheduledRides flips the badge without a re-render */
     if (typeof document === "undefined" || meterShown(M)) return;
@@ -10198,11 +10254,24 @@
       var row = got[id] && typeof got[id] === "object" ? got[id] : null;
       if (!row) { verInv[id] = null; return; }
       var src = row.square && typeof row.square === "object" ? row.square : row;
+      /* Staged Worker shape {number,status,paid,payUrl,receiptUrl,checkedAt}. Nested square still wins when present. */
+      if (!(row.square && typeof row.square === "object") && (row.number || row.payUrl || row.receiptUrl || row.status)) {
+        src = { invoiceNumber: row.number || row.invoiceNo || "", status: row.status || "", paid: row.paid === true, public_url: row.payUrl || "", payments: row.receiptUrl ? [{ status: "COMPLETED", refundedCents: 0, receipt_url: row.receiptUrl }] : [], checkedAt: row.checkedAt };
+      }
       var link = null;
       try { link = squareInvoiceLink(src); } catch (e) { link = null; }
       var keep = { invoiceNo: String(row.invoiceNo || (link && link.invoiceNo) || ""), amountCents: row.amountCents, taxCents: row.taxCents };
-      if (link && link.pay) keep.square = { invoiceNumber: link.invoiceNo, status: link.pay === "paid" ? "PAID" : "UNPAID", public_url: link.pay === "unpaid" ? link.url : "", payments: link.pay === "paid" ? [{ status: "COMPLETED", refundedCents: 0, receipt_url: link.url }] : [] };
-      keep.fetchedAt = Date.now();
+      var srcStatus = String((src && src.status) || "").toUpperCase();
+      var srcNo = String((src && (src.invoiceNumber || src.number || src.invoiceNo)) || (link && link.invoiceNo) || "").replace(/^#/, "").replace(/\s+/g, "");
+      if (link && link.pay) keep.square = { invoiceNumber: link.invoiceNo, status: link.pay === "paid" ? "PAID" : "UNPAID", paid: link.pay === "paid", public_url: link.pay === "unpaid" ? link.url : "", payments: link.pay === "paid" ? [{ status: "COMPLETED", refundedCents: 0, receipt_url: link.url }] : [] };
+      else if (/^\d{1,20}$/.test(srcNo) && (srcStatus || (src && (src.paid === true || src.paid === false)))) {
+        keep.square = { invoiceNumber: srcNo, status: srcStatus, paid: !!(src && (src.paid === true || srcStatus === "PAID")), public_url: "", payments: [] };
+        try { keep.square.public_url = rideSquareHttps((src && (src.public_url || src.publicUrl)) || ""); } catch (e2) { keep.square.public_url = ""; }
+      }
+      /* A timestamp on the worker row is Square's own check. An old one is not treated as a fresh read. */
+      var serverChecked = sqPayTime(row.checkedAt) || sqPayTime(src && src.checkedAt) || sqPayTime(src && src.fetchedAt);
+      if (serverChecked > 1e12 && !sqPayFresh(serverChecked, Date.now())) { keep.staleSquare = true; keep.fetchedAt = serverChecked; keep.checkedAt = serverChecked; }
+      else { keep.fetchedAt = Date.now(); keep.checkedAt = serverChecked > 1e12 ? serverChecked : Date.now(); }
       verInv[id] = keep;
     });
     return verInv;
@@ -10252,8 +10321,26 @@
       var got = d && d.invoices && d.invoices[id];
       if (!got || typeof got !== "object") return invShareUnknown(id);
       verInvTake([id], d.invoices);
+      try { schedNavPaint(); } catch (ePaint) {}
       return invoiceShareFromWorker(verInv[id]);
     }, function () { if (invShareGen[id] !== gen) return invoiceShareFromWorker(verInv[id]); return invShareUnknown(id); });
+  }
+  var navInvAt = {};
+  function navTurnInvoice() {
+    var r = null, held = null, id = "";
+    try {
+      r = rideLineRide();
+      if (r && r.id) { id = String(r.id); held = verInv[id]; }
+    } catch (e) { r = null; }
+    if (id) {
+      var now = Date.now();
+      var freshHeld = held && !held.stale && !held.staleSquare && held.fetchedAt && now - held.fetchedAt < 60000;
+      if (!freshHeld && !(navInvAt[id] && now - navInvAt[id] < 60000)) {
+        navInvAt[id] = now;
+        try { invShareRefresh({ rideId: id }); } catch (e2) {}
+      }
+    }
+    return navInvoiceHtml(squareNavModel(r || {}, held, Date.now()));
   }
   function verifiedPrepaid(pp, ver) { /* pure (tested) */
     if (!pp) return null;
@@ -10658,7 +10745,7 @@
     var fe = document.getElementById("sched-eta-fs"), top = document.getElementById("sched-fs-top");
     if (top) { var h2 = schedEtaHtml("sched-eta-fs"); if (!fe) top.insertAdjacentHTML("beforeend", h2); else if (fe.outerHTML !== h2) fe.outerHTML = h2; }
   }
-  function schedNavPaint() { var el = document.getElementById("sched-turn"); if (el) { var h = schedTurnHtml(); if (el.outerHTML !== h) el.outerHTML = h; } var fs = document.getElementById("sched-turn-fs"); if (fs) { var h2 = schedTurnHtml().replace('id="sched-turn"', 'id="sched-turn-fs"'); if (fs.outerHTML !== h2) fs.outerHTML = h2; } try { schedEtaPaint(); } catch (e) {} if (!schedNavTrip()) schedFullApply(); if (navTestOn()) try { navTestPaint(); } catch (e) {} } /* v75x: full screen banner too; v75y test flag: Uber-style card + bar */
+  function schedNavPaint() { var el = document.getElementById("sched-turn"); if (el) { var h = schedTurnHtml(); if (el.outerHTML !== h) el.outerHTML = h; } var fs = document.getElementById("sched-turn-fs"); if (fs) { var h2 = schedTurnHtml().replace('id="sched-turn"', 'id="sched-turn-fs"'); if (fs.outerHTML !== h2) fs.outerHTML = h2; } try { schedEtaPaint(); } catch (e) {} if (!schedNavTrip()) schedFullApply(); try { schedFullLift(); } catch (eLift) {} if (navTestOn()) try { navTestPaint(); } catch (e) {} } /* v75x: full screen banner too; v75y test flag: Uber-style card + bar */
   /* v75x (Matthew 10/16): on the way to the pickup the map can fill the whole screen. A big "Full screen map" button on the
      small map (or a tap on the map) opens it; the next-turn banner stays on top, the pickup pin, Follow / Heading up and the
      v75w arrow freeze are the SAME map (resized, never recreated). Big "I'm at the pickup" + Close. The choice is remembered
@@ -10732,29 +10819,37 @@
     } else if (line.parentNode !== host) host.insertBefore(line, host.firstChild);
     return line;
   }
-  function schedMapBillPlace(bot) {
+  function schedMapInvPlace(bot) {
+    /* Dark green invoice bar, full width, directly above the main action button. No white strip. */
     if (!bot || typeof document === "undefined") return;
-    var t = null, r = null, html = "";
-    try { t = schedNavTrip(); r = t ? schedFind(t.id) : null; } catch (e) { r = null; }
-    try { html = r ? questionSlotHtml(r) : ""; } catch (e2) { html = ""; }
+    var html = "";
+    try { html = navTurnInvoice(); } catch (e) { html = ""; }
+    var el = document.getElementById("nav-inv");
+    var inBot = !!(el && bot.contains && bot.contains(el));
+    if (!html) { if (inBot) el.remove(); return; }
+    var before = bot.querySelector ? (bot.querySelector("#sched-fs-arrived") || bot.querySelector(".rfs-actions") || bot.querySelector("#rfs-ask")) : null;
+    if (!inBot) {
+      if (before && before.insertAdjacentHTML) before.insertAdjacentHTML("beforebegin", html);
+      else bot.insertAdjacentHTML("afterbegin", html);
+      return;
+    }
+    if (el.outerHTML !== html) { el.outerHTML = html; el = document.getElementById("nav-inv"); }
+    if (el && before && before.parentNode === bot && el.nextElementSibling !== before && before.before) before.before(el);
+  }
+  function schedMapBillPlace(bot) {
+    /* The white invoice strip is not on the nav map. Invoice # and Paid/Unpaid sit on the bottom bar. */
+    if (!bot || typeof document === "undefined") return;
     var host = document.getElementById("sched-bill-host");
-    if (html) {
-      if (!host) {
-        host = document.createElement("div");
-        host.id = "sched-bill-host";
-        host.className = "sched-bill-host";
-      }
-      if (host.__h !== html) { host.innerHTML = html; host.__h = html; }
-      if (host.parentNode !== bot) {
-        if (bot.firstChild && bot.insertBefore) bot.insertBefore(host, bot.firstChild);
-        else if (bot.appendChild) bot.appendChild(host);
-      }
-    } else if (host && bot.contains && bot.contains(host)) schedBillHome();
+    if (host && bot.contains && bot.contains(host)) schedBillHome();
     var btn = bot.querySelector ? bot.querySelector("#sched-fs-arrived") : null;
-    if (!btn) return;
-    var text = schedPickupStatusText(r);
-    if (btn.textContent !== text) btn.textContent = text;
-    if (btn.getAttribute && btn.getAttribute("aria-label") !== text) btn.setAttribute("aria-label", text);
+    if (btn) {
+      var r = null;
+      try { var t = schedNavTrip(); r = t ? schedFind(t.id) : null; } catch (e) { r = null; }
+      var text = schedPickupStatusText(r);
+      if (btn.textContent !== text) btn.textContent = text;
+      if (btn.getAttribute && btn.getAttribute("aria-label") !== text) btn.setAttribute("aria-label", text);
+    }
+    schedMapInvPlace(bot);
   }
   function schedFsMeasure() {
     var stage = document.getElementById("home-map-stage");
@@ -10763,7 +10858,19 @@
     if (bot && bot.offsetHeight) stage.style.setProperty("--sched-fs-bar", bot.offsetHeight + "px");
     if (top && top.offsetHeight) stage.style.setProperty("--sched-fs-top", top.offsetHeight + "px");
   }
+  /* Arrive card is the reference: solid #0b3d23, 3px #2e9d4f border, 14px corners, system-ui, white text. */
+  function navUniformStyle() {
+    if (typeof document === "undefined" || document.getElementById("pcs-nav-uniform")) return;
+    var st = document.createElement("style");
+    st.id = "pcs-nav-uniform";
+    st.textContent =
+      "#home-map-stage.pcs-fullmap #sched-turn-fs,#meter-map-stage.pcs-rfs .meter-turn,#home-map-stage.pcs-fullmap .nav-eta,#meter-map-stage.pcs-rfs .nav-eta,#home-map-stage.pcs-fullmap #nav-inv,#meter-map-stage.pcs-rfs #nav-inv,#rfs-bar #nav-inv,#meter-map-stage.pcs-rfs .rfs-row,#home-map-stage.pcs-fullmap .nav-toggle button,#meter-map-stage.pcs-rfs .nav-toggle button,#home-map-stage.pcs-fullmap #sched-fs-arrived,#home-map-stage.pcs-fullmap #sched-fs-close,#rfs-bar .rfs-close,#rfs-bar .rfs-toll-add{background:#0b3d23 !important;color:#fff !important;border:3px solid #2e9d4f !important;border-radius:14px !important;font-family:system-ui,-apple-system,sans-serif !important}" +
+      "#meter-map-stage.pcs-rfs .rfs-row .rfs-fare,#meter-map-stage.pcs-rfs .rfs-row .rfs-stats,#meter-map-stage.pcs-rfs .rfs-row .rfs-stats b,#meter-map-stage.pcs-rfs .rfs-row .rfs-tier{color:#fff !important;font-family:system-ui,-apple-system,sans-serif !important}" +
+      "#rfs-bar .rfs-end{border-width:3px !important;border-style:solid !important;border-radius:14px !important;font-family:system-ui,-apple-system,sans-serif !important}";
+    (document.head || document.documentElement).appendChild(st);
+  }
   function schedFullStyle() {
+    navUniformStyle();
     if (document.getElementById("pcs-fullmap-style")) return;
     var st = document.createElement("style"); st.id = "pcs-fullmap-style";
     st.textContent = "#home-map-stage.pcs-fullmap{position:fixed !important;left:0;right:0;top:0;bottom:0;width:100vw;height:100vh !important;height:100dvh !important;margin:0 !important;z-index:2147482000;background:#0b3d23;border-radius:0}" +
@@ -10782,7 +10889,9 @@
       ".sched-bill-host .fine,.sched-bill-host #pcs-question-slot{margin:0;color:#1a1a1a;font-size:16px;font-weight:700}" +
       ".sched-bill-host a{color:#0b3d23;font-weight:800}" +
       "#sched-fs-bottom,#rfs-bar{container-type:inline-size}.pcs-map-green,#sched-fs-arrived{display:block;width:100%;box-sizing:border-box;height:62px;min-height:62px;margin:0;padding:0 10px;font-size:clamp(12px,calc(100cqw / 26),20px);font-weight:800;line-height:58px;text-align:center;background:#0b6b3a;color:#fff;border:2px solid #fff;border-radius:14px;white-space:nowrap;overflow:hidden;text-overflow:clip;position:relative;z-index:1;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.4)}" +
-      "#sched-fs-close{display:block;width:100%;min-height:58px;font-size:21px;font-weight:800;background:#d1fae5;color:#0b3d23;border:3px solid #0b3d23;border-radius:14px;margin:0;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.4)}";
+      "#sched-fs-close{display:block;width:100%;min-height:58px;font-size:21px;font-weight:800;background:#d1fae5;color:#0b3d23;border:3px solid #0b3d23;border-radius:14px;margin:0;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.4)}" +
+      "#sched-fs-bottom #nav-inv,#rfs-bar #nav-inv{pointer-events:auto;position:relative;z-index:1}" +
+      "body.pcs-fullmap-body #pcs-sos-btn{z-index:2147482100 !important;bottom:auto !important;right:12px !important;top:250px;top:var(--pcs-sos-top,calc(env(safe-area-inset-top,0px) + 250px))}";
     document.head.appendChild(st);
   }
   function schedFullResize() {
@@ -10812,6 +10921,7 @@
       schedBillHome();
       if (openB) openB.remove(); if (top) top.remove(); if (bot) bot.remove(); if (stage) fsMphDrop(stage); /* v76b */
       if (stage && stage.classList.contains("pcs-fullmap")) { stage.classList.remove("pcs-fullmap"); document.body.style.overflow = ""; schedFullResize(); }
+      schedFullMark(stage);
       return;
     }
     schedFullStyle();
@@ -10841,7 +10951,12 @@
       if (navTestOn()) navTestBottom(bot); /* v75y test flag */
       else schedMapBillPlace(bot);
       schedFsMeasure();
-      fsMphPlace(stage, (navTestOn() ? 262 : 172) + "px"); /* v76b: MPH badge */
+      var mphBottom = (navTestOn() ? 262 : 172) + "px";
+      if (bot && bot.getBoundingClientRect && stage.getBoundingClientRect) {
+        var lift = Math.round(stage.getBoundingClientRect().bottom - bot.getBoundingClientRect().top + 12);
+        if (lift > 0) mphBottom = lift + "px"; /* above the invoice bar and the action buttons */
+      }
+      fsMphPlace(stage, mphBottom); /* v76b: MPH badge */
     } else { schedBillHome(); rideLineHome(); if (top) top.remove(); if (bot) bot.remove(); fsMphDrop(stage); }
     if (full !== was) {
       stage.classList.toggle("pcs-fullmap", full);
@@ -10850,6 +10965,25 @@
       setTimeout(schedFullResize, 120);
       if (!full) { var card = document.getElementById("sched-trip"); if (card && card.scrollIntoView) try { card.scrollIntoView({ block: "start" }); } catch (e) {} }
     }
+    schedFullMark(stage);
+  }
+  function schedFullMark(stage) {
+    if (typeof document === "undefined" || !document.body || !document.body.classList) return;
+    var on = !!(stage && stage.classList && stage.classList.contains("pcs-fullmap"));
+    if (document.body.classList.contains("pcs-fullmap-body") !== on) document.body.classList.toggle("pcs-fullmap-body", on);
+    if (on) { try { sosPlace(); } catch (e) {} }
+  }
+  function schedFullLift() {
+    if (typeof document === "undefined") return;
+    var stage = document.getElementById("home-map-stage"), bot = document.getElementById("sched-fs-bottom");
+    if (!stage || !stage.classList.contains("pcs-fullmap") || !bot) { schedFullMark(stage); return; }
+    schedMapInvPlace(bot);
+    schedFsMeasure();
+    if (bot.getBoundingClientRect && stage.getBoundingClientRect) {
+      var lift = Math.round(stage.getBoundingClientRect().bottom - bot.getBoundingClientRect().top + 12);
+      if (lift > 0) fsMphPlace(stage, lift + "px");
+    }
+    schedFullMark(stage);
   }
   /* ---------- v76b (Matthew 10/17, his screenshots): SPEED on the full-screen map + FULL SCREEN during the ride ----------
      1) A big MPH badge on the full-screen map in every phase. Same GPS speed math as the meter's MPH box (meterSpeedSample /
@@ -10895,6 +11029,7 @@
   }
   function fsMphDrop(stage) { var el = typeof document !== "undefined" ? document.getElementById("fs-mph") : null; if (el && (!stage || el.parentNode === stage)) el.remove(); }
   function fsStyle() {
+    navUniformStyle();
     if (document.getElementById("pcs-fs76b-style")) return;
     var st = document.createElement("style"); st.id = "pcs-fs76b-style";
     st.textContent =
@@ -10905,7 +11040,7 @@
       "#meter-map-stage.pcs-rfs .map-caption{display:none}" +
       "#meter-map-stage.pcs-rfs .meter-topstack{top:8px;top:calc(env(safe-area-inset-top,0px) + 8px)}" +
       "#meter-map-stage.pcs-rfs .nav-toggle{bottom:calc(var(--pcs-safe-bottom, env(safe-area-inset-bottom, 0px)) + 22px + var(--rfs-bar, 148px) + 14px) !important;z-index:1004;pointer-events:auto}#meter-map-stage.pcs-rfs .nav-recenter{bottom:calc(var(--pcs-safe-bottom, env(safe-area-inset-bottom, 0px)) + 22px + var(--rfs-bar, 148px) + 62px) !important;z-index:1004;pointer-events:auto}" +
-      "#meter-map-stage.pcs-rfs .leaflet-top.leaflet-left{top:calc(var(--pcs-safe-top, env(safe-area-inset-top, 0px)) + 12px) !important;left:calc(var(--pcs-safe-left, env(safe-area-inset-left, 0px)) + 10px) !important;z-index:1005;pointer-events:auto}" +
+      "#meter-map-stage.pcs-rfs .leaflet-top.leaflet-left{top:calc(var(--pcs-safe-top, env(safe-area-inset-top, 0px)) + var(--rfs-top, 168px) + 12px) !important;left:calc(var(--pcs-safe-left, env(safe-area-inset-left, 0px)) + 10px) !important;z-index:1005;pointer-events:auto}" +
       "#meter-map-stage.pcs-rfs #rfs-open{display:none}" +
       "#rfs-open{position:absolute;left:8px;bottom:34px;z-index:1002;width:auto;min-height:52px;margin:0;padding:10px 16px;font-size:18px;font-weight:800;border-radius:12px;border:2px solid #0b3d23;background:#d1fae5;color:#0b3d23;box-shadow:0 2px 6px rgba(0,0,0,.35);cursor:pointer}" +
       "#rfs-bar{position:absolute;left:max(8px, calc(var(--pcs-safe-left, env(safe-area-inset-left, 0px)) + 8px));right:max(8px, calc(var(--pcs-safe-right, env(safe-area-inset-right, 0px)) + 8px));bottom:calc(var(--pcs-safe-bottom, env(safe-area-inset-bottom, 0px)) + 22px);z-index:1003;display:flex;flex-direction:column;gap:8px;background:transparent;padding:0;margin:0;border:0;box-shadow:none;pointer-events:none}" +
@@ -10923,6 +11058,7 @@
       "#rfs-bar .rfs-close{flex:1 1 0;min-height:62px;margin:0;font-size:20px;font-weight:900;border-radius:14px;background:#d1fae5;color:#0b3d23;border:3px solid #0b3d23;cursor:pointer}" +
       "#rfs-bar .rfs-keep{flex:1 1 0;min-height:62px;margin:0;font-size:17px;font-weight:800;border-radius:14px;background:#fff;color:#0b3d23;border:3px solid #0b3d23;cursor:pointer}" +
       ".rfs-ask{margin:0 0 6px;font-size:18px;font-weight:800;color:#0b3d23;text-align:center}" +
+      "#rfs-bar #nav-inv{pointer-events:auto;position:relative;z-index:1}" +
       "body.pcs-rfs-body #pcs-sos-btn{z-index:2147482100 !important;bottom:auto !important;right:12px !important;top:250px;top:var(--pcs-sos-top,calc(env(safe-area-inset-top,0px) + 250px))}";
     document.head.appendChild(st);
   }
@@ -10962,7 +11098,12 @@
   }
   function rfsSig(M) {
     var t = meterTollView(M), ed = meterTollEditable(M) && t.on;
-    return [state.meterConfirmEnd ? 1 : 0, ed ? 1 : 0, t.count, t.cents, t.kind, state.meterTollEdit ? 1 : 0, M.prepaid ? 1 : 0, M.tierLabel || "", meterShown(M) ? "m" : rideInvoiceSig(meterInvInfo(M)), state.meterBusy ? 1 : 0, rideEstHtml(M, "x")].join("|");
+    var inv = "";
+    try {
+      var rr = rideLineRide(), held = rr && rr.id ? verInv[rr.id] : null, nm = squareNavModel(rr || {}, held, Date.now());
+      inv = (nm.text || "") + "|" + (nm.href || "");
+    } catch (e) { inv = ""; }
+    return [state.meterConfirmEnd ? 1 : 0, ed ? 1 : 0, t.count, t.cents, t.kind, state.meterTollEdit ? 1 : 0, M.prepaid ? 1 : 0, M.tierLabel || "", meterShown(M) ? "m" : rideInvoiceSig(meterInvInfo(M)), inv, state.meterBusy ? 1 : 0, rideEstHtml(M, "x")].join("|");
   }
   /* v2.0k r5 (Matthew 10/25: "THE ONLY TIME THAT I WANTED THE ESTIMATED PRICE WAS UNDER METERED RIDE OR CASH RIDE"):
      the "Estimated cost" line shows ONLY on a Metered ride and on a Cash calendar ride. Card, Square / invoice and set-fare rides: no line.
@@ -11031,12 +11172,14 @@
         (t.count && po ? '<button type="button" class="rfs-toll-line" id="rfs-toll-line" data-rfs="tollline" aria-label="' + esc(t.label + " " + money(t.cents) + ". Tap to change the amount") + '">' + esc(t.label) + " <b>" + money(t.cents) + "</b></button>" +
           '<button type="button" class="rfs-toll-undo" id="rfs-toll-undo" data-rfs="tollundo">Undo</button>' : "") + "</div>";
     }
+    var inv = "";
+    try { inv = navTurnInvoice(); } catch (eInv) { inv = ""; }
     if (state.meterConfirmEnd) {
-      html += '<p class="rfs-ask" id="rfs-ask">End this ride?' + (!ridePriceOk(M) ? "" : M.prepaid ? " " + invoiceFareText(M.prepaid) + "." : shown ? " Meter " + money(f.sub) + "." : "") + "</p>" +
+      html += '<p class="rfs-ask" id="rfs-ask">End this ride?' + (!ridePriceOk(M) ? "" : M.prepaid ? " " + invoiceFareText(M.prepaid) + "." : shown ? " Meter " + money(f.sub) + "." : "") + "</p>" + inv +
         '<div class="rfs-actions"><button type="button" class="rfs-end" id="rfs-end-yes" data-rfs="endyes">Yes, end ride</button>' +
         '<button type="button" class="rfs-keep" id="rfs-end-keep" data-rfs="endkeep">' + (shown ? "Keep the meter running" : "Keep driving") + "</button></div>"; /* v2.0d.5 r5 */
     } else {
-      html += '<div class="rfs-actions"><button type="button" class="rfs-end" id="rfs-end" data-rfs="end"' + (state.meterBusy ? " disabled" : "") + ">End ride</button>" +
+      html += inv + '<div class="rfs-actions"><button type="button" class="rfs-end" id="rfs-end" data-rfs="end"' + (state.meterBusy ? " disabled" : "") + ">End ride</button>" +
         '<button type="button" class="rfs-close" id="rfs-close" data-rfs="close">Close map</button></div>';
     }
     return html;
@@ -11054,12 +11197,20 @@
     else if (a === "close") rfsSet(false);
     rfsApply();
   }
+  function rfsTopMeasure(stage) {
+    stage = stage || rfsStage();
+    if (!stage || !stage.style || !stage.style.setProperty) return;
+    var top = document.getElementById("meter-topstack");
+    var h = top && top.offsetHeight;
+    if (h) stage.style.setProperty("--rfs-top", h + "px");
+  }
   function rfsTick() {
     var bar = document.getElementById("rfs-bar"), M = state.meter;
     if (!bar || !M || M.status !== "running") return;
     var f = meterFare(M), set = function (id, v) { var el = document.getElementById(id); if (el && el.textContent !== v) el.textContent = v; };
     if (meterShown(M)) set("rfs-fare", meterMoneyShown(M, f.sub)); else meterInvRefresh(M); set("rfs-miles", f.miles.toFixed(2)); set("rfs-time", meterClock(Date.now() - M.startedAt));
     var h = bar.offsetHeight, stage = rfsStage();
+    rfsTopMeasure(stage);
     if (stage && h && stage.__rfsBarH !== h) { stage.__rfsBarH = h; stage.style.setProperty("--rfs-bar", h + "px"); var mp = document.getElementById("fs-mph"); if (mp && bar.getBoundingClientRect && stage.getBoundingClientRect) mp.style.bottom = Math.round(stage.getBoundingClientRect().bottom - bar.getBoundingClientRect().top + 12) + "px"; }
   }
   function rfsApply() {
@@ -11094,7 +11245,7 @@
       rfsResize();
       setTimeout(rfsResize, 120);
     }
-    if (full) rfsTick();
+    if (full) { rfsTick(); setTimeout(function () { rfsTopMeasure(); }, 120); }
   }
   if (typeof window !== "undefined") {
     window.__pcsRideFull = { on: function () { return rfsOn(); }, set: function (v) { rfsSet(!!v); }, apply: function () { rfsApply(); }, mph: function () { return fsMphNow(); },
@@ -11216,12 +11367,20 @@
     var out = { v: 1, status: st, kind: o.kind === "sched" ? "sched" : "app", updatedAt: now };
     if (st === "ended" || st === "stopped") { out.endedAt = Number(o.endedAt) || now; return out; }
     if (o.bill === "invoiced" || o.bill === "prepaid") out.bill = o.bill; /* v2.0l r3: a plain word only ("Invoiced ride" / "Prepaid ride"), never an amount */
-    if (o.pay === "paid" || o.pay === "unpaid") out.pay = o.pay;
     var invNo = String(o.invoiceNo || "").replace(/^#/, "").replace(/\s+/g, "");
     if (/^\d{1,20}$/.test(invNo)) out.invoiceNo = invNo;
+    /* Payment word only with a check from the last 10 minutes. A stored Square status with an old checkedAt is not republished. */
+    var chk = sqPayTime(o.checkedAt), payOk = (o.pay === "paid" || o.pay === "unpaid") && sqPayFresh(chk, now) ? o.pay : "";
+    if (payOk) {
+      out.pay = payOk;
+      out.checkedAt = chk;
+      var stt = String(o.sqStatus || "").toUpperCase().replace(/[^A-Z_]/g, "").slice(0, 40);
+      if (stt) out.sqStatus = stt;
+      out.sqInvoice = { status: stt || (payOk === "paid" ? "PAID" : "UNPAID"), paid: payOk === "paid", checkedAt: chk };
+    }
     var recUrl = folSquareUrl(o.receiptUrl), payUrl = folSquareUrl(o.payUrl);
-    if (o.pay === "paid" && recUrl) out.receiptUrl = recUrl; /* receipt link only after a verified paid record */
-    if (o.pay === "unpaid" && payUrl) out.payUrl = payUrl; /* pay link only with an explicit unpaid record */
+    if (payOk === "paid" && recUrl) out.receiptUrl = recUrl; /* receipt link only after a fresh paid record */
+    if (payOk === "unpaid" && payUrl) out.payUrl = payUrl; /* pay link only with a fresh unpaid record */
     var df = folFirst(o.driverName); if (df) out.driverFirst = df;
     var car = folCar(o.car); if (car) out.car = car;
     if (/^[A-Za-z0-9_-]{24}$/.test(String(o.cardKey || ""))) out.cardKey = String(o.cardKey); /* v77.3b: random key of the driver's picture card (photo shown on /follow/); never the driver id */
@@ -11316,7 +11475,7 @@
     if (!m || !/(^|\.)squareup(sandbox)?\.com$|(^|\.)square\.link$/i.test(m[1])) return "";
     return s;
   }
-  function folSig(c) { return JSON.stringify([c.bill || "", c.pay || "", c.invoiceNo || "", c.receiptUrl || "", c.payUrl || "", c.status, c.pos ? [c.pos.lat, c.pos.lng] : 0, c.eta || 0, c.pickup || 0, c.dest || 0, c.car || 0, c.driverFirst || "", c.cardKey || "", folPhotoSig(c.photo), c.route ? c.route.length + ":" + c.route[c.route.length - 1] : 0, c.stops || 0]); }
+  function folSig(c) { return JSON.stringify([c.bill || "", c.pay || "", c.invoiceNo || "", c.receiptUrl || "", c.payUrl || "", c.checkedAt || 0, c.sqStatus || "", c.status, c.pos ? [c.pos.lat, c.pos.lng] : 0, c.eta || 0, c.pickup || 0, c.dest || 0, c.car || 0, c.driverFirst || "", c.cardKey || "", folPhotoSig(c.photo), c.route ? c.route.length + ":" + c.route[c.route.length - 1] : 0, c.stops || 0]); }
   function folHere() {
     if (!isCoord(state.hereLat) || !isCoord(state.hereLng)) return null;
     var at = Number(state.gpsAt) || 0;
@@ -11411,20 +11570,8 @@
         if (e && !e.pending) eta = { to: "dest", miles: e.miles, min: e.min };
         if (meterRoute && meterRoute.line) route = meterRoute.line;
       }
-      var share = invoiceShareFromWorker(verInv[r.id]);
-      if (!(share.pay && share.invoiceNo) && st !== "cancelled") {
-        var boardNo = "";
-        try { boardNo = String(rideInvoiceNoFrom(r, onMeter ? M : null) || "").replace(/^#/, "").replace(/\s+/g, ""); } catch (eInv) { boardNo = ""; }
-        if (/^\d{1,20}$/.test(boardNo)) {
-          var boardPay = "";
-          try { boardPay = ridePayWord(r, onMeter ? M : null); } catch (ePay) { boardPay = ""; }
-          if (boardPay !== "paid" && boardPay !== "unpaid") boardPay = "";
-          var qShare = r.sqInvoice && typeof r.sqInvoice === "object" ? r.sqInvoice : null;
-          var shareUrl = boardPay === "paid" ? rideSquareHttps(r.receiptUrl || (qShare && (qShare.receipt_url || qShare.receiptUrl)) || "") : boardPay === "unpaid" ? rideSquareHttps(rideCustomerPayUrl(r)) : "";
-          share = { invoiceNo: boardNo, pay: boardPay, url: shareUrl };
-        }
-      }
-      out.push(Object.assign({ key: "c_" + r.id, kind: "sched", bill: rideBillKind(r, onMeter ? M : null), pay: share.pay, invoiceNo: share.invoiceNo, receiptUrl: share.pay === "paid" ? share.url : "", payUrl: share.pay === "unpaid" ? share.url : "", status: st, phone: r.riderPhone, pickup: pickup, dest: dest, stops: stops, eta: eta, route: route, pos: here }, base));
+      var share = st === "cancelled" ? { no: "", pay: "", href: "", status: "", checkedAt: 0 } : squareNavModel(r, verInv[r.id], Date.now());
+      out.push(Object.assign({ key: "c_" + r.id, kind: "sched", bill: rideBillKind(r, onMeter ? M : null), pay: share.pay, invoiceNo: share.no, receiptUrl: share.pay === "paid" ? share.href : "", payUrl: share.pay === "unpaid" ? share.href : "", checkedAt: share.checkedAt || 0, sqStatus: share.status || "", status: st, phone: r.riderPhone, pickup: pickup, dest: dest, stops: stops, eta: eta, route: route, pos: here }, base));
     });
     var code = state.screen === "trip" ? String(state.driverCode || readDriverCode() || "") : "";
     if (code && FOL_KEY_RE.test("r_" + code)) {
@@ -11903,6 +12050,7 @@
     var was = stage.classList.contains("pcs-fullmap");
     stage.classList.add("pcs-navtest"); stage.classList.add("pcs-navarr");
     if (!was) { stage.classList.add("pcs-fullmap"); document.body.style.overflow = "hidden"; schedFullResize(); setTimeout(schedFullResize, 120); }
+    schedFullMark(stage);
     return true;
   }
   if (typeof window !== "undefined") window.__pcsNavTest = { on: function () { return navTestOn(); }, parse: navTurnParse, mph: navMph, limitParse: navLimitParse, limitAt: navLimitAt,
