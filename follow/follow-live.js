@@ -83,7 +83,8 @@
     if (!$("fl-sos-style")) {
       var st = document.createElement("style");
       st.id = "fl-sos-style";
-      st.textContent = "#fl-sos-btn{position:fixed;top:calc(env(safe-area-inset-top,0px) + 64px);right:8px;z-index:3000;width:64px;height:64px;border-radius:50%;border:3px solid #fff;background:#c0161b;color:#fff;font:900 13px/1.05 system-ui,sans-serif;box-shadow:0 4px 16px rgba(0,0,0,.45);cursor:pointer;-webkit-tap-highlight-color:transparent;touch-action:manipulation}" +
+      /* v2.0m-az: flush to the tracker corner. The old 64px inset sat on the driver photo. */
+      st.textContent = "body[data-app=\"follow\"] .phone{position:relative}#fl-sos-btn{position:absolute;top:0;right:0;z-index:3000;width:64px;height:64px;border-radius:50%;border:3px solid #fff;background:#c0161b;color:#fff;font:900 13px/1.05 system-ui,sans-serif;box-shadow:0 1px 2px rgba(0,0,0,.45);cursor:pointer;-webkit-tap-highlight-color:transparent;touch-action:manipulation}" +
         "#fl-sos-ask,#fl-sos-sheet{position:fixed;inset:0;z-index:4000;background:rgba(5,14,28,.94);display:flex;align-items:center;justify-content:center;padding:16px}" +
         "#fl-sos-ask .box,#fl-sos-sheet .box{background:#0b1c33;color:#fff;border:2px solid #c0161b;border-radius:18px;max-width:420px;width:100%;padding:20px;text-align:center}" +
         "#fl-sos-ask h2,#fl-sos-sheet h2{color:#ff6b6b;margin:0 0 10px;font-size:24px}" +
@@ -100,7 +101,7 @@
     b.setAttribute("aria-label", "SOS — request police help");
     b.textContent = "SOS";
     b.addEventListener("click", function (ev) { try { ev.preventDefault(); ev.stopPropagation(); } catch (e) {} openFlSosAsk(); });
-    (document.body || document.documentElement).appendChild(b);
+    (document.querySelector(".phone") || document.body || document.documentElement).appendChild(b);
   }
   function openFlSosAsk() {
     if ($("fl-sos-ask") || $("fl-sos-sheet")) return;

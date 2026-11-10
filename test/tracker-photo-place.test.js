@@ -95,10 +95,28 @@ test("the synthetic driver photo stays under the green bar and off the map contr
         }
         var photoBox = box("fl-photo"), status = box("fl-status"), map = box("fl-map"), live = box("fl-live");
         var north = box("fl-north"), zoom = box(".leaflet-control-zoom");
+        var sos = box("fl-sos-btn"), phone = box(".phone");
+        function hit(x, y) {
+          var el = document.elementFromPoint(x, y);
+          return el ? (el.id || el.tagName) : "";
+        }
+        var inset = 4;
+        var cx = photoBox.left + photoBox.w / 2, cy = photoBox.top + photoBox.h / 2;
+        var photoHits = [
+          hit(cx, photoBox.top + inset),
+          hit(cx, photoBox.bottom - inset),
+          hit(photoBox.left + inset, cy),
+          hit(photoBox.right - inset, cy),
+          hit(cx, cy)
+        ];
         return JSON.stringify({
           photo: photoBox, status: status, map: map, live: live, north: north, zoom: zoom,
+          sos: sos, phone: phone, vw: window.innerWidth, vh: window.innerHeight,
           hidden: document.getElementById("fl-photo").hidden,
           overStatus: overlap(photoBox, status), overNorth: overlap(photoBox, north), overZoom: overlap(photoBox, zoom),
+          overSos: overlap(photoBox, sos),
+          sosHit: hit(sos.left + sos.w / 2, sos.top + sos.h / 2),
+          photoHits: photoHits,
           text: document.getElementById("fl-who").textContent
         });
       })()
@@ -133,6 +151,13 @@ test("the synthetic driver photo stays under the green bar and off the map contr
       assert.ok(got.zoom, size[0] + " zoom control missing");
       assert.equal(got.overNorth, false, size[0] + " photo covers north");
       assert.equal(got.overZoom, false, size[0] + " photo covers zoom");
+      assert.equal(got.overSos, false, size[0] + " SOS covers the photo " + report);
+      assert.ok(got.sos && got.sos.w >= 44 && got.sos.h >= 44, size[0] + " SOS is too small " + report);
+      assert.ok(got.sos.top <= 1, size[0] + " SOS is not flush to the top " + report);
+      assert.ok(Math.abs(got.sos.right - got.phone.right) <= 1, size[0] + " SOS is not flush to the tracker edge " + report);
+      assert.ok(got.sos.left >= -1 && got.sos.bottom <= got.vh + 1 && got.sos.right <= got.vw + 1, size[0] + " SOS is off screen " + report);
+      assert.equal(got.sosHit, "fl-sos-btn", size[0] + " SOS is not the top control " + report);
+      assert.ok(got.photoHits.every(function (id) { return id === "fl-photo"; }), size[0] + " photo is covered " + JSON.stringify(got.photoHits));
       assert.ok(got.north.top >= got.map.top - 1 && got.north.bottom <= got.map.bottom + 1, size[0] + " north left the map");
       assert.ok(got.zoom.left <= got.map.left + 30, size[0] + " zoom left the map");
       assert.equal(got.text, "Your PCS driver: Matt");
