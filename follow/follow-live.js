@@ -430,25 +430,38 @@
     if (!/^\d{1,20}$/.test(no)) no = "";
     var pay = d.pay === "paid" || d.pay === "unpaid" ? d.pay : "";
     var receipt = squareHttps(d.receiptUrl), payUrl = squareHttps(d.payUrl);
-    var legacy = d.bill === "invoiced" ? "Invoiced ride" : d.bill === "prepaid" ? "Prepaid ride" : "";
-    if (pay === "paid" && no && receipt) return { label: "Invoice #" + no + " \u2013 paid", link: { href: receipt, text: "View receipt", id: "fl-receipt" }, show: true, gap: "" };
-    if (pay === "unpaid" && no && payUrl) return { label: "Invoice #" + no + " \u2013 unpaid", link: { href: payUrl, text: "Pay invoice", id: "fl-pay" }, show: true, gap: "" };
-    if (no) return { label: "Invoice #" + no, link: null, show: true, gap: "number-only" };
+    /* A known invoice number is enough to show the bar. A Square link is added only with a confirmed paid or unpaid word. Missing URLs and the old gap names never hide that number. */
+    var link = null;
+    if (no && pay === "paid" && receipt) link = { href: receipt, text: "View receipt", id: "fl-receipt" };
+    else if (no && pay === "unpaid" && payUrl) link = { href: payUrl, text: "Pay invoice", id: "fl-pay" };
+    if (no) {
+      var label = "Invoice #" + no;
+      if (link) label += pay === "paid" ? " \u2013 paid" : " \u2013 unpaid";
+      return { label: label, link: link, show: true, gap: link ? "" : "number-only" };
+    }
     var gap = "";
     if (pay === "paid" && !receipt) gap = "paid-without-receipt";
     else if (pay === "unpaid" && !payUrl) gap = "unpaid-without-pay-url";
-    else if (legacy) gap = "no-verified-payment";
+    else if (d.bill === "invoiced" || d.bill === "prepaid") gap = "no-verified-payment";
     return { label: "", link: null, show: false, gap: gap };
   }
   function paintBill(d) {
     var el = $("fl-call"); if (!el) return;
     var m = billBarModel(d);
-    if (!m.show) { el.hidden = true; if (el.textContent) el.textContent = ""; return; }
+    var live = $("fl-live");
+    function mark(on) {
+      if (!live || !live.classList) return;
+      var had = live.classList.contains("fl-has-bill");
+      if (on) live.classList.add("fl-has-bill"); else live.classList.remove("fl-has-bill");
+      if (had !== on && S.map) { try { S.map.invalidateSize(); } catch (e) {} }
+    }
+    if (!m.show) { el.hidden = true; if (el.textContent) el.textContent = ""; mark(false); return; }
     if (m.link) {
       var html = esc(m.label) + " \u00b7 <a id=\"" + m.link.id + "\" href=\"" + esc(m.link.href) + "\" target=\"_blank\" rel=\"noopener\">" + esc(m.link.text) + "</a>";
       if (el.innerHTML !== html) el.innerHTML = html;
     } else if (el.textContent !== m.label || (el.querySelector && el.querySelector("a"))) el.textContent = m.label;
     el.hidden = false;
+    mark(true);
   }
   function update(d) {
     S.d = d;

@@ -65,6 +65,35 @@ test("the synthetic driver photo stays under the green bar and off the map contr
     const sid = attached.result.sessionId;
     await send("Page.enable", {}, sid);
     await send("Runtime.enable", {}, sid);
+    const billOnScreen = `
+      (function () {
+        var now = Date.now();
+        window.__pcsFollowLive.update({
+          status: "on_way", driverFirst: "Matt", bill: "invoiced", invoiceNo: "000574", pay: "unpaid",
+          car: { color: "Black", year: "2022", make: "Cadillac", model: "XTS", plate: "PCS1" },
+          photo: document.getElementById("fl-photo").src,
+          pickup: { label: "1200 Smith St, Houston", lat: 29.76, lng: -95.36 },
+          dest: { label: "IAH Airport", lat: 29.99, lng: -95.34 },
+          eta: { min: 12, miles: 6.4, to: "pickup" }, etaAt: now,
+          pos: { lat: 29.75, lng: -95.37, at: now }, updatedAt: now
+        });
+        var bill = document.getElementById("fl-call");
+        var photo = document.getElementById("fl-photo").getBoundingClientRect();
+        var br = bill.getBoundingClientRect();
+        var phone = document.querySelector(".phone").getBoundingClientRect();
+        var sos = getComputedStyle(document.getElementById("fl-sos-btn"));
+        var overlap = !(photo.bottom <= br.top + 1 || photo.top >= br.bottom - 1 || photo.right <= br.left + 1 || photo.left >= br.right - 1);
+        var bg = getComputedStyle(bill).backgroundColor;
+        return JSON.stringify({
+          text: bill.textContent, hidden: !!bill.hidden, bg: bg,
+          top: Math.round(br.top), bottom: Math.round(br.bottom), h: Math.round(br.height),
+          phoneTop: Math.round(phone.top), phoneBottom: Math.round(phone.bottom),
+          inView: br.height >= 30 && br.top >= phone.top - 1 && br.bottom <= phone.bottom + 1 && br.left >= phone.left - 1 && br.right <= phone.right + 1,
+          overlap: overlap, sosPos: sos.position, sosTop: Math.round(parseFloat(sos.top) || 0),
+          green: bg === "rgb(190, 241, 198)"
+        });
+      })()
+    `;
     const paint = `
       (function () {
         var c = document.createElement("canvas"); c.width = 128; c.height = 128;
@@ -161,6 +190,15 @@ test("the synthetic driver photo stays under the green bar and off the map contr
       assert.ok(got.north.top >= got.map.top - 1 && got.north.bottom <= got.map.bottom + 1, size[0] + " north left the map");
       assert.ok(got.zoom.left <= got.map.left + 30, size[0] + " zoom left the map");
       assert.equal(got.text, "Your PCS driver: Matt");
+      const bareBill = await send("Runtime.evaluate", { expression: billOnScreen, returnByValue: true }, sid);
+      const bare = JSON.parse(bareBill.result.result.value);
+      assert.equal(bare.text, "Invoice #000574", size[0] + " " + bareBill.result.result.value);
+      assert.equal(bare.hidden, false, size[0] + " invoice bar hidden");
+      assert.equal(bare.overlap, false, size[0] + " invoice bar covers the photo");
+      assert.equal(bare.inView, true, size[0] + " invoice bar is off the phone " + bareBill.result.result.value);
+      assert.equal(bare.green, true, size[0] + " invoice bar is not green " + bare.bg);
+      assert.equal(bare.sosPos, "absolute", size[0] + " SOS position changed");
+      assert.ok(bare.sosTop <= 1, size[0] + " SOS moved off the top corner");
     }
     const billExpr = `
       (function (kind) {

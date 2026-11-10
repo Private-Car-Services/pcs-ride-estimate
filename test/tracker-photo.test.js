@@ -25,10 +25,11 @@ function loadFollow() {
     document: {
       visibilityState: "visible",
       getElementById: function (id) { return nodes[id] || null; },
+      querySelector: function () { return null; },
       createElement: function () { return make("made"); },
       addEventListener: function () {},
       head: { appendChild: function () {} },
-      body: {}
+      body: { appendChild: function () {} }
     },
     location: { search: "?t=" + "a".repeat(32) },
     fetch: function () { return new Promise(function () {}); },

@@ -49,7 +49,7 @@ function loadFollow() {
     console: console, Date: Date, Math: Math, JSON: JSON, Promise: Promise, Number: Number, String: String, Object: Object,
     Array: Array, RegExp: RegExp, Error: Error, parseInt: parseInt, isFinite: isFinite, encodeURIComponent: encodeURIComponent,
     setTimeout: function () { return 0; }, clearTimeout: function () {}, setInterval: function () { return 0; }, clearInterval: function () {},
-    document: { visibilityState: "visible", getElementById: function (id) { return nodes[id] || null; }, createElement: function () { return make("made"); }, addEventListener: function () {}, head: { appendChild: function () {} }, body: {} },
+    document: { visibilityState: "visible", getElementById: function (id) { return nodes[id] || null; }, querySelector: function () { return null; }, createElement: function () { return make("made"); }, addEventListener: function () {}, head: { appendChild: function () {} }, body: { appendChild: function () {} } },
     location: { search: "?t=" + "b".repeat(32) },
     fetch: function () { return new Promise(function () {}); },
     navigator: {}, addEventListener: function () {}, removeEventListener: function () {}
@@ -63,6 +63,31 @@ function loadFollow() {
 const follow = loadApp();
 const live = loadFollow();
 const now = Date.now();
+
+test("a known invoice stays visible when the Square link is not ready", function () {
+  const unpaid = live.bill({ invoiceNo: "000574", pay: "unpaid", bill: "invoiced" });
+  assert.equal(unpaid.show, true);
+  assert.equal(unpaid.label, "Invoice #000574");
+  assert.equal(unpaid.link, null);
+  assert.equal(unpaid.gap, "number-only");
+  assert.equal(unpaid.label.indexOf("unpaid"), -1);
+  const paid = live.bill({ invoiceNo: "000554", pay: "paid", bill: "prepaid" });
+  assert.equal(paid.show, true);
+  assert.equal(paid.label, "Invoice #000554");
+  assert.equal(paid.link, null);
+  assert.equal(paid.gap, "number-only");
+  assert.equal(paid.label.indexOf("paid"), -1);
+  const legacy = live.bill({ invoiceNo: "000560", bill: "invoiced" });
+  assert.equal(legacy.show, true);
+  assert.equal(legacy.label, "Invoice #000560");
+  assert.equal(legacy.link, null);
+  assert.equal(live.bill({ bill: "invoiced", pay: "unpaid" }).show, false);
+  assert.equal(live.bill({ bill: "invoiced", pay: "unpaid" }).gap, "unpaid-without-pay-url");
+  assert.equal(live.bill({ bill: "prepaid", pay: "paid" }).show, false);
+  assert.equal(live.bill({ bill: "prepaid", pay: "paid" }).gap, "paid-without-receipt");
+  assert.equal(live.bill({ bill: "invoiced" }).show, false);
+  assert.equal(live.bill({ bill: "invoiced" }).gap, "no-verified-payment");
+});
 
 test("a bare invoice number is not labeled paid or unpaid and gets no link", function () {
   const bare = { prepaidInvoiceNo: "000554", status: "assigned", sqInvoice: { paid: true, status: "PAID" }, receiptUrl: RECEIPT };

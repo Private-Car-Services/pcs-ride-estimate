@@ -40,7 +40,10 @@
     body[data-app="follow"] header.top{flex:none;padding:4px 8px !important;margin:0 !important;min-height:0 !important}
     body[data-app="follow"] header.top svg{max-height:34px !important;width:auto !important;height:34px !important}
     body[data-app="follow"] main#app{flex:1 1 auto;min-height:0;display:flex;flex-direction:column;padding:0 6px !important;margin:0 !important;overflow:hidden}
-    #fl-live{flex:1 1 auto;min-height:0;display:flex;flex-direction:column;padding:6px 8px !important;margin:0 !important;box-sizing:border-box}
+    #fl-live{position:relative;flex:1 1 auto;min-height:0;display:flex;flex-direction:column;padding:6px 8px !important;margin:0 !important;box-sizing:border-box}
+    /* The invoice bar stays on the visible card. A short phone used to lay it out under the map and clip it. */
+    #fl-live.fl-has-bill{padding-bottom:56px !important}
+    #fl-live.fl-has-bill > #fl-call{position:absolute;left:8px;right:8px;bottom:6px;z-index:4;margin:0 !important}
     #fl-live > *{flex:none}
     #fl-live .fl-status{font-size:17px !important;padding:5px 8px !important;margin:0 0 4px !important}
     #fl-live .fl-who{font-size:15px !important;margin:0 !important;line-height:1.25}
@@ -66,6 +69,8 @@
       #fl-live .fl-arr .k,#fl-live .fl-arr span,#fl-live .fl-spd span{font-size:13px !important}
       #fl-live .fl-spd small,#fl-live .fl-arr small{font-size:12px !important}
       #fl-live .fl-call{min-height:36px !important;line-height:36px !important;font-size:16px !important}
+      #fl-live.fl-has-bill{padding-bottom:48px !important}
+      #fl-live.fl-has-bill > #fl-call{bottom:4px}
       body[data-app="follow"] header.top svg{max-height:28px !important;height:28px !important}
       #fl-live .fl-photo{width:44px;height:44px;border-width:2px}
     }
@@ -79,6 +84,6 @@
   </div>
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script src="follow.js?v=2.0l"></script>
-  <script src="follow-live.js?v=2.0m-az"></script>
+  <script src="follow-live.js?v=2.0m-ba"></script>
 </body>
 </html>
