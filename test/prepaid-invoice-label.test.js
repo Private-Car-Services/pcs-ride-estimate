@@ -118,7 +118,7 @@ test("invoiced and prepaid rides both show the saved number on the same green li
   assert.equal(bill.kind(row, null), "invoiced");
 });
 
-test("the pickup status keeps Invoice #000574 on the same line and does not add a map row", function () {
+test("the pickup button stays I'm at the pickup and the invoice is not on a white map strip", function () {
   const row = { prepaid: true, prepaidInvoiceNo: "000574" };
   assert.equal(bill.pickupLine(row), "I\u2019m at the pickup");
   assert.equal(bill.pickupLine({ prepaidInvoiceNo: "000574" }), "I\u2019m at the pickup");
@@ -129,10 +129,13 @@ test("the pickup status keeps Invoice #000574 on the same line and does not add 
   assert.equal(bill.bar({ prepaidInvoiceNo: "000554" }), "Invoice #000554");
   const src = fs.readFileSync(path.join(__dirname, "../app/app.js"), "utf8");
   const place = src.slice(src.indexOf("function schedMapBillPlace"), src.indexOf("function schedFsMeasure"));
-  assert.match(place, /questionSlotHtml/);
-  assert.match(place, /insertBefore/);
+  const turn = src.slice(src.indexOf("function schedTurnHtml"), src.indexOf("function navEtaClock"));
+  assert.equal(place.indexOf("questionSlotHtml"), -1);
+  assert.match(place, /schedBillHome/);
+  assert.doesNotMatch(place, /insertBefore/);
   assert.doesNotMatch(place, /host\.remove/);
   assert.match(place, /sched-fs-arrived/);
+  assert.match(turn, /navTurnInvoice/);
   assert.match(src, /nav-toggle\{bottom:calc\(var\(--pcs-safe-bottom/);
   assert.match(src, /leaflet-top\.leaflet-left\{top:calc\(var\(--pcs-safe-top/);
   assert.doesNotMatch(src.slice(src.indexOf("function schedFullStyle"), src.indexOf("function schedFullResize")), /nav-toggle\{bottom:172px/);

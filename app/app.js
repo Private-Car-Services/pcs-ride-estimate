@@ -10254,6 +10254,10 @@
       var row = got[id] && typeof got[id] === "object" ? got[id] : null;
       if (!row) { verInv[id] = null; return; }
       var src = row.square && typeof row.square === "object" ? row.square : row;
+      /* Staged Worker shape {number,status,paid,payUrl,receiptUrl,checkedAt}. Nested square still wins when present. */
+      if (!(row.square && typeof row.square === "object") && (row.number || row.payUrl || row.receiptUrl || row.status)) {
+        src = { invoiceNumber: row.number || row.invoiceNo || "", status: row.status || "", paid: row.paid === true, public_url: row.payUrl || "", payments: row.receiptUrl ? [{ status: "COMPLETED", refundedCents: 0, receipt_url: row.receiptUrl }] : [], checkedAt: row.checkedAt };
+      }
       var link = null;
       try { link = squareInvoiceLink(src); } catch (e) { link = null; }
       var keep = { invoiceNo: String(row.invoiceNo || (link && link.invoiceNo) || ""), amountCents: row.amountCents, taxCents: row.taxCents };

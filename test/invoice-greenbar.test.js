@@ -198,6 +198,14 @@ test("the dark green nav line uses fresh Square truth for 000562", function () {
   assert.ok(html.indexOf(PAY) >= 0);
   assert.ok(html.indexOf(">Unpaid<") >= 0);
   assert.equal(bill.navHtml(none).indexOf("nav-inv-link"), -1);
+  const flat = bill.take(["ride-562"], { "ride-562": { number: "000562", status: "DRAFT", paid: false, payUrl: "", receiptUrl: "", checkedAt: now } });
+  assert.equal(flat["ride-562"].square.status, "DRAFT");
+  assert.equal(flat["ride-562"].square.paid, false);
+  assert.equal(bill.nav({ prepaidInvoiceNo: "000999" }, flat["ride-562"], now).text, "Invoice #000562 · Unpaid");
+  const paidFlat = bill.take(["ride-paid"], { "ride-paid": { number: "000562", status: "PAID", paid: true, payUrl: PAY, receiptUrl: RECEIPT, checkedAt: now } });
+  const paidNav = bill.nav({ prepaidInvoiceNo: "000999" }, paidFlat["ride-paid"], now);
+  assert.equal(paidNav.text, "Invoice #000562 · Paid");
+  assert.equal(paidNav.href, RECEIPT);
 });
 
 function quotedCss(fnSrc) {

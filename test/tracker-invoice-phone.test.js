@@ -36,6 +36,8 @@ window.__show = function (d) { window.__pcsFollowLive.update(d); };
 window.__bar = function () {
   var el = document.getElementById("fl-call");
   var status = document.getElementById("fl-status");
+  var invEl = status && status.querySelector(".fl-status-inv");
+  var rideEl = status && status.querySelector(".fl-status-ride");
   var a = el && el.querySelector("a");
   var word = status && status.querySelector("a");
   var bg = el ? getComputedStyle(el).backgroundColor : "";
@@ -46,6 +48,10 @@ window.__bar = function () {
     hidden: !el || !!el.hidden,
     text: el ? el.textContent : "",
     status: status ? status.textContent : "",
+    ride: rideEl ? rideEl.textContent : "",
+    inv: invEl ? invEl.textContent : "",
+    invNowrap: invEl ? getComputedStyle(invEl).whiteSpace : "",
+    invDisplay: invEl ? getComputedStyle(invEl).display : "",
     href: a ? a.getAttribute("href") : "",
     link: a ? a.textContent : "",
     wordHref: word ? word.getAttribute("href") : "",
@@ -114,6 +120,10 @@ test("390x844 tracker bottom bar is the invoice line, not the call button", asyn
     const num = await show({ invoiceNo: "000562" });
     assert.equal(num.hidden, true);
     assert.equal(num.pinned, false);
+    assert.equal(num.ride, "Your driver is on the way");
+    assert.equal(num.inv, "Invoice #000562");
+    assert.equal(num.invNowrap, "nowrap");
+    assert.equal(num.invDisplay, "block");
     assert.ok(num.status.indexOf("Invoice #000562") >= 0);
     assert.equal(num.status.indexOf("Unpaid"), -1);
     assert.equal(num.status.indexOf("Paid"), -1);
@@ -126,6 +136,9 @@ test("390x844 tracker bottom bar is the invoice line, not the call button", asyn
     assert.equal(draft.hidden, false);
     assert.equal(draft.text, "Unpaid");
     assert.equal(draft.href, "");
+    assert.equal(draft.ride, "Your driver is on the way");
+    assert.equal(draft.inv, "Invoice #000562 · Unpaid");
+    assert.equal(draft.invNowrap, "nowrap");
     assert.ok(draft.status.indexOf("Invoice #000562 · Unpaid") >= 0);
     assert.equal(draft.bg, "rgb(11, 107, 58)");
     assert.equal(draft.pinned, false);
