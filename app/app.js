@@ -15479,6 +15479,7 @@
     meterIndexPatch(M, "paid_other", { paymentStatus: "paid_other", paidVia: "comparison", rideKind: "comparison", comparisonRide: true }); /* v2.0m-e (Harry): its own kind, not "test"; still left out of pay and revenue like test rides */
     meterMarkTest(M, now);
     meterUpdatePayWeek(M, { comparisonRide: true, paidVia: "comparison", rideKind: "comparison", comparison: M.cmp, riderName: "Comparison ride" });
+    try { cmpReleaseDriver(M); } catch (e) {} /* v2.0m-bd: back to Available in this same turn */
   }
   if (typeof window !== "undefined") window.__pcsV20meCmp = { allowed: cmpAllowed, type: cmpRideType, cents: cmpCentsOf, finish: cmpFinish, boxes: cmpBoxesHtml, pick: cmpPickHtml, list: CMP_SERVICES };
   if (typeof document !== "undefined") {
@@ -15514,6 +15515,12 @@
     M.metered = !(sr || state.schedStartId); /* v2.0a: only the Metered ride button shows the meter */
     if (M.metered) M.meterKind = state.meterKind === "comparison" ? "comparison" : state.meterKind === "meter" ? "meter" : "cash"; /* v2.0m-c */ /* v2.0l: ride type known from the start */
     if (M.meterKind === "comparison") M.cmp = { service: state.cmpService, rideType: cmpRideType(state.cmpService, state.cmpType), charged: (state.cmpDraft || {}).charged || "", paid: (state.cmpDraft || {}).paid || "" }; /* the tab boxes ride along with the saved meter */ /* v2.0m-e: filled in from the dropdowns */
+    if (M.meterKind === "comparison") { /* v2.0m-bd: this ride may return the driver to Available. A PCS/Uber ride already in progress is left alone. */
+      var cmpBlock = false;
+      try { cmpBlock = qManualBusy() || qOnBreak() || driverMidRide(); } catch (e) {}
+      try { var cmpTrip = schedTripNow(); if (cmpTrip && cmpTrip.id && cmpTrip.phase !== "done") cmpBlock = true; } catch (e) {}
+      if (!cmpBlock) cmpOwnSet(M.code); else cmpOwnSet("");
+    }
     if (M.meterKind === "comparison") { var cpa = String(state.cmpFromQ || "").trim().slice(0, 160); if (cpa) { M.cmp.pickupAddress = cpa; M.pickupAddress = cpa; } state.cmpFromQ = null; state.cmpFromList = []; cmpFromGeoAt = 0; } /* v2.0m-f: typed pickup */
     if (sr) { M.schedId = sr.id; M.setFareCents = Math.round(Number(sr.fareBeforeTax) * 100); M.schedRider = String(sr.rider || ""); }
     else if (state.schedStartId) { var srx = schedFind(state.schedStartId); if (srx) { M.schedId = srx.id; M.schedRider = String(srx.rider || ""); M.pickupAddress = String(srx.pickup || "").slice(0, 160); } } /* v75r: metered scheduled ride */
@@ -15759,6 +15766,8 @@
   function meterEnd() {
     var M = state.meter;
     if (!M || M.status !== "running" || state.meterBusy) return;
+    /* v2.0m-bd: a comparison ride ends in this tap. Waiting on GPS (up to 4s) let Goal open first, so the ride stayed running. */
+    if (meterKindOf(M) === "comparison") { meterFinishEnd(); return; }
     state.meterBusy = "Ending the ride…";
     render();
     var finished = false;
@@ -21322,6 +21331,7 @@
       if (ROLE === "driver" && signedIn()) {
         saveMilesAnchor(); /* v64 */
         markPresenceAway("closed"); /* v64: was a DELETE; the shift stays open until Log out */
+        try { cmpFlushIfPending(); } catch (e) {} /* v2.0m-bd: Available write survives the jump to Goal */
       }
     });
     if (ROLE === "driver") {
@@ -21343,6 +21353,7 @@
         if (ROLE === "driver" && signedIn()) {
           saveMilesAnchor(); /* v64: last point + time survive a page kill */
           markPresenceAway("background");
+          try { cmpFlushIfPending(); } catch (e) {} /* v2.0m-bd */
         }
         return;
       }
@@ -21379,6 +21390,7 @@
     if (ROLE === "driver" && signedIn()) {
       syncDriverProfile().then(function () { render(); });
     }
+    try { cmpReassertAvailable(); } catch (e) {} /* v2.0m-bd: a closed comparison ride must not come back On a ride */
     render();
   });
 
@@ -21645,6 +21657,85 @@
     render();
     try { syncOpenRideAlert(); } catch (e) {}
     try { refreshOpenRides(true); } catch (e) {}
+  }
+  /* v2.0m-bd: the Available button's clear. Comparison end calls this; it is not a second copy of the flag clear. */
+  function qReleaseToAvailable() {
+    if (qManualBusy() || qOnBreak()) qSetManualBusy(false);
+    else try { rtTick(); } catch (e) {}
+  }
+  function cmpOwnKey() { return "pcs-cmp-own-status-" + driverPresenceId(); }
+  function cmpPendKey() { return "pcs-cmp-avail-pending-" + driverPresenceId(); }
+  function cmpOwnRead() { try { return localStorage.getItem(cmpOwnKey()) || ""; } catch (e) { return ""; } }
+  function cmpOwnSet(code) { try { if (code) localStorage.setItem(cmpOwnKey(), String(code)); else localStorage.removeItem(cmpOwnKey()); } catch (e) {} }
+  /* A live PCS trip, or a manual On a ride this comparison did not start, stays as it is. */
+  function cmpRealRideBlocks(code) {
+    if (driverMidRide()) return true;
+    try { var t = schedTripNow(); if (t && t.id && t.phase !== "done") return true; } catch (e) {}
+    if ((qManualBusy() || qOnBreak()) && cmpOwnRead() !== String(code || "")) return true;
+    return false;
+  }
+  function cmpPushAvailable() {
+    var tok = "";
+    try { tok = qToken(); } catch (e) {}
+    if (!tok) return;
+    var body = JSON.stringify({ token: tok, onRide: false, onBreak: false, source: "manual" });
+    try {
+      fetch(METER_WORKER + "/driver/status", { method: "POST", headers: { "Content-Type": "application/json" }, body: body, keepalive: true }).then(function () {
+        try { localStorage.removeItem(cmpPendKey()); } catch (e) {}
+      }).catch(function () {});
+    } catch (e) {}
+  }
+  function cmpWriteAvailableNow() {
+    try {
+      var lat = isCoord(state.hereLat) ? +state.hereLat : null;
+      var lng = isCoord(state.hereLng) ? +state.hereLng : null;
+      if (!isCoord(lat) || !isCoord(lng)) {
+        var prev = (trkRead(trkId())[chicagoToday()] || []);
+        var p = prev[prev.length - 1];
+        if (p) { lat = p[1] / 1e5; lng = p[2] / 1e5; }
+      }
+      if ((!isCoord(lat) || !isCoord(lng)) && trkLast) { lat = trkLast.lat; lng = trkLast.lng; }
+      if (isCoord(lat) && isCoord(lng) && trkStatus() === "a") trkNote(+lat, +lng, Date.now());
+    } catch (e) {}
+    cmpPushAvailable();
+  }
+  function cmpReleaseDriver(M) {
+    if (!M || M.meterKind !== "comparison") return;
+    if (cmpOwnRead() !== String(M.code || "")) return;
+    if (cmpRealRideBlocks(M.code)) return;
+    cmpOwnSet("");
+    try { localStorage.setItem(cmpPendKey(), JSON.stringify({ code: M.code, at: Date.now() })); } catch (e) {}
+    qReleaseToAvailable();
+    cmpWriteAvailableNow();
+  }
+  function cmpFlushIfPending() {
+    var pend = "";
+    try { pend = localStorage.getItem(cmpPendKey()) || ""; } catch (e) {}
+    if (!pend || qManualBusy() || qOnBreak() || qAutoBusy()) return;
+    cmpWriteAvailableNow();
+  }
+  function cmpReassertAvailable() {
+    if (ROLE !== "driver" || !signedIn()) return;
+    try { meterEnsureLoaded(); } catch (e) {}
+    var M = state.meter;
+    if (M && M.meterKind === "comparison" && (M.status === "running" || M.status === "ended")) return;
+    var own = cmpOwnRead(), pend = "";
+    try { pend = localStorage.getItem(cmpPendKey()) || ""; } catch (e) {}
+    var letter = "";
+    try { var pts = (trkRead(trkId())[chicagoToday()] || []); letter = pts.length ? pts[pts.length - 1][3] : ""; } catch (e) {}
+    var closedCmp = false;
+    try {
+      var last = JSON.parse(localStorage.getItem("pcs-meter-last-" + driverPresenceId()) || "null");
+      closedCmp = !!(last && last.meterKind === "comparison" && last.status !== "running");
+    } catch (e) {}
+    if (!own && !pend && !(closedCmp && letter === "r" && !qManualBusy() && !qOnBreak())) return;
+    if (driverMidRide() || qAutoBusy() || cmpRealRideBlocks(own)) return;
+    if ((qManualBusy() || qOnBreak()) && !own) return;
+    if (qManualBusy() || qOnBreak()) qReleaseToAvailable();
+    else try { rtTick(); } catch (e) {}
+    cmpOwnSet("");
+    try { if (!pend) localStorage.setItem(cmpPendKey(), JSON.stringify({ code: own || (last && last.code) || "", at: Date.now() })); } catch (e) {}
+    cmpWriteAvailableNow();
   }
   /* v2.0m-q (Matthew 11/4): "On a ride" drop-down: PCS / Uber / Lyft / Other. Each ride is saved with its type, start, end and
      miles (from the app's tracked miles) at rides/DRVRMLES/{driver}/{day}/rideSegments, and listed on the driver's Logs. */
@@ -22016,7 +22107,7 @@
       return;
     }
     if (t.id === "q-set-available" && VM_BLOCK_BREAK_TO_ONLINE && (qManualBusy() || qOnBreak()) && vmBlocksNow().length) { qd.brkMsg = vmBlockMsg(); render(); return; } /* v2.0f Harry r1 #6 (flag pending Matthew) */
-    if (t.id === "q-set-available") { if (qOffline()) { qSetOffline(false); return; } if (qManualBusy() || qOnBreak()) qSetManualBusy(false); else try { rtTick(); } catch (e) {} return; }
+    if (t.id === "q-set-available") { if (qOffline()) { qSetOffline(false); return; } qReleaseToAvailable(); return; }
     if (t.id === "q-set-onride") { qd.rtMenu = !qd.rtMenu; render(); return; } /* v2.0m-q: open the PCS / Uber / Lyft / Other drop-down */
     /* v2.0l item 8: the gap question buttons are removed with the pop-up */
     if (t.id === "q-set-break") { if (!qOnBreak()) { if (brkStoppedOk(Date.now())) { qd.brkMsg = ""; qSetBreak(true); } else { qd.brkMsg = "Pull over and stop to start a break"; render(); } } return; }
