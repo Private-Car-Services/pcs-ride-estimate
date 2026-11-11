@@ -510,6 +510,7 @@ test("rider-in-car map: invoice line in the one dark green bar, End ride, Close 
   assert.ok(html.indexOf('id="rfs-toll-add"') >= 0);
   assert.ok(html.indexOf('id="rfs-end" data-rfs="end"') >= 0 && html.indexOf(">End ride<") >= 0);
   assert.ok(html.indexOf('id="rfs-close" data-rfs="close">Close map<') >= 0);
+  assert.ok(/<div class="rfs-actions"><button[^>]*id="rfs-end"[^>]*>End ride<\/button><button[^>]*id="rfs-close"/.test(html), "End ride and Close map share the Close map row");
   assert.ok(html.indexOf("rfs-green") < html.indexOf("rfs-end") && html.indexOf("rfs-end") < html.indexOf("rfs-close"));
   T.state.meterConfirmEnd = true;
   const ask = T.bar(M);
@@ -536,4 +537,17 @@ test("rider-in-car map CSS matches the drive-to-rider map", function () {
   assert.ok(ride.indexOf("var(--rfs-top, 96px) + 12px") >= 0);
   assert.ok(ride.indexOf("#meter-map-stage.pcs-rfs .leaflet-control-zoom a{width:44px;height:44px;line-height:44px;font-size:22px;pointer-events:auto}") >= 0);
   assert.ok(/#rfs-bar \.rfs-end\{[^}]*background:#8b1c1c/.test(ride), "End ride stays red");
+});
+
+test("rider-in-car map: MPH, turn line, and Add toll sit like the drive-to-rider map", function () {
+  const apply = appSrc.slice(appSrc.indexOf("function rfsApply"), appSrc.indexOf("window.__pcsRideFull"));
+  const tick = appSrc.slice(appSrc.indexOf("function rfsTick"), appSrc.indexOf("function rfsApply"));
+  const turn = appSrc.slice(appSrc.indexOf("function meterTurnHtml"), appSrc.indexOf("function meterEstFetch"));
+  const ride = quotedCss(appSrc.slice(appSrc.indexOf("function fsStyle"), appSrc.indexOf("function rfsKey")));
+  assert.ok(apply.indexOf('fsMphPlace(stage, "172px")') >= 0, "MPH at the pickup map's 172px");
+  assert.equal(tick.indexOf("mp.style.bottom"), -1);
+  assert.ok(turn.indexOf("meterTurnLeftHtml()") >= 0 && turn.indexOf("meterEtaInfo(M)") >= 0 && turn.indexOf("rfsOn()") >= 0);
+  assert.ok(turn.indexOf('" mi to the drop-off"') >= 0 && turn.indexOf('" \\u00b7 about "') >= 0);
+  assert.ok(ride.indexOf("#rfs-bar .rfs-toll{position:absolute;right:0;bottom:calc(100% + 22px);margin:0}") >= 0);
+  assert.ok(ride.indexOf("#meter-map-stage.pcs-rfs .meter-turn{line-height:normal}") >= 0);
 });

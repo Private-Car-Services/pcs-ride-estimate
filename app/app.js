@@ -10964,6 +10964,7 @@
       "#rfs-green .pcs-arrived-label{display:block;line-height:58px;white-space:nowrap;overflow:hidden;text-overflow:clip}" +
       "#rfs-bar #rfs-green.has-inv{height:auto;min-height:62px;line-height:1.25;white-space:normal;overflow:visible;padding:8px 12px}#rfs-green.has-inv .pcs-arrived-label{line-height:1.25}" +
       "#rfs-green .pcs-fs-inv{display:block;margin:2px 0 0;font-size:16px;font-weight:800;line-height:1.3;text-align:center;color:#fff;white-space:normal}#rfs-green .pcs-fs-inv a{color:#fff;font-weight:800;text-decoration:underline}" +
+      "#meter-map-stage.pcs-rfs .meter-turn{line-height:normal}#rfs-bar .rfs-toll{position:absolute;right:0;bottom:calc(100% + 22px);margin:0}#rfs-bar .rfs-actions .rfs-end{flex:1 1 0;min-height:58px}#rfs-bar .rfs-actions .rfs-close{flex:1 1 0;width:auto}" +
       "#rfs-green b{font-variant-numeric:tabular-nums}#rfs-green .rfs-paid{margin:4px 0 0;padding:0}#rfs-bar .rfs-end{box-shadow:0 2px 8px rgba(0,0,0,.4)}" +
       "#meter-map-stage.pcs-rfs .leaflet-control-zoom a{width:44px;height:44px;line-height:44px;font-size:22px;pointer-events:auto}#meter-map-stage.pcs-rfs .meter-topstack{gap:8px}#meter-map-stage.pcs-rfs .meter-turn{background:#0b3d23;color:#fff;border-radius:12px;padding:10px 12px;font-size:20px;font-weight:800;box-shadow:0 2px 8px rgba(0,0,0,.4)}#meter-map-stage.pcs-rfs .meter-turn small{font-size:14px;font-weight:700;color:#d1fae5;opacity:1}" +
       "body.pcs-rfs-body #pcs-sos-btn{z-index:2147482100 !important;bottom:auto !important;right:12px !important;top:250px;top:var(--pcs-sos-top,calc(env(safe-area-inset-top,0px) + 250px))}";
@@ -11095,8 +11096,8 @@
         '<div class="rfs-actions"><button type="button" class="rfs-end" id="rfs-end-yes" data-rfs="endyes">Yes, end ride</button>' +
         '<button type="button" class="rfs-keep" id="rfs-end-keep" data-rfs="endkeep">' + (shown ? "Keep the meter running" : "Keep driving") + "</button></div>"; /* v2.0d.5 r5 */
     } else {
-      html += '<div class="rfs-actions"><button type="button" class="rfs-end" id="rfs-end" data-rfs="end"' + (state.meterBusy ? " disabled" : "") + ">End ride</button></div>" +
-        '<button type="button" class="rfs-close" id="rfs-close" data-rfs="close">Close map</button>';
+      html += '<div class="rfs-actions"><button type="button" class="rfs-end" id="rfs-end" data-rfs="end"' + (state.meterBusy ? " disabled" : "") + ">End ride</button>" +
+        '<button type="button" class="rfs-close" id="rfs-close" data-rfs="close">Close map</button></div>'; /* v2.0m-bj: the Close map row, same spot as the pickup map */
     }
     return html;
   }
@@ -11118,10 +11119,11 @@
     if (!bar || !M || M.status !== "running") return;
     var f = meterFare(M), set = function (id, v) { var el = document.getElementById(id); if (el && el.textContent !== v) el.textContent = v; };
     if (meterShown(M)) set("rfs-fare", meterMoneyShown(M, f.sub)); else meterInvRefresh(M); set("rfs-miles", f.miles.toFixed(2)); set("rfs-time", meterClock(Date.now() - M.startedAt));
-    var h = bar.offsetHeight, stage = rfsStage();
+    var toll = bar.querySelector ? bar.querySelector(".rfs-toll") : null;
+    var h = bar.offsetHeight + (toll && toll.offsetHeight ? toll.offsetHeight + 22 : 0), stage = rfsStage(); /* v2.0m-bj: North up / Follow sit above the Add toll tab, which sits above the map credit line */
     var tops = document.getElementById("meter-topstack"), th = tops ? tops.offsetHeight : 0;
     if (stage && th && stage.__rfsTopH !== th) { stage.__rfsTopH = th; stage.style.setProperty("--rfs-top", th + "px"); } /* v2.0m-bj */
-    if (stage && h && stage.__rfsBarH !== h) { stage.__rfsBarH = h; stage.style.setProperty("--rfs-bar", h + "px"); var mp = document.getElementById("fs-mph"); if (mp && bar.getBoundingClientRect && stage.getBoundingClientRect) mp.style.bottom = Math.round(stage.getBoundingClientRect().bottom - bar.getBoundingClientRect().top + 12) + "px"; }
+    if (stage && h && stage.__rfsBarH !== h) { stage.__rfsBarH = h; stage.style.setProperty("--rfs-bar", h + "px"); } /* v2.0m-bj: MPH stays at the pickup map's 172px */
   }
   function rfsApply() {
     if (typeof document === "undefined" || !document.body) return;
@@ -11146,10 +11148,12 @@
       if (!bar) { bar = document.createElement("div"); bar.id = "rfs-bar"; bar.setAttribute("role", "region"); bar.setAttribute("aria-label", "Meter"); navStopTouch(bar); bar.addEventListener("click", rfsBarClick); stage.appendChild(bar); }
       var sig = rfsSig(M);
       if (bar.__sig !== sig) { bar.__sig = sig; bar.innerHTML = rfsBarHtml(M); }
-      fsMphPlace(stage, (bar.getBoundingClientRect && stage.getBoundingClientRect ? Math.round(stage.getBoundingClientRect().bottom - bar.getBoundingClientRect().top + 12) : ((bar.offsetHeight || 148) + 34)) + "px");
+      fsMphPlace(stage, "172px"); /* v2.0m-bj: same spot as the to-pickup full map */
     } else { rideLineHome(); if (bar) bar.remove(); fsMphDrop(stage); }
     if (full !== was) {
+      var mt = document.getElementById("meter-turn"); /* v2.0m-bj: the turn card's drop-off line comes and goes with full screen */
       stage.classList.toggle("pcs-rfs", full);
+      if (mt) { var mth = meterTurnHtml(); if (mt.outerHTML !== mth) mt.outerHTML = mth; }
       document.body.classList.toggle("pcs-rfs-body", full);
       document.body.style.overflow = full ? "hidden" : "";
       rfsResize();
@@ -17671,7 +17675,15 @@
     var t = meterNextTurn();
     if (!t) return '<div class="meter-turn" id="meter-turn" style="display:none"></div>';
     var d = t.mi < 0.1 ? Math.max(50, Math.round(t.mi * 5280 / 50) * 50) + " ft" : t.mi.toFixed(1) + " mi";
-    return '<div class="meter-turn" id="meter-turn" role="status" aria-live="polite"><small>In ' + esc(d) + "</small>" + esc(t.text) + "</div>";
+    return '<div class="meter-turn" id="meter-turn" role="status" aria-live="polite"><small>In ' + esc(d) + "</small>" + esc(t.text) + meterTurnLeftHtml() + "</div>";
+  }
+  /* v2.0m-bj (Harry 11/10): on the in-ride full map the turn card has the pickup card's second line, for the drop-off.
+     Same numbers as the Arrive box (meterEtaInfo). Not on the small meter map. */
+  function meterTurnLeftHtml() {
+    var M = state.meter, e = null;
+    try { if (!rfsOn()) return ""; e = meterEtaInfo(M); } catch (x) { return ""; }
+    if (!e || e.arrived || e.pending || !isFinite(+e.miles)) return "";
+    return '<small style="margin-top:4px">' + esc(e.miles + " mi to the drop-off" + (e.min ? " \u00b7 about " + e.min + " min" : "")) + "</small>";
   }
   if (typeof window !== "undefined") setInterval(function () {
     try {
