@@ -10940,7 +10940,7 @@
       "#meter-map-stage.pcs-rfs .map-caption{display:none}" +
       "#meter-map-stage.pcs-rfs .meter-topstack{top:8px;top:calc(env(safe-area-inset-top,0px) + 8px)}" +
       "#meter-map-stage.pcs-rfs .nav-toggle{bottom:calc(var(--pcs-safe-bottom, env(safe-area-inset-bottom, 0px)) + 22px + var(--rfs-bar, 148px) + 14px) !important;z-index:1004;pointer-events:auto}#meter-map-stage.pcs-rfs .nav-recenter{bottom:calc(var(--pcs-safe-bottom, env(safe-area-inset-bottom, 0px)) + 22px + var(--rfs-bar, 148px) + 62px) !important;z-index:1004;pointer-events:auto}" +
-      "#meter-map-stage.pcs-rfs .leaflet-top.leaflet-left{top:calc(var(--pcs-safe-top, env(safe-area-inset-top, 0px)) + 12px) !important;left:calc(var(--pcs-safe-left, env(safe-area-inset-left, 0px)) + 10px) !important;z-index:1005;pointer-events:auto}" +
+      "#meter-map-stage.pcs-rfs .leaflet-top.leaflet-left{top:calc(var(--pcs-safe-top, env(safe-area-inset-top, 0px)) + var(--rfs-top, 96px) + 12px) !important;left:calc(var(--pcs-safe-left, env(safe-area-inset-left, 0px)) + 10px) !important;z-index:1005;pointer-events:auto}" +
       "#meter-map-stage.pcs-rfs #rfs-open{display:none}" +
       "#rfs-open{position:absolute;left:8px;bottom:34px;z-index:1002;width:auto;min-height:52px;margin:0;padding:10px 16px;font-size:18px;font-weight:800;border-radius:12px;border:2px solid #0b3d23;background:#d1fae5;color:#0b3d23;box-shadow:0 2px 6px rgba(0,0,0,.35);cursor:pointer}" +
       "#rfs-bar{position:absolute;left:max(8px, calc(var(--pcs-safe-left, env(safe-area-inset-left, 0px)) + 8px));right:max(8px, calc(var(--pcs-safe-right, env(safe-area-inset-right, 0px)) + 8px));bottom:calc(var(--pcs-safe-bottom, env(safe-area-inset-bottom, 0px)) + 22px);z-index:1003;display:flex;flex-direction:column;gap:8px;background:transparent;padding:0;margin:0;border:0;box-shadow:none;pointer-events:none}" +
@@ -10955,9 +10955,17 @@
       "#rfs-bar .rfs-toll-line{flex:0 0 auto;width:auto;min-height:32px;margin:0;font-size:13px;font-weight:800;border-radius:8px;background:#e8f8ec;color:#0b3d23;border:1px solid #2e9d4f;text-align:left;padding:4px 8px;cursor:pointer}" +
       "#rfs-bar .rfs-toll-undo{flex:0 0 auto;width:auto;min-height:32px;margin:0;font-size:13px;font-weight:700;border-radius:8px;background:#f3f4f6;color:#1a1a1a;border:1px solid #6b7280;padding:4px 8px;cursor:pointer}" +
       ".rfs-actions{display:flex;gap:8px}#rfs-bar .rfs-end{flex:2 1 0;min-height:62px;margin:0;font-size:24px;font-weight:900;border-radius:14px;background:#8b1c1c;color:#fff;border:3px solid #5c0f0f;cursor:pointer}" +
-      "#rfs-bar .rfs-close{flex:1 1 0;min-height:62px;margin:0;font-size:20px;font-weight:900;border-radius:14px;background:#d1fae5;color:#0b3d23;border:3px solid #0b3d23;cursor:pointer}" +
+      "#rfs-bar .rfs-close{display:block;width:100%;min-height:58px;font-size:21px;font-weight:800;background:#d1fae5;color:#0b3d23;border:3px solid #0b3d23;border-radius:14px;margin:0;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.4)}" +
       "#rfs-bar .rfs-keep{flex:1 1 0;min-height:62px;margin:0;font-size:17px;font-weight:800;border-radius:14px;background:#fff;color:#0b3d23;border:3px solid #0b3d23;cursor:pointer}" +
       ".rfs-ask{margin:0 0 6px;font-size:18px;font-weight:800;color:#0b3d23;text-align:center}" +
+      /* v2.0m-bj (Matthew 11/10: "that's the way that my map needs to be when the rider is in the car"): the in-ride full map
+         uses the to-pickup full map layout. Same dark green bar (copied from schedFullStyle), same turn card look, same zoom spot. */
+      "#rfs-bar{container-type:inline-size}#rfs-bar .pcs-map-green{display:block;width:100%;box-sizing:border-box;height:62px;min-height:62px;margin:0;padding:0 10px;font-size:clamp(12px,calc(100cqw / 26),20px);font-weight:800;line-height:58px;text-align:center;background:#0b6b3a;color:#fff;border:2px solid #fff;border-radius:14px;white-space:nowrap;overflow:hidden;text-overflow:clip;position:relative;z-index:1;cursor:default;box-shadow:0 2px 8px rgba(0,0,0,.4)}" +
+      "#rfs-green .pcs-arrived-label{display:block;line-height:58px;white-space:nowrap;overflow:hidden;text-overflow:clip}" +
+      "#rfs-bar #rfs-green.has-inv{height:auto;min-height:62px;line-height:1.25;white-space:normal;overflow:visible;padding:8px 12px}#rfs-green.has-inv .pcs-arrived-label{line-height:1.25}" +
+      "#rfs-green .pcs-fs-inv{display:block;margin:2px 0 0;font-size:16px;font-weight:800;line-height:1.3;text-align:center;color:#fff;white-space:normal}#rfs-green .pcs-fs-inv a{color:#fff;font-weight:800;text-decoration:underline}" +
+      "#rfs-green b{font-variant-numeric:tabular-nums}#rfs-green .rfs-paid{margin:4px 0 0;padding:0}#rfs-bar .rfs-end{box-shadow:0 2px 8px rgba(0,0,0,.4)}" +
+      "#meter-map-stage.pcs-rfs .leaflet-control-zoom a{width:44px;height:44px;line-height:44px;font-size:22px;pointer-events:auto}#meter-map-stage.pcs-rfs .meter-topstack{gap:8px}#meter-map-stage.pcs-rfs .meter-turn{background:#0b3d23;color:#fff;border-radius:12px;padding:10px 12px;font-size:20px;font-weight:800;box-shadow:0 2px 8px rgba(0,0,0,.4)}#meter-map-stage.pcs-rfs .meter-turn small{font-size:14px;font-weight:700;color:#d1fae5;opacity:1}" +
       "body.pcs-rfs-body #pcs-sos-btn{z-index:2147482100 !important;bottom:auto !important;right:12px !important;top:250px;top:var(--pcs-sos-top,calc(env(safe-area-inset-top,0px) + 250px))}";
     document.head.appendChild(st);
   }
@@ -10997,7 +11005,7 @@
   }
   function rfsSig(M) {
     var t = meterTollView(M), ed = meterTollEditable(M) && t.on;
-    return [state.meterConfirmEnd ? 1 : 0, ed ? 1 : 0, t.count, t.cents, t.kind, state.meterTollEdit ? 1 : 0, M.prepaid ? 1 : 0, M.tierLabel || "", meterShown(M) ? "m" : rideInvoiceSig(meterInvInfo(M)), state.meterBusy ? 1 : 0, rideEstHtml(M, "x")].join("|");
+    return [state.meterConfirmEnd ? 1 : 0, ed ? 1 : 0, t.count, t.cents, t.kind, state.meterTollEdit ? 1 : 0, M.prepaid ? 1 : 0, M.tierLabel || "", meterShown(M) ? "m" : rideInvoiceSig(meterInvInfo(M)) + rfsInvHtml(M), state.meterBusy ? 1 : 0, rideEstHtml(M, "x")].join("|");
   }
   /* v2.0k r5 (Matthew 10/25: "THE ONLY TIME THAT I WANTED THE ESTIMATED PRICE WAS UNDER METERED RIDE OR CASH RIDE"):
      the "Estimated cost" line shows ONLY on a Metered ride and on a Cash calendar ride. Card, Square / invoice and set-fare rides: no line.
@@ -11050,13 +11058,23 @@
     return e ? '<p class="ride-est" id="' + id + '" data-est-from="' + e.from + '" role="status" style="margin:4px 0;font-size:20px;font-weight:800;text-align:center">' + esc(e.text) + "</p>" : "";
   }
   if (typeof window !== "undefined") window.__pcsV20kEst = { cost: rideEstCost, html: rideEstHtml };
+  /* v2.0m-bj: the invoice line the to-pickup green bar shows (fsMapInvoiceHtml), for the ride on the meter. No invoice number, nothing. */
+  function rfsInvHtml(M) {
+    if (!M || meterShown(M) || !M.schedId) return "";
+    var r = null;
+    try { r = schedFind(M.schedId); } catch (e) { r = null; }
+    if (!r) return "";
+    var h = "";
+    try { h = fsMapInvoiceHtml(r); } catch (e2) { h = ""; }
+    return h ? h.replace('id="sched-fs-inv"', 'id="rfs-inv"') : "";
+  }
+  /* v2.0m-bj (Matthew 11/10): same layout as the to-pickup full map. The dark green bar holds what was on the light row
+     (fare when metered, miles, time) where "I'm at the pickup" sits, with the invoice line under it. End ride (red) is
+     under the bar, and Close map is the same full-width button as on the to-pickup map. Add toll is still the small tab. */
   function rfsBarHtml(M) {
     var f = meterFare(M), t = meterTollInfo(M), pp = M.prepaid;
     var shown = meterShown(M);
-    var html = '<div class="rfs-row">' + (shown ? '<div class="rfs-fare" id="rfs-fare" aria-label="Meter fare">' + meterMoneyShown(M, f.sub) + "</div>" : "") +
-      '<div class="rfs-stats"><span><b id="rfs-miles">' + f.miles.toFixed(2) + "</b> mi</span><span><b id=\"rfs-time\">" + meterClock(Date.now() - M.startedAt) + "</b></span>" +
-      (shown ? '<span class="rfs-tier" id="rfs-tier">' + esc(M.tierLabel || "Meter") + (M.taxRate ? " \u00b7 tax at the end" : "") + "</span>" : "") + "</div></div>" + rideEstHtml(M, "rfs-est");
-    if (pp && shown) html += '<p class="rfs-paid" id="rfs-paid">\u2713 ' + esc(prepaidBadgeText(pp)) + " \u00b7 balance $0.00</p>";
+    var html = "";
     if (M.prepaid) t = meterTollView(M);
     if (meterTollEditable(M) && t.on) {
       var po = ridePriceOk(M);
@@ -11066,13 +11084,19 @@
         (t.count && po ? '<button type="button" class="rfs-toll-line" id="rfs-toll-line" data-rfs="tollline" aria-label="' + esc(t.label + " " + money(t.cents) + ". Tap to change the amount") + '">' + esc(t.label) + " <b>" + money(t.cents) + "</b></button>" +
           '<button type="button" class="rfs-toll-undo" id="rfs-toll-undo" data-rfs="tollundo">Undo</button>' : "") + "</div>";
     }
+    var more = (shown ? '<span class="pcs-fs-inv" id="rfs-tier">' + esc(M.tierLabel || "Meter") + (M.taxRate ? " \u00b7 tax at the end" : "") + "</span>" : "") + rideEstHtml(M, "rfs-est");
+    if (pp && shown) more += '<p class="rfs-paid" id="rfs-paid">\u2713 ' + esc(prepaidBadgeText(pp)) + " \u00b7 balance $0.00</p>";
+    more += rfsInvHtml(M);
+    html += '<div id="rfs-green" class="pcs-map-green' + (more ? " has-inv" : "") + '" role="status"><span class="pcs-arrived-label">' +
+      (shown ? '<span id="rfs-fare" aria-label="Meter fare">' + meterMoneyShown(M, f.sub) + "</span> \u00b7 " : "") +
+      '<span><b id="rfs-miles">' + f.miles.toFixed(2) + "</b> mi</span> \u00b7 <span><b id=\"rfs-time\">" + meterClock(Date.now() - M.startedAt) + "</b></span></span>" + more + "</div>";
     if (state.meterConfirmEnd) {
       html += '<p class="rfs-ask" id="rfs-ask">End this ride?' + (!ridePriceOk(M) ? "" : M.prepaid ? " " + invoiceFareText(M.prepaid) + "." : shown ? " Meter " + money(f.sub) + "." : "") + "</p>" +
         '<div class="rfs-actions"><button type="button" class="rfs-end" id="rfs-end-yes" data-rfs="endyes">Yes, end ride</button>' +
         '<button type="button" class="rfs-keep" id="rfs-end-keep" data-rfs="endkeep">' + (shown ? "Keep the meter running" : "Keep driving") + "</button></div>"; /* v2.0d.5 r5 */
     } else {
-      html += '<div class="rfs-actions"><button type="button" class="rfs-end" id="rfs-end" data-rfs="end"' + (state.meterBusy ? " disabled" : "") + ">End ride</button>" +
-        '<button type="button" class="rfs-close" id="rfs-close" data-rfs="close">Close map</button></div>';
+      html += '<div class="rfs-actions"><button type="button" class="rfs-end" id="rfs-end" data-rfs="end"' + (state.meterBusy ? " disabled" : "") + ">End ride</button></div>" +
+        '<button type="button" class="rfs-close" id="rfs-close" data-rfs="close">Close map</button>';
     }
     return html;
   }
@@ -11095,6 +11119,8 @@
     var f = meterFare(M), set = function (id, v) { var el = document.getElementById(id); if (el && el.textContent !== v) el.textContent = v; };
     if (meterShown(M)) set("rfs-fare", meterMoneyShown(M, f.sub)); else meterInvRefresh(M); set("rfs-miles", f.miles.toFixed(2)); set("rfs-time", meterClock(Date.now() - M.startedAt));
     var h = bar.offsetHeight, stage = rfsStage();
+    var tops = document.getElementById("meter-topstack"), th = tops ? tops.offsetHeight : 0;
+    if (stage && th && stage.__rfsTopH !== th) { stage.__rfsTopH = th; stage.style.setProperty("--rfs-top", th + "px"); } /* v2.0m-bj */
     if (stage && h && stage.__rfsBarH !== h) { stage.__rfsBarH = h; stage.style.setProperty("--rfs-bar", h + "px"); var mp = document.getElementById("fs-mph"); if (mp && bar.getBoundingClientRect && stage.getBoundingClientRect) mp.style.bottom = Math.round(stage.getBoundingClientRect().bottom - bar.getBoundingClientRect().top + 12) + "px"; }
   }
   function rfsApply() {

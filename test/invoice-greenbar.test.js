@@ -158,10 +158,15 @@ test("the driver invoice read keeps only the asked ride", function () {
 
 test("the ride map bar does not add a second invoice row", function () {
   const rfs = appSrc.slice(appSrc.indexOf("function rfsBarHtml"), appSrc.indexOf("function rfsBarClick"));
+  const rfsInv = appSrc.slice(appSrc.indexOf("function rfsInvHtml"), appSrc.indexOf("function rfsBarHtml"));
   const place = appSrc.slice(appSrc.indexOf("function schedMapBillPlace"), appSrc.indexOf("function schedFsMeasure"));
   assert.equal(rfs.indexOf("rideBillLabelHtml"), -1);
-  assert.equal(rfs.indexOf("pcs-map-green"), -1);
+  /* v2.0m-bj: the in-ride full map uses the to-pickup layout: one dark green bar, the invoice line inside it */
+  assert.equal(rfs.split("pcs-map-green").length - 1, 1);
+  assert.equal(rfs.split("rfsInvHtml(M)").length - 1, 1);
+  assert.match(rfsInv, /fsMapInvoiceHtml\(r\)/);
   assert.equal(rfs.indexOf("rfs-bill"), -1);
+  assert.equal(rfs.indexOf("rfs-row"), -1);
   assert.match(place, /schedBillHome/);
   assert.match(place, /fsMapInvoiceHtml/);
   assert.match(place, /#sched-fs-arrived/);
@@ -452,4 +457,83 @@ test("the white invoice bar is gone and the invoice text is in the dark green ba
     session.chrome.kill("SIGKILL");
     session.server.kill("SIGKILL");
   }
+});
+
+/* v2.0m-bj (Matthew 11/10): the rider-in-car full map has the same layout as the drive-to-rider full map. */
+function loadRide() {
+  const mark = '  if (typeof window !== "undefined") {\n    window.__pcsRideFull';
+  assert.ok(appSrc.indexOf(mark) > 0, "ride full hook mark");
+  const src = appSrc.replace(mark, "  window.__rfsT = { bar: rfsBarHtml, inv: fsMapInvoiceHtml, state: state };\n" + mark);
+  const sandbox = {
+    console: console, Date: Date, Math: Math, Intl: Intl, JSON: JSON, Promise: Promise,
+    Number: Number, String: String, Object: Object, Array: Array, isFinite: isFinite, parseInt: parseInt,
+    RegExp: RegExp, Error: Error, encodeURIComponent: encodeURIComponent, decodeURIComponent: decodeURIComponent,
+    setTimeout: function () { return 0; }, clearTimeout: function () {}, setInterval: function () { return 0; }, clearInterval: function () {},
+    requestAnimationFrame: function () { return 0; }, cancelAnimationFrame: function () {},
+    navigator: { userAgent: "test", share: null, geolocation: null, maxTouchPoints: 0, language: "en-US" },
+    location: { search: "", hostname: "localhost", href: "http://localhost/app/driver/", protocol: "http:", hash: "", pathname: "/app/driver/", replace: function () {} },
+    history: { pushState: function () {}, replaceState: function () {}, back: function () {}, state: null },
+    localStorage: { getItem: function () { return null; }, setItem: function () {}, removeItem: function () {} },
+    sessionStorage: { getItem: function () { return null; }, setItem: function () {}, removeItem: function () {} },
+    addEventListener: function () {}, removeEventListener: function () {},
+    fetch: function () { return Promise.resolve({ ok: false, status: 0, text: function () { return Promise.resolve(""); }, json: function () { return Promise.resolve(null); } }); },
+    document: {
+      readyState: "complete", currentScript: { src: "" }, visibilityState: "visible",
+      getElementById: function () { return null; }, querySelector: function () { return null; }, querySelectorAll: function () { return []; },
+      addEventListener: function () {}, createElement: el, body: el(), head: el(), documentElement: el()
+    }
+  };
+  sandbox.window = sandbox;
+  vm.createContext(sandbox);
+  vm.runInContext(src, sandbox, { filename: "app/app.js" });
+  return sandbox.__rfsT;
+}
+
+test("rider-in-car map: invoice line in the one dark green bar, End ride, Close map, toll tab", function () {
+  const T = loadRide();
+  const DON_PAY = "https://app.squareup.com/pay-invoice/invtmp:41611547-76a4-4ca2-8fa0-da55855ad720";
+  const don = { id: "icloud_e3c7f78e8c4364875277", status: "assigned", prepaidInvoiceNo: "000586", prepaid: false, prepaidVia: "square_invoice",
+    sqInvoice: { number: "000586", status: "UNPAID", paid: false, public_url: DON_PAY, subtotalCents: 4480, taxCents: 370, totalCents: 4850 } };
+  T.state.scheduledRides = [don];
+  const M = { status: "running", code: "PD9R639L", schedId: don.id, startedAt: Date.now() - 60000, miles: 1.2, prepaid: null, tollOn: true };
+  T.state.meter = M; T.state.meterConfirmEnd = false;
+  const html = T.bar(M);
+  assert.equal(html.split("pcs-map-green").length - 1, 1, "one dark green bar");
+  assert.ok(html.indexOf('id="rfs-green" class="pcs-map-green has-inv"') >= 0);
+  assert.ok(html.indexOf('id="rfs-inv"') >= 0 && html.indexOf('id="sched-fs-inv"') < 0);
+  assert.ok(html.indexOf("Invoice #000586 \u00b7 Unpaid") >= 0, html);
+  assert.ok(html.indexOf(DON_PAY) >= 0 && html.indexOf("Pay invoice") >= 0);
+  assert.equal(html.indexOf("$44.80"), -1, "no price on an invoice ride");
+  assert.equal(html.indexOf("rfs-row"), -1, "light miles row is gone");
+  assert.ok(html.indexOf('id="rfs-miles"') >= 0 && html.indexOf('id="rfs-time"') >= 0);
+  assert.equal(html.indexOf('id="rfs-fare"'), -1);
+  assert.ok(html.indexOf('id="rfs-toll-add"') >= 0);
+  assert.ok(html.indexOf('id="rfs-end" data-rfs="end"') >= 0 && html.indexOf(">End ride<") >= 0);
+  assert.ok(html.indexOf('id="rfs-close" data-rfs="close">Close map<') >= 0);
+  assert.ok(html.indexOf("rfs-green") < html.indexOf("rfs-end") && html.indexOf("rfs-end") < html.indexOf("rfs-close"));
+  T.state.meterConfirmEnd = true;
+  const ask = T.bar(M);
+  assert.ok(ask.indexOf('data-rfs="endyes"') >= 0 && ask.indexOf('data-rfs="endkeep"') >= 0 && ask.indexOf("Keep driving") >= 0);
+  assert.equal(ask.indexOf('data-rfs="close"'), -1);
+  assert.ok(ask.indexOf("Invoice #000586") >= 0);
+  T.state.meterConfirmEnd = false;
+  const metered = { status: "running", code: "TESTMETR", metered: true, startedAt: Date.now() - 60000, miles: 1.2, baseCents: 500, perMileCents: 250, tierLabel: "Day rate", prepaid: null, tollOn: true };
+  T.state.meter = metered;
+  const mh = T.bar(metered);
+  assert.ok(mh.indexOf('id="rfs-fare"') >= 0 && /\$\d+\.\d\d/.test(mh), "meter fare shows on a metered ride");
+  assert.ok(mh.indexOf('id="rfs-tier"') >= 0 && mh.indexOf("Day rate") >= 0);
+  assert.equal(mh.indexOf("Invoice #"), -1);
+});
+
+test("rider-in-car map CSS matches the drive-to-rider map", function () {
+  const pick = quotedCss(appSrc.slice(appSrc.indexOf("function schedFullStyle"), appSrc.indexOf("function schedFullResize")));
+  const ride = quotedCss(appSrc.slice(appSrc.indexOf("function fsStyle"), appSrc.indexOf("function rfsKey")));
+  const green = /\.pcs-map-green,#sched-fs-arrived\{([^}]*)\}/.exec(pick)[1];
+  const rideGreen = /#rfs-bar \.pcs-map-green\{([^}]*)\}/.exec(ride)[1];
+  assert.equal(rideGreen, green.replace("cursor:pointer", "cursor:default"));
+  const close = /#sched-fs-close\{([^}]*)\}/.exec(pick)[1];
+  assert.equal(/#rfs-bar \.rfs-close\{([^}]*)\}/.exec(ride)[1], close);
+  assert.ok(ride.indexOf("var(--rfs-top, 96px) + 12px") >= 0);
+  assert.ok(ride.indexOf("#meter-map-stage.pcs-rfs .leaflet-control-zoom a{width:44px;height:44px;line-height:44px;font-size:22px;pointer-events:auto}") >= 0);
+  assert.ok(/#rfs-bar \.rfs-end\{[^}]*background:#8b1c1c/.test(ride), "End ride stays red");
 });
