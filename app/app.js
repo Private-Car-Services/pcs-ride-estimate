@@ -11121,7 +11121,11 @@
     if (meterShown(M)) set("rfs-fare", meterMoneyShown(M, f.sub)); else meterInvRefresh(M); set("rfs-miles", f.miles.toFixed(2)); set("rfs-time", meterClock(Date.now() - M.startedAt));
     var toll = bar.querySelector ? bar.querySelector(".rfs-toll") : null;
     var h = bar.offsetHeight + (toll && toll.offsetHeight ? toll.offsetHeight + 22 : 0), stage = rfsStage(); /* v2.0m-bj: North up / Follow sit above the Add toll tab, which sits above the map credit line */
-    var tops = document.getElementById("meter-topstack"), th = tops ? tops.offsetHeight : 0;
+    var tops = document.getElementById("meter-topstack"), th = 0;
+    if (tops && tops.getBoundingClientRect) { /* v2.0m-bk: bottom of the visible cards (turn card, Arrive box), like #sched-fs-top holds; hidden or empty pieces don't count */
+      var t0 = tops.getBoundingClientRect().top;
+      Array.prototype.forEach.call(tops.children || [], function (c) { var q = c.getBoundingClientRect ? c.getBoundingClientRect() : null; if (q && q.width > 0 && q.height > 0) th = Math.max(th, Math.round(q.bottom - t0)); });
+    }
     if (stage && th && stage.__rfsTopH !== th) { stage.__rfsTopH = th; stage.style.setProperty("--rfs-top", th + "px"); } /* v2.0m-bj */
     if (stage && h && stage.__rfsBarH !== h) { stage.__rfsBarH = h; stage.style.setProperty("--rfs-bar", h + "px"); } /* v2.0m-bj: MPH stays at the pickup map's 172px */
   }
