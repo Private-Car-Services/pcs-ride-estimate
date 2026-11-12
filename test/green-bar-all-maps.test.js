@@ -47,7 +47,7 @@ S.scheduledRides = [DEREK, RAHUAL];
 const src = fs.readFileSync(path.join(__dirname, "../app/app.js"), "utf8");
 
 test("ride map green bar: Derek #000570 Paid + View receipt (his real receipt link)", function () {
-  const h = box.__pcsRideFull.green({ status: "running", schedId: DEREK.id });
+  const h = box.__pcsRideFull.green({ status: "running", startedAt: Date.now() - 60000, schedId: DEREK.id });
   assert.ok(h.indexOf('class="pcs-map-green has-inv"') >= 0, h);
   assert.ok(h.indexOf('id="sched-fs-inv"') >= 0);
   assert.ok(h.indexOf("Invoice #000570 \u00b7 Paid \u00b7 ") >= 0, h);
@@ -57,7 +57,7 @@ test("ride map green bar: Derek #000570 Paid + View receipt (his real receipt li
 });
 
 test("ride map green bar: Rahual #000587 Unpaid + Pay invoice", function () {
-  const h = box.__pcsRideFull.green({ status: "running", schedId: RAHUAL.id });
+  const h = box.__pcsRideFull.green({ status: "running", startedAt: Date.now() - 60000, schedId: RAHUAL.id });
   assert.ok(h.indexOf("Invoice #000587 \u00b7 Unpaid \u00b7 ") >= 0, h);
   assert.ok(h.indexOf('href="https://app.squareup.com/pay-invoice/invtmp:95a58e9c-5700-4c"') >= 0, h);
   assert.ok(h.indexOf(">Pay invoice</a>") >= 0);
@@ -66,18 +66,28 @@ test("ride map green bar: Rahual #000587 Unpaid + Pay invoice", function () {
 test("ride map green bar uses the very same invoice line as the pickup map", function () {
   [DEREK, RAHUAL].forEach(function (r) {
     const pick = box.__pcsV20lBill.fsInv(r);
-    const ride = box.__pcsRideFull.green({ status: "running", schedId: r.id });
+    const ride = box.__pcsRideFull.green({ status: "running", startedAt: Date.now() - 60000, schedId: r.id });
     assert.ok(pick && ride.indexOf(pick) >= 0, r.id);
   });
 });
 
-test("no linked board ride, no invoice number, or a cancelled ride: no bar (nothing invented)", function () {
-  assert.equal(box.__pcsRideFull.green({ status: "running" }), "");
-  assert.equal(box.__pcsRideFull.green({ status: "running", schedId: "nope" }), "");
+test("no linked board ride, no invoice number, or a cancelled ride: End ride + meter line, no invoice line (nothing invented)", function () {
+  const M = function (id) { return { status: "running", startedAt: Date.now() - 60000, schedId: id }; };
   S.scheduledRides = [DEREK, RAHUAL, { id: "x1", status: "assigned" }, Object.assign({}, RAHUAL, { id: "x2", status: "cancelled" })];
-  assert.equal(box.__pcsRideFull.green({ status: "running", schedId: "x1" }), "");
-  assert.equal(box.__pcsRideFull.green({ status: "running", schedId: "x2" }), "");
+  [M(undefined), M("nope"), M("x1"), M("x2")].forEach(function (m) {
+    const h = box.__pcsRideFull.green(m);
+    assert.ok(h.indexOf('<span class="pcs-arrived-label">End ride</span>') >= 0, h);
+    assert.equal(h.indexOf("Invoice #"), -1, h);
+    assert.ok(/<b id="rfs-miles">0\.00<\/b> mi \u00b7 <b id="rfs-time">1:0\d<\/b>/.test(h), h);
+  });
   S.scheduledRides = [DEREK, RAHUAL];
+});
+
+test("ride map bar = the pickup map's structure: title End ride, then the invoice line, then the meter line", function () {
+  const h = box.__pcsRideFull.green({ status: "running", startedAt: Date.now() - 60000, schedId: DEREK.id });
+  const a = h.indexOf("End ride</span>"), b = h.indexOf('id="sched-fs-inv"'), c = h.indexOf('id="rfs-green-meter"');
+  assert.ok(a > 0 && b > a && c > b, h);
+  assert.ok(h.indexOf('data-rfs="end"') >= 0, "same End ride handler (and its confirm)");
 });
 
 test("waiting at the pickup keeps the same full map; the ride and no trip do not", function () {
@@ -93,14 +103,21 @@ test("waiting at the pickup keeps the same full map; the ride and no trip do not
   assert.equal(box.__pcsRideFull.fsTrip(), null);
 });
 
-test("each screen keeps its own buttons: End ride / Add toll only on the ride map, Close map on both", function () {
+test("each screen keeps its own buttons: End ride / Add toll only on the ride map, Close map full width on both", function () {
   const pickupBot = /bot\.innerHTML = '([^']|\\')*sched-fs-close[^\n]*/.exec(src)[0];
   assert.equal(pickupBot.indexOf("rfs-end"), -1);
   assert.equal(pickupBot.indexOf("toll"), -1);
-  assert.ok(src.indexOf('id="rfs-end" data-rfs="end"') >= 0);
-  assert.ok(src.indexOf('id="rfs-toll-add"') >= 0);
-  assert.ok(src.indexOf("html += rfsGreenHtml(M);") >= 0 && src.indexOf("html += rfsGreenHtml(M);") < src.indexOf('id="rfs-end" data-rfs="end"'), "green bar sits right above End ride / Close map");
+  assert.ok(src.indexOf('html += rfsGreenHtml(M) + \'<button type="button" id="rfs-close" data-rfs="close">Close map</button>\'') >= 0);
+  assert.ok(src.indexOf('"#sched-fs-close,#rfs-bar #rfs-close{display:block;') >= 0, "Close map uses the pickup map's rule");
+  assert.ok(src.indexOf('id="rfs-toll-add" data-rfs="toll" style="\' + bs + \'"') >= 0, "Add toll is a pill in the Heading up / Full route style");
+  assert.ok(src.indexOf('id="rfs-end-yes" data-rfs="endyes">Yes, end ride</button>') >= 0, "the End ride confirm is unchanged");
   assert.ok(/SCHED_RIDER_IN_TEXT = "Rider is in \\u2013 start the ride"/.test(src), "the waiting action is the card's own Rider is in text");
+});
+
+test("one top banner: pickup and ride use navTurnBannerHtml with the same box", function () {
+  assert.ok(src.indexOf('return navTurnBannerHtml("sched-turn", n.text, n.mi, n.left, mins, "pickup");') >= 0);
+  assert.ok(src.indexOf('return navTurnBannerHtml("meter-turn", t.text, t.mi, e.milesExact, e.min, "drop-off");') >= 0);
+  assert.ok(src.indexOf("#meter-map-stage.pcs-rfs #meter-eta-chip{display:none !important}") >= 0, "no chip in the banner slot on the ride map");
 });
 
 test("the customer tracker is untouched by this change", function () {
