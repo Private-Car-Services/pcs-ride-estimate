@@ -200,7 +200,7 @@
      every 60 s; any God write (godFetch non-GET) forces the next refresh to reload them. */
   var SLOW_MS = 60000, slowAt = {}, slowForce = {};
   function slowDue(k) { var n = Date.now(); if (slowForce[k] || !slowAt[k] || n - slowAt[k] >= SLOW_MS) { slowAt[k] = n; slowForce[k] = false; return true; } return false; }
-  function slowKick() { slowForce.kv = true; slowForce.dr = true; slowForce.ro = true; }
+  function slowKick() { slowForce.kv = true; slowForce.dr = true; slowForce.ro = true; slowForce.mi = true; slowForce.hi = true; } /* v2.0m-gc1: miles/history too */
   window.__pcsSlowDue = slowDue; /* test hook */
   function godFetch(url, opts) {
     opts = opts || {};
@@ -1410,9 +1410,14 @@
     return [row.carYear, row.carMake, row.carModel].filter(Boolean).join(" ");
   }
 
+  var MILES_FETCH_DAYS = 31; /* v2.0m-gc1 (God crash): God loads only the last 31 Chicago days of miles (keys are YYYY-MM-DD) */
+  function milesSinceKey() {
+    var t = chicagoToday().split("-").map(Number);
+    return new Date(Date.UTC(t[0], t[1] - 1, t[2]) - MILES_FETCH_DAYS * 86400000).toISOString().slice(0, 10);
+  }
   function listDriverMiles(driverId) {
     if (!driverId) return Promise.resolve({});
-    return fetch(milesUrl(driverId)).then(function (res) {
+    return fetch(milesUrl(driverId) + "?orderBy=" + encodeURIComponent('"$key"') + "&startAt=" + encodeURIComponent('"' + milesSinceKey() + '"')).then(function (res) {
       if (res.status === 401 || res.status === 403) {
         var err = new Error("miles-denied");
         err.denied = true;
@@ -4114,8 +4119,19 @@
     };
   }
 
+  /* v2.0m-gc1 (God crash): one refresh at a time; a refresh asked for while one runs is run once right after it.
+     A refresh stuck over 90 s no longer blocks new ones. */
+  var refreshBusyAt = 0, refreshAgain = false;
   function refresh() {
     if (state.screen !== "board") return;
+    if (refreshBusyAt && Date.now() - refreshBusyAt < 90000) { refreshAgain = true; return; }
+    var myRun = refreshBusyAt = Date.now();
+    refreshAgain = false;
+    function refreshDone() {
+      if (refreshBusyAt !== myRun) return;
+      refreshBusyAt = 0;
+      if (refreshAgain) { refreshAgain = false; refresh(); }
+    }
     state.loading = true;
 
     var rosterP = (slowDue("ro") ? listRoster() : Promise.resolve(state.roster)).then(function (rows) { /* v77.15 add2: roster every 60 s (or after a save) */
@@ -4177,6 +4193,7 @@
     });
 
     var milesP = driversP.then(function () {
+      if (!slowDue("mi")) return; /* v2.0m-gc1: miles every 60 s (or after a God save), not every refresh */
       var ids = {};
       Object.keys(state.roster || {}).forEach(function (id) { ids[id] = true; });
       (state.drivers || []).forEach(function (d) { if (d && d.id) ids[d.id] = true; });
@@ -4200,6 +4217,7 @@
     });
 
     var historyP = driversP.then(function () {
+      if (!slowDue("hi")) return; /* v2.0m-gc1: driver history every 60 s (or after a God save) */
       var ids = {};
       Object.keys(state.roster || {}).forEach(function (id) { ids[id] = true; });
       (state.drivers || []).forEach(function (d) { if (d && d.id) ids[d.id] = true; });
@@ -4244,7 +4262,7 @@
 
     var discP = slowDue("dr") ? listDiscReqs().then(function (d) { state.discReqs = d; }).catch(function () {}) : Promise.resolve(); /* v73; v77.15: 60 s */
     var rcP = listRateContracts().then(function (L) { state.rateContracts = L; }).catch(function () {}); /* v76j */
-    Promise.all([rosterP, driversP, ridesP, milesP, historyP, calendarP, safetyP, paymentsP, discP, rcP]).then(function () {
+    var allP = Promise.all([rosterP, driversP, ridesP, milesP, historyP, calendarP, safetyP, paymentsP, discP, rcP]).then(function () {
       try { rovAutoApply(); } catch (e) {} /* v76j */
       state.loading = false;
       state.lastRefreshAt = Date.now();
@@ -4255,6 +4273,7 @@
       var notice = document.getElementById("drivers-action-notice");
       if (notice && state.actionNotice) notice.textContent = state.actionNotice;
     });
+    allP.then(refreshDone, function (err) { refreshDone(); throw err; }); /* v2.0m-gc1 */
   }
 
   function statusPillText() {
@@ -4940,7 +4959,7 @@
         return fetch(rowUrl, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(patch) });
       }).then(function () { return fetch(baseUrl() + "/rides/DRVRHSLG/" + encodeURIComponent(fid) + "/overrides/" + fnow + ".json", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ kind: "odometer corrected to " + fval, at: fnow, grantedAt: fnow, by: godWho(), reason: fw || "Corrected in God mode", from: Number(frq.entered) || 0, to: fval }) }); })
         .then(function () { return hosOvrSave(fid, { odoDismiss: { reason: ("Corrected to " + fval + (fw ? ": " + fw : "")).slice(0, 200), by: godWho() } }).catch(function () {}); })
-        .then(hosOvrLoad).catch(function () { ofs.disabled = false; if (fe) fe.textContent = "Couldn't save. Try again."; });
+        .then(function () { slowKick(); return hosOvrLoad(); }).catch(function () { ofs.disabled = false; if (fe) fe.textContent = "Couldn't save. Try again."; });
       return;
     }
     if (od) { /* v74: Ignore / Dismiss the alert (logged with who / when / reason); nothing is reset */
