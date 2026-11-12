@@ -10822,9 +10822,12 @@
       "#sched-fs-close,#rfs-bar #rfs-close{display:block;width:100%;min-height:58px;font-size:21px;font-weight:800;background:#d1fae5;color:#0b3d23;border:3px solid #0b3d23;border-radius:14px;margin:0;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.4)}" +
       "#sched-fs-arrived .pcs-arrived-label,#rfs-bar .pcs-map-green .pcs-arrived-label{display:block;line-height:58px;white-space:nowrap;overflow:hidden;text-overflow:clip}" +
       "#sched-fs-bottom:not(.nt-bot) #sched-fs-arrived.has-inv,#rfs-bar .pcs-map-green.has-inv{height:auto;min-height:62px;line-height:1.25;white-space:normal;overflow:visible;padding:8px 12px}" +
-      "#sched-fs-bottom:not(.nt-bot) #sched-fs-arrived.has-inv .pcs-arrived-label,#rfs-bar .pcs-map-green.has-inv .pcs-arrived-label{line-height:1.25}" +
+      "#sched-fs-bottom:not(.nt-bot) #sched-fs-arrived.has-inv .pcs-arrived-label,#rfs-bar .pcs-map-green.has-inv .pcs-arrived-label{line-height:1.25;white-space:normal}" +
+      /* v2.0m-bn r3 (Harry): the action title is the largest text in the bar at every size (>= the 16px invoice line), as on the reference */
+      "#sched-fs-bottom:not(.nt-bot) #sched-fs-arrived .pcs-arrived-label,#rfs-bar .pcs-map-green .pcs-arrived-label{font-size:clamp(18px,calc(100cqw / 18),20px)}" +
       "#sched-fs-arrived #sched-fs-inv,#rfs-bar .pcs-map-green #sched-fs-inv,#rfs-bar .pcs-map-green .rfs-green-meter{display:block;margin:2px 0 0;font-size:16px;font-weight:800;line-height:1.3;text-align:center;color:#fff;white-space:normal}" +
       "#sched-fs-arrived #sched-fs-inv a,#rfs-bar .pcs-map-green #sched-fs-inv a{color:#fff;font-weight:800;text-decoration:underline}" +
+      "#rfs-bar #rfs-green.rfs-asking{cursor:default}#rfs-bar #rfs-green .rfs-actions{margin:8px 0 0}#rfs-bar #rfs-green .rfs-end{border-color:#fff}" +
       /* v2.0m-bf: this full map sits above the SOS button. Same raise and spot as the in-ride full screen. */
       "body.pcs-fullmap-body #pcs-sos-btn{z-index:2147482100 !important;bottom:auto !important;right:12px !important;top:250px;top:var(--pcs-sos-top,calc(env(safe-area-inset-top,0px) + 250px))}";
     document.head.appendChild(st);
@@ -10965,6 +10968,9 @@
       /* v2.0m-bn r2: the pickup map's top (banner full width, Arrive card right, no chip in that slot) */
       "#meter-map-stage.pcs-rfs #meter-turn{margin:0;align-self:stretch;box-shadow:0 2px 8px rgba(0,0,0,.4)}#meter-map-stage.pcs-rfs #meter-eta-chip{display:none !important}#meter-map-stage.pcs-rfs .meter-topstack .nav-eta{margin:0}" +
       "#meter-map-stage.pcs-rfs .nav-toggle{flex-wrap:wrap;justify-content:flex-end;max-width:calc(100% - 16px)}" +
+      /* v2.0m-bn r3 (Harry): on a phone the ride pills (Add toll ...) get their own row above Heading up / Full route, right-aligned, so
+         nothing reaches the MPH box (which stays at the reference spot). iPad keeps one row. */
+      "#meter-map-stage.pcs-rfs #rfs-pills:empty{display:none}@media (max-width:600px){#meter-map-stage.pcs-rfs .nav-toggle{max-width:calc(100% - 124px)}#meter-map-stage.pcs-rfs #rfs-pills:not(:empty){display:flex !important;flex-basis:100%;justify-content:flex-end;flex-wrap:wrap;gap:inherit}}" +
       "#meter-map-stage.pcs-rfs .nav-toggle{bottom:calc(var(--pcs-safe-bottom, env(safe-area-inset-bottom, 0px)) + 22px + var(--rfs-bar, 148px) + 14px) !important;z-index:1004;pointer-events:auto}#meter-map-stage.pcs-rfs .nav-recenter{bottom:calc(var(--pcs-safe-bottom, env(safe-area-inset-bottom, 0px)) + 22px + var(--rfs-bar, 148px) + 62px) !important;z-index:1004;pointer-events:auto}" +
       "#meter-map-stage.pcs-rfs .leaflet-top.leaflet-left{top:calc(var(--pcs-safe-top, env(safe-area-inset-top, 0px)) + var(--rfs-top, 0px) + 12px) !important;left:calc(var(--pcs-safe-left, env(safe-area-inset-left, 0px)) + 10px) !important;z-index:1005;pointer-events:auto}" +
       "#meter-map-stage.pcs-rfs #rfs-open{display:none}" +
@@ -10980,7 +10986,7 @@
       ".rfs-toll{display:flex;flex-wrap:wrap;justify-content:flex-end;align-items:center;gap:6px;max-width:100%;box-sizing:border-box;margin:-2px 0 6px}#rfs-bar .rfs-toll-add{flex:0 0 auto;width:auto;min-height:32px;margin:0;padding:4px 12px;font-size:14px;font-weight:800;border-radius:8px 8px 0 0;background:#bef1c6;color:#0b3d23;border:2px solid #2e9d4f;border-bottom-width:4px;cursor:pointer}" +
       "#rfs-bar .rfs-toll-line{flex:0 0 auto;width:auto;min-height:32px;margin:0;font-size:13px;font-weight:800;border-radius:8px;background:#e8f8ec;color:#0b3d23;border:1px solid #2e9d4f;text-align:left;padding:4px 8px;cursor:pointer}" +
       "#rfs-bar .rfs-toll-undo{flex:0 0 auto;width:auto;min-height:32px;margin:0;font-size:13px;font-weight:700;border-radius:8px;background:#f3f4f6;color:#1a1a1a;border:1px solid #6b7280;padding:4px 8px;cursor:pointer}" +
-      ".rfs-actions{display:flex;gap:8px}#rfs-bar .rfs-end{flex:2 1 0;min-height:62px;margin:0;font-size:24px;font-weight:900;border-radius:14px;background:#8b1c1c;color:#fff;border:3px solid #5c0f0f;cursor:pointer}" +
+      ".rfs-actions{display:flex;gap:8px}#rfs-bar .rfs-end{flex:2 1 0;min-height:62px;margin:0;font-size:24px;font-weight:900;border-radius:14px;color:#fff;border:3px solid #5c0f0f;cursor:pointer}#rfs-bar .rfs-end,#rfs-bar #rfs-green.pcs-map-green{background:#8b1c1c}" +
       "#rfs-bar .rfs-close{flex:1 1 0;min-height:62px;margin:0;font-size:20px;font-weight:900;border-radius:14px;background:#d1fae5;color:#0b3d23;border:3px solid #0b3d23;cursor:pointer}" +
       "#rfs-bar .rfs-keep{flex:1 1 0;min-height:62px;margin:0;font-size:17px;font-weight:800;border-radius:14px;background:#fff;color:#0b3d23;border:3px solid #0b3d23;cursor:pointer}" +
       ".rfs-ask{margin:0 0 6px;font-size:18px;font-weight:800;color:#0b3d23;text-align:center}" +
@@ -11121,15 +11127,20 @@
     var h = rfsDestPillHtml(M) + rfsTollPillsHtml(M);
     if (box.__h !== h) { box.__h = h; box.innerHTML = h; }
   }
+  /* v2.0m-bn r3 (Harry): the confirm swaps INTO the same red bar (title line = the question), same buttons and handlers */
+  function rfsAskHtml(M, f, shown) {
+    return '<div id="rfs-green" class="pcs-map-green has-inv rfs-asking" role="group" aria-label="End this ride?">' +
+      '<span class="pcs-arrived-label" id="rfs-ask">End this ride?' + (!ridePriceOk(M) ? "" : M.prepaid ? " " + invoiceFareText(M.prepaid) + "." : shown ? " Meter " + money(f.sub) + "." : "") + "</span>" +
+      '<div class="rfs-actions"><button type="button" class="rfs-end" id="rfs-end-yes" data-rfs="endyes">Yes, end ride</button>' +
+      '<button type="button" class="rfs-keep" id="rfs-end-keep" data-rfs="endkeep">' + (shown ? "Keep the meter running" : "Keep driving") + "</button></div></div>"; /* v2.0d.5 r5 */
+  }
   function rfsBarHtml(M) {
     var f = meterFare(M), pp = M.prepaid;
     var shown = meterShown(M);
     var html = rideEstHtml(M, "rfs-est"); /* Metered / Cash only (empty on an invoiced ride) */
     if (pp && shown) html += '<p class="rfs-paid" id="rfs-paid">\u2713 ' + esc(prepaidBadgeText(pp)) + " \u00b7 balance $0.00</p>";
     if (state.meterConfirmEnd) {
-      html += '<p class="rfs-ask" id="rfs-ask">End this ride?' + (!ridePriceOk(M) ? "" : M.prepaid ? " " + invoiceFareText(M.prepaid) + "." : shown ? " Meter " + money(f.sub) + "." : "") + "</p>" +
-        '<div class="rfs-actions"><button type="button" class="rfs-end" id="rfs-end-yes" data-rfs="endyes">Yes, end ride</button>' +
-        '<button type="button" class="rfs-keep" id="rfs-end-keep" data-rfs="endkeep">' + (shown ? "Keep the meter running" : "Keep driving") + "</button></div>"; /* v2.0d.5 r5 */
+      html += rfsAskHtml(M, f, shown);
     } else {
       html += rfsGreenHtml(M) + '<button type="button" id="rfs-close" data-rfs="close">Close map</button>'; /* v2.0m-bn r2: the pickup map's bar + Close map */
     }
