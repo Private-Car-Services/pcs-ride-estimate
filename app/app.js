@@ -10581,6 +10581,9 @@
   });
   var schedNavRoute = null, schedNavBusy = "", schedNavAt = 0;
   function schedNavTrip() { var t = schedTripNow(); return t && t.phase === "pickup" && !state.meter ? t : null; }
+  /* v2.0m-bn (Matthew 11/12: "all to look exactly alike"): the full map stays the same screen while waiting at the pickup.
+     Turn-by-turn still uses schedNavTrip (pickup leg only). */
+  function schedFsTrip() { var t = schedTripNow(); return t && (t.phase === "pickup" || t.phase === "arrived") && !state.meter ? t : null; }
   function schedNavPickup(r) { return r && isCoord(r.pickupLat) && isCoord(r.pickupLng) ? Promise.resolve({ lat: +r.pickupLat, lng: +r.pickupLng }) : schedGeocode(r && r.pickup); }
   var schedNavSeq = 0, schedNavOff = { since: 0, fixes: 0, lastFix: 0, lastReroute: 0, dist: 0, reroutes: 0 };
   function schedNavFetch(force, reroute) {
@@ -10626,9 +10629,10 @@
     }
     return out;
   }
+  var SCHED_TURN_BOX = "background:#0b3d23;color:#fff;border-radius:12px;padding:10px 12px;margin:0 0 8px;font-size:20px;font-weight:800";
   function schedTurnHtml() {
     var n = schedNextTurn(), R = schedNavRoute;
-    var box = "background:#0b3d23;color:#fff;border-radius:12px;padding:10px 12px;margin:0 0 8px;font-size:20px;font-weight:800";
+    var box = SCHED_TURN_BOX;
     if (!n) return '<div id="sched-turn" role="status" style="' + box + '">' + (meterHerePt() ? "Finding the route to the pickup\u2026" : "Allow location to see the route to the pickup.") + "</div>";
     var dd = n.mi == null ? "" : n.mi < 0.1 ? Math.max(50, Math.round(n.mi * 5280 / 50) * 50) + " ft" : n.mi.toFixed(1) + " mi";
     var mins = R && R.miles > 0 ? Math.max(1, Math.round(R.minutes * Math.min(1, n.left * 1.3 / Math.max(0.01, R.miles)))) : null;
@@ -10687,11 +10691,11 @@
   var NAVTEST_KEY = "pcs-navtest";
   function navTestOn() { try { return localStorage.getItem(NAVTEST_KEY) === "1"; } catch (e) { return false; } }
   function schedFullOn() {
-    var t = schedNavTrip(); if (!t) return false;
+    var t = schedFsTrip(); if (!t) return false; /* v2.0m-bn */
     try { var fv = localStorage.getItem(schedFullKey(t)); return fv === "1" || (fv === null && navTestOn()); } catch (e) { return state.schedFullLeg === schedFullKey(t); } /* v75y test flag: full map opens by itself */
   }
   function schedFullSet(on) {
-    var t = schedNavTrip(); if (!t) return;
+    var t = schedFsTrip(); if (!t) return; /* v2.0m-bn */
     state.schedFullLeg = on ? schedFullKey(t) : "";
     try { localStorage.setItem(schedFullKey(t), on ? "1" : "0"); } catch (e) {}
     schedFullApply();
@@ -10699,7 +10703,7 @@
   function schedFullClear(t) { if (t) try { localStorage.removeItem(schedFullKey(t)); } catch (e) {} state.schedFullLeg = ""; }
   function schedArrivedNow() {
     var t = schedTripNow(); if (!t) return;
-    schedFullClear(t);
+    state.schedArrivedTapAt = Date.now(); /* v2.0m-bn: the full map stays open while waiting (no schedFullClear) */
     schedTripSave({ id: t.id, phase: "arrived", at: t.at, arrivedAt: Date.now() }); schedNavRoute = null;
     schedPatch(t.id, { arrivedAt: Date.now() });
     render();
@@ -10748,14 +10752,22 @@
     } else if (line.parentNode !== host) host.insertBefore(line, host.firstChild);
     return line;
   }
+  var SCHED_RIDER_IN_TEXT = "Rider is in \u2013 start the ride";
+  /* v2.0m-bn: one green-bar tap. On the way it is "I'm at the pickup"; waiting at the pickup it is "Rider is in" (the same
+     start-ride logic as the card button). A second tap within 1.5 s of arriving is ignored so a double tap can't start the ride. */
+  function schedFsGreenTap() {
+    var t = schedFsTrip(); if (!t) return;
+    if (t.phase === "arrived") { if (Date.now() - (Number(state.schedArrivedTapAt) || 0) < 1500) return; schedBegin(t.id); }
+    else schedArrivedNow();
+  }
   function schedMapBillPlace(bot) {
     if (!bot || typeof document === "undefined") return;
     schedBillHome();
     var t = null, r = null;
-    try { t = schedNavTrip(); r = t ? schedFind(t.id) : null; } catch (e) { r = null; }
+    try { t = schedFsTrip(); r = t ? schedFind(t.id) : null; } catch (e) { r = null; } /* v2.0m-bn */
     var btn = bot.querySelector ? bot.querySelector("#sched-fs-arrived") : null;
     if (!btn) return;
-    var text = schedPickupStatusText(r);
+    var text = t && t.phase === "arrived" ? SCHED_RIDER_IN_TEXT : schedPickupStatusText(r); /* v2.0m-bn: the waiting screen's own action */
     var label = btn.querySelector ? btn.querySelector(".pcs-arrived-label") : null;
     if (!label) {
       label = document.createElement("span");
@@ -10805,10 +10817,11 @@
       "#sched-fs-bottom,#rfs-bar{container-type:inline-size}.pcs-map-green,#sched-fs-arrived{display:block;width:100%;box-sizing:border-box;height:62px;min-height:62px;margin:0;padding:0 10px;font-size:clamp(12px,calc(100cqw / 26),20px);font-weight:800;line-height:58px;text-align:center;background:#0b6b3a;color:#fff;border:2px solid #fff;border-radius:14px;white-space:nowrap;overflow:hidden;text-overflow:clip;position:relative;z-index:1;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.4)}" +
       "#sched-fs-close{display:block;width:100%;min-height:58px;font-size:21px;font-weight:800;background:#d1fae5;color:#0b3d23;border:3px solid #0b3d23;border-radius:14px;margin:0;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.4)}" +
       "#sched-fs-arrived .pcs-arrived-label{display:block;line-height:58px;white-space:nowrap;overflow:hidden;text-overflow:clip}" +
-      "#sched-fs-bottom:not(.nt-bot) #sched-fs-arrived.has-inv{height:auto;min-height:62px;line-height:1.25;white-space:normal;overflow:visible;padding:8px 12px}" +
-      "#sched-fs-bottom:not(.nt-bot) #sched-fs-arrived.has-inv .pcs-arrived-label{line-height:1.25}" +
-      "#sched-fs-arrived #sched-fs-inv{display:block;margin:2px 0 0;font-size:16px;font-weight:800;line-height:1.3;text-align:center;color:#fff;white-space:normal}" +
-      "#sched-fs-arrived #sched-fs-inv a{color:#fff;font-weight:800;text-decoration:underline}" +
+      "#sched-fs-bottom:not(.nt-bot) #sched-fs-arrived.has-inv,#rfs-bar .pcs-map-green.has-inv{height:auto;min-height:62px;line-height:1.25;white-space:normal;overflow:visible;padding:8px 12px}" +
+      "#rfs-bar .pcs-map-green.has-inv{display:flex;flex-direction:column;justify-content:center}" + /* v2.0m-bn: the invoice line sits in the middle of the same bar */
+      "#sched-fs-bottom:not(.nt-bot) #sched-fs-arrived.has-inv .pcs-arrived-label,#rfs-bar .pcs-map-green.has-inv .pcs-arrived-label{line-height:1.25}" +
+      "#sched-fs-arrived #sched-fs-inv,#rfs-bar .pcs-map-green #sched-fs-inv{display:block;margin:2px 0 0;font-size:16px;font-weight:800;line-height:1.3;text-align:center;color:#fff;white-space:normal}" +
+      "#sched-fs-arrived #sched-fs-inv a,#rfs-bar .pcs-map-green #sched-fs-inv a{color:#fff;font-weight:800;text-decoration:underline}" +
       /* v2.0m-bf: this full map sits above the SOS button. Same raise and spot as the in-ride full screen. */
       "body.pcs-fullmap-body #pcs-sos-btn{z-index:2147482100 !important;bottom:auto !important;right:12px !important;top:250px;top:var(--pcs-sos-top,calc(env(safe-area-inset-top,0px) + 250px))}";
     document.head.appendChild(st);
@@ -10834,7 +10847,7 @@
     if (typeof document === "undefined") return;
     var stage = document.getElementById("home-map-stage");
     if (navArrApply(stage)) return; /* v75y test flag: arrival view (returns false right away when the flag is off) */
-    var leg = !!(ROLE === "driver" && schedNavTrip() && stage);
+    var leg = !!(ROLE === "driver" && schedFsTrip() && stage); /* v2.0m-bn: waiting at the pickup too */
     var openB = document.getElementById("sched-fs-open"), top = document.getElementById("sched-fs-top"), bot = document.getElementById("sched-fs-bottom");
     if (!leg) {
       schedBillHome();
@@ -10853,12 +10866,13 @@
     }
     if (liveMap && !liveMap._pcsFullTap) {
       liveMap._pcsFullTap = true;
-      liveMap.on("click", function () { if (schedNavTrip() && !schedFullOn()) schedFullSet(true); }); /* a tap (never a drag) on the small map opens it */
+      liveMap.on("click", function () { if (schedFsTrip() && !schedFullOn()) schedFullSet(true); }); /* v2.0m-bn */ /* a tap (never a drag) on the small map opens it */
     }
     var full = schedFullOn(), was = stage.classList.contains("pcs-fullmap");
     if (full) {
       if (!top) { top = document.createElement("div"); top.id = "sched-fs-top"; stage.appendChild(top); }
       if (navTestOn()) navTestTop(stage, top); else /* v75y test flag */
+      if (!schedNavTrip()) { var waitH = '<div id="sched-wait-fs" role="status" style="' + SCHED_TURN_BOX + '">You\u2019re at the pickup</div>'; if (top.innerHTML !== waitH) top.innerHTML = waitH; } else /* v2.0m-bn: waiting at the pickup: the same top banner with the card's own line (no route left) */
       top.innerHTML = schedTurnHtml().replace('id="sched-turn"', 'id="sched-turn-fs"') + schedEtaHtml("sched-eta-fs"); /* v77.8 ETA box below the banner */
       if (!bot) {
         bot = document.createElement("div"); bot.id = "sched-fs-bottom";
@@ -10868,11 +10882,11 @@
         arrived.addEventListener("click", function (e) {
           if (e.target && e.target.closest && e.target.closest("a")) { e.stopPropagation(); return; }
           e.stopPropagation();
-          schedArrivedNow();
+          schedFsGreenTap(); /* v2.0m-bn */
         });
         arrived.addEventListener("keydown", function (e) {
           if (e.target && e.target.closest && e.target.closest("a")) return;
-          if (e.key === "Enter" || e.key === " ") { e.preventDefault(); schedArrivedNow(); }
+          if (e.key === "Enter" || e.key === " ") { e.preventDefault(); schedFsGreenTap(); }
         });
         bot.querySelector("#sched-fs-close").addEventListener("click", function (e) { e.stopPropagation(); schedFullSet(false); });
         stage.appendChild(bot);
@@ -11003,7 +11017,7 @@
   }
   function rfsSig(M) {
     var t = meterTollView(M), ed = meterTollEditable(M) && t.on;
-    return [state.meterConfirmEnd ? 1 : 0, ed ? 1 : 0, t.count, t.cents, t.kind, state.meterTollEdit ? 1 : 0, M.prepaid ? 1 : 0, M.tierLabel || "", meterShown(M) ? "m" : rideInvoiceSig(meterInvInfo(M)), state.meterBusy ? 1 : 0, rideEstHtml(M, "x")].join("|");
+    return [state.meterConfirmEnd ? 1 : 0, ed ? 1 : 0, t.count, t.cents, t.kind, state.meterTollEdit ? 1 : 0, M.prepaid ? 1 : 0, M.tierLabel || "", meterShown(M) ? "m" : rideInvoiceSig(meterInvInfo(M)), state.meterBusy ? 1 : 0, rideEstHtml(M, "x"), rfsGreenHtml(M)].join("|"); /* v2.0m-bn: green bar */
   }
   /* v2.0k r5 (Matthew 10/25: "THE ONLY TIME THAT I WANTED THE ESTIMATED PRICE WAS UNDER METERED RIDE OR CASH RIDE"):
      the "Estimated cost" line shows ONLY on a Metered ride and on a Cash calendar ride. Card, Square / invoice and set-fare rides: no line.
@@ -11056,6 +11070,15 @@
     return e ? '<p class="ride-est" id="' + id + '" data-est-from="' + e.from + '" role="status" style="margin:4px 0;font-size:20px;font-weight:800;text-align:center">' + esc(e.text) + "</p>" : "";
   }
   if (typeof window !== "undefined") window.__pcsV20kEst = { cost: rideEstCost, html: rideEstHtml };
+  /* v2.0m-bn (Matthew 11/12: "fix my damn green bar"): the SAME solid dark green bar as the pickup map (.pcs-map-green +
+     fsMapInvoiceHtml), from the board ride this meter is linked to: "Invoice #NNNNNN \u00b7 Paid \u00b7 View receipt" or
+     "\u00b7 Unpaid \u00b7 Pay invoice". No invoice number, no bar. This screen keeps its own buttons (End ride, Close map, Add toll). */
+  function rfsGreenRide(M) { var r = null; try { r = M && M.schedId ? schedFind(M.schedId) : null; } catch (e) { r = null; } return r && r.status !== "cancelled" && r.status !== "canceled" ? r : null; }
+  function rfsGreenHtml(M) {
+    var inv = "";
+    try { var r = rfsGreenRide(M); inv = r ? fsMapInvoiceHtml(r) : ""; } catch (e) { inv = ""; }
+    return inv ? '<div id="rfs-green" class="pcs-map-green has-inv" role="status">' + inv + "</div>" : "";
+  }
   function rfsBarHtml(M) {
     var f = meterFare(M), t = meterTollInfo(M), pp = M.prepaid;
     var shown = meterShown(M);
@@ -11072,6 +11095,7 @@
         (t.count && po ? '<button type="button" class="rfs-toll-line" id="rfs-toll-line" data-rfs="tollline" aria-label="' + esc(t.label + " " + money(t.cents) + ". Tap to change the amount") + '">' + esc(t.label) + " <b>" + money(t.cents) + "</b></button>" +
           '<button type="button" class="rfs-toll-undo" id="rfs-toll-undo" data-rfs="tollundo">Undo</button>' : "") + "</div>";
     }
+    html += rfsGreenHtml(M); /* v2.0m-bn */
     if (state.meterConfirmEnd) {
       html += '<p class="rfs-ask" id="rfs-ask">End this ride?' + (!ridePriceOk(M) ? "" : M.prepaid ? " " + invoiceFareText(M.prepaid) + "." : shown ? " Meter " + money(f.sub) + "." : "") + "</p>" +
         '<div class="rfs-actions"><button type="button" class="rfs-end" id="rfs-end-yes" data-rfs="endyes">Yes, end ride</button>' +
@@ -11111,7 +11135,7 @@
       if (document.body.classList.contains("pcs-rfs-body")) { document.body.classList.remove("pcs-rfs-body"); document.body.style.overflow = ""; }
       return;
     }
-    fsStyle();
+    fsStyle(); schedFullStyle(); /* v2.0m-bn: the shared green bar CSS (.pcs-map-green) */
     var M = state.meter;
     var open = document.getElementById("rfs-open");
     if (!open) {
@@ -11138,7 +11162,7 @@
     if (full) rfsTick();
   }
   if (typeof window !== "undefined") {
-    window.__pcsRideFull = { on: function () { return rfsOn(); }, set: function (v) { rfsSet(!!v); }, apply: function () { rfsApply(); }, mph: function () { return fsMphNow(); },
+    window.__pcsRideFull = { green: rfsGreenHtml, fsTrip: function () { return schedFsTrip(); }, greenTap: function () { schedFsGreenTap(); }, on: function () { return rfsOn(); }, set: function (v) { rfsSet(!!v); }, apply: function () { rfsApply(); }, mph: function () { return fsMphNow(); },
       sample: function (lat, lng, now, speed) { var keep = meterSpdPts; meterSpdPts = fsSpdPts; try { meterSpeedSample(fsSpd, lat, lng, now, speed); } finally { fsSpdPts = meterSpdPts; meterSpdPts = keep; } return meterMphNow(fsSpd, now); } }; /* test hooks */
     setInterval(function () { try { fsMphPaint(); if (document.getElementById("rfs-bar")) { rfsApply(); } } catch (e) {} }, 1000);
   }
@@ -11706,7 +11730,7 @@
   }
   if (typeof window !== "undefined" && typeof location !== "undefined") try { var ntq = /[?&]navtest=([01])\b/.exec(location.search || ""); if (ntq) { if (ntq[1] === "1") localStorage.setItem(NAVTEST_KEY, "1"); else localStorage.removeItem(NAVTEST_KEY); } } catch (e) {} /* v75y */
   if (typeof window !== "undefined") window.__pcsSchedFull = { key: schedFullKey, on: function () { return schedFullOn(); }, set: function (v) { schedFullSet(v); }, apply: function () { schedFullApply(); } }; /* test hook */
-  if (typeof window !== "undefined") setInterval(function () { try { if (schedNavTrip()) { schedNavPaint(); schedNavOffCheck(Date.now()); schedNavFetch(false); var bot = document.getElementById("sched-fs-bottom"); if (bot && !navTestOn()) { schedMapBillPlace(bot); schedFsMeasure(); } } } catch (e) {} }, 2000);
+  if (typeof window !== "undefined") setInterval(function () { try { if (schedNavTrip()) { schedNavPaint(); schedNavOffCheck(Date.now()); schedNavFetch(false); var bot = document.getElementById("sched-fs-bottom"); if (bot && !navTestOn()) { schedMapBillPlace(bot); schedFsMeasure(); } } else if (schedFsTrip()) { var botW = document.getElementById("sched-fs-bottom"); if (botW && !navTestOn()) { schedMapBillPlace(botW); schedFsMeasure(); } } } catch (e) {} }, 2000); /* v2.0m-bn: waiting too */
   /* ---------- v75y TEST FLAG ONLY (Matthew 10/16, Uber reference screenshots): every function below runs only when
      navTestOn() is true (see NAVTEST_KEY). Pickup leg: big black turn card (arrow, distance, street, "toward" the next street),
      heading-up map with the arrow marker, speed-limit badge on the left (only when the road's limit is known), slim bottom bar
@@ -12138,6 +12162,7 @@
       meterStart();
       state.meterSchedPending = null; state.schedStartId = "";
       if (state.meter && state.meter.schedId === id) {
+        try { schedFullClear(schedTripNow()); } catch (eFs) {} /* v2.0m-bn: the waiting full map's key ends with the leg */
         schedTripSave(null);
         state.schedMsg = "";
         schedPatch(id, { pickedUpAt: Date.now(), meterCode: state.meter.code });
