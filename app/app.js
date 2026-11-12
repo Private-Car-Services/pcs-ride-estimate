@@ -9813,7 +9813,13 @@
   /* v2.0a (Matthew 10/22): the running meter (fare so far / estimate) shows ONLY on a ride started as "Metered" (the v70
      Metered ride button; real or rate comparison). Every other ride (scheduled / calendar, set fare, invoice, unknown)
      hides it everywhere and shows the invoice # + Paid (green) / Unpaid (red). Explicit flag; unknown = hidden. Pure (tested). */
-  function meterShown(M) { return !!(M && M.metered === true && !M.schedId); }
+  function meterShown(M) { return !!(M && M.metered === true && (!M.schedId || M.schedMeter === true)); } /* v2.0m-bm: or a metered scheduled ride (schedMeter) */
+  /* v2.0m-bm (Matthew/Harry 11/11): a scheduled ride booked as a meter job. The board has no flag for it; the calendar title /
+     rider says "(Metered ride)" (e.g. "PCS Pick up Mike Black (Metered ride)"). Pure (tested). */
+  function schedMeterJob(r) { if (!r) return false; var t = [r.title, r.rider, r.notes, r.description].map(function (x) { return String(x || ""); }).join(" "); return /\bmetered ride\b/i.test(t); }
+  /* v2.0m-bm: a scheduled ride is headed to / at the pickup, so the standalone Metered ride Start is blocked. */
+  var SCHED_METER_BLOCK_MSG = "Finish or cancel the scheduled ride first.";
+  function schedBlocksMeter() { try { var t = schedTripNow(); if (t && t.id && t.phase !== "done") return true; var lk = rideLockRec(); return !!(lk && lk.k === "sched" && !state.meter); } catch (e) { return false; } } /* Harry: "Back to the list" keeps the sched lock -> still blocked */
   function rideInvoiceInfo(r, M) {
     r = r || {}; var pp = M && M.prepaid ? M.prepaid : null, q = r.sqInvoice && typeof r.sqInvoice === "object" ? r.sqInvoice : null;
     var no = String(r.prepaidInvoiceNo || r.invoiceNo || (q && (q.invoiceNumber || q.number)) || (pp && pp.invoiceNo) || "").replace(/^#/, "").trim();
@@ -12140,6 +12146,8 @@
       render();
     });
   }
+  if (typeof window !== "undefined") window.__pcsSchedMeter = { state: function () { return state; }, begin: schedBegin, start: meterStart, end: meterFinishEnd, paid: function (d) { meterOnPaid(d); }, clear: function () { meterClear(); }, /* v2.0m-bm test hook */
+    shown: meterShown, job: schedMeterJob, blocks: schedBlocksMeter, locked: function () { return driverRideLocked(); }, tripSave: schedTripSave, screen: function () { return meterScreen(); }, msg: SCHED_METER_BLOCK_MSG };
   function schedBind() {
     if (typeof document === "undefined") return;
     (state.scheduledRides || []).forEach(function (r) { if (r && r.dropoff && String(r.assignedDriverId || "") && r.status !== "completed") { try { schedEstimate(r); } catch (e) {} } });
@@ -15525,6 +15533,8 @@
   }
   function meterStart() {
     if (state.meter || !canGoOnline() || driverMidRide()) return;
+    if (!state.schedStartId && !state.meterSchedPending && schedBlocksMeter()) { state.meterError = SCHED_METER_BLOCK_MSG; render(); return; } /* v2.0m-bm: standalone meter blocked during a scheduled ride */
+    if ((state.schedStartId || state.meterSchedPending) && state.meterKind === "comparison") state.meterKind = "meter"; /* Harry: a scheduled start never trips the Comparison checks */
     if (state.meterKind === "comparison" && !cmpAllowed()) { state.meterKind = "meter"; render(); return; } /* v2.0m-e */
     if (state.meterKind === "comparison" && !cmpRideType(state.cmpService, state.cmpType)) { state.meterError = state.cmpService === "lyft" ? "Lyft ride types are coming soon. Pick Uber for now." : "Pick Uber or Lyft and the ride type first."; render(); return; } /* v2.0m-e */
     var now = Date.now();
@@ -15551,7 +15561,7 @@
     if (M.meterKind === "comparison") M.cmp = { service: state.cmpService, rideType: cmpRideType(state.cmpService, state.cmpType), charged: (state.cmpDraft || {}).charged || "", paid: (state.cmpDraft || {}).paid || "" }; /* the tab boxes ride along with the saved meter */ /* v2.0m-e: filled in from the dropdowns */
     if (M.meterKind === "comparison") { var cpa = String(state.cmpFromQ || "").trim().slice(0, 160); if (cpa) { M.cmp.pickupAddress = cpa; M.pickupAddress = cpa; } state.cmpFromQ = null; state.cmpFromList = []; cmpFromGeoAt = 0; } /* v2.0m-f: typed pickup */
     if (sr) { M.schedId = sr.id; M.setFareCents = Math.round(Number(sr.fareBeforeTax) * 100); M.schedRider = String(sr.rider || ""); }
-    else if (state.schedStartId) { var srx = schedFind(state.schedStartId); if (srx) { M.schedId = srx.id; M.schedRider = String(srx.rider || ""); M.pickupAddress = String(srx.pickup || "").slice(0, 160); } } /* v75r: metered scheduled ride */
+    else if (state.schedStartId) { var srx = schedFind(state.schedStartId); if (srx) { M.schedId = srx.id; M.schedRider = String(srx.rider || ""); M.pickupAddress = String(srx.pickup || "").slice(0, 160); if (schedMeterJob(srx)) { M.metered = true; M.schedMeter = true; M.meterKind = "meter"; } } } /* v75r: metered scheduled ride */ /* v2.0m-bm: a "(Metered ride)" booking runs the visible meter on this same ride */
     state.schedStartId = "";
     if (M.schedId) { var ppr = prepaidOf(schedFind(M.schedId)); if (ppr) M.prepaid = verifiedPrepaid(ppr, verInv[M.schedId]); } /* v75v; v77.11 r2 Worker amount */
     M.startFlags = rideSessionFlags(null, now, Number(state.gpsAt) || 0); /* v77.10: stale GPS at Start */
@@ -16624,13 +16634,14 @@
     var back = '<div class="app-nav"><button class="btn ghost" type="button" id="meter-back">← Back to map</button></div>';
     if (!M) {
       var band = meterBand(new Date(Date.now()));
-      var ready = canGoOnline() && !driverMidRide();
+      var schedBlk = schedBlocksMeter(); /* v2.0m-bm */
+      var ready = canGoOnline() && !driverMidRide() && !schedBlk;
       return (
         back + '<section id="meter-ready" class="meter-split">' +
         '<div class="meter-col">' + (meterSandbox() ? meterTestTag({ sandbox: true }) : "") +
         '<h2 class="meter-h2">Metered ride</h2>' + meterKindPickHtml() + meterModeHtml(band.key, band.label, "meter-mode") +
         '<details class="card meter-rates-box" id="meter-rates-box"><summary>Rates · starts ' + esc(money(band.entryCents)) + " · " + esc(money(band.cents)) + "/mi</summary>" + meterRatesHtml(band) + "</details>" +
-        (ready ? "" : '<p class="error" id="meter-gate">Finish the steps on Home (approval, car details and starting odometer) before starting a metered ride.</p>') +
+        (ready ? "" : schedBlk ? '<p class="error" id="meter-gate">' + esc(SCHED_METER_BLOCK_MSG) + "</p>" /* v2.0m-bm */ : '<p class="error" id="meter-gate">Finish the steps on Home (approval, car details and starting odometer) before starting a metered ride.</p>') +
         '<p class="fine" id="meter-gps">' + esc(meterGpsLine(null)) + "</p>" +
         meterTripHtml(null) + /* v72t: Regular / To airport / From airport */
         meterRouteHtml("ready") + /* v72s: From / + Add a stop / To */
