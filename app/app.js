@@ -9819,7 +9819,7 @@
   function schedMeterJob(r) { if (!r) return false; var t = [r.title, r.rider, r.notes, r.description].map(function (x) { return String(x || ""); }).join(" "); return /\bmetered ride\b/i.test(t); }
   /* v2.0m-bm: a scheduled ride is headed to / at the pickup, so the standalone Metered ride Start is blocked. */
   var SCHED_METER_BLOCK_MSG = "Finish or cancel the scheduled ride first.";
-  function schedBlocksMeter() { try { var t = schedTripNow(); return !!(t && t.id && t.phase !== "done"); } catch (e) { return false; } }
+  function schedBlocksMeter() { try { var t = schedTripNow(); if (t && t.id && t.phase !== "done") return true; var lk = rideLockRec(); return !!(lk && lk.k === "sched" && !state.meter); } catch (e) { return false; } } /* Harry: "Back to the list" keeps the sched lock -> still blocked */
   function rideInvoiceInfo(r, M) {
     r = r || {}; var pp = M && M.prepaid ? M.prepaid : null, q = r.sqInvoice && typeof r.sqInvoice === "object" ? r.sqInvoice : null;
     var no = String(r.prepaidInvoiceNo || r.invoiceNo || (q && (q.invoiceNumber || q.number)) || (pp && pp.invoiceNo) || "").replace(/^#/, "").trim();
@@ -15534,6 +15534,7 @@
   function meterStart() {
     if (state.meter || !canGoOnline() || driverMidRide()) return;
     if (!state.schedStartId && !state.meterSchedPending && schedBlocksMeter()) { state.meterError = SCHED_METER_BLOCK_MSG; render(); return; } /* v2.0m-bm: standalone meter blocked during a scheduled ride */
+    if ((state.schedStartId || state.meterSchedPending) && state.meterKind === "comparison") state.meterKind = "meter"; /* Harry: a scheduled start never trips the Comparison checks */
     if (state.meterKind === "comparison" && !cmpAllowed()) { state.meterKind = "meter"; render(); return; } /* v2.0m-e */
     if (state.meterKind === "comparison" && !cmpRideType(state.cmpService, state.cmpType)) { state.meterError = state.cmpService === "lyft" ? "Lyft ride types are coming soon. Pick Uber for now." : "Pick Uber or Lyft and the ride type first."; render(); return; } /* v2.0m-e */
     var now = Date.now();
