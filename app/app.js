@@ -10986,7 +10986,7 @@
       ".rfs-toll{display:flex;flex-wrap:wrap;justify-content:flex-end;align-items:center;gap:6px;max-width:100%;box-sizing:border-box;margin:-2px 0 6px}#rfs-bar .rfs-toll-add{flex:0 0 auto;width:auto;min-height:32px;margin:0;padding:4px 12px;font-size:14px;font-weight:800;border-radius:8px 8px 0 0;background:#bef1c6;color:#0b3d23;border:2px solid #2e9d4f;border-bottom-width:4px;cursor:pointer}" +
       "#rfs-bar .rfs-toll-line{flex:0 0 auto;width:auto;min-height:32px;margin:0;font-size:13px;font-weight:800;border-radius:8px;background:#e8f8ec;color:#0b3d23;border:1px solid #2e9d4f;text-align:left;padding:4px 8px;cursor:pointer}" +
       "#rfs-bar .rfs-toll-undo{flex:0 0 auto;width:auto;min-height:32px;margin:0;font-size:13px;font-weight:700;border-radius:8px;background:#f3f4f6;color:#1a1a1a;border:1px solid #6b7280;padding:4px 8px;cursor:pointer}" +
-      ".rfs-actions{display:flex;gap:8px}#rfs-bar .rfs-end{flex:2 1 0;min-height:62px;margin:0;font-size:24px;font-weight:900;border-radius:14px;color:#fff;border:3px solid #5c0f0f;cursor:pointer}#rfs-bar .rfs-end,#rfs-bar #rfs-green.pcs-map-green{background:#8b1c1c}" +
+      ".rfs-actions{display:flex;gap:8px}#rfs-bar .rfs-end{flex:2 1 0;min-height:62px;margin:0;font-size:24px;font-weight:900;border-radius:14px;color:#fff;border:3px solid #5c0f0f;cursor:pointer}#rfs-bar .rfs-end,#rfs-bar #rfs-green.pcs-map-green.rfs-asking{background:#8b1c1c}" +
       "#rfs-bar .rfs-close{flex:1 1 0;min-height:62px;margin:0;font-size:20px;font-weight:900;border-radius:14px;background:#d1fae5;color:#0b3d23;border:3px solid #0b3d23;cursor:pointer}" +
       "#rfs-bar .rfs-keep{flex:1 1 0;min-height:62px;margin:0;font-size:17px;font-weight:800;border-radius:14px;background:#fff;color:#0b3d23;border:3px solid #0b3d23;cursor:pointer}" +
       ".rfs-ask{margin:0 0 6px;font-size:18px;font-weight:800;color:#0b3d23;text-align:center}" +
@@ -11127,7 +11127,7 @@
     var h = rfsDestPillHtml(M) + rfsTollPillsHtml(M);
     if (box.__h !== h) { box.__h = h; box.innerHTML = h; }
   }
-  /* v2.0m-bn r3 (Harry): the confirm swaps INTO the same red bar (title line = the question), same buttons and handlers */
+  /* v2.0m-bn r4 (Matthew): End ride bar stays the shared dark green with white title; the confirm swaps INTO the bar and turns the old End ride red (title line = the question), same buttons and handlers */
   function rfsAskHtml(M, f, shown) {
     return '<div id="rfs-green" class="pcs-map-green has-inv rfs-asking" role="group" aria-label="End this ride?">' +
       '<span class="pcs-arrived-label" id="rfs-ask">End this ride?' + (!ridePriceOk(M) ? "" : M.prepaid ? " " + invoiceFareText(M.prepaid) + "." : shown ? " Meter " + money(f.sub) + "." : "") + "</span>" +

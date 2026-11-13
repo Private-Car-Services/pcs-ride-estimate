@@ -120,8 +120,10 @@ test("one top banner: pickup and ride use navTurnBannerHtml with the same box", 
   assert.ok(src.indexOf("#meter-map-stage.pcs-rfs #meter-eta-chip{display:none !important}") >= 0, "no chip in the banner slot on the ride map");
 });
 
-test("rev 3: End ride bar is the old End ride red (no new color), the confirm swaps into the bar, the title is the largest line", function () {
-  assert.ok(src.indexOf("#rfs-bar .rfs-end,#rfs-bar #rfs-green.pcs-map-green{background:#8b1c1c}") >= 0, "same red as the old End ride button");
+test("rev 4: End ride bar stays the pickup map's dark green with a white title; red is only the confirm bar and Yes, end ride", function () {
+  assert.ok(src.indexOf(".pcs-map-green,#sched-fs-arrived{") >= 0 && src.indexOf("background:#0b6b3a;color:#fff") >= 0, "shared dark green + white title text");
+  assert.ok(src.indexOf("#rfs-bar .rfs-end,#rfs-bar #rfs-green.pcs-map-green.rfs-asking{background:#8b1c1c}") >= 0, "red only on the confirm bar and Yes, end ride");
+  assert.equal(src.indexOf("#rfs-bar .rfs-end,#rfs-bar #rfs-green.pcs-map-green{background:#8b1c1c}"), -1, "the End ride bar itself is not red");
   assert.equal((src.match(/#8b1c1c/g) || []).length, 1, "no second copy of the red");
   assert.ok(src.indexOf('return \'<div id="rfs-green" class="pcs-map-green has-inv rfs-asking" role="group" aria-label="End this ride?">\' +') >= 0 && src.indexOf('html += rfsAskHtml(M, f, shown);') >= 0);
   assert.ok(src.indexOf('id="rfs-end-yes" data-rfs="endyes">Yes, end ride</button>') >= 0 && src.indexOf('id="rfs-end-keep" data-rfs="endkeep">') >= 0, "same confirm buttons and handlers");
