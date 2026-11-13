@@ -3816,11 +3816,11 @@
       fluidsDays: (function () { try { return Number(localStorage.getItem("pcs-dvir-fluids-days")) || 7; } catch (e) { return 7; } })(), /* v74: God-editable fluids interval */
       dvirItems: (function () { try { return JSON.parse(localStorage.getItem("pcs-dvir-cfg") || "null"); } catch (e) { return null; } })(), /* God-mode checklist (rides/DVIRCFG) */
       cityAt: dlCityAt, canSign: true, odoNow: state.milesStartOdo, odoCheck: dvirOdoCheck, /* v75u */ plates: (function () { try { var m = state.vmMine || {}; return Object.keys(m).map(function (k) { return normalizePlate((m[k] && m[k].plate) || ""); }).filter(Boolean); } catch (e) { return []; } })(), /* v2.0i: plate picker choices */
-      signOf: function (d) { return dlRec("signs")[d] || (hist.signs || {})[d] || null; },
+      signOf: function (d) { var l = dlRec("signs")[d], sv = (hist.signs || {})[d]; if (sv && sv.needsSign && !(l && Number(l.at) > Number(sv.editedAt))) return sv; /* v2.0m-bq: God edited the day after this phone's signature */ return l || sv || null; },
       onSign: function (d, rec) { dlPut("signs", d, rec); },
-      dvirOf: function (d, k) { var a = dlRec("dvir")[d] || {}, b2 = (hist.dvir || {})[d] || {}; var r = a[k] || b2[k] || null; if (r && b2[k] && b2[k].cleared) r = Object.assign({}, r, { cleared: b2[k].cleared });
+      dvirOf: function (d, k) { var a = dlRec("dvir")[d] || {}, b2 = (hist.dvir || {})[d] || {}; if (b2[k] && b2[k].deleted === true) return null; /* v2.0m-bq: God deleted it */ var r = (b2[k] && b2[k].godOrig ? b2[k] : null) || a[k] || b2[k] || null; /* v2.0m-bq: a God edit wins over this phone's copy */ if (r && b2[k] && b2[k].cleared) r = Object.assign({}, r, { cleared: b2[k].cleared });
         if (r && k === "post" && d === dlToday()) { var pst = 0; try { pst = signedIn() ? currentShiftSince() : 0; } catch (e) {} if (pst && Number(r.at) < pst) return null; } /* v76h (Matthew 10/18): inspections belong to the SHIFT. A post-trip from BEFORE this shift / login (e.g. 1:52 AM, shift opened 1:39 PM) is the earlier shift's; show a fresh form (the earlier one stays in the day history) */
-        if (r && k === "pre" && d === dlToday()) { var ps = null; try { ps = preTripState(now); } catch (e) {} if (r.carriedOver || !(ps && ps.ok && Number(ps.rec.at) === Number(r.at))) return null; } /* v76d-pretrip: a pre-trip that no longer counts never shows as done */
+        if (r && k === "pre" && d === dlToday()) { var ps = null; try { ps = preTripState(now); } catch (e) {} if (r.carriedOver || !(ps && ps.ok && (Number(ps.rec.at) === Number(r.at) || Number(ps.rec.at) === Number((r.godOrig || {}).at)))) return null; } /* v2.0m-bq: display only; the pre-trip gate is unchanged */ /* v76d-pretrip: a pre-trip that no longer counts never shows as done */
         return r; },
       vehDates: function () { var pl = normalizePlate(acc.carPlate || "") || "car"; try { return (JSON.parse(localStorage.getItem("pcs-dvir-veh") || "{}") || {})[pl] || ((hist.veh || {})[pl]) || {}; } catch (e) { return {}; } },
       onDvir: function (d, k, rec) { /* registration / insurance / car-wash dates remembered per vehicle (plate): local + rides/DVIRVEH/{plate} */
@@ -4400,6 +4400,8 @@
   }
   window.__pcsDriverLog = { data: driverLogData, open: openDriverLog };
   window.__pcsPretrip = { state: function (n) { return preTripState(n); }, done: function () { return preTripDoneToday(); }, resetMs: function () { return shiftResetMs(); }, gap: function (t, n) { return offDutyGapAfter(t, n); }, hos: function (n) { return hosStatus(n); }, washBlock: function (n) { return washBlockNow(n); }, vehBlocks: function (n) { return vehAvailBlocks(n); }, washMsg: function () { return qd.washMsg || ""; }, dvirBlock: function () { return dvirBlock(); } }; /* v76d-pretrip test hook */
+  window.__pcsGodLog = { apply: function (r, d, b, o, p) { return godLogApply(r, d, b, o, p); }, trim: function (h, r) { return godLogTrim(h, r); } }; /* v2.0m-bq test hook */
+  window.__pcsHos70 = { fromRecords: function (p, r) { return hosDutyFromRecords(p, r); }, fromRows: function (r) { return hosHistFromRows(r); }, duty: function (n) { return hosDutySegs(n); } }; /* v2.0m-bp test hook */
   /* break intervals [s, e] from this phone + the server copy; an open break on another device runs to its last heartbeat */
   function hosBreaks(now) {
     var out = {}, add = function (r) { if (!r || !(Number(r.s) > 0)) return; var e = Number(r.e) || Number(r.s); var x = out[r.s]; if (!x || e > x[1]) out[r.s] = [Number(r.s), e]; };
@@ -4982,7 +4984,7 @@
         var x = sh[k] || {}, a = Number(x.shiftStartedAt) || Number(k), b = Number(x.shiftEndedAt) || 0;
         if (!(a > 0) || seen[a]) return;
         seen[a] = 1;
-        if (x.hosExcluded) { segs.push([a, a, 0, 1]); return; } /* v72w: God/owner excluded this shift from HOS: zero duty */
+        if (x.hosExcluded) { segs.push([a, b >= a ? b : a, 0, 1]); return; } /* v72w: God/owner excluded this shift from HOS: zero duty (v2.0m-bp: end kept so recorded pieces inside it are dropped too) */
         if (!(b >= a)) return; /* v72w: a shift closed at its start (b == a) still caps the phone's local copy */
         var mi = Number(x.trackedMiles); if (!(mi >= 0)) mi = Number(x.odoMiles) || 0;
         segs.push([a, b, Math.max(0, mi)]);
@@ -4991,6 +4993,37 @@
       if (oa > 0 && ob > oa && !seen[oa] && r.shiftClosed !== true) { seen[oa] = 1; segs.push([oa, ob, -1]); }
     });
     return segs.sort(function (x, y) { return x[0] - y[0]; });
+  }
+  /* v2.0m-bq (Matthew 11/12: God-only Driver's Log edits). Runs on each server history pull, BEFORE the hours code reads it, so
+     hosHistFromRows / hosDutySegs / hosStatus stay untouched and use the edited values: a God-deleted shift reads as excluded from
+     HOS; this phone's own cached copies that a God edit replaced (driving spans, Break / Offline records, on-duty pieces cut from an
+     edited shift) are trimmed; God-deleted Driving / Break / Offline records are left out. The server keeps every original. */
+  function godLogApply(rows, drvObj, brkObj, offObj, pcObj) {
+    var GE = window.PCSDriverLog && window.PCSDriverLog.godEdit, out = { drive: drvObj, breaks: brkObj, offline: offObj, pieces: pcObj };
+    if (!GE) return out;
+    (rows || []).forEach(function (r) { var sh = r && r.shifts && typeof r.shifts === "object" ? r.shifts : {};
+      Object.keys(sh).forEach(function (k) { var x = sh[k]; if (x && x.deleted === true && !x.hosExcluded) { x.hosExcluded = true; x.hosExcludedBy = x.deletedBy || "God mode"; x.hosExcludedAt = x.deletedAt; x.hosExcludedReason = x.deleteReason || "deleted in God mode"; } }); });
+    var m = GE.mask({ drive: drvObj, breaks: brkObj, offline: offObj }), cuts = GE.shiftCuts(rows || []);
+    if (m.drv.length) { var dl = hosReadDrv(), nd = hosSubtract(dl.map(function (x) { return [Number(x[0]), Number(x[1])]; }), m.drv); if (nd.length !== dl.length || JSON.stringify(nd) !== JSON.stringify(dl)) hosWriteDrv(nd); }
+    var drop = function (o, mk, save) { var ch = false; Object.keys(o).forEach(function (k) { var v = o[k]; if (v && !v.open && (mk[k] || mk[String(Number(v.s))])) { delete o[k]; ch = true; } }); if (ch) save(o); };
+    if (Object.keys(m.brk).length) drop(hosReadBrk(), m.brk, hosWriteBrk);
+    if (Object.keys(m.off).length) drop(hosReadOff(), m.off, function (o) { try { localStorage.setItem(hosOffKey(), JSON.stringify(o)); } catch (e) {} });
+    if (cuts.length) { var lg = hosReadLog(), ch2 = false;
+      Object.keys(lg).forEach(function (k) { var g = lg[k]; if (k === "__cur" || k === "__off" || !g || typeof g !== "object" || g.rest || !(Number(g.e) > Number(g.s))) return;
+        var rest = hosSubtract([[Number(g.s), Number(g.e)]], cuts); if (rest.length === 1 && rest[0][0] === Number(g.s) && rest[0][1] === Number(g.e)) return;
+        ch2 = true; if (!rest.length) { lg[k] = Object.assign({}, g, { e: Number(g.s) }); return; } /* closed at its start = no duty (key kept) */
+        lg[k] = Object.assign({}, g, { s: rest[0][0], e: rest[0][1] }); rest.slice(1).forEach(function (q) { lg[String(q[0])] = Object.assign({}, g, { s: q[0], e: q[1] }); }); });
+      if (ch2) hosWriteLog(lg); }
+    out.drive = GE.live(drvObj); out.breaks = GE.live(brkObj); out.offline = GE.live(offObj); out.pieces = pcObj && typeof pcObj === "object" ? GE.live(pcObj) : pcObj;
+    return out;
+  }
+  /* v2.0m-bq (Harry hold, 9:37 PM): after a God edit shortens or moves a shift, the recorded on-duty list the hours read (server
+     duty pieces + ride segments, h.duty from v2.0m-bp) loses everything outside the edited span. Overlay on the cached list only;
+     the server pieces and ride records are not changed. */
+  function godLogTrim(h, rows) {
+    var GE = window.PCSDriverLog && window.PCSDriverLog.godEdit; if (!GE || !h || !Array.isArray(h.duty) || !h.duty.length) return h;
+    var cuts = GE.shiftCuts(rows || []); if (cuts.length) h.duty = hosSubtract(h.duty, cuts);
+    return h;
   }
   function hosPullHistory() {
     if (ROLE !== "driver" || !syncOn() || !signedIn()) return Promise.resolve(false);
@@ -5004,10 +5037,14 @@
       authFetch(databaseURL() + "/rides/DRVRHSLG/" + encodeURIComponent(id) + "/overrides.json").then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }), /* v73 log */
       authFetch(databaseURL() + "/rides/DRVRHSLG/" + encodeURIComponent(id) + "/days.json").then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }), /* v73 saved days */
       authFetch(databaseURL() + "/rides/DRVRHSLG/" + encodeURIComponent(id) + "/signs.json").then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }),
-      authFetch(databaseURL() + "/rides/DRVRHSLG/" + encodeURIComponent(id) + "/dvir.json").then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; })
+      authFetch(databaseURL() + "/rides/DRVRHSLG/" + encodeURIComponent(id) + "/dvir.json").then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }),
+      /* v2.0m-bp (Matthew 11/12 9:29 PM): the recorded on-duty pieces (rides/DRVRHSLG/{id}/{start}, written by hosTick while
+         Available / on a ride, never while Offline) for the last 16 days; null when the read fails */
+      authFetch(databaseURL() + "/rides/DRVRHSLG/" + encodeURIComponent(id) + ".json?orderBy=" + encodeURIComponent('"$key"') + "&startAt=" + encodeURIComponent('"' + (Date.now() - 16 * 86400000) + '"') + "&endAt=" + encodeURIComponent('"9999999999999"')).then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; })
     ])).then(function (res) {
-      var dvObj = res.pop(), sgObj = res.pop(), daysObj = res.pop(), ovrObj = res.pop(), offObj = res.pop(), brkObj = res.pop(), drvObj = res.pop(), loc = readMilesLocal() || {};
+      var pcObj = res.pop(), dvObj = res.pop(), sgObj = res.pop(), daysObj = res.pop(), ovrObj = res.pop(), offObj = res.pop(), brkObj = res.pop(), drvObj = res.pop(), loc = readMilesLocal() || {};
       days.forEach(function (d, j) { if (!res[j] && loc[d]) res[j] = loc[d]; });
+      try { var gx = godLogApply(res, drvObj, brkObj, offObj, pcObj); drvObj = gx.drive; brkObj = gx.breaks; offObj = gx.offline; pcObj = gx.pieces; } catch (e) {} /* v2.0m-bq */
       var drv = [];
       if (drvObj && typeof drvObj === "object") Object.keys(drvObj).forEach(function (k) { var v = drvObj[k] || {}; if (Number(v.e) > Number(v.s)) drv.push([Number(v.s), Number(v.e)]); });
       var brk = [];
@@ -5017,10 +5054,19 @@
       var ovr = [];
       if (ovrObj && typeof ovrObj === "object") Object.keys(ovrObj).forEach(function (k) { var v = ovrObj[k]; if (v && typeof v === "object") ovr.push(Object.assign({ at: Number(v.grantedAt || v.at || k) || 0 }, v)); });
       var rowsByDay = {}; days.forEach(function (d, j) { if (res[j]) rowsByDay[d] = res[j]; });
-      var h = { segs: hosHistFromRows(res), drv: drv, brk: brk, off: off, ovr: ovr, rows: rowsByDay, days: daysObj && typeof daysObj === "object" ? daysObj : {}, signs: sgObj || {}, dvir: dvObj || {}, at: Date.now() };
+      var h = { segs: hosHistFromRows(res), duty: hosDutyFromRecords(pcObj, res), dutyOk: !!(pcObj && typeof pcObj === "object"), drv: drv, brk: brk, off: off, ovr: ovr, rows: rowsByDay, days: daysObj && typeof daysObj === "object" ? daysObj : {}, signs: sgObj || {}, dvir: dvObj || {}, at: Date.now() };
+      try { godLogTrim(h, res); } catch (e) {} /* v2.0m-bq */
       try { localStorage.setItem(hosHistKey(), JSON.stringify(h)); } catch (e) {}
       return true;
     });
+  }
+  /* v2.0m-bp (Matthew 11/12 9:29 PM): 70 h = recorded on-duty time only: the duty pieces the app saved while Available / on a
+     ride, plus every recorded ride segment (miles rows). A whole shift (pre-trip to post-trip) is no longer filled in. */
+  function hosDutyFromRecords(pcObj, rows) {
+    var out = [];
+    if (pcObj && typeof pcObj === "object") Object.keys(pcObj).forEach(function (k) { var v = pcObj[k]; if (!/^\d{13}$/.test(k) || !v || typeof v !== "object" || v.rest) return; var s = Number(v.s) || 0, e = Number(v.e) || 0; if (s > 0 && e - s >= HOS_MIN_PIECE_MS) out.push([s, e]); });
+    (rows || []).forEach(function (r) { var rs = r && r.rideSegments; if (!rs || typeof rs !== "object") return; Object.keys(rs).forEach(function (k) { var x = rs[k] || {}, s = Number(x.start) || 0, e = Number(x.end) || 0; if (s > 0 && e > s) out.push([s, e]); }); });
+    return hosMerge(out);
   }
   function hosMerge(list) {
     var a = list.slice().sort(function (x, y) { return x[0] - y[0]; }), out = [];
@@ -5043,9 +5089,12 @@
   function hosDutySegs(now) {
     var st = hosShiftStart();
     var log = hosReadLog();
-    var hist = hosReadHist().segs, histEnd = {};
+    var hh = hosReadHist(), hist = hh.segs, histEnd = {};
     hist.forEach(function (g) { histEnd[String(g[0])] = { e: g[1], closed: g[2] !== -1, x: !!g[3] }; });
-    var segs = hist.filter(function (g) { return !g[3] && g[1] > g[0]; }).map(function (g) { return [g[0], Math.min(g[1], now)]; });
+    var spans = hist.filter(function (g) { return !g[3] && g[1] > g[0]; }).map(function (g) { return [g[0], Math.min(g[1], now)]; });
+    /* v2.0m-bp: recorded pieces + rides replace the whole-shift spans; an older copy with no record list keeps the spans */
+    var recd = hh.dutyOk && Array.isArray(hh.duty) ? hh.duty.map(function (x) { return [Number(x[0]), Math.min(Number(x[1]), now)]; }).filter(function (x) { return x[1] > x[0]; }) : null;
+    var segs = recd ? recd : spans;
     Object.keys(log).forEach(function (k) {
       var g = log[k];
       if (k === "__cur" || k === "__off" || !g || typeof g !== "object" || g.rest) return;
@@ -5060,7 +5109,13 @@
       if (srvEnd && srvEnd.closed) e0 = Math.min(e0, srvEnd.e);
       if (s0 > 0 && e0 >= s0 && (Math.min(e0, now) - s0 >= HOS_MIN_PIECE_MS || (mine && e0 === now))) segs.push([s0, Math.min(e0, now)]); /* v75: closed pieces under 2 min don't count */
     });
-    if (st && !log[String(st)] && !log.__cur) segs.push([st, Math.min(now, st + HOS_HEARTBEAT_GAP_MS)]);
+    var offNow = false; try { offNow = qOffline(); } catch (e) {}
+    if (st && !log[String(st)] && !log.__cur && !log.__off && !offNow) segs.push([st, Math.min(now, st + HOS_HEARTBEAT_GAP_MS)]); /* v2.0m-bp: never while Offline (pre-trip done, not Available yet) */
+    if (recd) {
+      spans.forEach(function (g) { if (hosOverlap(segs, g[0], g[1]) <= 0) segs.push(g); }); /* a shift with no recorded piece or ride at all (older data): old whole-shift count */
+      var ex = hist.filter(function (g) { return g[3] && g[1] > g[0]; }).map(function (g) { return [g[0], g[1]]; });
+      if (ex.length) segs = hosSubtract(segs, ex); /* God-excluded shifts stay at zero */
+    }
     return hosMerge(segs.filter(function (x) { return x[1] >= x[0]; }));
   }
   function hosOverlap(list, from, to) {

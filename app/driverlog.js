@@ -43,8 +43,8 @@
       var restC = data.currentStatus && tot[data.currentStatus] != null && data.currentStatus !== "sb" ? data.currentStatus : (cur ? cur.c : "off");
       tot[restC] += len - future;
       var row = (data.rows || {})[d] || null, odo = odoOf(row);
-      var edits = editsOf(row).concat((data.overrides || []).filter(function (o) { var t = Number(o.at || o.grantedAt) || 0; return t >= t0 && t < t1; }).map(function (o) {
-        return { at: Number(o.at || o.grantedAt), what: (o.auto ? "" : "God mode ") + (o.kind || "override") + (o.hours ? " (" + o.hours + " h)" : ""), by: o.by || "God mode", reason: o.reason || "" };
+      var edits = editsOf(row).concat((data.overrides || []).filter(function (o) { var t = Number(o.at || o.grantedAt) || 0; return o.logDay ? o.logDay === d : t >= t0 && t < t1; }) /* v2.0m-bq: a God log edit shows on the day it changed */.map(function (o) {
+        return { at: Number(o.at || o.grantedAt), what: (o.auto ? "" : "God mode ") + (o.kind || "override") + (o.logDay && o.what ? ": " + o.what : "") + (o.hours ? " (" + o.hours + " h)" : ""), by: o.by || "God mode", reason: o.reason || "" };
       }));
       out.push({ restCode: restC, day: d, start: t0, minutes: len, upTo: future, segs: segs, totals: tot, odo: odo, edits: edits });
     }
@@ -70,7 +70,7 @@
     Object.keys(sh).forEach(function (k) {
       var x = sh[k] || {};
       if (x.hosExcluded) out.push({ at: Number(x.hosExcludedAt || k) || 0, what: "Shift excluded from HOS", by: x.hosExcludedBy || x.editedBy || "God mode", reason: x.hosExcludedReason || x.reason || x.editReason || "" });
-      if (x.editedBy || x.editReason || x.godEdit) out.push({ at: Number(x.editedAt || k) || 0, what: "Shift edited in God mode", by: x.editedBy || "God mode", reason: x.editReason || x.reason || "" });
+      if ((x.editedBy || x.editReason || x.godEdit) && !x.godOrig && !x.deleted) out.push({ at: Number(x.editedAt || k) || 0, what: "Shift edited in God mode", by: x.editedBy || "God mode", reason: x.editReason || x.reason || "" });
       if (x.odoRepaired) out.push({ at: Number(x.odoRepaired.at) || 0, what: "Odometer corrected " + x.odoRepaired.from + " \u2192 " + x.odoRepaired.to, by: x.odoRepaired.by || "app", reason: x.odoRepaired.why || "" });
     });
     return out;
@@ -136,13 +136,13 @@
   function dayHash(day) { var t = JSON.stringify([day.segs.map(function (x) { return [x.c, x.a, x.b]; }), day.odo.start, day.odo.end, day.edits.length]), h = 0; for (var i = 0; i < t.length; i++) h = (h * 31 + t.charCodeAt(i)) | 0; return String(h); }
   function sigState(day, meta) { var r = meta.signOf ? meta.signOf(day.day) : null; if (!r || !r.img) return { r: null, stale: false }; var live = day.upTo >= day.minutes ? dayHash(day) : r.hash; return { r: r, stale: r.hash !== live }; }
   function signHtml(day, meta) {
-    var ss = sigState(day, meta), r = ss.r;
+    var ss = sigState(day, meta), r = ss.r, raw = meta.signOf ? meta.signOf(day.day) : null, needs = !r && !!(raw && raw.needsSign); /* v2.0m-bq: a God edit cleared the signature */
     return '<div class="dl-sign" style="background:#fff;padding:16px;text-align:center;color:#444">' +
       '<p class="dl-cert" style="margin:0 0 12px">' + CERT + "</p>" +
       (r && !ss.stale ? '<img class="dl-sig-img" alt="Signature" src="' + esc(r.img) + '" style="max-width:100%;height:160px;object-fit:contain"><div style="border-top:1px solid #333;margin:0 0 8px"></div>' +
           '<p class="dl-signed" style="font-size:13px">Signed by ' + esc(meta.driver || "") + " on " + esc(clock(r.at)) + "</p>"
-        : (ss.stale ? '<p class="dl-resign" style="color:#b91c1c;font-weight:700">This day was edited after it was signed. Please sign again.</p>' : "") +
-          (meta.canSign ? '<canvas id="dl-sig-pad" width="680" height="170" style="width:100%;height:170px;touch-action:none;display:block"></canvas><div style="border-top:1px solid #333"></div>' +
+        : (needs ? '<p class="dl-resign dl-needs-sign" style="color:#b91c1c;font-weight:700">Edited, needs your signature.</p>' : ss.stale ? '<p class="dl-resign" style="color:#b91c1c;font-weight:700">This day was edited after it was signed. Please sign again.</p>' : "") +
+          (meta.canSign || meta.godSign ? '<canvas id="dl-sig-pad" width="680" height="170" style="width:100%;height:170px;touch-action:none;display:block"></canvas><div style="border-top:1px solid #333"></div>' +
             '<p style="margin:10px 0"><a href="#" id="dl-sig-clear" style="color:#2f6fe0;text-decoration:none">Clear Signature</a></p>' +
             '<button type="button" id="dl-sig-save" data-day="' + esc(day.day) + '" style="background:#2f6fe0;color:#fff;border:0;border-radius:8px;padding:10px 18px">Save signature</button>'
             : '<p class="dl-unsigned">Not signed yet.</p>')) + "</div>";
@@ -912,4 +912,136 @@
     if (out !== t.value) t.value = out;
   }, true);
   window.PCSDriverLog = { newerWash: newerWash, washWarnText: washWarnText, washLastText: washLastText, WASH_WARN: WASH_WARN, recView: recView, washLine: washLine, minTimeGate: minTimeGate, fmtDur: fmtDur, motionGate: motionGate, fluidsDue: fluidsDue, readDvir: readDvir, parseMdy: parseMdy, expiryState: expiryState, washState: washState, EXTRAS: DVIR_EXTRAS, items: items, DVIR: DVIR, CERT: CERT, dayHash: dayHash, snapshot: snapshot, historyHtml: historyHtml, build: build, html: html, gridSvg: gridSvg, listHtml: listHtml, mapHtml: mapHtml, drawMap: drawMap, ridesHtml: ridesHtml, mapReset: function () { mapView = null; }, stopTimeAt: function (d, v) { return stopTimeAt(d, v); }, /* v2.0m-s: God day map */ trkRuns: trkRuns, trkTotals: trkTotals, trkPts: trkPts, trkDisplayRuns: trkDisplayRuns, runColor: runColor, runLabel: runLabel, rideTypeCanon: rideTypeCanon, rideDisplay: rideDisplay, pcsAutoRecord: pcsAutoRecord, rideSegmentStaysOpen: rideSegmentStaysOpen, foldRideSegments: foldRideSegments, trackLetter: trackLetter, historyMapSpec: historyMapSpec, historyMapStyle: historyMapStyle, trackLayers: trackLayers, trackGeo: trackGeo, detailHtml: detailHtml, csv: csv, open: open, close: close, download: download, midnight: midnight, CARRIER: CARRIER };
+})();
+/* v2.0m-bq (Matthew 11/12: "I need to be able to edit the drivers log. But only me."): God-mode Driver's Log edits.
+   Pure helpers shared by God mode (the editor) and the driver app (reads the edits). Nothing here writes: God mode sends the
+   ops through the Worker (/god/db, God password / token), which is the only owner-only write path.
+   No edit loses data: each changed field keeps its FIRST value in godOrig/{field}, editedBy / editedAt / editReason say who,
+   when and why, and an audit record goes to rides/DRVRHSLG/{id}/overrides/{at} (shown in the day's "God-mode edits / overrides").
+   A delete is soft: deleted:true + deletedBy / deletedAt / deleteReason; the record stays in storage and drops out of the hour
+   totals (70 h Cycle, Shift, Drive) and the driver's view. Edited values are written in place, so every reader (God view,
+   driver Driver's Log, hosStatus) uses them; mask() tells the driver app which of its own local copies the edit replaced. */
+(function () {
+  "use strict";
+  var L = typeof window !== "undefined" ? window.PCSDriverLog : null; if (!L) return;
+  var TZ = "America/Chicago", IV = { drive: "Driving", breaks: "Break", offline: "Offline" };
+  var FIELDS = { dvir: ["at", "plate", "odometer"], shift: ["shiftStartedAt", "shiftEndedAt", "startOdometer", "endOdometer"], iv: ["s", "e"] };
+  var LABEL = { at: "time", plate: "plate", odometer: "odometer", shiftStartedAt: "start", shiftEndedAt: "end", startOdometer: "opening odometer", endOdometer: "ending odometer", s: "start", e: "end", status: "status" };
+  var TIMEF = { at: 1, shiftStartedAt: 1, shiftEndedAt: 1, s: 1, e: 1 };
+  function ymd(ms) { return new Intl.DateTimeFormat("en-CA", { timeZone: TZ, year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date(ms)); }
+  function addDays(d, n) { return new Date(Date.UTC(+d.slice(0, 4), +d.slice(5, 7) - 1, +d.slice(8, 10)) + n * 86400000).toISOString().slice(0, 10); }
+  function tclock(ms) { try { return new Date(ms).toLocaleTimeString("en-US", { timeZone: TZ, hour: "numeric", minute: "2-digit" }); } catch (e) { return String(ms); } }
+  function show(f, v) { if (v == null || v === "") return "(none)"; return TIMEF[f] && Number(v) > 0 ? tclock(Number(v)) : f === "status" ? (IV[v] || v) : String(v); }
+  function isDel(v) { return !!(v && typeof v === "object" && v.deleted === true); }
+  function edited(v) { return !!(v && typeof v === "object" && (v.godOrig || v.editedBy)); }
+  function n(v) { return v != null && v !== "" && isFinite(Number(v)) ? Number(v) : null; }
+  /* every log entry of one Chicago day: hl = rides/DRVRHSLG/{id}, row = rides/DRVRMLES/{id}/{day} */
+  function entries(day, hl, row) {
+    hl = hl && typeof hl === "object" ? hl : {}; var t0 = L.midnight(day), t1 = L.midnight(addDays(day, 1)), out = [];
+    var dv = (hl.dvir || {})[day] || {};
+    var dvEnt = function (sub, kind, v) { out.push({ key: "dvir:" + sub, type: "dvir", kind: kind, label: (kind === "post" ? "Post-trip" : "Pre-trip") + " inspection", hub: "DRVRHSLG", base: "dvir/" + day, sub: sub + "/", t: n(v.at) || 0,
+      vals: { at: n(v.at), plate: v.plate || "", odometer: v.odometer == null ? "" : v.odometer }, rec: v, deleted: isDel(v), edited: edited(v) }); };
+    ["pre", "post"].forEach(function (k) { if (dv[k] && typeof dv[k] === "object") dvEnt(k, k, dv[k]); });
+    Object.keys(dv.earlier || {}).forEach(function (ek) { var v = dv.earlier[ek]; if (v && typeof v === "object" && /^[A-Za-z0-9_-]{1,40}$/.test(ek)) dvEnt("earlier/" + ek, /^post/.test(ek) ? "post" : "pre", v); });
+    var sh = row && row.shifts && typeof row.shifts === "object" ? row.shifts : {};
+    Object.keys(sh).forEach(function (k) { var x = sh[k]; if (!x || typeof x !== "object" || !/^[A-Za-z0-9_-]{1,80}$/.test(k)) return;
+      var today = ymd(Date.now());
+      out.push({ open: day >= today && !(n(x.shiftEndedAt) > 0), key: "shift:" + k, type: "shift", label: "On duty (shift)", hub: "DRVRMLES", base: day, sub: "shifts/" + k + "/", t: n(x.shiftStartedAt) || n(k) || 0,
+        vals: { shiftStartedAt: n(x.shiftStartedAt) || n(k), shiftEndedAt: n(x.shiftEndedAt), startOdometer: x.startOdometer == null ? "" : x.startOdometer, endOdometer: x.endOdometer == null ? "" : x.endOdometer },
+        rec: x, deleted: isDel(x) || !!x.hosExcluded, excluded: !!x.hosExcluded && !isDel(x), edited: edited(x) }); });
+    Object.keys(IV).forEach(function (c) { var o = hl[c] && typeof hl[c] === "object" ? hl[c] : {};
+      Object.keys(o).forEach(function (k) { var v = o[k]; if (!v || typeof v !== "object" || !(n(v.s) > 0) || !/^[A-Za-z0-9_-]{1,80}$/.test(k)) return; var s = n(v.s), e = n(v.e) || s;
+        if (!(s < t1 && e >= t0)) return;
+        out.push({ key: c + ":" + k, type: "iv", coll: c, label: IV[c], hub: "DRVRHSLG", base: c + "/" + k, sub: "", t: s, vals: { s: s, e: n(v.e), status: c }, rec: v, open: !!v.open && !(n(v.e) > s), deleted: isDel(v), edited: edited(v) }); }); });
+    out.sort(function (a, b) { return a.t - b.t || (a.key < b.key ? -1 : 1); });
+    return out;
+  }
+  function audit(ent, kind, from, to, who, reason, now, day) {
+    var what = ent.label + " " + show(ent.type === "dvir" ? "at" : ent.type === "shift" ? "shiftStartedAt" : "s", ent.type === "dvir" ? ent.vals.at : ent.type === "shift" ? ent.vals.shiftStartedAt : ent.vals.s) + ": " +
+      (kind === "log delete" ? "deleted" : Object.keys(to).map(function (f) { return LABEL[f] + " " + show(f, from[f]) + " \u2192 " + show(f, to[f]); }).join(", "));
+    return { kind: kind, what: what, entry: ent.key, path: "/rides/" + ent.hub + "/{id}/" + ent.base + (ent.sub ? "/" + ent.sub.replace(/\/$/, "") : ""), from: from, to: to, by: who, at: now, grantedAt: now, reason: reason, logDay: day };
+  }
+  /* changes: { field: new value } (times in ms; status = "drive" | "breaks" | "offline" for a Driving / Break / Offline entry).
+     -> { ops: [...] for /god/db } or { error }. */
+  function editOps(id, day, ent, changes, who, reason, now, hl, oldSign) {
+    now = Number(now) || Date.now(); who = String(who || "God mode").slice(0, 80); reason = String(reason || "").trim().slice(0, 200);
+    if (!ent || ent.deleted) return { error: "That entry is deleted." };
+    if (ent.open) return { error: "That entry is still open on the driver's phone. Edit it after it ends." };
+    var flds = ent.type === "dvir" ? FIELDS.dvir : ent.type === "shift" ? FIELDS.shift : FIELDS.iv, from = {}, to = {}, rec = ent.rec || {}, orig = rec.godOrig || {};
+    Object.keys(changes || {}).forEach(function (f) {
+      if (f === "status" || flds.indexOf(f) < 0) return; var nv = changes[f], ov = ent.vals[f];
+      if (TIMEF[f] || f === "odometer" || /Odometer$/.test(f)) nv = nv === "" || nv == null ? null : Number(nv);
+      if (f === "plate") nv = String(nv || "").toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 10);
+      if ((nv === null || nv === "") && (ov === null || ov === "" || ov == null)) return;
+      if (String(nv) === String(ov)) return;
+      if (TIMEF[f] && !(nv > 0)) return; /* a time can't be blanked */
+      if (nv !== null && typeof nv === "number" && !isFinite(nv)) return;
+      from[f] = ov == null ? null : ov; to[f] = nv;
+    });
+    var s = to.s != null ? to.s : ent.vals.s, e = to.e != null ? to.e : ent.vals.e;
+    if (ent.type === "iv" && e != null && s != null && e < s) return { error: "The end is before the start." };
+    var ss = to.shiftStartedAt != null ? to.shiftStartedAt : ent.vals.shiftStartedAt, se = to.shiftEndedAt != null ? to.shiftEndedAt : ent.vals.shiftEndedAt;
+    if (ent.type === "shift" && ss && se && se < ss) return { error: "The end is before the start." };
+    var lim = now + 5 * 60000; if (Object.keys(to).some(function (f) { return TIMEF[f] && to[f] > lim; })) return { error: "A time can't be in the future." };
+    var newSt = ent.type === "iv" && changes && changes.status && IV[changes.status] && changes.status !== ent.coll ? changes.status : "";
+    if (!Object.keys(to).length && !newSt) return { error: "Nothing changed." };
+    var stamp = { editedBy: who, editedAt: now, editReason: reason }, ops = [], base = "/rides/" + ent.hub + "/" + id + "/" + ent.base;
+    if (newSt) { /* Driving / Break / Offline: soft-delete here, the same span is added under the new status (nothing is removed) */
+      var nk = String(Math.round(s)); if (hl && hl[newSt] && hl[newSt][nk]) return { error: "There is already a " + IV[newSt] + " entry starting at that time." };
+      var np = "/rides/DRVRHSLG/" + id + "/" + newSt + "/" + nk;
+      ops.push({ method: "PATCH", path: base, value: { deleted: true, deletedBy: who, deletedAt: now, deleteReason: reason || "status changed to " + IV[newSt], movedTo: np.replace("/" + id + "/", "/{id}/") } });
+      var nr = { s: s, e: e, open: false, movedFrom: base.replace("/" + id + "/", "/{id}/"), godOrig: Object.assign({}, orig, { status: orig.status || ent.coll, s: orig.s != null ? orig.s : ent.vals.s, e: orig.e != null ? orig.e : ent.vals.e }) };
+      ops.push({ method: "PUT", path: np, value: Object.assign(nr, stamp) });
+      from.status = ent.coll; to.status = newSt;
+    } else {
+      var p = {}; Object.keys(to).forEach(function (f) { p[ent.sub + f] = to[f]; if (orig[f] === undefined) p[ent.sub + "godOrig/" + f] = from[f] == null ? "(none)" : from[f]; });
+      Object.keys(stamp).forEach(function (k) { p[ent.sub + k] = stamp[k]; });
+      ops.push({ method: "PATCH", path: base, value: p });
+    }
+    var a = audit(ent, "log edit", from, to, who, reason, now, day); if (oldSign && oldSign.img) a.oldSign = { at: oldSign.at, hash: oldSign.hash || "", img: oldSign.img };
+    ops.push({ method: "PUT", path: "/rides/DRVRHSLG/" + id + "/overrides/" + now, value: a });
+    ops.push(unsignOp(id, day, oldSign, who, now));
+    return { ops: ops, audit: a };
+  }
+  function deleteOps(id, day, ent, who, reason, now, oldSign) {
+    now = Number(now) || Date.now(); who = String(who || "God mode").slice(0, 80); reason = String(reason || "").trim().slice(0, 200);
+    if (!ent || ent.deleted) return { error: "That entry is already deleted." };
+    if (ent.open) return { error: "That entry is still open on the driver's phone. Delete it after it ends." };
+    var p = {}; p[ent.sub + "deleted"] = true; p[ent.sub + "deletedBy"] = who; p[ent.sub + "deletedAt"] = now; p[ent.sub + "deleteReason"] = reason;
+    var a = audit(ent, "log delete", ent.vals, {}, who, reason, now, day); if (oldSign && oldSign.img) a.oldSign = { at: oldSign.at, hash: oldSign.hash || "", img: oldSign.img };
+    return { ops: [{ method: "PATCH", path: "/rides/" + ent.hub + "/" + id + "/" + ent.base, value: p }, { method: "PUT", path: "/rides/DRVRHSLG/" + id + "/overrides/" + now, value: a }, unsignOp(id, day, oldSign, who, now)], audit: a };
+  }
+  /* driver app: which of its OWN local copies a God edit / delete replaced. drv = original driving spans to cut out of the local
+     driving log; brk / off = keys (start ms) of local Break / Offline records to drop (the server copy, edited, is used instead). */
+  function mask(h) {
+    var m = { drv: [], brk: {}, off: {} };
+    var each = function (o, fn) { if (o && typeof o === "object") Object.keys(o).forEach(function (k) { var v = o[k]; if (v && typeof v === "object" && (isDel(v) || v.godOrig)) fn(k, v); }); };
+    each(h && h.drive, function (k, v) { var g = v.godOrig || {}, s = n(g.s) != null ? n(g.s) : n(v.s), e = n(g.e) != null ? n(g.e) : n(v.e); if (s > 0 && e > s) m.drv.push([s, e]); });
+    each(h && h.breaks, function (k, v) { m.brk[k] = 1; var g = v.godOrig || {}; if (n(g.s) > 0) m.brk[String(n(g.s))] = 1; });
+    each(h && h.offline, function (k, v) { m.off[k] = 1; var g = v.godOrig || {}; if (n(g.s) > 0) m.off[String(n(g.s))] = 1; });
+    return m;
+  }
+  /* on-duty time a God edit / delete took OUT of a shift: original span minus the edited span (whole span when deleted).
+     rows = DRVRMLES day rows (object or array). The edited span itself is counted from the shift record. */
+  function shiftCuts(rows) {
+    var cut = [], list = Array.isArray(rows) ? rows : Object.keys(rows || {}).map(function (k) { return rows[k]; });
+    list.forEach(function (r) { var sh = r && r.shifts && typeof r.shifts === "object" ? r.shifts : {};
+      Object.keys(sh).forEach(function (k) { var x = sh[k]; if (!x || typeof x !== "object" || !(isDel(x) || x.godOrig)) return; var g = x.godOrig || {};
+        var os = n(g.shiftStartedAt) > 0 ? n(g.shiftStartedAt) : (n(x.shiftStartedAt) || n(k)), oe = g.shiftEndedAt === "(none)" ? null : (n(g.shiftEndedAt) > 0 ? n(g.shiftEndedAt) : n(x.shiftEndedAt));
+        if (!(os > 0) || !(oe > os)) return;
+        if (isDel(x)) { cut.push([os, oe]); return; }
+        var ns = n(x.shiftStartedAt) || os, ne = n(x.shiftEndedAt) || oe;
+        if (ns > os) cut.push([os, Math.min(ns, oe)]); if (ne < oe) cut.push([Math.max(ne, os), oe]); }); });
+    return cut.filter(function (c) { return c[1] > c[0]; });
+  }
+  /* any edit / delete clears that day's signature: the old one is kept (prevSigns + the audit record); the day reads
+     "Edited, needs your signature" until it is signed again (God mode reuses the Driver's Log signature pad). */
+  function unsignOp(id, day, oldSign, who, now) {
+    var prev = Object.assign({}, (oldSign && oldSign.prevSigns) || {});
+    if (oldSign && oldSign.img) { var o = Object.assign({}, oldSign); delete o.prevSigns; delete o.needsSign; prev[String(Number(o.at) || now)] = o; }
+    return { method: "PUT", path: "/rides/DRVRHSLG/" + id + "/signs/" + day, value: { needsSign: true, editedAt: now, editedBy: who, prevSigns: Object.keys(prev).length ? prev : null } };
+  }
+  function signRec(oldSign, rec, who) { var o = Object.assign({}, rec, { signedBy: who, signedIn: "God mode" }); var prev = oldSign && oldSign.prevSigns; if (prev) o.prevSigns = prev; return o; }
+  function live(o) { var out = {}; if (o && typeof o === "object") Object.keys(o).forEach(function (k) { if (!isDel(o[k])) out[k] = o[k]; }); return out; }
+  L.godEdit = { entries: entries, editOps: editOps, deleteOps: deleteOps, mask: mask, shiftCuts: shiftCuts, unsignOp: unsignOp, signRec: signRec, live: live, isDel: isDel, show: show, ymd: ymd, IV: IV, LABEL: LABEL };
 })();
