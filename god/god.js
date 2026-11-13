@@ -5577,6 +5577,7 @@
               locateBtn +
               '<button type="button" class="btn btn-gold" data-add-ride-driver="' + esc(d.id) + '">+ Add ride</button>' + /* v72d */
               '<button type="button" class="btn btn-ghost" data-driver-log="' + esc(d.id) + '">Driver\u2019s Log (14 days)</button>' + /* v73 */
+              '<button type="button" class="btn btn-ghost" data-dl-edit="' + esc(d.id) + '">Edit Driver\u2019s Log</button>' + /* v2.0m-bq: God only */
               '<button type="button" class="btn btn-ping-driver" data-ping-driver="' + esc(d.id) + '" style="background:#2e7d32;color:#fff;border:0;border-radius:10px;font-weight:800;font-size:17px;min-height:48px;padding:8px 14px;margin:4px 6px 4px 0">Ping driver</button>' + /* v77.10 */
               '<button type="button" class="btn btn-ghost btn-force-logout" data-force-logout="' + esc(d.id) + '"' + (trip ? ' disabled title="Driver is on an active ride"' : "") + ">" + (trip ? "Log out driver (on a ride)" : "Log out driver") + "</button>" + /* v74b */
               '<p class="driver-speed"><strong>Speed</strong> ' + esc(speedTxt) + "</p>" +
@@ -9794,28 +9795,155 @@
       /* v2.0m-l (Matthew 10/28): an open record with no real end (e <= s) used to run to "now" and paint days OFF (Anson since 10/21, Matthew since 10/23).
          Now it runs to "now" only if nothing (duty/drive/break/offline/DVIR) starts after it; otherwise it ends at the next activity start. */
       var opens = [], starts = [];
-      var iv = function (o, arr) { if (o && typeof o === "object") Object.keys(o).forEach(function (k) { var v = o[k] || {}; var s0 = Number(v.s), e0 = Number(v.e) || s0; if (s0 > 0) starts.push(s0); if (v.open && !(e0 > s0)) { if (s0 > 0) opens.push([s0, arr]); return; } if (s0 > 0 && e0 > s0) arr.push([s0, e0]); }); };
-      Object.keys(hl).forEach(function (k) { if (/^\d+$/.test(k)) { var v = hl[k] || {}; if (Number(v.s) > 0) starts.push(Number(v.s)); if (Number(v.s) > 0 && Number(v.e) > Number(v.s)) duty.push([Number(v.s), Number(v.e)]); } });
+      var GE = window.PCSDriverLog && window.PCSDriverLog.godEdit, gdel = function (v) { return !!(v && v.deleted === true); }; /* v2.0m-bq: God-deleted log entries stay stored, out of the log */
+      var iv = function (o, arr) { if (o && typeof o === "object") Object.keys(o).forEach(function (k) { var v = o[k] || {}; if (gdel(v)) return; var s0 = Number(v.s), e0 = Number(v.e) || s0; if (s0 > 0) starts.push(s0); if (v.open && !(e0 > s0)) { if (s0 > 0) opens.push([s0, arr]); return; } if (s0 > 0 && e0 > s0) arr.push([s0, e0]); }); };
+      Object.keys(hl).forEach(function (k) { if (/^\d+$/.test(k)) { var v = hl[k] || {}; if (gdel(v)) return; if (Number(v.s) > 0) starts.push(Number(v.s)); if (Number(v.s) > 0 && Number(v.e) > Number(v.s)) duty.push([Number(v.s), Number(v.e)]); } });
       iv(hl.drive, drive); iv(hl.breaks, breaks); iv(hl.offline, offline);
-      if (hl.dvir && typeof hl.dvir === "object") Object.keys(hl.dvir).forEach(function (d) { var o = hl.dvir[d]; if (o && typeof o === "object") Object.keys(o).forEach(function (k) { var a = Number(o[k] && o[k].at); if (a > 0) starts.push(a); }); });
+      if (hl.dvir && typeof hl.dvir === "object") Object.keys(hl.dvir).forEach(function (d) { var o = hl.dvir[d]; if (o && typeof o === "object") Object.keys(o).forEach(function (k) { if (gdel(o[k])) return; var a = Number(o[k] && o[k].at); if (a > 0) starts.push(a); }); });
       opens.forEach(function (x) { var nx = 0; starts.forEach(function (t) { if (t > x[0] && (!nx || t < nx)) nx = t; }); var e1 = nx || now; if (e1 > x[0]) x[1].push([x[0], e1]); });
       if (hl.overrides && typeof hl.overrides === "object") Object.keys(hl.overrides).forEach(function (k) { var v = hl.overrides[k]; if (v && typeof v === "object") overrides.push(Object.assign({ at: Number(v.grantedAt || v.at || k) || 0 }, v)); });
       Object.keys(miles).forEach(function (d) { var r = miles[d] || {}, sh = r.shifts || {};
-        Object.keys(sh).forEach(function (k) { var x = sh[k] || {}, a = Number(x.shiftStartedAt) || Number(k), b = Number(x.shiftEndedAt) || 0; if (!x.hosExcluded && a > 0 && b > a && !duty.some(function (g) { return g[0] < b && g[1] > a; })) duty.push([a, b]); }); });
+        Object.keys(sh).forEach(function (k) { var x = sh[k] || {}, a = Number(x.shiftStartedAt) || Number(k), b = Number(x.shiftEndedAt) || 0; if (!x.hosExcluded && !gdel(x) && a > 0 && b > a && (x.godOrig || !duty.some(function (g) { return g[0] < b && g[1] > a; }))) duty.push([a, b]); }); });
+      try { var gcut = GE ? GE.shiftCuts(miles) : []; if (gcut.length) duty = gSubtract(duty, gcut); } catch (e) {} /* v2.0m-bq: time God cut from a shift is off duty */
       var pres = (state.drivers || []).concat(state.offlineDrivers || []).filter(function (x) { return x && x.id === id; })[0] || {};
       var sg = hl.signs || {}, dv = hl.dvir || {};
-      return { signOf: function (d) { return sg[d] || null; }, dvirOf: function (d, k) { return (dv[d] || {})[k] || null; }, now: now, days: Math.max(15, Number(state.dlDays && state.dlDays[id]) || 15), snapshots: hl.days && typeof hl.days === "object" ? hl.days : {},
+      return { signOf: function (d) { return sg[d] || null; }, dvirOf: function (d, k) { var r = (dv[d] || {})[k] || null; return gdel(r) ? null : r; }, now: now, days: Math.max(15, Number(state.dlDays && state.dlDays[id]) || 15), snapshots: hl.days && typeof hl.days === "object" ? hl.days : {},
         more: function (n) { state.dlDays = state.dlDays || {}; state.dlDays[id] = n; godDriverLogData(id).then(function (d2) { window.PCSDriverLog.open(window.PCSDriverLog.build(d2), d2, "history:" + (n - 1)); }); },
         duty: duty, drive: drive, breaks: breaks, offline: offline, rows: miles, overrides: overrides,
         driver: ro.name || pres.name || id, vehicle: { year: ro.carYear || pres.carYear || "", make: ro.carMake || pres.carMake || "", model: ro.carModel || pres.carModel || "", plate: ro.carPlate || pres.carPlate || "" } };
     });
   }
+  function gSubtract(a, b) { var out = []; a.forEach(function (x) { var segs = [[Number(x[0]), Number(x[1])]]; b.forEach(function (y) { var nx = []; segs.forEach(function (g) { if (y[1] <= g[0] || y[0] >= g[1]) nx.push(g); else { if (y[0] > g[0]) nx.push([g[0], y[0]]); if (y[1] < g[1]) nx.push([y[1], g[1]]); } }); segs = nx; }); segs.forEach(function (g) { if (g[1] > g[0]) out.push(g); }); }); return out; }
   document.addEventListener("click", function (e) {
     var b = e.target && e.target.closest ? e.target.closest("[data-driver-log]") : null;
     if (!b || !window.PCSDriverLog) return;
     e.preventDefault();
     godDriverLogData(b.getAttribute("data-driver-log")).then(function (d) { window.PCSDriverLog.open(window.PCSDriverLog.build(d), d, "all"); });
   });
+  /* v2.0m-bq (Matthew 11/12, App Updates: "I need to be able to edit the drivers log. But only me." / "I want access to edit"):
+     God-mode-only Driver's Log editor. One driver + one Chicago day: inspections (pre / post / earlier), shifts (on duty), Driving,
+     Break and Offline entries. Edit time / status / plate / odometer, or delete (soft, with a confirm). Every write goes through the
+     Worker's /god/db with the God password / token (owner-only); there is NO direct-database fallback. Nothing is lost: see
+     PCSDriverLog.godEdit (godOrig, editedBy / editedAt / editReason, audit in overrides/{at}, deletes stay stored). Any change
+     clears that day's signature ("Edited, needs your signature"); Matthew signs again here with the Driver's Log signature pad. */
+  var dle = { id: "", day: "", data: null, open: "", msg: "" };
+  function dleTodayYmd() { return new Intl.DateTimeFormat("en-CA", { timeZone: "America/Chicago", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date()); }
+  function dleHm(ms) { if (!(Number(ms) > 0)) return ""; var p = {}; new Intl.DateTimeFormat("en-US", { timeZone: "America/Chicago", hourCycle: "h23", hour: "2-digit", minute: "2-digit" }).formatToParts(new Date(Number(ms))).forEach(function (x) { p[x.type] = x.value; }); return p.hour + ":" + p.minute; }
+  function dleAt(day, hm, after) { /* "HH:MM" on Chicago day -> ms; an end before its start rolls to the next day */
+    var m = /^(\d{1,2}):(\d{2})$/.exec(String(hm || "")), L = window.PCSDriverLog; if (!m || !L) return null;
+    var t = L.midnight(day) + (Number(m[1]) * 60 + Number(m[2])) * 60000;
+    if (dleHm(t) !== ("0" + m[1]).slice(-2) + ":" + m[2]) { var t2 = t - 3600000; if (dleHm(t2) === ("0" + m[1]).slice(-2) + ":" + m[2]) t = t2; else t += 3600000; } /* DST day */
+    if (after && t < after) t += 86400000;
+    return t;
+  }
+  function dleLoad(id, day) {
+    var j = function (u) { return fetch(u, { cache: "no-store" }).then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }); }, hb = baseUrl() + "/rides/DRVRHSLG/" + encodeURIComponent(id);
+    return Promise.all([j(hb + "/dvir/" + day + ".json"), j(hb + "/drive.json"), j(hb + "/breaks.json"), j(hb + "/offline.json"), j(baseUrl() + "/rides/" + encodeURIComponent(MILES_HUB) + "/" + encodeURIComponent(id) + "/" + day + ".json"), j(hb + "/signs/" + day + ".json")]).then(function (r) {
+      var hl = { dvir: {}, drive: r[1] || {}, breaks: r[2] || {}, offline: r[3] || {} }; hl.dvir[day] = r[0] || {};
+      return { hl: hl, row: r[4] || {}, sign: r[5] || null };
+    });
+  }
+  function dleSend(ops) { /* owner-only: the Worker checks the God password / token on every call */
+    var auth = godWriteAuth(); if (!auth) return Promise.reject(new Error("The God password is needed once on this device."));
+    slowKick();
+    return fetch(PAY_WORKER + "/god/db", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(Object.assign({ ops: ops }, auth)) }).then(function (res) {
+      return res.json().catch(function () { return {}; }).then(function (d) {
+        if (d && d.godToken) { try { gqSetTok(d.godToken); gq.pw = ""; gq.tokOn = true; } catch (e) {} }
+        if (res.status === 401) { try { gqSetTok(""); gq.pw = ""; } catch (e) {} }
+        if (!res.ok || !d || d.ok !== true) throw new Error((d && d.error) || ("server answered " + res.status));
+        return d;
+      });
+    });
+  }
+  function dleRowHtml(e) {
+    var GE = window.PCSDriverLog.godEdit, v = e.vals, t = e.type === "dvir" ? GE.show("at", v.at) + " \u00b7 plate " + (v.plate || "\u2014") + " \u00b7 odometer " + (v.odometer === "" ? "\u2014" : v.odometer)
+      : e.type === "shift" ? GE.show("s", v.shiftStartedAt) + " \u2013 " + (v.shiftEndedAt ? GE.show("s", v.shiftEndedAt) : "open") + (v.startOdometer !== "" || v.endOdometer !== "" ? " \u00b7 odometer " + (v.startOdometer === "" ? "\u2014" : v.startOdometer) + " \u2013 " + (v.endOdometer === "" ? "\u2014" : v.endOdometer) : "")
+      : GE.show("s", v.s) + " \u2013 " + (v.e ? GE.show("s", v.e) : "open");
+    var tag = e.deleted ? (e.excluded ? " \u00b7 <em>excluded from HOS</em>" : " \u00b7 <em>deleted (kept on file)</em>") : e.edited ? " \u00b7 <em>edited by " + esc((e.rec && e.rec.editedBy) || "God mode") + "</em>" : "";
+    var k = esc(e.key), h = '<div class="dle-row" data-dle-row="' + k + '" style="padding:8px 0;border-top:1px solid #4a5d78' + (e.deleted ? ";opacity:.6" : "") + '"><strong>' + esc(e.label) + "</strong> " + esc(t) + tag +
+      (e.deleted ? "" : e.open ? ' <span class="meta">(open: edit after it ends)</span>' : '<br><button type="button" class="btn btn-ghost" data-dle-edit="' + k + '">Edit</button> <button type="button" class="btn btn-ghost" data-dle-del="' + k + '">Delete</button>');
+    if (dle.open === "edit:" + e.key) {
+      var fld = function (name, lab, val, type) { return '<label for="dle-' + name + '">' + lab + '</label><input id="dle-' + name + '" data-dle-f="' + name + '" type="' + (type || "text") + '" value="' + esc(val == null ? "" : String(val)) + '" data-dle-was="' + esc(val == null ? "" : String(val)) + '">'; };
+      h += '<div class="dle-form">' + (e.type === "dvir" ? fld("at", "Time", dleHm(v.at), "time") + fld("plate", "Plate", v.plate) + fld("odometer", "Odometer", v.odometer)
+        : e.type === "shift" ? fld("shiftStartedAt", "Start", dleHm(v.shiftStartedAt), "time") + fld("shiftEndedAt", "End", dleHm(v.shiftEndedAt), "time") + fld("startOdometer", "Opening odometer", v.startOdometer) + fld("endOdometer", "Ending odometer", v.endOdometer)
+        : fld("s", "Start", dleHm(v.s), "time") + fld("e", "End", dleHm(v.e), "time") + '<label for="dle-status">Status</label><select id="dle-status" data-dle-f="status" data-dle-was="' + esc(e.coll) + '">' + Object.keys(GE.IV).map(function (c) { return '<option value="' + c + '"' + (c === e.coll ? " selected" : "") + ">" + GE.IV[c] + "</option>"; }).join("") + "</select>") +
+        '<label for="dle-reason">Reason (optional)</label><input id="dle-reason" maxlength="200">' +
+        '<div class="pp-actions"><button type="button" class="pp-cancel" data-dle-cancel="1">Cancel</button><button type="button" class="btn btn-gold" data-dle-save="' + k + '">Save</button></div></div>';
+    }
+    if (dle.open === "del:" + e.key) h += '<div class="dle-form"><p>Delete this entry? It stays on file, leaves the hour totals and the driver\u2019s view, and the day will need your signature again.</p><label for="dle-reason">Reason (optional)</label><input id="dle-reason" maxlength="200">' +
+      '<div class="pp-actions"><button type="button" class="pp-cancel" data-dle-cancel="1">Cancel</button><button type="button" class="btn btn-gold" data-dle-delok="' + k + '">Yes, delete</button></div></div>';
+    return h + "</div>";
+  }
+  function dleRender() {
+    var el = document.getElementById("god-pay-popup"); if (!el || !el.getAttribute("data-dle")) return;
+    var GE = window.PCSDriverLog && window.PCSDriverLog.godEdit, d = dle.data, list = d && GE ? GE.entries(dle.day, d.hl, d.row) : null;
+    var main = list ? list.filter(function (e) { return e.type !== "iv" || e.coll !== "drive"; }) : [], drv = list ? list.filter(function (e) { return e.type === "iv" && e.coll === "drive"; }) : [];
+    var sg = d && d.sign, sigLine = !d ? "" : sg && sg.img ? "Signed " + esc(ctClock(Number(sg.at))) : sg && sg.needsSign ? '<strong class="dle-needs-sign">Edited, needs your signature.</strong>' : "Not signed yet.";
+    el.innerHTML = '<div class="pp-card" role="dialog" aria-modal="true" aria-labelledby="dle-title" style="max-width:720px;max-height:92vh;overflow:auto;padding-bottom:28px">' +
+      '<h2 id="dle-title" style="overflow-wrap:anywhere">Edit Driver\u2019s Log<br><span style="font-size:17px">' + esc(gqName(dle.id)) + "</span></h2>" + /* v2.0m-bq r2: long login names wrap at 390 wide */
+      '<label for="dle-day">Day (Central time)</label><input id="dle-day" type="date" value="' + esc(dle.day) + '" max="' + esc(dleTodayYmd()) + '">' +
+      '<p class="meta dle-sign">' + sigLine + (d && !(sg && sg.img) ? ' <button type="button" class="btn btn-gold" data-dle-sign="1">Sign this day</button>' : "") + "</p>" +
+      (!d ? '<p class="meta">Loading\u2026</p>' : !list.length ? '<p class="meta">No log entries on this day.</p>' : main.map(dleRowHtml).join("") +
+        (drv.length ? '<details' + (/^(edit|del):drive:/.test(dle.open) ? " open" : "") + '><summary>Driving pieces (' + drv.length + ")</summary>" + drv.map(dleRowHtml).join("") + "</details>" : "")) +
+      '<p class="pp-err" id="dle-err" role="alert">' + esc(dle.msg || "") + "</p>" +
+      '<div class="pp-actions"><button type="button" class="pp-cancel" data-dle-close="1">Close</button></div></div>';
+  }
+  function dleReload() { dle.data = null; dleRender(); return dleLoad(dle.id, dle.day).then(function (d) { dle.data = d; dleRender(); }).catch(function () { dle.msg = "Couldn\u2019t load the log. Try again."; dleRender(); }); }
+  function dleOpen(id, day) {
+    closeRefundPopup(); ensurePayPopupStyle();
+    if (!document.getElementById("dle-style")) { var st = document.createElement("style"); st.id = "dle-style"; st.textContent = "body:has(#god-pay-popup[data-dle]) #gm-open{display:none!important}"; document.head.appendChild(st); } /* v2.0m-bq r2: the Driver day map button never covers the editor */
+    dle = { id: id, day: day || dleTodayYmd(), data: null, open: "", msg: "" };
+    var el = document.createElement("div"); el.id = "god-pay-popup"; el.setAttribute("data-dle", "1"); document.body.appendChild(el);
+    return dleReload();
+  }
+  function dleFind(key) { var GE = window.PCSDriverLog.godEdit; return GE.entries(dle.day, dle.data.hl, dle.data.row).filter(function (e) { return e.key === key; })[0] || null; }
+  function dleApply(r) {
+    if (r.error) { dle.msg = r.error; dleRender(); return; }
+    dle.msg = "Saving\u2026"; dleRender();
+    dleSend(r.ops).then(function () { dle.open = ""; dle.msg = "Saved. The day needs your signature again."; return dleReload(); })
+      .catch(function (er) { dle.msg = "Not saved: " + String((er && er.message) || er); dleRender(); });
+  }
+  function dleSignOpen() { /* reuses the Driver's Log day view + signature pad; the signature is saved through the Worker */
+    var L = window.PCSDriverLog; if (!L) return;
+    godDriverLogData(dle.id).then(function (dd) {
+      var old = dle.data && dle.data.sign;
+      dd.godSign = true;
+      dd.signOf = function (d) { return d === dle.day ? (dle.data && dle.data.sign) || null : null; };
+      dd.onSign = function (d, rec) {
+        var val = L.godEdit.signRec(old, rec, godWho());
+        dleSend([{ method: "PUT", path: "/rides/DRVRHSLG/" + dle.id + "/signs/" + d, value: val }])
+          .then(function () { dle.data.sign = val; dle.msg = "Signed."; try { L.close(); } catch (e) {} dleRender(); })
+          .catch(function (er) { window.alert("Signature not saved: " + String((er && er.message) || er)); });
+      };
+      L.open(L.build(dd), dd, "day:" + dle.day + ":sign");
+    });
+  }
+  document.addEventListener("click", function (e) {
+    var t = e.target && e.target.closest ? e.target.closest("[data-dl-edit],[data-dle-edit],[data-dle-del],[data-dle-cancel],[data-dle-save],[data-dle-delok],[data-dle-close],[data-dle-sign]") : null; if (!t) return;
+    var GE = window.PCSDriverLog && window.PCSDriverLog.godEdit; if (!GE) return;
+    e.preventDefault();
+    if (t.hasAttribute("data-dl-edit")) { dleOpen(t.getAttribute("data-dl-edit")); return; }
+    if (t.hasAttribute("data-dle-close")) { closeRefundPopup(); return; }
+    if (t.hasAttribute("data-dle-sign")) { dleSignOpen(); return; }
+    if (t.hasAttribute("data-dle-cancel")) { dle.open = ""; dle.msg = ""; dleRender(); return; }
+    if (t.hasAttribute("data-dle-edit")) { dle.open = "edit:" + t.getAttribute("data-dle-edit"); dle.msg = ""; dleRender(); return; }
+    if (t.hasAttribute("data-dle-del")) { dle.open = "del:" + t.getAttribute("data-dle-del"); dle.msg = ""; dleRender(); return; }
+    var reason = String((document.getElementById("dle-reason") || {}).value || "");
+    if (t.hasAttribute("data-dle-delok")) { var de = dleFind(t.getAttribute("data-dle-delok")); dleApply(GE.deleteOps(dle.id, dle.day, de, godWho(), reason, Date.now(), dle.data.sign)); return; }
+    if (t.hasAttribute("data-dle-save")) {
+      var ent = dleFind(t.getAttribute("data-dle-save")); if (!ent) return;
+      var ch = {}, dayOf = ent.type === "dvir" ? GE.ymd(ent.vals.at || Date.now()) : dle.day, startMs = null;
+      Array.prototype.forEach.call(document.querySelectorAll("[data-dle-f]"), function (inp) {
+        var f = inp.getAttribute("data-dle-f"), v = String(inp.value || ""); if (v === inp.getAttribute("data-dle-was")) return;
+        if (f === "status") { ch.status = v; return; }
+        if (inp.type === "time") { if (!v) return; var base = f === "e" || f === "shiftEndedAt" ? (ch.s || ch.shiftStartedAt || ent.vals.s || ent.vals.shiftStartedAt) : null; ch[f] = dleAt(f === "at" ? dayOf : dle.day, v, base); return; }
+        ch[f] = v;
+      });
+      dleApply(GE.editOps(dle.id, dle.day, ent, ch, godWho(), reason, Date.now(), dle.data.hl, dle.data.sign)); return;
+    }
+  });
+  document.addEventListener("change", function (e) { if (e.target && e.target.id === "dle-day" && /^\d{4}-\d{2}-\d{2}$/.test(e.target.value)) { dle.day = e.target.value; dle.open = ""; dle.msg = ""; dleReload(); } });
+  window.__pcsGodLogEdit = { open: dleOpen, state: function () { return dle; }, at: dleAt }; /* test hook */
   /* v73 DVIR: defects flagged in God mode; an "unsafe" defect blocks the driver from going Available until cleared here (reason logged) */
   state.dvirFlags = [];
   /* v77.17 (Matthew 6:20 AM "last car wash not recorded yet" for every driver): the wash dates were only fetched inside
