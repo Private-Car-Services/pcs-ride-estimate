@@ -102,15 +102,21 @@ test("a fill figures miles, mpg, tank, and price per mile", function () {
   assert.equal(fuel.owner(), false);
 });
 
-test("gallons keep three decimals and a price stays at cents", function () {
+test("gallons stay locked at three decimals and price stays locked at two", function () {
   const sandbox = loadGoal();
+  assert.equal(sandbox.__pcsGoalRegFmt("1234"), "12.34");
+  assert.equal(sandbox.__pcsGoalRegFmt("1234", 3), "1.234");
+  assert.equal(sandbox.__pcsGoalRegFmt("1", 3), "0.001");
+  assert.equal(sandbox.__pcsGoalRegFmt("0", 3), "0.000");
+  assert.equal(sandbox.__pcsGoalRegFmt("0"), "0.00");
+  assert.equal(sandbox.__pcsGoalRegFmt(""), "");
   sandbox.__pcsGoalOpen();
   const ov = sandbox.document.getElementById("gl-screen");
-  function field(kp) {
+  function field(kp, reg) {
     const input = sandbox.document.createElement("input");
     input.type = "text";
     input.setAttribute("data-kp", kp);
-    if (kp === "d") input.setAttribute("data-reg", "1");
+    if (reg) input.setAttribute("data-reg", reg);
     ov.appendChild(input);
     input.focus();
     return input;
@@ -125,10 +131,25 @@ test("gallons keep three decimals and a price stays at cents", function () {
     (pad._l.pointerdown || []).forEach(function (fn) { fn(ev); });
     (pad._l.pointerup || []).forEach(function (fn) { fn(ev); });
   }
-  const gal = field("g");
-  ["1", ".", "2", "3", "4", "5"].forEach(press);
+  const gal = field("g", "3");
+  ["1", "2", "3", "4"].forEach(press);
   assert.equal(gal.value, "1.234");
-  const price = field("d");
+  press(".");
+  assert.equal(gal.value, "1.234");
+  press("bs");
+  assert.equal(gal.value, "0.123");
+  press("bs");
+  press("bs");
+  press("bs");
+  assert.equal(gal.value, "");
+  press("0");
+  assert.equal(gal.value, "0.000");
+  const price = field("d", "1");
   ["1", "2", "3", "4"].forEach(press);
   assert.equal(price.value, "12.34");
+  press(".");
+  assert.equal(price.value, "12.34");
+  press("bs");
+  assert.equal(price.value, "1.23");
+  assert.notEqual(price.value, "0.123");
 });
