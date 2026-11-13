@@ -10805,10 +10805,11 @@
       "#sched-fs-bottom,#rfs-bar{container-type:inline-size}.pcs-map-green,#sched-fs-arrived{display:block;width:100%;box-sizing:border-box;height:62px;min-height:62px;margin:0;padding:0 10px;font-size:clamp(12px,calc(100cqw / 26),20px);font-weight:800;line-height:58px;text-align:center;background:#0b6b3a;color:#fff;border:2px solid #fff;border-radius:14px;white-space:nowrap;overflow:hidden;text-overflow:clip;position:relative;z-index:1;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.4)}" +
       "#sched-fs-close{display:block;width:100%;min-height:58px;font-size:21px;font-weight:800;background:#d1fae5;color:#0b3d23;border:3px solid #0b3d23;border-radius:14px;margin:0;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.4)}" +
       "#sched-fs-arrived .pcs-arrived-label{display:block;line-height:58px;white-space:nowrap;overflow:hidden;text-overflow:clip}" +
-      "#sched-fs-bottom:not(.nt-bot) #sched-fs-arrived.has-inv{height:auto;min-height:62px;line-height:1.25;white-space:normal;overflow:visible;padding:8px 12px}" +
+      "#sched-fs-bottom:not(.nt-bot) #sched-fs-arrived.has-inv,#rfs-bar .pcs-map-green.has-inv{height:auto;min-height:62px;line-height:1.25;white-space:normal;overflow:visible;padding:8px 12px}" +
+      "#rfs-bar .pcs-map-green.has-inv{display:flex;flex-direction:column;justify-content:center;cursor:default}" + /* v2.0m-bo: invoice line uses the shared pickup-map bar */
       "#sched-fs-bottom:not(.nt-bot) #sched-fs-arrived.has-inv .pcs-arrived-label{line-height:1.25}" +
-      "#sched-fs-arrived #sched-fs-inv{display:block;margin:2px 0 0;font-size:16px;font-weight:800;line-height:1.3;text-align:center;color:#fff;white-space:normal}" +
-      "#sched-fs-arrived #sched-fs-inv a{color:#fff;font-weight:800;text-decoration:underline}" +
+      "#sched-fs-arrived #sched-fs-inv,#rfs-bar .pcs-map-green #sched-fs-inv{display:block;margin:2px 0 0;font-size:16px;font-weight:800;line-height:1.3;text-align:center;color:#fff;white-space:normal}" +
+      "#sched-fs-arrived #sched-fs-inv a,#rfs-bar .pcs-map-green #sched-fs-inv a{color:#fff;font-weight:800;text-decoration:underline}" +
       /* v2.0m-bf: this full map sits above the SOS button. Same raise and spot as the in-ride full screen. */
       "body.pcs-fullmap-body #pcs-sos-btn{z-index:2147482100 !important;bottom:auto !important;right:12px !important;top:250px;top:var(--pcs-sos-top,calc(env(safe-area-inset-top,0px) + 250px))}";
     document.head.appendChild(st);
@@ -11003,7 +11004,7 @@
   }
   function rfsSig(M) {
     var t = meterTollView(M), ed = meterTollEditable(M) && t.on;
-    return [state.meterConfirmEnd ? 1 : 0, ed ? 1 : 0, t.count, t.cents, t.kind, state.meterTollEdit ? 1 : 0, M.prepaid ? 1 : 0, M.tierLabel || "", meterShown(M) ? "m" : rideInvoiceSig(meterInvInfo(M)), state.meterBusy ? 1 : 0, rideEstHtml(M, "x")].join("|");
+    return [state.meterConfirmEnd ? 1 : 0, ed ? 1 : 0, t.count, t.cents, t.kind, state.meterTollEdit ? 1 : 0, M.prepaid ? 1 : 0, M.tierLabel || "", meterShown(M) ? "m" : rideInvoiceSig(meterInvInfo(M)), state.meterBusy ? 1 : 0, rideEstHtml(M, "x"), rfsGreenHtml(M)].join("|"); /* v2.0m-bo: invoice bar */
   }
   /* v2.0k r5 (Matthew 10/25: "THE ONLY TIME THAT I WANTED THE ESTIMATED PRICE WAS UNDER METERED RIDE OR CASH RIDE"):
      the "Estimated cost" line shows ONLY on a Metered ride and on a Cash calendar ride. Card, Square / invoice and set-fare rides: no line.
@@ -11056,6 +11057,16 @@
     return e ? '<p class="ride-est" id="' + id + '" data-est-from="' + e.from + '" role="status" style="margin:4px 0;font-size:20px;font-weight:800;text-align:center">' + esc(e.text) + "</p>" : "";
   }
   if (typeof window !== "undefined") window.__pcsV20kEst = { cost: rideEstCost, html: rideEstHtml };
+  /* v2.0m-bo (Matthew 11/12 8:01 PM): add the pickup map's solid dark green invoice bar
+     to the destination / in-car full map. Same fsMapInvoiceHtml line ("Invoice #NNNNNN \u00b7 Paid \u00b7 View receipt"
+     or "\u00b7 Unpaid \u00b7 Pay invoice"). No invoice number, no bar. The red End ride button and the rest of this
+     dock stay as they are. */
+  function rfsGreenRide(M) { var r = null; try { r = M && M.schedId ? schedFind(M.schedId) : null; } catch (e) { r = null; } return r && r.status !== "cancelled" && r.status !== "canceled" ? r : null; }
+  function rfsGreenHtml(M) {
+    var inv = "";
+    try { var r = rfsGreenRide(M); inv = r ? fsMapInvoiceHtml(r) : ""; } catch (e) { inv = ""; }
+    return inv ? '<div id="rfs-green" class="pcs-map-green has-inv" role="status">' + inv + "</div>" : "";
+  }
   function rfsBarHtml(M) {
     var f = meterFare(M), t = meterTollInfo(M), pp = M.prepaid;
     var shown = meterShown(M);
@@ -11072,6 +11083,7 @@
         (t.count && po ? '<button type="button" class="rfs-toll-line" id="rfs-toll-line" data-rfs="tollline" aria-label="' + esc(t.label + " " + money(t.cents) + ". Tap to change the amount") + '">' + esc(t.label) + " <b>" + money(t.cents) + "</b></button>" +
           '<button type="button" class="rfs-toll-undo" id="rfs-toll-undo" data-rfs="tollundo">Undo</button>' : "") + "</div>";
     }
+    html += rfsGreenHtml(M); /* v2.0m-bo: shared pickup-map invoice bar, above End ride / Close map */
     if (state.meterConfirmEnd) {
       html += '<p class="rfs-ask" id="rfs-ask">End this ride?' + (!ridePriceOk(M) ? "" : M.prepaid ? " " + invoiceFareText(M.prepaid) + "." : shown ? " Meter " + money(f.sub) + "." : "") + "</p>" +
         '<div class="rfs-actions"><button type="button" class="rfs-end" id="rfs-end-yes" data-rfs="endyes">Yes, end ride</button>' +
@@ -11111,7 +11123,7 @@
       if (document.body.classList.contains("pcs-rfs-body")) { document.body.classList.remove("pcs-rfs-body"); document.body.style.overflow = ""; }
       return;
     }
-    fsStyle();
+    fsStyle(); schedFullStyle(); /* v2.0m-bo: reuse the shared .pcs-map-green / invoice-line CSS */
     var M = state.meter;
     var open = document.getElementById("rfs-open");
     if (!open) {
@@ -11138,7 +11150,7 @@
     if (full) rfsTick();
   }
   if (typeof window !== "undefined") {
-    window.__pcsRideFull = { on: function () { return rfsOn(); }, set: function (v) { rfsSet(!!v); }, apply: function () { rfsApply(); }, mph: function () { return fsMphNow(); },
+    window.__pcsRideFull = { green: rfsGreenHtml, on: function () { return rfsOn(); }, set: function (v) { rfsSet(!!v); }, apply: function () { rfsApply(); }, mph: function () { return fsMphNow(); },
       sample: function (lat, lng, now, speed) { var keep = meterSpdPts; meterSpdPts = fsSpdPts; try { meterSpeedSample(fsSpd, lat, lng, now, speed); } finally { fsSpdPts = meterSpdPts; meterSpdPts = keep; } return meterMphNow(fsSpd, now); } }; /* test hooks */
     setInterval(function () { try { fsMphPaint(); if (document.getElementById("rfs-bar")) { rfsApply(); } } catch (e) {} }, 1000);
   }
