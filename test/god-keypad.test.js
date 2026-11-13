@@ -216,17 +216,17 @@ test("a PIN tap types one digit and does not double it", function () {
   assert.equal(input.value, "1234");
 });
 
-test("v2.0m-br is what a phone on v2.0m-bf is offered", function () {
+test("v2.0m-bs is what a phone on v2.0m-bf is offered", function () {
   const { sandbox } = loadGoal();
   const version = fs.readFileSync(path.join(__dirname, "../app/version.js"), "utf8");
-  assert.ok(version.indexOf('var APP_VERSION = "v2.0m-br"') >= 0);
+  assert.ok(version.indexOf('var APP_VERSION = "v2.0m-bs"') >= 0);
   assert.equal(version.indexOf('var APP_VERSION = "v2.0m-bq"'), -1);
   assert.equal(version.indexOf('var APP_VERSION = "v2.0m-bp"'), -1);
   const pages = {
-    "app/driver/index.html": "version.js?v=2.0m-br",
-    "app/index.html": "version.js?v=2.0m-br",
-    "god/index.html": "goal.js?v=2.0m-br",
-    "meter/index.html": "version.js?v=2.0m-br"
+    "app/driver/index.html": "version.js?v=2.0m-bs",
+    "app/index.html": "version.js?v=2.0m-bs",
+    "god/index.html": "goal.js?v=2.0m-bs",
+    "meter/index.html": "version.js?v=2.0m-bs"
   };
   Object.keys(pages).forEach(function (rel) {
     const html = fs.readFileSync(path.join(__dirname, "..", rel), "utf8");

@@ -4959,7 +4959,7 @@
         return fetch(rowUrl, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(patch) });
       }).then(function () { return fetch(baseUrl() + "/rides/DRVRHSLG/" + encodeURIComponent(fid) + "/overrides/" + fnow + ".json", { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ kind: "odometer corrected to " + fval, at: fnow, grantedAt: fnow, by: godWho(), reason: fw || "Corrected in God mode", from: Number(frq.entered) || 0, to: fval }) }); })
         .then(function () { return hosOvrSave(fid, { odoDismiss: { reason: ("Corrected to " + fval + (fw ? ": " + fw : "")).slice(0, 200), by: godWho() } }).catch(function () {}); })
-        .then(function () { slowKick(); return hosOvrLoad(); }).catch(function () { ofs.disabled = false; if (fe) fe.textContent = "Couldn't save. Try again."; });
+        .then(function () { var fform = document.querySelector('[data-odo-fix-form="' + fid + '"]'); if (fform) fform.hidden = true; /* v2.0m-bs: close the box so the repaint can clear the warning */ slowKick(); return hosOvrLoad(); }).catch(function () { ofs.disabled = false; if (fe) fe.textContent = "Couldn't save. Try again."; });
       return;
     }
     if (od) { /* v74: Ignore / Dismiss the alert (logged with who / when / reason); nothing is reset */
@@ -5112,6 +5112,9 @@
   function hosPaint() {
     var box = document.getElementById("hos-box-god");
     if (!box) return;
+    /* v2.0m-bs (Matthew 11/13): the 5-second repaint wiped an open "Correct mileage" box (closed it and put the driver's
+       number back) about a second after typing. While any correct-mileage box is open, leave the panel alone. */
+    if (box.querySelector(".odo-fix-form:not([hidden])")) return;
     var a = document.activeElement;
     if (a && /^hos-/.test(a.id || "")) { var al = document.getElementById("hos-alerts-wrap"); if (al) al.innerHTML = hosAlertsHtml(); return; } /* don't wipe typing */
     box.innerHTML = '<div id="hos-alerts-wrap">' + hosAlertsHtml() + "</div>" + '<div id="hos-ovr-wrap">' + hosOvrFormHtml() + "</div>" + hosPanelHtml();
