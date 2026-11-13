@@ -159,7 +159,7 @@
   /* ---------- lock ---------- */
   /* v75t: number pad on every money/number box. decimal = dollars (keypad with a point), numeric = whole counts (days left, PIN). */
   function numPad(root) { if (!root || !root.querySelectorAll) return 0; var n = 0; [].forEach.call(root.querySelectorAll("input"), function (el) {
-    if (el.getAttribute("data-fuel") === "gal") { el.type = "text"; el.setAttribute("inputmode", "decimal"); el.setAttribute("autocomplete", "off"); kpMark(el, false); el.setAttribute("data-kp", "g"); el.removeAttribute("data-reg"); n++; return; }
+    if (el.getAttribute("data-fuel") === "gal") { el.type = "text"; el.setAttribute("inputmode", "decimal"); el.setAttribute("autocomplete", "off"); kpMark(el, false); el.setAttribute("data-kp", "g"); el.setAttribute("data-reg", "3"); n++; return; }
     if (el.getAttribute("data-fuel") === "odo") { el.type = "text"; el.setAttribute("inputmode", "numeric"); el.setAttribute("autocomplete", "off"); kpMark(el, true); n++; return; }
     if ((el.readOnly && !kpHold(el)) || /^(password|checkbox|radio|date|time|file|hidden)$/.test(el.type) && !(el.type === "password" && el.getAttribute("inputmode") === "numeric")) return;
     var im = el.getAttribute("inputmode"), whole = el.id === "gl-s-days" || im === "numeric", money = whole || im === "decimal" || el.type === "number";
@@ -173,7 +173,8 @@
      v2.0m-ao: those boxes stay above the open pad, and a typed zero price stays 0.00.
      v2.0m-ap: each saved fill stays in the list, with miles, tank, mpg, price per gallon, total, and price per mile.
      v2.0m-aq: a Done touch does not leave the pad open.
-     v2.0m-au: a note or other text field closes the pad, and opening the pad blurs that text field so the iOS keyboard drops. */
+     v2.0m-au: a note or other text field closes the pad, and opening the pad blurs that text field so the iOS keyboard drops.
+     v2.0m-bi: gallons is a three-decimal register (1,2,3,4 -> 1.234; Delete drops the last digit). Price stays two decimals. The point key does not insert a point. */
   var KP_KEY = "pcsGoalSysKb", kpEl = null, kpCur = null;
   function kpOn() { try { return localStorage.getItem(KP_KEY) !== "1"; } catch (e) { return true; } }
   function kpHold(el) { var id = el && el.id; return id === "gl-pin" || id === "gl-pin1" || id === "gl-pin2" || id === "gl-q-amt" || id === "gl-q-tip" || id === "gl-fuel-odo" || id === "gl-fuel-price" || id === "gl-fuel-gal"; }
@@ -194,12 +195,13 @@
     d.addEventListener("click", function (e) { var b = kpBtn(e); if (!b || (b.__kpUp && Date.now() - b.__kpUp < 700) || (d.__eatClick && Date.now() < d.__eatClick)) return; kpPress(b.getAttribute("data-k")); });
     kpEl = d; return d; }
   /* v75x (Matthew): cash-register money boxes: digits fill from the cents, 9,6,2,5 -> 96.25; Delete drops the last digit; first key after opening a box starts a new amount */
-  function regFmt(v) { var raw = String(v == null ? "" : v).replace(/\D/g, ""), dg = raw.replace(/^0+/, ""); if (!dg) return raw ? "0.00" : ""; if (dg.length > 7) dg = dg.slice(0, 7); return (Number(dg) / 100).toFixed(2); }
-  function regKey(el, k) { var shown = el.__regFresh ? "" : String(el.value || ""), dg = shown.replace(/\D/g, "").replace(/^0+/, ""); el.__regFresh = false;
+  function regDp(el) { var r = el && el.getAttribute && el.getAttribute("data-reg"); return r === "3" ? 3 : 2; }
+  function regFmt(v, dp) { dp = dp === 3 ? 3 : 2; var div = dp === 3 ? 1000 : 100, raw = String(v == null ? "" : v).replace(/\D/g, ""), dg = raw.replace(/^0+/, ""); if (!dg) return raw ? (0).toFixed(dp) : ""; if (dg.length > 7) dg = dg.slice(0, 7); return (Number(dg) / div).toFixed(dp); }
+  function regKey(el, k) { var dp = regDp(el), shown = el.__regFresh ? "" : String(el.value || ""), dg = shown.replace(/\D/g, "").replace(/^0+/, ""); el.__regFresh = false;
     if (k === "clr" || (k === "bs" && !dg)) dg = ""; else if (k === "bs") dg = dg.slice(0, -1); else if (/^[0-9]$/.test(k)) { if (dg.length < 7) dg += k; } else return;
-    el.value = regFmt(dg); try { el.setSelectionRange(el.value.length, el.value.length); } catch (e) {} kpFire(el); }
-  if (typeof document !== "undefined") document.addEventListener("input", function (e) { var t = e.target; if (!t || !t.getAttribute || t.getAttribute("data-reg") !== "1" || t.__regIn) return;
-    var f = regFmt(t.value); if (t.value !== f) { t.value = f; try { t.setSelectionRange(f.length, f.length); } catch (x) {} } }, true);
+    el.value = regFmt(dg, dp); try { el.setSelectionRange(el.value.length, el.value.length); } catch (e) {} kpFire(el); }
+  if (typeof document !== "undefined") document.addEventListener("input", function (e) { var t = e.target; if (!t || !t.getAttribute || t.__regIn) return; var reg = t.getAttribute("data-reg"); if (reg !== "1" && reg !== "3") return;
+    var f = regFmt(t.value, reg === "3" ? 3 : 2); if (t.value !== f) { t.value = f; try { t.setSelectionRange(f.length, f.length); } catch (x) {} } }, true);
   window.__pcsGoalRegFmt = regFmt; window.__pcsGoalRegKey = regKey; /* test hooks */
   window.__pcsKpBtn = kpBtn;
   window.__pcsNumPad = numPad;
@@ -208,7 +210,7 @@
   function kpBtn(e) { var t = e && e.target; if (!t) return null; if (t.closest) { var b = t.closest("button[data-k]"); if (b) return b; } var p = t.parentElement; return p && p.closest ? p.closest("button[data-k]") : null; }
   function kpPress(k) { var el = kpCur; if (k === "done") { if (el) el.dispatchEvent(new Event("change", { bubbles: true })); var fm = el && el.form && /^gl-f-(pin|unlock)$/.test(el.form.id) ? el.form : null; kpClose(); if (fm) lockSubmit(fm); return; }
     if (k === "sys") { if (kpCur && kpHold(kpCur)) return; try { localStorage.setItem(KP_KEY, "1"); } catch (e) {} var c = kpCur; kpClose(); kpRefresh(); if (c) { c.blur(); setTimeout(function () { c.focus(); }, 30); } return; }
-    if (!el) return; if (el.getAttribute("data-reg") === "1" && k !== ".") return regKey(el, k); if (el.getAttribute("data-reg") === "1") return; var v = el.value, s = el.selectionStart, en = el.selectionEnd; if (s == null || el.type === "password") { s = en = v.length; }
+    if (!el) return; var reg = el.getAttribute("data-reg"); if ((reg === "1" || reg === "3") && k !== ".") return regKey(el, k); if (reg === "1" || reg === "3") return; var v = el.value, s = el.selectionStart, en = el.selectionEnd; if (s == null || el.type === "password") { s = en = v.length; }
     var whole = el.getAttribute("data-kp") === "w", nv;
     if (k === "clr") nv = "", s = 0;
     else if (k === "bs") { if (s === en && s > 0) s--; nv = v.slice(0, s) + v.slice(en); }

@@ -83,7 +83,7 @@ test("fuel fields stay above the pad and keep their own digits in both orientati
     const plan = [
       ["gl-fuel-price", ["4", "0", "5", "0"], "40.50"],
       ["gl-fuel-odo", ["1", "0", "0", "3", "7", "9"], "100379"],
-      ["gl-fuel-gal", ["1", "8", ".", "1", "5", "7"], "18.157"]
+      ["gl-fuel-gal", ["1", "8", "1", "5", "7"], "18.157"]
     ];
     for (const size of sizes) {
       await send("Emulation.setDeviceMetricsOverride", { width: size[0], height: size[1], deviceScaleFactor: 1, mobile: false }, sid);
