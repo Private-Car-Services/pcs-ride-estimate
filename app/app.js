@@ -4400,6 +4400,7 @@
   }
   window.__pcsDriverLog = { data: driverLogData, open: openDriverLog };
   window.__pcsPretrip = { state: function (n) { return preTripState(n); }, done: function () { return preTripDoneToday(); }, resetMs: function () { return shiftResetMs(); }, gap: function (t, n) { return offDutyGapAfter(t, n); }, hos: function (n) { return hosStatus(n); }, washBlock: function (n) { return washBlockNow(n); }, vehBlocks: function (n) { return vehAvailBlocks(n); }, washMsg: function () { return qd.washMsg || ""; }, dvirBlock: function () { return dvirBlock(); } }; /* v76d-pretrip test hook */
+  window.__pcsHos70 = { fromRecords: function (p, r) { return hosDutyFromRecords(p, r); }, fromRows: function (r) { return hosHistFromRows(r); }, duty: function (n) { return hosDutySegs(n); } }; /* v2.0m-bp test hook */
   /* break intervals [s, e] from this phone + the server copy; an open break on another device runs to its last heartbeat */
   function hosBreaks(now) {
     var out = {}, add = function (r) { if (!r || !(Number(r.s) > 0)) return; var e = Number(r.e) || Number(r.s); var x = out[r.s]; if (!x || e > x[1]) out[r.s] = [Number(r.s), e]; };
@@ -4982,7 +4983,7 @@
         var x = sh[k] || {}, a = Number(x.shiftStartedAt) || Number(k), b = Number(x.shiftEndedAt) || 0;
         if (!(a > 0) || seen[a]) return;
         seen[a] = 1;
-        if (x.hosExcluded) { segs.push([a, a, 0, 1]); return; } /* v72w: God/owner excluded this shift from HOS: zero duty */
+        if (x.hosExcluded) { segs.push([a, b >= a ? b : a, 0, 1]); return; } /* v72w: God/owner excluded this shift from HOS: zero duty (v2.0m-bp: end kept so recorded pieces inside it are dropped too) */
         if (!(b >= a)) return; /* v72w: a shift closed at its start (b == a) still caps the phone's local copy */
         var mi = Number(x.trackedMiles); if (!(mi >= 0)) mi = Number(x.odoMiles) || 0;
         segs.push([a, b, Math.max(0, mi)]);
@@ -5004,9 +5005,12 @@
       authFetch(databaseURL() + "/rides/DRVRHSLG/" + encodeURIComponent(id) + "/overrides.json").then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }), /* v73 log */
       authFetch(databaseURL() + "/rides/DRVRHSLG/" + encodeURIComponent(id) + "/days.json").then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }), /* v73 saved days */
       authFetch(databaseURL() + "/rides/DRVRHSLG/" + encodeURIComponent(id) + "/signs.json").then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }),
-      authFetch(databaseURL() + "/rides/DRVRHSLG/" + encodeURIComponent(id) + "/dvir.json").then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; })
+      authFetch(databaseURL() + "/rides/DRVRHSLG/" + encodeURIComponent(id) + "/dvir.json").then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }),
+      /* v2.0m-bp (Matthew 11/12 9:29 PM): the recorded on-duty pieces (rides/DRVRHSLG/{id}/{start}, written by hosTick while
+         Available / on a ride, never while Offline) for the last 16 days; null when the read fails */
+      authFetch(databaseURL() + "/rides/DRVRHSLG/" + encodeURIComponent(id) + ".json?orderBy=" + encodeURIComponent('"$key"') + "&startAt=" + encodeURIComponent('"' + (Date.now() - 16 * 86400000) + '"') + "&endAt=" + encodeURIComponent('"9999999999999"')).then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; })
     ])).then(function (res) {
-      var dvObj = res.pop(), sgObj = res.pop(), daysObj = res.pop(), ovrObj = res.pop(), offObj = res.pop(), brkObj = res.pop(), drvObj = res.pop(), loc = readMilesLocal() || {};
+      var pcObj = res.pop(), dvObj = res.pop(), sgObj = res.pop(), daysObj = res.pop(), ovrObj = res.pop(), offObj = res.pop(), brkObj = res.pop(), drvObj = res.pop(), loc = readMilesLocal() || {};
       days.forEach(function (d, j) { if (!res[j] && loc[d]) res[j] = loc[d]; });
       var drv = [];
       if (drvObj && typeof drvObj === "object") Object.keys(drvObj).forEach(function (k) { var v = drvObj[k] || {}; if (Number(v.e) > Number(v.s)) drv.push([Number(v.s), Number(v.e)]); });
@@ -5017,10 +5021,18 @@
       var ovr = [];
       if (ovrObj && typeof ovrObj === "object") Object.keys(ovrObj).forEach(function (k) { var v = ovrObj[k]; if (v && typeof v === "object") ovr.push(Object.assign({ at: Number(v.grantedAt || v.at || k) || 0 }, v)); });
       var rowsByDay = {}; days.forEach(function (d, j) { if (res[j]) rowsByDay[d] = res[j]; });
-      var h = { segs: hosHistFromRows(res), drv: drv, brk: brk, off: off, ovr: ovr, rows: rowsByDay, days: daysObj && typeof daysObj === "object" ? daysObj : {}, signs: sgObj || {}, dvir: dvObj || {}, at: Date.now() };
+      var h = { segs: hosHistFromRows(res), duty: hosDutyFromRecords(pcObj, res), dutyOk: !!(pcObj && typeof pcObj === "object"), drv: drv, brk: brk, off: off, ovr: ovr, rows: rowsByDay, days: daysObj && typeof daysObj === "object" ? daysObj : {}, signs: sgObj || {}, dvir: dvObj || {}, at: Date.now() };
       try { localStorage.setItem(hosHistKey(), JSON.stringify(h)); } catch (e) {}
       return true;
     });
+  }
+  /* v2.0m-bp (Matthew 11/12 9:29 PM): 70 h = recorded on-duty time only: the duty pieces the app saved while Available / on a
+     ride, plus every recorded ride segment (miles rows). A whole shift (pre-trip to post-trip) is no longer filled in. */
+  function hosDutyFromRecords(pcObj, rows) {
+    var out = [];
+    if (pcObj && typeof pcObj === "object") Object.keys(pcObj).forEach(function (k) { var v = pcObj[k]; if (!/^\d{13}$/.test(k) || !v || typeof v !== "object" || v.rest) return; var s = Number(v.s) || 0, e = Number(v.e) || 0; if (s > 0 && e - s >= HOS_MIN_PIECE_MS) out.push([s, e]); });
+    (rows || []).forEach(function (r) { var rs = r && r.rideSegments; if (!rs || typeof rs !== "object") return; Object.keys(rs).forEach(function (k) { var x = rs[k] || {}, s = Number(x.start) || 0, e = Number(x.end) || 0; if (s > 0 && e > s) out.push([s, e]); }); });
+    return hosMerge(out);
   }
   function hosMerge(list) {
     var a = list.slice().sort(function (x, y) { return x[0] - y[0]; }), out = [];
@@ -5043,9 +5055,12 @@
   function hosDutySegs(now) {
     var st = hosShiftStart();
     var log = hosReadLog();
-    var hist = hosReadHist().segs, histEnd = {};
+    var hh = hosReadHist(), hist = hh.segs, histEnd = {};
     hist.forEach(function (g) { histEnd[String(g[0])] = { e: g[1], closed: g[2] !== -1, x: !!g[3] }; });
-    var segs = hist.filter(function (g) { return !g[3] && g[1] > g[0]; }).map(function (g) { return [g[0], Math.min(g[1], now)]; });
+    var spans = hist.filter(function (g) { return !g[3] && g[1] > g[0]; }).map(function (g) { return [g[0], Math.min(g[1], now)]; });
+    /* v2.0m-bp: recorded pieces + rides replace the whole-shift spans; an older copy with no record list keeps the spans */
+    var recd = hh.dutyOk && Array.isArray(hh.duty) ? hh.duty.map(function (x) { return [Number(x[0]), Math.min(Number(x[1]), now)]; }).filter(function (x) { return x[1] > x[0]; }) : null;
+    var segs = recd ? recd : spans;
     Object.keys(log).forEach(function (k) {
       var g = log[k];
       if (k === "__cur" || k === "__off" || !g || typeof g !== "object" || g.rest) return;
@@ -5060,7 +5075,13 @@
       if (srvEnd && srvEnd.closed) e0 = Math.min(e0, srvEnd.e);
       if (s0 > 0 && e0 >= s0 && (Math.min(e0, now) - s0 >= HOS_MIN_PIECE_MS || (mine && e0 === now))) segs.push([s0, Math.min(e0, now)]); /* v75: closed pieces under 2 min don't count */
     });
-    if (st && !log[String(st)] && !log.__cur) segs.push([st, Math.min(now, st + HOS_HEARTBEAT_GAP_MS)]);
+    var offNow = false; try { offNow = qOffline(); } catch (e) {}
+    if (st && !log[String(st)] && !log.__cur && !log.__off && !offNow) segs.push([st, Math.min(now, st + HOS_HEARTBEAT_GAP_MS)]); /* v2.0m-bp: never while Offline (pre-trip done, not Available yet) */
+    if (recd) {
+      spans.forEach(function (g) { if (hosOverlap(segs, g[0], g[1]) <= 0) segs.push(g); }); /* a shift with no recorded piece or ride at all (older data): old whole-shift count */
+      var ex = hist.filter(function (g) { return g[3] && g[1] > g[0]; }).map(function (g) { return [g[0], g[1]]; });
+      if (ex.length) segs = hosSubtract(segs, ex); /* God-excluded shifts stay at zero */
+    }
     return hosMerge(segs.filter(function (x) { return x[1] >= x[0]; }));
   }
   function hosOverlap(list, from, to) {
