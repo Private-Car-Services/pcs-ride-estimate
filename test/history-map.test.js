@@ -329,10 +329,11 @@ test("God day view keeps a missing stored type blank and does not call it PCS", 
 });
 
 
-test("v2.0m-bs is the update phones on v2.0m-bf will accept", function () {
+test("v2.0m-bt is the update phones on v2.0m-bf will accept", function () {
   const box = loadScript("app/version.js");
-  assert.equal(box.PCS_APP_VERSION, "v2.0m-bs");
-  assert.ok(box.pcsVersionCmp("v2.0m-bs", "v2.0m-bq") >= 0);
+  assert.equal(box.PCS_APP_VERSION, "v2.0m-bt");
+  assert.ok(box.pcsVersionCmp("v2.0m-bt", "v2.0m-bs") >= 0);
+  assert.ok(box.pcsVersionCmp("v2.0m-bt", "v2.0m-bq") >= 0);
   assert.ok(box.pcsVersionCmp("v2.0m-bs", "v2.0m-bp") >= 0);
   assert.ok(box.pcsVersionCmp("v2.0m-bs", "v2.0m-bo") >= 0);
   assert.ok(box.pcsVersionCmp("v2.0m-bs", "v2.0m-bm") >= 0);
@@ -342,6 +343,7 @@ test("v2.0m-bs is the update phones on v2.0m-bf will accept", function () {
   assert.ok(box.pcsVersionCmp("v2.0m-bs", "v2.0m-az") >= 0);
   assert.ok(box.pcsVersionCmp("v2.0m-bs", "v2.0m-ax") >= 0);
   assert.ok(box.pcsVersionCmp("v2.0m-bs", "v2.0m-ay") >= 0);
+  assert.notEqual(box.PCS_APP_VERSION, "v2.0m-bs");
   assert.notEqual(box.PCS_APP_VERSION, "v2.0m-bq");
   assert.notEqual(box.PCS_APP_VERSION, "v2.0m-bp");
   assert.notEqual(box.PCS_APP_VERSION, "v2.0m-bf");
@@ -350,9 +352,9 @@ test("v2.0m-bs is the update phones on v2.0m-bf will accept", function () {
   assert.notEqual(box.PCS_APP_VERSION, "v2.0m-az");
   assert.notEqual(box.PCS_APP_VERSION, "v2.0m-ay");
   const pages = {
-    "app/driver/index.html": ["../version.js?v=2.0m-bs", "../driverlog.js?v=2.0m-bq", "../app.js?v=2.0m-bq"],
-    "app/index.html": ["version.js?v=2.0m-bs", "app.js?v=2.0m-bq"],
-    "god/index.html": ["../app/version.js?v=2.0m-bs", "../app/driverlog.js?v=2.0m-bq", "./godmap.js?v=2.0m-ad", "./goal.js?v=2.0m-bs", "./god.js?v=2.0m-bs"]
+    "app/driver/index.html": ["../version.js?v=2.0m-bt", "../driverlog.js?v=2.0m-bq", "../app.js?v=2.0m-bt"],
+    "app/index.html": ["version.js?v=2.0m-bt", "app.js?v=2.0m-bt"],
+    "god/index.html": ["../app/version.js?v=2.0m-bt", "../app/driverlog.js?v=2.0m-bq", "./godmap.js?v=2.0m-ad", "./goal.js?v=2.0m-bs", "./god.js?v=2.0m-bs"]
   };
   Object.keys(pages).forEach(function (rel) {
     const html = fs.readFileSync(path.join(root, rel), "utf8");
