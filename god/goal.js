@@ -7,7 +7,7 @@
    cannot decrypt. No network calls (CSP connect-src 'none'). Back up with "Export encrypted backup". */
 (function () {
   "use strict";
-  var GL_CSS = '#gl-screen{--bg:#0b1f0b;--card:#102810;--line:#2e5a2e;--green:#3fae5a;--lite:#7ee08f;--gold:#d4af37;--goldt:#f0d48a;--red:#ff8a80;--txt:#eef5ee}#gl-screen,#gl-screen *{box-sizing:border-box}#gl-screen,#gl-screen{margin:0;background:var(--bg);color:var(--txt);font:16px/1.35 -apple-system,system-ui,Segoe UI,Roboto,sans-serif}#gl-screen main{max-width:760px;margin:0 auto;padding:14px 14px 80px}#gl-screen h1{color:var(--goldt);font-size:24px;margin:6px 0 10px}#gl-screen .card{border:1px solid var(--line);border-radius:14px;padding:12px;margin:10px 0;background:var(--card)}#gl-screen .card.hero{border:2px solid var(--gold)}#gl-screen .card.day{border:2px solid var(--green);text-align:center;background:#0f300f}#gl-screen .card b.t{color:var(--goldt);font-size:17px}#gl-screen .grid{display:flex;flex-wrap:wrap;gap:8px;margin-top:6px}#gl-screen .big{flex:1 1 30%;min-width:110px;background:#163a16;border:1px solid var(--green);border-radius:10px;padding:8px}#gl-screen .big .v{font-size:22px;font-weight:900}#gl-screen .neg{color:var(--red)}#gl-screen .pos{color:var(--lite)}#gl-screen .fine{font-size:13px;color:#b9cdb9}#gl-screen table{width:100%;border-collapse:collapse}#gl-screen td,#gl-screen th{padding:4px 3px}#gl-screen td.r,#gl-screen th.r{text-align:right}#gl-screen tr.b{border-top:1px solid var(--line)}#gl-screen input,#gl-screen select{font-size:16px;padding:9px;border-radius:10px;border:1px solid #9ab79a;background:#fff;color:#000}#gl-screen .btn{font-weight:800;border-radius:12px;padding:10px 16px;border:2px solid var(--gold);background:linear-gradient(#f0d48a,#d4af37);color:#0b1f0b;cursor:pointer;font-size:16px}#gl-screen .btn.ghost{background:transparent;color:var(--goldt)}#gl-screen .total{font-size:42px;font-weight:900;color:var(--lite)}#gl-screen #gl-q-amt{font-size:28px;width:170px;text-align:right}#gl-screen label{display:inline-block;margin:4px 8px 4px 0}#gl-screen label span{display:block}#gl-screen .lock{max-width:420px;margin:12vh auto;padding:20px}#gl-screen .err{color:var(--red);min-height:1.2em}#gl-screen .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;justify-content:center}#gl-screen .btn.ghost{background:#f3f4f6;color:#1a1a1a;border:2px solid #6b7280}#gl-screen .lock{color:#eef5ee}#gl-screen summary{cursor:pointer}#gl-screen input,#gl-screen .gl-ovin{pointer-events:auto;touch-action:manipulation;-webkit-user-select:text;user-select:text;position:relative;z-index:2}#gl-screen .gl-ovin::placeholder{color:#555;opacity:1}#gl-close{position:fixed;top:max(40px,calc(10px + env(safe-area-inset-top)));right:max(16px,env(safe-area-inset-right));z-index:9101;min-height:52px;min-width:120px;font-size:20px;font-weight:900;border-radius:14px;border:2px solid #fff;background:#1f8a3b;color:#fff;cursor:pointer}#gl-screen main{padding-top:100px}#gl-kp{display:none;position:fixed;left:0;right:0;bottom:0;z-index:9102;background:#0b3d17;border-top:3px solid #3fae5a;padding:10px max(10px,env(safe-area-inset-right)) max(12px,env(safe-area-inset-bottom)) max(10px,env(safe-area-inset-left));box-shadow:0 -6px 24px rgba(0,0,0,.6)}#gl-kp .kp-top{display:flex;align-items:center;gap:10px;max-width:520px;margin:0 auto 8px}#gl-kp #gl-kp-lbl{flex:1;text-align:center;color:#fff;font-weight:800;font-size:17px}#gl-kp .kp-g{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;max-width:520px;margin:0 auto}#gl-kp button{-webkit-user-select:none;user-select:none;touch-action:manipulation;cursor:pointer}#gl-kp .kp-g button{min-height:68px;font-size:32px;font-weight:800;border-radius:14px;border:2px solid #1f8a3b;background:#fff;color:#0b1f0b}#gl-kp .kp-g button:active{background:#c8f0d0}#gl-kp.whole button[data-k=\".\"]{visibility:hidden}#gl-kp.hold button[data-k=\"sys\"]{display:none}#gl-kp .kp-sm{min-height:48px;padding:8px 14px;font-size:16px;font-weight:800;border-radius:12px;border:2px solid #fff;background:#1f8a3b;color:#fff}#gl-kp .kp-clr{background:#fff;color:#0b1f0b;border-color:#1f8a3b}#gl-kp .kp-done{display:block;width:100%;max-width:520px;margin:10px auto 0;min-height:68px;font-size:26px;font-weight:900;border-radius:14px;border:2px solid #fff;background:#1f8a3b;color:#fff}#gl-screen.kp-open #gl-close{display:none}#gl-kb-tog{position:fixed;left:max(12px,env(safe-area-inset-left));bottom:max(12px,env(safe-area-inset-bottom));z-index:9101;min-height:44px;padding:8px 14px;font-size:15px;font-weight:800;border-radius:12px;border:2px solid #fff;background:#1f8a3b;color:#fff}#gl-screen.kp-open #gl-kb-tog{display:none!important}#gl-screen #gl-past{text-align:left}#gl-screen #gl-past .gl-past-scroll{max-height:248px;overflow-y:auto;-webkit-overflow-scrolling:touch;overscroll-behavior:contain}#gl-screen #gl-past .gl-pastday{display:block;width:100%;background:none;border:0;padding:0;margin:0;color:inherit;font:inherit;font-weight:700;text-align:left;cursor:pointer;touch-action:manipulation}#gl-screen #gl-past .gl-pastday[aria-pressed=true]{box-shadow:inset 0 0 0 2px #7ee08f}#gl-screen #gl-b-return-today{display:inline-block;width:auto;margin:0 0 6px;min-height:48px;font-size:17px;font-weight:900;touch-action:manipulation}';
+  var GL_CSS = '#gl-screen{--bg:#0b1f0b;--card:#102810;--line:#2e5a2e;--green:#3fae5a;--lite:#7ee08f;--gold:#d4af37;--goldt:#f0d48a;--red:#ff8a80;--txt:#eef5ee}#gl-screen,#gl-screen *{box-sizing:border-box}#gl-screen,#gl-screen{margin:0;background:var(--bg);color:var(--txt);font:16px/1.35 -apple-system,system-ui,Segoe UI,Roboto,sans-serif}#gl-screen main{max-width:760px;margin:0 auto;padding:14px 14px 80px}#gl-screen h1{color:var(--goldt);font-size:24px;margin:6px 0 10px}#gl-screen .card{border:1px solid var(--line);border-radius:14px;padding:12px;margin:10px 0;background:var(--card)}#gl-screen .card.hero{border:2px solid var(--gold)}#gl-screen .card.day{border:2px solid var(--green);text-align:center;background:#0f300f}#gl-screen .card b.t{color:var(--goldt);font-size:17px}#gl-screen .grid{display:flex;flex-wrap:wrap;gap:8px;margin-top:6px}#gl-screen .big{flex:1 1 30%;min-width:110px;background:#163a16;border:1px solid var(--green);border-radius:10px;padding:8px}#gl-screen .big .v{font-size:22px;font-weight:900}#gl-screen .neg{color:var(--red)}#gl-screen .pos{color:var(--lite)}#gl-screen .fine{font-size:13px;color:#b9cdb9}#gl-screen table{width:100%;border-collapse:collapse}#gl-screen td,#gl-screen th{padding:4px 3px}#gl-screen td.r,#gl-screen th.r{text-align:right}#gl-screen tr.b{border-top:1px solid var(--line)}#gl-screen input,#gl-screen select{font-size:16px;padding:9px;border-radius:10px;border:1px solid #9ab79a;background:#fff;color:#000}#gl-screen .btn{font-weight:800;border-radius:12px;padding:10px 16px;border:2px solid var(--gold);background:linear-gradient(#f0d48a,#d4af37);color:#0b1f0b;cursor:pointer;font-size:16px}#gl-screen .btn.ghost{background:transparent;color:var(--goldt)}#gl-screen .total{font-size:42px;font-weight:900;color:var(--lite)}#gl-screen #gl-q-amt{font-size:28px;width:170px;text-align:right}#gl-screen label{display:inline-block;margin:4px 8px 4px 0}#gl-screen label span{display:block}#gl-screen .lock{max-width:420px;margin:12vh auto;padding:20px}#gl-screen .err{color:var(--red);min-height:1.2em}#gl-screen .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;justify-content:center}#gl-screen .btn.ghost{background:#f3f4f6;color:#1a1a1a;border:2px solid #6b7280}#gl-screen .lock{color:#eef5ee}#gl-screen summary{cursor:pointer}#gl-screen input,#gl-screen .gl-ovin{pointer-events:auto;touch-action:manipulation;-webkit-user-select:text;user-select:text;position:relative;z-index:2}#gl-screen .gl-ovin::placeholder{color:#555;opacity:1}#gl-close{position:fixed;top:max(40px,calc(10px + env(safe-area-inset-top)));right:max(16px,env(safe-area-inset-right));z-index:9101;min-height:52px;min-width:120px;font-size:20px;font-weight:900;border-radius:14px;border:2px solid #fff;background:#1f8a3b;color:#fff;cursor:pointer}#gl-screen main{padding-top:100px}#gl-kp{display:none;position:fixed;left:0;right:0;bottom:0;z-index:9102;background:#0b3d17;border-top:3px solid #3fae5a;padding:10px max(10px,env(safe-area-inset-right)) max(12px,env(safe-area-inset-bottom)) max(10px,env(safe-area-inset-left));box-shadow:0 -6px 24px rgba(0,0,0,.6)}#gl-kp .kp-top{display:flex;align-items:center;gap:10px;max-width:520px;margin:0 auto 8px}#gl-kp #gl-kp-lbl{flex:1;text-align:center;color:#fff;font-weight:800;font-size:17px}#gl-kp .kp-g{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;max-width:520px;margin:0 auto}#gl-kp button{-webkit-user-select:none;user-select:none;touch-action:manipulation;cursor:pointer}#gl-kp .kp-g button{min-height:68px;font-size:32px;font-weight:800;border-radius:14px;border:2px solid #1f8a3b;background:#fff;color:#0b1f0b}#gl-kp .kp-g button:active{background:#c8f0d0}#gl-kp.whole button[data-k=\".\"]{visibility:hidden}#gl-kp.hold button[data-k=\"sys\"]{display:none}#gl-kp .kp-sm{min-height:48px;padding:8px 14px;font-size:16px;font-weight:800;border-radius:12px;border:2px solid #fff;background:#1f8a3b;color:#fff}#gl-kp .kp-clr{background:#fff;color:#0b1f0b;border-color:#1f8a3b}#gl-kp .kp-done{display:block;width:100%;max-width:520px;margin:10px auto 0;min-height:68px;font-size:26px;font-weight:900;border-radius:14px;border:2px solid #fff;background:#1f8a3b;color:#fff}#gl-screen.kp-open #gl-close{display:none}#gl-kb-tog{position:fixed;left:max(12px,env(safe-area-inset-left));bottom:max(12px,env(safe-area-inset-bottom));z-index:9101;min-height:44px;padding:8px 14px;font-size:15px;font-weight:800;border-radius:12px;border:2px solid #fff;background:#1f8a3b;color:#fff}#gl-screen.kp-open #gl-kb-tog{display:none!important}#gl-screen #gl-fuel-log{margin:8px 0 0;padding:0 0 0 1.2em;max-height:22em;overflow-y:auto;-webkit-overflow-scrolling:touch;overscroll-behavior:contain}#gl-screen #gl-past{text-align:left}#gl-screen #gl-past .gl-past-scroll{max-height:248px;overflow-y:auto;-webkit-overflow-scrolling:touch;overscroll-behavior:contain}#gl-screen #gl-past .gl-pastday{display:block;width:100%;background:none;border:0;padding:0;margin:0;color:inherit;font:inherit;font-weight:700;text-align:left;cursor:pointer;touch-action:manipulation}#gl-screen #gl-past .gl-pastday[aria-pressed=true]{box-shadow:inset 0 0 0 2px #7ee08f}#gl-screen #gl-b-return-today{display:inline-block;width:auto;margin:0 0 6px;min-height:48px;font-size:17px;font-weight:900;touch-action:manipulation}';
   var ITER = 600000, LOCK_MS = 5 * 60000, MINPW = 10;
   var LINES = [["pcs", "PCS (private clients)"], ["uber", "Uber"], ["lyft", "Lyft"], /* v76j (Matthew 10/19): PCS first + the default pick */ ["ofc", "Officiating (Football/Softball)"], ["va", "VA"], ["cash", "Cash"], ["oth", "Other"]];
   var EXP = [["exp", "Old fuel & expenses"]]; /* v76e: kept only so old entries still show; never offered, never in totals */
@@ -159,7 +159,7 @@
   /* ---------- lock ---------- */
   /* v75t: number pad on every money/number box. decimal = dollars (keypad with a point), numeric = whole counts (days left, PIN). */
   function numPad(root) { if (!root || !root.querySelectorAll) return 0; var n = 0; [].forEach.call(root.querySelectorAll("input"), function (el) {
-    if (el.getAttribute("data-fuel") === "gal") { el.type = "text"; el.setAttribute("inputmode", "decimal"); el.setAttribute("autocomplete", "off"); kpMark(el, false); el.setAttribute("data-kp", "g"); el.setAttribute("data-reg", "3"); n++; return; }
+    if (el.getAttribute("data-fuel") === "gal" || el.getAttribute("data-fuel") === "ppg") { el.type = "text"; el.setAttribute("inputmode", "decimal"); el.setAttribute("autocomplete", "off"); kpMark(el, false); el.setAttribute("data-kp", "g"); el.setAttribute("data-reg", "3"); n++; return; }
     if (el.getAttribute("data-fuel") === "odo") { el.type = "text"; el.setAttribute("inputmode", "numeric"); el.setAttribute("autocomplete", "off"); kpMark(el, true); n++; return; }
     if ((el.readOnly && !kpHold(el)) || /^(password|checkbox|radio|date|time|file|hidden)$/.test(el.type) && !(el.type === "password" && el.getAttribute("inputmode") === "numeric")) return;
     var im = el.getAttribute("inputmode"), whole = el.id === "gl-s-days" || im === "numeric", money = whole || im === "decimal" || el.type === "number";
@@ -177,7 +177,7 @@
      v2.0m-bi: gallons is a three-decimal register (1,2,3,4 -> 1.234; Delete drops the last digit). Price stays two decimals. The point key does not insert a point. */
   var KP_KEY = "pcsGoalSysKb", kpEl = null, kpCur = null;
   function kpOn() { try { return localStorage.getItem(KP_KEY) !== "1"; } catch (e) { return true; } }
-  function kpHold(el) { var id = el && el.id; return id === "gl-pin" || id === "gl-pin1" || id === "gl-pin2" || id === "gl-q-amt" || id === "gl-q-tip" || id === "gl-fuel-odo" || id === "gl-fuel-price" || id === "gl-fuel-gal"; }
+  function kpHold(el) { var id = el && el.id; return id === "gl-pin" || id === "gl-pin1" || id === "gl-pin2" || id === "gl-q-amt" || id === "gl-q-tip" || id === "gl-fuel-odo" || id === "gl-fuel-price" || id === "gl-fuel-gal" || id === "gl-fuel-miss-odo" || id === "gl-fuel-miss-gal" || id === "gl-fuel-miss-ppg"; }
   function kpMark(el, whole) { el.setAttribute("data-kp", whole ? "w" : "d"); if (!whole && el.type !== "password") el.setAttribute("data-reg", "1"); else el.removeAttribute("data-reg");
     if (kpHold(el) || kpOn()) el.setAttribute("inputmode", "none"); else el.setAttribute("inputmode", whole ? "numeric" : "decimal"); if (kpHold(el)) el.readOnly = true; }
   function kpRefresh() { var ov = document.getElementById("gl-screen"); if (!ov) return; [].forEach.call(ov.querySelectorAll("input[data-kp]"), function (el) {
@@ -557,17 +557,88 @@
       return !!(k && String(k.email || "").trim().toLowerCase() === FUEL_OWNER_EMAIL);
     } catch (e) { return false; }
   }
+  function fuelSeedOdo(book) {
+    var seed = book && book.seed;
+    return seed && isFinite(+seed.odo) ? Math.round(+seed.odo) : null;
+  }
   function fuelRows(book) {
     var f = book || {}, rows = [];
     Object.keys(f).forEach(function (k) { if (k.indexOf("log_") === 0 && f[k] && typeof f[k] === "object") rows.push(Object.assign({ id: k }, f[k])); });
-    rows.sort(function (a, b) { return (Number(a.at) || 0) - (Number(b.at) || 0); });
+    rows.sort(function (a, b) { return (Math.round(Number(a.odo)) || 0) - (Math.round(Number(b.odo)) || 0) || (Number(a.at) || 0) - (Number(b.at) || 0); });
     return rows;
   }
+  function fuelDisplayRows(book) {
+    var prev = fuelSeedOdo(book), rows = fuelRows(book);
+    return rows.map(function (r) {
+      var out = Object.assign({}, r, { displayPrev: prev });
+      prev = Math.round(Number(r.odo));
+      return out;
+    });
+  }
   function fuelPrevOdo(book) {
-    var rows = fuelRows(book);
-    if (rows.length) return Math.round(Number(rows[rows.length - 1].odo));
-    var seed = book && book.seed;
-    return seed && isFinite(+seed.odo) ? Math.round(+seed.odo) : null;
+    var rows = fuelRows(book), i, max = null, odo;
+    for (i = 0; i < rows.length; i++) {
+      odo = Math.round(Number(rows[i].odo));
+      if (isFinite(odo) && (max == null || odo > max)) max = odo;
+    }
+    if (max != null) return max;
+    return fuelSeedOdo(book);
+  }
+  /* Receipt date + optional time in Central Time. No time means noon. */
+  function fuelAtFromInput(dateVal, timeVal) {
+    var m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(dateVal || "").trim());
+    if (!m) return null;
+    var y = +m[1], mo = +m[2], d = +m[3], hour = 12, minute = 0, hm = String(timeVal || "").trim(), t, g, i, w, off, chk;
+    if (hm) {
+      t = /^(\d{1,2}):(\d{2})/.exec(hm) || /^(\d{2})(\d{2})$/.exec(hm);
+      if (!t) return null;
+      hour = +t[1]; minute = +t[2];
+      if (hour > 23 || minute > 59) return null;
+    }
+    g = Date.UTC(y, mo - 1, d, hour, minute, 0);
+    for (i = 0; i < 8; i++) {
+      w = ctWall(g);
+      off = Date.UTC(w.y, w.m - 1, w.d, w.h, w.mi, w.s) - g;
+      g = Date.UTC(y, mo - 1, d, hour, minute, 0) - off;
+    }
+    chk = ctWall(g);
+    if (chk.y !== y || chk.m !== mo || chk.d !== d || chk.h !== hour || chk.mi !== minute) return null;
+    return g;
+  }
+  function fuelValidateMissing(book, rec) {
+    book = book || {};
+    var seed = fuelSeedOdo(book), odo = Math.round(Number(rec && rec.odo)), at = rec && rec.at != null ? Number(rec.at) : NaN, gal, priceEach, rows, i, r, ro, ra;
+    if (!isFinite(at)) return { ok: false, error: "Enter the date of the receipt." };
+    if (!isFinite(odo)) return { ok: false, error: "Enter the odometer." };
+    if (seed == null) return { ok: false, error: "Save a starting odometer first." };
+    if (!(odo > seed)) return { ok: false, error: "Odometer has to be above the starting odometer." };
+    rows = fuelRows(book);
+    for (i = 0; i < rows.length; i++) {
+      if (Math.round(Number(rows[i].odo)) === odo) return { ok: false, error: "That odometer is already in the log." };
+    }
+    gal = Math.round(Number(rec && rec.gallons) * 1000) / 1000;
+    priceEach = Math.round(Number(rec && rec.ppg) * 1000) / 1000;
+    if (!(gal > 0) || !(priceEach > 0)) return { ok: false, error: "Gallons and price have to be more than 0." };
+    for (i = 0; i < rows.length; i++) {
+      r = rows[i]; ro = Math.round(Number(r.odo)); ra = Number(r.at) || 0;
+      if (ra < at && ro >= odo) return { ok: false, error: "That odometer does not fit the dates around it. An older fill has to have a lower odometer." };
+      if (ra > at && ro <= odo) return { ok: false, error: "That odometer does not fit the dates around it. An older fill has to have a lower odometer." };
+    }
+    return { ok: true, odo: odo, gallons: gal, ppg: priceEach, price: Math.round(gal * priceEach * 100) / 100, at: at };
+  }
+  function fuelAddMissing(book, rec, now) {
+    var v = fuelValidateMissing(book, rec), at, when, prev, rows, i, entry;
+    if (!v.ok) return v;
+    book = book || {};
+    at = v.at;
+    while (book["log_" + at]) at += 1;
+    when = fuelWhen(at);
+    prev = fuelSeedOdo(book);
+    rows = fuelRows(book);
+    for (i = 0; i < rows.length; i++) { if (Math.round(Number(rows[i].odo)) < v.odo) prev = Math.round(Number(rows[i].odo)); }
+    entry = { at: at, date: when.date, time: when.time, prev: prev, odo: v.odo, gallons: v.gallons, price: v.price, ppg: v.ppg, added: true, addedAt: now || Date.now() };
+    book["log_" + at] = entry;
+    return { ok: true, id: "log_" + at, entry: entry };
   }
   function fuelMath(prev, odo, gallons, price) {
     if ([prev, odo, gallons, price].some(function (v) { return String(v == null ? "" : v).trim() === "" || !isFinite(+v); })) return { ok: false, miles: null, mpg: null, tank: null, ppm: null };
@@ -584,23 +655,35 @@
     return { miles: String(m.miles), mpg: m.mpg.toFixed(2), tank: m.tank.toFixed(2), ppm: "$" + m.ppm.toFixed(2), ppg: isFinite(ppg) ? "$" + ppg.toFixed(3) : "" };
   }
   function fuelHist(r) {
-    var f = fuelFmt(fuelMath(r.prev, r.odo, r.gallons, r.price));
+    var prev = r.displayPrev != null ? r.displayPrev : r.prev;
+    var f = fuelFmt(fuelMath(prev, r.odo, r.gallons, r.price));
     return esc(r.date + " " + r.time) + " · odo " + r.odo + " · " + Number(r.gallons).toFixed(3) + " gal · " + f.miles + " mi · " + f.tank + " mi/tank · " + f.mpg + " mpg · " + f.ppg + "/gal · $" + Number(r.price).toFixed(2) + " total · " + f.ppm + "/mi";
   }
   function fuelHtml() {
     if (!fuelForMatthew()) return "";
-    var book = (D && D.fuel) || {}, prev = fuelPrevOdo(book), rows = fuelRows(book);
+    var book = (D && D.fuel) || {}, prev = fuelPrevOdo(book), rows = fuelDisplayRows(book);
     var box = "background:#fff;color:#0b2a12;border:2px solid #1f8a3b;border-radius:10px;padding:8px;font-size:18px";
     var head = '<section class="card" id="gl-fuel"><b class="t">Fuel</b><p class="fine" id="gl-fuel-when">Date and time are saved automatically.</p>';
     if (prev == null) return head + '<label class="fine">Starting odometer <input id="gl-fuel-odo" data-fuel="odo" type="text" inputmode="numeric" autocomplete="off" aria-label="Starting odometer" style="' + box + ';width:160px"></label> <button type="button" class="btn" id="gl-fuel-seed">Save starting odometer</button><p class="fine" id="gl-fuel-msg"></p></section>';
-    var last = rows.length ? rows[rows.length - 1] : null, shown = last ? fuelFmt(fuelMath(last.prev, last.odo, last.gallons, last.price)) : fuelFmt(null);
+    var last = rows.length ? rows[rows.length - 1] : null, shown = last ? fuelFmt(fuelMath(last.displayPrev, last.odo, last.gallons, last.price)) : fuelFmt(null);
+    var miss = '<p style="margin:10px 0 6px"><button type="button" class="btn ghost" id="gl-fuel-miss-open">Add missing receipt</button></p>';
+    if (fuelMissOpen) miss += '<div id="gl-fuel-miss" style="margin:8px 0;padding:10px;border:1px solid var(--line);border-radius:10px">' +
+      '<p class="fine">Date, odometer, gallons, and price per gallon from the receipt.</p>' +
+      '<label class="fine">Date <input id="gl-fuel-miss-date" type="date" aria-label="Receipt date" style="' + box + ';width:170px"></label> ' +
+      '<label class="fine">Time (optional) <input id="gl-fuel-miss-time" type="time" value="12:00" aria-label="Receipt time, optional, default noon" style="' + box + ';width:130px"></label> ' +
+      '<label class="fine">Odometer <input id="gl-fuel-miss-odo" data-fuel="odo" type="text" inputmode="numeric" autocomplete="off" aria-label="Receipt odometer" style="' + box + ';width:140px"></label> ' +
+      '<label class="fine">Gallons <input id="gl-fuel-miss-gal" data-fuel="gal" type="text" inputmode="decimal" autocomplete="off" aria-label="Receipt gallons" placeholder="0.000" style="' + box + ';width:120px"></label> ' +
+      '<label class="fine">Price per gallon <input id="gl-fuel-miss-ppg" data-fuel="ppg" type="text" inputmode="decimal" autocomplete="off" aria-label="Price per gallon" placeholder="0.000" style="' + box + ';width:120px"></label> ' +
+      '<button type="button" class="btn" id="gl-fuel-miss-save">Save missing receipt</button>' +
+      '<p class="fine" id="gl-fuel-miss-msg"></p></div>';
     return head + '<p class="fine">Previous odometer <b id="gl-fuel-prev">' + prev + "</b> locked</p>" +
       '<label class="fine">Price <input id="gl-fuel-price" type="text" inputmode="decimal" autocomplete="off" aria-label="Fuel price" placeholder="0.00" style="' + box + ';width:120px"></label> ' +
       '<label class="fine">Current odometer <input id="gl-fuel-odo" data-fuel="odo" type="text" inputmode="numeric" autocomplete="off" aria-label="Current odometer" style="' + box + ';width:140px"></label> ' +
       '<label class="fine">Gallons <input id="gl-fuel-gal" data-fuel="gal" type="text" inputmode="decimal" autocomplete="off" aria-label="Gallons" placeholder="0.000" style="' + box + ';width:120px"></label> ' +
       '<button type="button" class="btn" id="gl-fuel-save">Save fill</button><p class="fine" id="gl-fuel-msg"></p>' +
       '<p id="gl-fuel-out">Miles <b id="gl-fuel-miles">' + shown.miles + '</b> · MPG <b id="gl-fuel-mpg">' + shown.mpg + '</b> · Miles per tank <b id="gl-fuel-tank">' + shown.tank + '</b> · Price per mile <b id="gl-fuel-ppm">' + shown.ppm + "</b></p>" +
-      (rows.length ? '<ul id="gl-fuel-log">' + rows.slice().reverse().map(function (r) { return "<li>" + fuelHist(r) + "</li>"; }).join("") + "</ul>" : "") +
+      miss +
+      (rows.length ? '<ul id="gl-fuel-log" data-view-rows="5" tabindex="0" aria-label="Fuel log">' + rows.slice().reverse().map(function (r) { return "<li>" + fuelHist(r) + "</li>"; }).join("") + "</ul>" : "") +
       "</section>";
   }
   function fuelPreview() {
@@ -627,7 +710,19 @@
     D.fuel["log_" + at] = { at: at, date: when.date, time: when.time, prev: m.prev, odo: m.odo, gallons: m.gallons, price: m.price };
     save(); paint();
   }
-  if (typeof window !== "undefined") window.__pcsGoalFuel = { math: fuelMath, fmt: fuelFmt, when: fuelWhen, prev: fuelPrevOdo, rows: fuelRows, owner: fuelForMatthew };
+  var fuelMissOpen = false;
+  function fuelSaveMissing() {
+    if (!fuelForMatthew()) return;
+    var msg = document.getElementById("gl-fuel-miss-msg");
+    var dateEl = document.getElementById("gl-fuel-miss-date"), timeEl = document.getElementById("gl-fuel-miss-time");
+    var rec = { at: fuelAtFromInput(dateEl && dateEl.value, timeEl && timeEl.value), odo: (document.getElementById("gl-fuel-miss-odo") || {}).value, gallons: (document.getElementById("gl-fuel-miss-gal") || {}).value, ppg: (document.getElementById("gl-fuel-miss-ppg") || {}).value };
+    D.fuel = D.fuel || {};
+    var result = fuelAddMissing(D.fuel, rec);
+    if (!result.ok) { if (msg) msg.textContent = result.error; return; }
+    fuelMissOpen = false;
+    save(); paint();
+  }
+  if (typeof window !== "undefined") window.__pcsGoalFuel = { math: fuelMath, fmt: fuelFmt, when: fuelWhen, prev: fuelPrevOdo, rows: fuelRows, displayRows: fuelDisplayRows, owner: fuelForMatthew, seed: fuelSeedOdo, atFromInput: fuelAtFromInput, validateMissing: fuelValidateMissing, addMissing: fuelAddMissing, hist: fuelHist, logFit: fuelLogFit, logFitSoon: fuelLogFitSoon, logFitWatch: fuelLogFitWatch };
   function paint() { paint.editK = null; /* v2.0d.4 r2 (Harry): every redraw rebuilds the add row as "Add", so no edit may survive it */
     if (snapToday()) save(); /* first open after midnight, or once goals are set */
     var c = calc(), s = D.settings, h = "";
@@ -806,11 +901,42 @@
     bindRest();
     bindFuel();
   }
+  var fuelLogFitT = null, fuelLogFitOn = false;
+  function fuelLogFit() {
+    var log = typeof document !== "undefined" && document.getElementById("gl-fuel-log"), first, cut, h, pad, cs;
+    if (!log) return;
+    log.style.height = "";
+    log.style.maxHeight = "";
+    if (!log.children || log.children.length <= 5) return;
+    first = log.children[0];
+    cut = log.children[5];
+    if (!first || !cut || !first.getBoundingClientRect || !cut.getBoundingClientRect) return;
+    h = cut.getBoundingClientRect().top - first.getBoundingClientRect().top;
+    if (!(h > 0)) return;
+    pad = 0;
+    try { cs = (typeof getComputedStyle === "function" ? getComputedStyle(log) : null); if (cs) pad = (parseFloat(cs.paddingTop) || 0) + (parseFloat(cs.paddingBottom) || 0); } catch (e) {}
+    log.style.maxHeight = (h + pad) + "px";
+    log.style.height = (h + pad) + "px";
+  }
+  function fuelLogFitSoon() {
+    if (fuelLogFitT) clearTimeout(fuelLogFitT);
+    fuelLogFitT = setTimeout(function () { fuelLogFitT = null; fuelLogFit(); }, 80);
+  }
+  function fuelLogFitWatch() {
+    if (fuelLogFitOn || typeof window === "undefined" || !window.addEventListener) return;
+    fuelLogFitOn = true;
+    window.addEventListener("resize", fuelLogFitSoon);
+    window.addEventListener("orientationchange", fuelLogFitSoon);
+  }
+  fuelLogFitWatch();
   function bindFuel() {
-    var seed = document.getElementById("gl-fuel-seed"), saveB = document.getElementById("gl-fuel-save");
+    var seed = document.getElementById("gl-fuel-seed"), saveB = document.getElementById("gl-fuel-save"), missOpen = document.getElementById("gl-fuel-miss-open"), missSave = document.getElementById("gl-fuel-miss-save");
     if (seed) seed.onclick = fuelSaveSeed;
     if (saveB) saveB.onclick = fuelSaveFill;
+    if (missOpen) missOpen.onclick = function () { fuelMissOpen = !fuelMissOpen; paint(); };
+    if (missSave) missSave.onclick = fuelSaveMissing;
     ["gl-fuel-price", "gl-fuel-odo", "gl-fuel-gal"].forEach(function (id) { var el = document.getElementById(id); if (el) el.addEventListener("input", fuelPreview); });
+    fuelLogFit();
   }
   /* v76j: flip Working Sunday for this week; the auto day count + today's goal are recalculated right away (a typed Days left for today is cleared) */
   function sunToggle() { var s = D.settings = D.settings || {}, c0 = calc(), on = s.workSunDate !== c0.sun;
