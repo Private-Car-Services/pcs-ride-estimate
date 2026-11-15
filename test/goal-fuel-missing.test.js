@@ -202,3 +202,60 @@ test("the Fuel card has Add missing receipt fields and the same gallons keypad",
   const html = fs.readFileSync(path.join(__dirname, "../god/index.html"), "utf8");
   assert.ok(html.indexOf("goal.js?v=2.0m-bv") >= 0);
 });
+
+test("the fuel log keeps every fill and shows five at a time in a scroll box", function () {
+  const src = fs.readFileSync(path.join(__dirname, "../god/goal.js"), "utf8");
+  assert.match(src, /#gl-screen #gl-fuel-log\{[^}]*overflow-y:auto/);
+  assert.match(src, /#gl-screen #gl-fuel-log\{[^}]*-webkit-overflow-scrolling:touch/);
+  assert.ok(src.indexOf('data-view-rows="5"') >= 0);
+  assert.ok(src.indexOf("rows.slice().reverse().map") >= 0);
+  assert.equal(src.indexOf("rows.slice(0, 5)"), -1);
+  assert.equal(src.indexOf("rows.slice(-5)"), -1);
+
+  const sandbox = loadGoal();
+  const fuel = sandbox.__pcsGoalFuel;
+  const book = { seed: { odo: 100000, at: 1 } };
+  const odos = [100200, 100350, 100500, 100650, 100800, 100950, 101100, 101250];
+  odos.forEach(function (odo, i) {
+    const at = Date.parse("2026-11-0" + (1 + i) + "T15:00:00Z");
+    const when = fuel.when(at);
+    book["log_" + at] = { at: at, date: when.date, time: when.time, prev: i ? odos[i - 1] : 100000, odo: odo, gallons: 10 + i, price: 40 };
+  });
+  assert.equal(fuel.rows(book).length, 8);
+  const newestFirst = fuel.displayRows(book).slice().reverse();
+  assert.equal(newestFirst[0].odo, 101250);
+  assert.equal(newestFirst[7].odo, 100200);
+
+  const log = sandbox.document.createElement("ul");
+  log.id = "gl-fuel-log";
+  log.style = {};
+  const lis = [];
+  newestFirst.forEach(function (r, i) {
+    const li = sandbox.document.createElement("li");
+    li._html = fuel.hist(r);
+    li.getBoundingClientRect = function () { return { top: 10 + i * 40, bottom: 10 + (i + 1) * 40, height: 40, left: 0, right: 40, width: 40 }; };
+    log.appendChild(li);
+    lis.push(li);
+  });
+  sandbox.document.getElementById = function (id) { return id === "gl-fuel-log" ? log : null; };
+  sandbox.getComputedStyle = function () { return { paddingTop: "0", paddingBottom: "0" }; };
+  fuel.logFit();
+  assert.equal(log.children.length, 8, "every fill stays in the list");
+  assert.equal(log.style.maxHeight, "200px");
+  assert.equal(log.style.height, "200px");
+  assert.ok(lis.every(function (li, i) { return li.parentNode === log && String(li._html).indexOf("odo " + newestFirst[i].odo) >= 0; }));
+
+  const short = sandbox.document.createElement("ul");
+  short.id = "gl-fuel-log";
+  short.style = {};
+  for (let i = 0; i < 3; i++) {
+    const li = sandbox.document.createElement("li");
+    li.getBoundingClientRect = function () { return { top: i * 40, bottom: (i + 1) * 40, height: 40, left: 0, right: 40, width: 40 }; };
+    short.appendChild(li);
+  }
+  sandbox.document.getElementById = function (id) { return id === "gl-fuel-log" ? short : null; };
+  fuel.logFit();
+  assert.equal(short.children.length, 3);
+  assert.equal(short.style.height, "");
+  assert.equal(short.style.maxHeight, "");
+});
