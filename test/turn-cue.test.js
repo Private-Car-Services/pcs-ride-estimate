@@ -137,10 +137,10 @@ test("the cue sits in both turn banners and uses the invoice green", function ()
   const meter = appSrc.slice(appSrc.indexOf("function meterTurnHtml"), appSrc.indexOf("function meterTurnPaint"));
   const paint = appSrc.slice(appSrc.indexOf("function schedNavPaint"), appSrc.indexOf("function schedFullKey"));
   const gps = appSrc.slice(appSrc.indexOf("function onGpsFix"), appSrc.indexOf("function fgLocateNow"));
-  assert.match(sched, /words \+[\s\S]*navCueHtml\(kind, cueMi\)/);
+  assert.match(sched, /navCueHtml\(kind, cueMi\) \+ '<span class="pcs-turn-text">'/);
   assert.match(sched, /mi to the pickup/);
   assert.match(sched, /In ' \+ esc\(dd\)/);
-  assert.match(meter, /esc\(t\.text\) \+ navCueHtml\(t\.kind, t\.mi\)/);
+  assert.match(meter, /navCueHtml\(t\.kind, t\.mi\) \+ '<span class="pcs-turn-text">'/);
   assert.match(meter, /id="meter-turn"/);
   assert.equal(meter.indexOf("Invoice"), -1);
   assert.match(paint, /schedTurnHtml\(false\)/);
@@ -199,7 +199,7 @@ function pointBefore(line, dest, targetMi) {
 }
 
 function banner(kind, miles, text, id, ride) {
-  const words = '<span class="pcs-turn-text" style="display:block">' + text + "</span>" + cue.html(kind, miles);
+  const words = '<div class="pcs-turn-row">' + cue.html(kind, miles) + '<span class="pcs-turn-text">' + text + "</span></div>";
   if (ride) return '<div class="meter-turn" id="' + id + '" role="status">' + words + "</div>";
   return '<div id="' + id + '" role="status" style="background:#0b3d23;color:#fff;border-radius:12px;padding:10px 12px;margin:0;font-size:20px;font-weight:800">' +
     words + '<small style="display:block;font-size:14px;font-weight:700;color:#d1fae5;margin-top:4px">5.2 mi to the pickup · about 9 min</small></div>';
@@ -280,7 +280,7 @@ function page(spec) {
     "var sos = document.getElementById('pcs-sos-btn'); if (sos) { var stack = document.getElementById('sched-fs-top') || document.getElementById('meter-topstack'); sos.style.top = Math.round((stack ? stack.getBoundingClientRect().bottom : 120) + 16) + 'px'; }" +
     "function box(id){var n=document.getElementById(id); if(!n) return null; var r=n.getBoundingClientRect(); if(r.width<2||r.height<2) return null; return {id:id,left:r.left,top:r.top,right:r.right,bottom:r.bottom};}" +
     "function hit(a,b){return !(a.right<=b.left+1||a.left>=b.right-1||a.bottom<=b.top+1||a.top>=b.bottom-1);}" +
-    "var cues=[].slice.call(document.querySelectorAll('.pcs-turn-cue')).map(function(n){var r=n.getBoundingClientRect(); var bg=getComputedStyle(n).backgroundColor; var arrow=n.querySelector('.pcs-turn-arrow'); var ar=arrow.getBoundingClientRect(); var words=n.parentNode.querySelector('.pcs-turn-text'); var wr=words?words.getBoundingClientRect():null; return {turn:n.getAttribute('data-turn'),text:n.querySelector('.pcs-turn-dist').textContent,instr:words?words.textContent:'',bg:bg,aw:Math.round(ar.width),ah:Math.round(ar.height),left:r.left,top:r.top,right:r.right,bottom:r.bottom,under:!!(wr && r.top>=wr.bottom-4)};});" +
+    "var cues=[].slice.call(document.querySelectorAll('.pcs-turn-cue')).map(function(n){var r=n.getBoundingClientRect(); var bg=getComputedStyle(n).backgroundColor; var arrow=n.querySelector('.pcs-turn-arrow'); var ar=arrow.getBoundingClientRect(); var words=n.parentNode.querySelector('.pcs-turn-text'); var wr=words?words.getBoundingClientRect():null; var dist=n.querySelector('.pcs-turn-dist'); return {turn:n.getAttribute('data-turn'),text:dist?dist.textContent:'',instr:words?words.textContent:'',bg:bg,aw:Math.round(ar.width),ah:Math.round(ar.height),left:r.left,top:r.top,right:r.right,bottom:r.bottom,beside:!!(wr && r.right<=wr.left+2 && Math.abs(r.top-wr.top)<8)};});" +
     "var watch=" + JSON.stringify(spec.watch) + "; var hits=[]; var zoomEl=document.querySelector('.leaflet-control-zoom'); var zb=zoomEl?zoomEl.getBoundingClientRect():null;" +
     "cues.forEach(function(c){ watch.forEach(function(id){ var b=box(id); if(b && hit(c,b)) hits.push(c.turn+' '+id); }); if(zb && zb.width>2 && hit(c,{left:zb.left,top:zb.top,right:zb.right,bottom:zb.bottom})) hits.push(c.turn+' zoom'); });" +
     "document.body.dataset.report=JSON.stringify({hits:hits,cues:cues,zoom:!!zoomEl});" +
@@ -328,7 +328,7 @@ test("four driver maps keep the arrow clear of the other controls", async functi
     "--window-size=900,1300", "--remote-debugging-port=" + (port + 100),
     "--user-data-dir=" + path.join(dir, "chrome"), "about:blank"
   ], { stdio: "ignore" });
-  const outDir = "/opt/cursor/artifacts/v2.0m-bt";
+  const outDir = "/opt/cursor/artifacts/v2.0m-bu";
   fs.mkdirSync(outDir, { recursive: true });
   const wait = (ms) => new Promise(function (r) { setTimeout(r, ms); });
   try {
@@ -394,7 +394,7 @@ test("four driver maps keep the arrow clear of the other controls", async functi
       assert.equal(got.cues.length, 1, name + " arrow count " + got.cues.length);
       got.cues.forEach(function (c) {
         assert.equal(c.turn, shot.move.kind, name);
-        assert.equal(c.under, true, name + " arrow is not under the direction text");
+        assert.equal(c.beside, true, name + " direction is not beside the arrow box");
         assert.equal(c.bg.replace(/\s/g, ""), "rgb(11,107,58)", name + " green");
         assert.ok(c.aw >= 52 && c.aw <= 64, name + " arrow width " + c.aw);
         assert.ok(c.ah >= 52 && c.ah <= 64, name + " arrow height " + c.ah);
@@ -428,7 +428,7 @@ test("ride-map Full screen sits beside zoom, and U turn is a U-turn", async func
   const zoomCss = appSrc.slice(zoomAt, appSrc.indexOf('"', zoomAt));
   const words = "Turn left onto<br>North 10th Street";
   function ridePage(full, w, h) {
-    const banner = '<div class="meter-turn" id="meter-turn"><span class="pcs-turn-text" style="display:block">' + words + "</span>" + cue.html("left", 0.5) + "</div>";
+    const banner = '<div class="meter-turn" id="meter-turn"><div class="pcs-turn-row">' + cue.html("left", 0.5) + '<span class="pcs-turn-text">' + words + "</span></div></div>";
     const eta = '<div id="meter-eta-box" class="nav-eta"><div class="nav-eta-at">Arrive 1:55 PM</div><div class="nav-eta-left">9 min · 5.2 mi</div><div class="nav-eta-to">to drop-off</div></div>';
     const stageH = full ? "100vh" : "46vh";
     return "<!doctype html><html><head><meta charset=\"utf-8\"><link rel=\"stylesheet\" href=\"leaflet.css\"><style>" +
@@ -479,7 +479,7 @@ test("ride-map Full screen sits beside zoom, and U turn is a U-turn", async func
     "--window-size=1100,900", "--remote-debugging-port=" + (port + 100),
     "--user-data-dir=" + path.join(dir, "chrome"), "about:blank"
   ], { stdio: "ignore" });
-  const outDir = "/opt/cursor/artifacts/v2.0m-bt";
+  const outDir = "/opt/cursor/artifacts/v2.0m-bu";
   fs.mkdirSync(outDir, { recursive: true });
   const wait = (ms) => new Promise(function (r) { setTimeout(r, ms); });
   try {

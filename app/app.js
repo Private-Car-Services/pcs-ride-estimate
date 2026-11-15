@@ -10794,6 +10794,9 @@
     ".pcs-turn-arrow{display:flex;align-items:center;justify-content:center;width:60px;height:60px;flex:0 0 60px}" +
     ".pcs-turn-arrow svg{width:56px;height:56px;display:block}" +
     ".pcs-turn-dist{font-size:28px;line-height:1.05;font-weight:900;color:#fff;white-space:nowrap;font-variant-numeric:tabular-nums}" +
+    ".pcs-turn-row{display:flex;align-items:flex-start;gap:10px;width:100%;min-width:0;box-sizing:border-box}" +
+    ".pcs-turn-row .pcs-turn-cue{margin:0;flex:0 0 auto}" +
+    ".pcs-turn-text{flex:1 1 auto;min-width:0;white-space:normal;overflow:visible;overflow-wrap:break-word;line-height:1.2}" +
     "#home-map-stage:not(.pcs-fullmap) #sched-turn-map{position:absolute;left:8px;right:8px;top:8px;z-index:1002;margin:0;pointer-events:none;box-shadow:0 2px 8px rgba(0,0,0,.4)}" +
     "#home-map-stage.pcs-fullmap #sched-turn-map{display:none}" +
     "#home-map-stage:not(.pcs-fullmap) #sched-eta-map{top:calc(var(--sched-map-banner, 8px) + 4px)}" +
@@ -10828,8 +10831,8 @@
     var dd = n.mi == null ? "" : n.mi < 0.1 ? Math.max(50, Math.round(n.mi * 5280 / 50) * 50) + " ft" : n.mi.toFixed(1) + " mi";
     var words = n.text ? esc(n.text) : "Head to the pickup";
     var lead = !onMap && n.text ? '<small style="display:block;font-size:14px;font-weight:700;color:#d1fae5">In ' + esc(dd) + "</small>" : "";
-    return '<div id="sched-turn" role="status" aria-live="polite" style="' + box + '">' + lead + words +
-      (onMap ? navCueHtml(kind, cueMi) : "") +
+    return '<div id="sched-turn" role="status" aria-live="polite" style="' + box + '">' + lead +
+      (onMap ? '<div class="pcs-turn-row">' + navCueHtml(kind, cueMi) + '<span class="pcs-turn-text">' + words + "</span></div>" : words) +
       '<small style="display:block;font-size:14px;font-weight:700;color:#d1fae5;margin-top:4px">' + esc((Math.round(n.left * 10) / 10) + " mi to the pickup" + (mins ? " \u00b7 about " + mins + " min" : "")) + "</small></div>";
   }
   function schedTurnMapPaint() {
@@ -17885,7 +17888,7 @@
     navCueStyle();
     var t = meterNextTurn();
     if (!t) return '<div class="meter-turn" id="meter-turn" style="display:none"></div>';
-    return '<div class="meter-turn" id="meter-turn" role="status" aria-live="polite">' + esc(t.text) + navCueHtml(t.kind, t.mi) + "</div>";
+    return '<div class="meter-turn" id="meter-turn" role="status" aria-live="polite"><div class="pcs-turn-row">' + navCueHtml(t.kind, t.mi) + '<span class="pcs-turn-text">' + esc(t.text) + "</span></div></div>";
   }
   function meterTurnPaint() {
     if (typeof document === "undefined") return;
