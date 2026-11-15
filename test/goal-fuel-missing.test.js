@@ -1,0 +1,204 @@
+/* Add missing receipt: insert-in-the-middle math, validation, and per-key fuel sync. */
+const assert = require("assert");
+const fs = require("fs");
+const path = require("path");
+const vm = require("vm");
+const test = require("node:test");
+
+function loadGoal() {
+  const nodes = {};
+  function el(tag) {
+    const node = {
+      tag: tag, style: {}, attrs: {}, children: [], parentNode: null, value: "", type: "text",
+      classList: { add() {}, remove() {}, toggle() {} },
+      setAttribute(k, v) { this.attrs[k] = String(v); },
+      getAttribute(k) { return this.attrs[k] == null ? null : this.attrs[k]; },
+      removeAttribute(k) { delete this.attrs[k]; },
+      appendChild(c) { c.parentNode = this; this.children.push(c); return c; },
+      addEventListener(t, fn) { this._l = this._l || {}; (this._l[t] = this._l[t] || []).push(fn); },
+      dispatchEvent(ev) { (this._l && this._l[ev.type] || []).forEach(function (fn) { fn(ev); }); return true; },
+      querySelector() { return null; }, querySelectorAll() { return []; },
+      closest() { return null; }, contains() { return false; }, focus() {}, blur() {},
+      setSelectionRange() {}, remove() {},
+      getBoundingClientRect() { return { top: 10, bottom: 40, left: 0, right: 40, width: 40, height: 30 }; }
+    };
+    Object.defineProperty(node, "id", { get() { return node._id || ""; }, set(v) { node._id = String(v); nodes[node._id] = node; } });
+    Object.defineProperty(node, "innerHTML", {
+      set(html) {
+        node._html = html; node.children = [];
+        const re = /<([a-z0-9]+)\b[^>]*\bid="([^"]+)"/gi;
+        let m;
+        while ((m = re.exec(html))) {
+          const child = el(m[1]);
+          child.id = m[2];
+          child.parentNode = node;
+          node.children.push(child);
+        }
+      },
+      get() { return node._html || ""; }
+    });
+    return node;
+  }
+  const doc = { readyState: "complete", body: el("body"), head: el("head"), documentElement: el("html"), addEventListener() {}, createElement: el, querySelector() { return null; }, getElementById(id) { return nodes[id] || null; } };
+  const sandbox = {
+    console, Date, Math, JSON, Number, String, Object, Array, Promise, RegExp, Error, parseInt, isFinite,
+    Event: function Event(type) { this.type = type; },
+    setTimeout() { return 0; }, clearTimeout() {}, setInterval() { return 0; }, clearInterval() {},
+    document: doc, localStorage: { getItem() { return null; }, setItem() {}, removeItem() {} },
+    location: { search: "", hostname: "localhost", href: "http://localhost/god/" },
+    navigator: { userAgent: "test" },
+    indexedDB: { open() { throw new Error("no-idb"); } },
+    crypto: { getRandomValues(a) { return a; }, subtle: {} },
+    fetch() { return Promise.reject(new Error("no")); },
+    TextEncoder, TextDecoder, Uint8Array, alert() {},
+    module: { exports: {} }
+  };
+  sandbox.window = sandbox;
+  vm.createContext(sandbox);
+  vm.runInContext(fs.readFileSync(path.join(__dirname, "../god/goal.js"), "utf8"), sandbox, { filename: "god/goal.js" });
+  return sandbox;
+}
+
+function bookWithTwoFills(fuelApi) {
+  const a1 = Date.parse("2026-11-08T14:55:00Z"); /* 8:55 AM CT */
+  const a3 = Date.parse("2026-11-14T16:00:00Z"); /* 10:00 AM CT */
+  const w1 = fuelApi.when(a1), w3 = fuelApi.when(a3);
+  return {
+    seed: { odo: 100000, at: 1 },
+    log_early: { at: a1, date: w1.date, time: w1.time, prev: 100000, odo: 100220, gallons: 10, price: 40 },
+    log_late: { at: a3, date: w3.date, time: w3.time, prev: 100220, odo: 100640, gallons: 9.5, price: 36 }
+  };
+}
+
+test("a missing receipt in the middle corrects miles and mpg in odometer order", function () {
+  const sandbox = loadGoal();
+  const fuel = sandbox.__pcsGoalFuel;
+  const book = bookWithTwoFills(fuel);
+  const laterPrevBefore = book.log_late.prev;
+  assert.equal(fuel.prev(book), 100640);
+  assert.equal(fuel.rows(book).map(function (r) { return r.odo; }).join(","), "100220,100640");
+
+  const at = fuel.atFromInput("2026-11-13", "20:25");
+  assert.ok(at);
+  const when = fuel.when(at);
+  assert.equal(when.date, "11/13/26");
+  assert.equal(when.time, "2025");
+  assert.equal(fuel.when(fuel.atFromInput("2026-11-13", "")).time, "1200");
+  assert.equal(fuel.when(fuel.atFromInput("2026-11-13", "12:00")).time, "1200");
+
+  const added = fuel.addMissing(book, { at: at, odo: 100400, gallons: 18.347, ppg: 4.539 }, 1700000000000);
+  assert.equal(added.ok, true);
+  assert.equal(added.entry.added, true);
+  assert.equal(added.entry.addedAt, 1700000000000);
+  assert.equal(added.entry.odo, 100400);
+  assert.equal(added.entry.gallons, 18.347);
+  assert.equal(added.entry.ppg, 4.539);
+  assert.equal(added.entry.price, Math.round(18.347 * 4.539 * 100) / 100);
+  assert.equal(added.entry.date, "11/13/26");
+  assert.equal(added.entry.time, "2025");
+  assert.equal(added.entry.prev, 100220);
+  assert.ok(book[added.id]);
+  assert.equal(book.log_late.prev, laterPrevBefore, "do not rewrite the later fill's stored prev");
+  assert.equal(book.log_early.prev, 100000);
+  assert.equal(book.log_early.odo, 100220);
+  assert.equal(book.log_late.odo, 100640);
+
+  const rows = fuel.displayRows(book);
+  assert.equal(rows.length, 3);
+  assert.deepEqual(rows.map(function (r) { return r.odo; }), [100220, 100400, 100640]);
+  assert.equal(rows[0].displayPrev, 100000);
+  assert.equal(rows[1].displayPrev, 100220);
+  assert.equal(rows[2].displayPrev, 100400);
+  const mid = fuel.math(rows[1].displayPrev, rows[1].odo, rows[1].gallons, rows[1].price);
+  assert.equal(mid.ok, true);
+  assert.equal(mid.miles, 180);
+  const after = fuel.math(rows[2].displayPrev, rows[2].odo, rows[2].gallons, rows[2].price);
+  assert.equal(after.ok, true);
+  assert.equal(after.miles, 240);
+  assert.equal(after.mpg, 240 / 9.5);
+  const storedAfter = fuel.math(book.log_late.prev, book.log_late.odo, book.log_late.gallons, book.log_late.price);
+  assert.equal(storedAfter.miles, 420, "stored prev still reflects the old gap; display uses the inserted odo");
+  assert.equal(fuel.prev(book), 100640);
+});
+
+test("a missing receipt is rejected when the odometer or amounts are not valid", function () {
+  const fuel = loadGoal().__pcsGoalFuel;
+  const book = bookWithTwoFills(fuel);
+  const midAt = fuel.atFromInput("2026-11-13", "20:25");
+  const copy = JSON.parse(JSON.stringify(book));
+
+  function reject(rec, text) {
+    const v = fuel.validateMissing(book, rec);
+    assert.equal(v.ok, false, text);
+    assert.ok(v.error, text);
+    assert.equal(JSON.stringify(book), JSON.stringify(copy), "validation must not save");
+  }
+
+  reject({ at: midAt, odo: 100000, gallons: 18.347, ppg: 4.539 }, "equal to the seed");
+  reject({ at: midAt, odo: 99999, gallons: 18.347, ppg: 4.539 }, "below the seed");
+  reject({ at: midAt, odo: 100220, gallons: 18.347, ppg: 4.539 }, "equal to an existing reading");
+  reject({ at: midAt, odo: 100700, gallons: 18.347, ppg: 4.539 }, "higher than a later date");
+  reject({ at: midAt, odo: 100100, gallons: 18.347, ppg: 4.539 }, "lower than an earlier date");
+  reject({ at: midAt, odo: 100400, gallons: 0, ppg: 4.539 }, "zero gallons");
+  reject({ at: midAt, odo: 100400, gallons: 18.347, ppg: 0 }, "zero price");
+  reject({ at: null, odo: 100400, gallons: 18.347, ppg: 4.539 }, "missing date");
+  assert.equal(fuel.addMissing(book, { at: midAt, odo: 100700, gallons: 18.347, ppg: 4.539 }).ok, false);
+  assert.equal(Object.keys(book).join(","), Object.keys(copy).join(","));
+});
+
+test("a new missing-receipt fuel key merges across devices and is not dropped", function () {
+  const sandbox = loadGoal();
+  const fuel = sandbox.__pcsGoalFuel;
+  const merge = sandbox.module.exports.merge;
+  const stamp = sandbox.module.exports.stamp;
+  const phone = { settings: {}, entries: {}, fuel: bookWithTwoFills(fuel) };
+  stamp(phone, 1000);
+  const ipad = JSON.parse(JSON.stringify(phone));
+  const at = fuel.atFromInput("2026-11-13", "20:25");
+  const added = fuel.addMissing(ipad.fuel, { at: at, odo: 100400, gallons: 18.347, ppg: 4.539 }, 2000);
+  assert.equal(added.ok, true);
+  stamp(ipad, 2000);
+  const out = merge(phone, ipad);
+  assert.ok(out.fuel[added.id], "new log key from the iPad is in the merge");
+  assert.equal(out.fuel[added.id].odo, 100400);
+  assert.equal(out.fuel[added.id].gallons, 18.347);
+  assert.equal(out.fuel[added.id].added, true);
+  assert.equal(out.fuel.log_early.odo, 100220);
+  assert.equal(out.fuel.log_late.odo, 100640);
+  assert.equal(out.fuel.seed.odo, 100000);
+  assert.equal(fuel.displayRows(out.fuel).length, 3);
+  assert.equal(fuel.prev(out.fuel), 100640);
+
+  const again = merge(out, phone);
+  assert.ok(again.fuel[added.id], "a later sync from the phone that never had the key does not drop it");
+  assert.equal(again.fuel[added.id].odo, 100400);
+  assert.equal(fuel.rows(again.fuel).length, 3);
+
+  const phoneOnly = { settings: {}, entries: {}, fuel: bookWithTwoFills(fuel) };
+  stamp(phoneOnly, 3000);
+  const other = { settings: {}, entries: {}, fuel: bookWithTwoFills(fuel) };
+  stamp(other, 3000);
+  const a = fuel.addMissing(phoneOnly.fuel, { at: fuel.atFromInput("2026-11-10", "09:00"), odo: 100300, gallons: 5, ppg: 3.5 }, 4000);
+  const b = fuel.addMissing(other.fuel, { at: fuel.atFromInput("2026-11-12", "09:00"), odo: 100500, gallons: 6, ppg: 3.6 }, 4000);
+  stamp(phoneOnly, 4000);
+  stamp(other, 4000);
+  const both = merge(phoneOnly, other);
+  assert.ok(both.fuel[a.id]);
+  assert.ok(both.fuel[b.id]);
+  assert.equal(fuel.rows(both.fuel).length, 4);
+});
+
+test("the Fuel card has Add missing receipt fields and the same gallons keypad", function () {
+  const src = fs.readFileSync(path.join(__dirname, "../god/goal.js"), "utf8");
+  assert.ok(src.indexOf("Add missing receipt") >= 0);
+  assert.ok(src.indexOf("Save missing receipt") >= 0);
+  assert.ok(src.indexOf('id="gl-fuel-miss-date"') >= 0);
+  assert.ok(src.indexOf('id="gl-fuel-miss-time"') >= 0);
+  assert.ok(src.indexOf('value="12:00"') >= 0);
+  assert.ok(src.indexOf('data-fuel="ppg"') >= 0);
+  assert.ok(src.indexOf('id="gl-fuel-miss-odo"') >= 0);
+  assert.ok(src.indexOf('id="gl-fuel-miss-gal"') >= 0);
+  assert.ok(/data-fuel" === "gal" \|\| el.getAttribute\("data-fuel"\) === "ppg"/.test(src) || src.indexOf('data-fuel") === "ppg"') >= 0);
+  const html = fs.readFileSync(path.join(__dirname, "../god/index.html"), "utf8");
+  assert.ok(html.indexOf("goal.js?v=2.0m-bv") >= 0);
+});
