@@ -722,7 +722,7 @@
     fuelMissOpen = false;
     save(); paint();
   }
-  if (typeof window !== "undefined") window.__pcsGoalFuel = { math: fuelMath, fmt: fuelFmt, when: fuelWhen, prev: fuelPrevOdo, rows: fuelRows, displayRows: fuelDisplayRows, owner: fuelForMatthew, seed: fuelSeedOdo, atFromInput: fuelAtFromInput, validateMissing: fuelValidateMissing, addMissing: fuelAddMissing, hist: fuelHist, logFit: fuelLogFit };
+  if (typeof window !== "undefined") window.__pcsGoalFuel = { math: fuelMath, fmt: fuelFmt, when: fuelWhen, prev: fuelPrevOdo, rows: fuelRows, displayRows: fuelDisplayRows, owner: fuelForMatthew, seed: fuelSeedOdo, atFromInput: fuelAtFromInput, validateMissing: fuelValidateMissing, addMissing: fuelAddMissing, hist: fuelHist, logFit: fuelLogFit, logFitSoon: fuelLogFitSoon, logFitWatch: fuelLogFitWatch };
   function paint() { paint.editK = null; /* v2.0d.4 r2 (Harry): every redraw rebuilds the add row as "Add", so no edit may survive it */
     if (snapToday()) save(); /* first open after midnight, or once goals are set */
     var c = calc(), s = D.settings, h = "";
@@ -901,6 +901,7 @@
     bindRest();
     bindFuel();
   }
+  var fuelLogFitT = null, fuelLogFitOn = false;
   function fuelLogFit() {
     var log = typeof document !== "undefined" && document.getElementById("gl-fuel-log"), first, cut, h, pad, cs;
     if (!log) return;
@@ -917,6 +918,17 @@
     log.style.maxHeight = (h + pad) + "px";
     log.style.height = (h + pad) + "px";
   }
+  function fuelLogFitSoon() {
+    if (fuelLogFitT) clearTimeout(fuelLogFitT);
+    fuelLogFitT = setTimeout(function () { fuelLogFitT = null; fuelLogFit(); }, 80);
+  }
+  function fuelLogFitWatch() {
+    if (fuelLogFitOn || typeof window === "undefined" || !window.addEventListener) return;
+    fuelLogFitOn = true;
+    window.addEventListener("resize", fuelLogFitSoon);
+    window.addEventListener("orientationchange", fuelLogFitSoon);
+  }
+  fuelLogFitWatch();
   function bindFuel() {
     var seed = document.getElementById("gl-fuel-seed"), saveB = document.getElementById("gl-fuel-save"), missOpen = document.getElementById("gl-fuel-miss-open"), missSave = document.getElementById("gl-fuel-miss-save");
     if (seed) seed.onclick = fuelSaveSeed;

@@ -259,3 +259,87 @@ test("the fuel log keeps every fill and shows five at a time in a scroll box", f
   assert.equal(short.style.height, "");
   assert.equal(short.style.maxHeight, "");
 });
+
+test("the fuel log refits five rows on resize and orientation change, once", function () {
+  const src = fs.readFileSync(path.join(__dirname, "../god/goal.js"), "utf8");
+  assert.match(src, /window\.addEventListener\("resize", fuelLogFitSoon\)/);
+  assert.match(src, /window\.addEventListener\("orientationchange", fuelLogFitSoon\)/);
+  const bindAt = src.indexOf("function bindFuel()");
+  const resizeInBind = src.indexOf('addEventListener("resize"', bindAt);
+  const orientInBind = src.indexOf('addEventListener("orientationchange"', bindAt);
+  assert.equal(resizeInBind, -1, "bindFuel must not add a resize listener");
+  assert.equal(orientInBind, -1, "bindFuel must not add an orientationchange listener");
+  assert.ok(src.indexOf("fuelLogFitWatch();") >= 0);
+  assert.ok(src.indexOf("if (fuelLogFitOn ||") >= 0);
+
+  const timers = [];
+  let tid = 0;
+  const listeners = { resize: [], orientationchange: [] };
+  const sandbox = {
+    console, Date, Math, JSON, Number, String, Object, Array, Promise, RegExp, Error, parseInt, isFinite,
+    Event: function Event(type) { this.type = type; },
+    setTimeout(fn, ms) { const id = ++tid; timers.push({ id, fn, ms: ms || 0 }); return id; },
+    clearTimeout(id) { const i = timers.findIndex(function (t) { return t.id === id; }); if (i >= 0) timers.splice(i, 1); },
+    setInterval() { return 0; }, clearInterval() {},
+    addEventListener(type, fn) { (listeners[type] = listeners[type] || []).push(fn); },
+    document: {
+      addEventListener() {}, getElementById() { return null; },
+      createElement() { return { id: "", style: {}, appendChild() {}, setAttribute() {}, children: [] }; },
+      head: { appendChild() {} }, body: { appendChild() {} }
+    },
+    localStorage: { getItem() { return null; }, setItem() {}, removeItem() {} },
+    location: { search: "", hostname: "localhost", href: "http://localhost/god/" },
+    navigator: { userAgent: "test" },
+    indexedDB: { open() { throw new Error("no-idb"); } },
+    crypto: { getRandomValues(a) { return a; }, subtle: {} },
+    fetch() { return Promise.reject(new Error("no")); },
+    TextEncoder, TextDecoder, Uint8Array, alert() {},
+    module: { exports: {} }
+  };
+  sandbox.window = sandbox;
+  vm.createContext(sandbox);
+  vm.runInContext(fs.readFileSync(path.join(__dirname, "../god/goal.js"), "utf8"), sandbox, { filename: "god/goal.js" });
+
+  assert.equal(listeners.resize.length, 1);
+  assert.equal(listeners.orientationchange.length, 1);
+  assert.equal(listeners.resize[0], sandbox.__pcsGoalFuel.logFitSoon);
+  assert.equal(listeners.orientationchange[0], sandbox.__pcsGoalFuel.logFitSoon);
+
+  sandbox.__pcsGoalFuel.logFitWatch();
+  sandbox.__pcsGoalFuel.logFitWatch();
+  assert.equal(listeners.resize.length, 1, "watch is a no-op the second time");
+  assert.equal(listeners.orientationchange.length, 1);
+
+  let rowH = 40;
+  const log = { style: {}, children: [] };
+  for (let i = 0; i < 8; i++) {
+    (function (i) {
+      log.children.push({
+        getBoundingClientRect() { return { top: 10 + i * rowH, bottom: 10 + (i + 1) * rowH, height: rowH, left: 0, right: 40, width: 40 }; }
+      });
+    })(i);
+  }
+  sandbox.document.getElementById = function (id) { return id === "gl-fuel-log" ? log : null; };
+  sandbox.getComputedStyle = function () { return { paddingTop: "0", paddingBottom: "0" }; };
+
+  sandbox.__pcsGoalFuel.logFit();
+  assert.equal(log.style.height, "200px");
+
+  rowH = 28;
+  listeners.resize[0]({ type: "resize" });
+  listeners.resize[0]({ type: "resize" });
+  listeners.orientationchange[0]({ type: "orientationchange" });
+  assert.equal(log.style.height, "200px", "height waits for the debounce");
+  assert.equal(timers.length, 1, "bursts collapse to one timer");
+  const wait = timers[0].ms;
+  assert.ok(wait >= 40 && wait <= 200, "debounce " + wait);
+  timers[0].fn();
+  timers.splice(0, 1);
+  assert.equal(log.style.height, "140px", "five rows at the new height");
+  assert.equal(log.children.length, 8);
+
+  sandbox.document.getElementById = function () { return null; };
+  listeners.resize[0]({ type: "resize" });
+  assert.equal(timers.length, 1);
+  assert.doesNotThrow(function () { timers[0].fn(); });
+});
