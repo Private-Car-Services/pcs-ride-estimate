@@ -714,7 +714,7 @@
       "</div>" +
       '<div class="gl-fuel-mrow gl-fuel-mrow2">' +
         fuelMonthBox("gl-fuel-m-mpg", "Avg MPG", f.mpg) +
-        fuelMonthBox("gl-fuel-m-ppm", "Price per mile", f.ppm) +
+        fuelMonthBox("gl-fuel-m-ppm", "Avg price per mile", f.ppm) +
       "</div>" +
       '<p class="fine" id="gl-fuel-m-label">' + esc(f.label) + "</p></div>";
   }

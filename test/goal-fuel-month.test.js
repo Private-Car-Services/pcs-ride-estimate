@@ -185,7 +185,7 @@ test("the Fuel card shows five month boxes above the date line, and paint refres
   assert.ok(src.indexOf("monthStats: fuelMonthStats") >= 0);
   assert.ok(src.indexOf('id="gl-fuel-month"') >= 0);
   assert.ok(src.indexOf("$ This month") >= 0);
-  assert.ok(src.indexOf("Price per mile") >= 0);
+  assert.ok(src.indexOf("Avg price per mile") >= 0);
   assert.ok(src.indexOf("fuelMonthHtml(book) + whenLine") >= 0);
   const html = fs.readFileSync(path.join(__dirname, "../god/index.html"), "utf8");
   assert.ok(html.indexOf("goal.js?v=2.0m-bx") >= 0);
