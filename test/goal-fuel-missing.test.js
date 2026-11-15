@@ -86,14 +86,14 @@ test("a missing receipt in the middle corrects miles and mpg in odometer order",
   assert.equal(fuel.when(fuel.atFromInput("2026-11-13", "")).time, "1200");
   assert.equal(fuel.when(fuel.atFromInput("2026-11-13", "12:00")).time, "1200");
 
-  const added = fuel.addMissing(book, { at: at, odo: 100400, gallons: 18.347, ppg: 4.539 }, 1700000000000);
+  const added = fuel.addMissing(book, { at: at, odo: 100400, gallons: 18.347, price: 83.28 }, 1700000000000);
   assert.equal(added.ok, true);
   assert.equal(added.entry.added, true);
   assert.equal(added.entry.addedAt, 1700000000000);
   assert.equal(added.entry.odo, 100400);
   assert.equal(added.entry.gallons, 18.347);
   assert.equal(added.entry.ppg, 4.539);
-  assert.equal(added.entry.price, Math.round(18.347 * 4.539 * 100) / 100);
+  assert.equal(added.entry.price, 83.28);
   assert.equal(added.entry.date, "11/13/26");
   assert.equal(added.entry.time, "2025");
   assert.equal(added.entry.prev, 100220);
@@ -134,15 +134,15 @@ test("a missing receipt is rejected when the odometer or amounts are not valid",
     assert.equal(JSON.stringify(book), JSON.stringify(copy), "validation must not save");
   }
 
-  reject({ at: midAt, odo: 100000, gallons: 18.347, ppg: 4.539 }, "equal to the seed");
-  reject({ at: midAt, odo: 99999, gallons: 18.347, ppg: 4.539 }, "below the seed");
-  reject({ at: midAt, odo: 100220, gallons: 18.347, ppg: 4.539 }, "equal to an existing reading");
-  reject({ at: midAt, odo: 100700, gallons: 18.347, ppg: 4.539 }, "higher than a later date");
-  reject({ at: midAt, odo: 100100, gallons: 18.347, ppg: 4.539 }, "lower than an earlier date");
-  reject({ at: midAt, odo: 100400, gallons: 0, ppg: 4.539 }, "zero gallons");
-  reject({ at: midAt, odo: 100400, gallons: 18.347, ppg: 0 }, "zero price");
-  reject({ at: null, odo: 100400, gallons: 18.347, ppg: 4.539 }, "missing date");
-  assert.equal(fuel.addMissing(book, { at: midAt, odo: 100700, gallons: 18.347, ppg: 4.539 }).ok, false);
+  reject({ at: midAt, odo: 100000, gallons: 18.347, price: 83.28 }, "equal to the seed");
+  reject({ at: midAt, odo: 99999, gallons: 18.347, price: 83.28 }, "below the seed");
+  reject({ at: midAt, odo: 100220, gallons: 18.347, price: 83.28 }, "equal to an existing reading");
+  reject({ at: midAt, odo: 100700, gallons: 18.347, price: 83.28 }, "higher than a later date");
+  reject({ at: midAt, odo: 100100, gallons: 18.347, price: 83.28 }, "lower than an earlier date");
+  reject({ at: midAt, odo: 100400, gallons: 0, price: 83.28 }, "zero gallons");
+  reject({ at: midAt, odo: 100400, gallons: 18.347, price: 0 }, "zero price");
+  reject({ at: null, odo: 100400, gallons: 18.347, price: 83.28 }, "missing date");
+  assert.equal(fuel.addMissing(book, { at: midAt, odo: 100700, gallons: 18.347, price: 83.28 }).ok, false);
   assert.equal(Object.keys(book).join(","), Object.keys(copy).join(","));
 });
 
@@ -155,7 +155,7 @@ test("a new missing-receipt fuel key merges across devices and is not dropped", 
   stamp(phone, 1000);
   const ipad = JSON.parse(JSON.stringify(phone));
   const at = fuel.atFromInput("2026-11-13", "20:25");
-  const added = fuel.addMissing(ipad.fuel, { at: at, odo: 100400, gallons: 18.347, ppg: 4.539 }, 2000);
+  const added = fuel.addMissing(ipad.fuel, { at: at, odo: 100400, gallons: 18.347, price: 83.28 }, 2000);
   assert.equal(added.ok, true);
   stamp(ipad, 2000);
   const out = merge(phone, ipad);
@@ -178,8 +178,8 @@ test("a new missing-receipt fuel key merges across devices and is not dropped", 
   stamp(phoneOnly, 3000);
   const other = { settings: {}, entries: {}, fuel: bookWithTwoFills(fuel) };
   stamp(other, 3000);
-  const a = fuel.addMissing(phoneOnly.fuel, { at: fuel.atFromInput("2026-11-10", "09:00"), odo: 100300, gallons: 5, ppg: 3.5 }, 4000);
-  const b = fuel.addMissing(other.fuel, { at: fuel.atFromInput("2026-11-12", "09:00"), odo: 100500, gallons: 6, ppg: 3.6 }, 4000);
+  const a = fuel.addMissing(phoneOnly.fuel, { at: fuel.atFromInput("2026-11-10", "09:00"), odo: 100300, gallons: 5, price: 17.5 }, 4000);
+  const b = fuel.addMissing(other.fuel, { at: fuel.atFromInput("2026-11-12", "09:00"), odo: 100500, gallons: 6, price: 21.6 }, 4000);
   stamp(phoneOnly, 4000);
   stamp(other, 4000);
   const both = merge(phoneOnly, other);
@@ -195,12 +195,12 @@ test("the Fuel card has Add missing receipt fields and the same gallons keypad",
   assert.ok(src.indexOf('id="gl-fuel-miss-date"') >= 0);
   assert.ok(src.indexOf('id="gl-fuel-miss-time"') >= 0);
   assert.ok(src.indexOf('value="12:00"') >= 0);
-  assert.ok(src.indexOf('data-fuel="ppg"') >= 0);
+  assert.ok(src.indexOf('id="gl-fuel-miss-price"') >= 0, "missing receipt asks for the total price like Save fill");
+  assert.ok(src.indexOf('id="gl-fuel-miss-ppg"') < 0, "no price per gallon box");
   assert.ok(src.indexOf('id="gl-fuel-miss-odo"') >= 0);
   assert.ok(src.indexOf('id="gl-fuel-miss-gal"') >= 0);
-  assert.ok(/data-fuel" === "gal" \|\| el.getAttribute\("data-fuel"\) === "ppg"/.test(src) || src.indexOf('data-fuel") === "ppg"') >= 0);
   const html = fs.readFileSync(path.join(__dirname, "../god/index.html"), "utf8");
-  assert.ok(html.indexOf("goal.js?v=2.0m-bv") >= 0);
+  assert.ok(html.indexOf("goal.js?v=2.0m-bw") >= 0);
 });
 
 test("the fuel log keeps every fill and shows five at a time in a scroll box", function () {

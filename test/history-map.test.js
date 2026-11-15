@@ -356,7 +356,7 @@ test("v2.0m-bu is the update phones on v2.0m-bf will accept", function () {
   const pages = {
     "app/driver/index.html": ["../version.js?v=2.0m-bu", "../driverlog.js?v=2.0m-bq", "../app.js?v=2.0m-bu"],
     "app/index.html": ["version.js?v=2.0m-bu", "app.js?v=2.0m-bu"],
-    "god/index.html": ["../app/version.js?v=2.0m-bu", "../app/driverlog.js?v=2.0m-bq", "./godmap.js?v=2.0m-ad", "./goal.js?v=2.0m-bv", "./god.js?v=2.0m-bs"]
+    "god/index.html": ["../app/version.js?v=2.0m-bu", "../app/driverlog.js?v=2.0m-bq", "./godmap.js?v=2.0m-ad", "./goal.js?v=2.0m-bw", "./god.js?v=2.0m-bs"]
   };
   Object.keys(pages).forEach(function (rel) {
     const html = fs.readFileSync(path.join(root, rel), "utf8");
