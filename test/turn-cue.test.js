@@ -69,7 +69,11 @@ test("maneuver modifier picks the arrow, and Google text is the fallback", funct
     ["", "", "Slight left to stay on Southwest Freeway", "left"],
     ["", "", "Keep right at the fork", "right"],
     ["", "", "Merge left onto I-45", "left"],
-    ["", "", "Continue onto Bagby Street", "straight"]
+    ["", "", "Continue onto Bagby Street", "straight"],
+    ["", "", "Turn left onto Fork Right Rd", "left"],
+    ["", "", "Turn left onto Bayou Turnpike", "left"],
+    ["", "", "Turn right onto Left Street", "right"],
+    ["", "", "Make a U-turn on Bayou Turnpike", "uturn"]
   ];
   rows.forEach(function (row) {
     assert.equal(cue.kind(row[0], row[1], row[2]), row[3], row[2]);
@@ -77,9 +81,14 @@ test("maneuver modifier picks the arrow, and Google text is the fallback", funct
 });
 
 test("distance is miles to one decimal, then feet in steps of 50 under 0.1 mile", function () {
+  assert.equal(cue.dist(1), "1 mile");
+  assert.equal(cue.dist(1.04), "1 mile");
+  assert.equal(cue.dist(1.2), "1.2 miles");
   assert.equal(cue.dist(1.24), "1.2 miles");
   assert.equal(cue.dist(0.8), "0.8 miles");
+  assert.equal(cue.dist(0.5), "0.5 miles");
   assert.equal(cue.dist(0.1), "0.1 miles");
+  assert.equal(cue.dist(100 / 5280), "100 feet");
   assert.equal(cue.dist(450 / 5280), "450 feet");
   assert.equal(cue.dist(800 / 5280), "0.2 miles");
   assert.equal(cue.dist(500 / 5280), "500 feet");
@@ -88,24 +97,36 @@ test("distance is miles to one decimal, then feet in steps of 50 under 0.1 mile"
   assert.equal(cue.dist(0), "50 feet");
 });
 
-test("distance follows the route line, and the step advances to the next maneuver", function () {
-  const line = [[29.76, -95.37], [29.76, -95.36], [29.75, -95.36]];
-  const along = cue.miles(line, { lat: 29.76, lng: -95.37 }, 29.75, -95.36);
-  const straight = cue.miles(null, { lat: 29.76, lng: -95.37 }, 29.75, -95.36);
-  assert.ok(along > straight + 0.05, "along " + along + " straight " + straight);
-  assert.ok(Math.abs(cue.miles(null, { lat: 29.76, lng: -95.37 }, 29.75, -95.36) - straight) < 1e-9);
-  const steps = [
-    { lat: 29.7604, lng: -95.3698, text: "Head out on Bagby Street", type: "depart", modifier: "" },
-    { lat: 29.7600, lng: -95.3700, text: "Turn left onto McKinney Street", type: "turn", modifier: "left" },
-    { lat: 29.7590, lng: -95.3684, text: "Turn right onto Smith Street", type: "turn", modifier: "right" }
-  ];
-  assert.equal(cue.pick(steps, { lat: 29.7604, lng: -95.3698 }), 1);
-  assert.equal(cue.kind(steps[1].type, steps[1].modifier, steps[1].text), "left");
-  assert.equal(cue.pick(steps, { lat: 29.76, lng: -95.37 }), 2);
-  assert.equal(cue.kind(steps[2].type, steps[2].modifier, steps[2].text), "right");
-  const houstonLeft = route.steps.filter(function (s) { return s.modifier === "slight left" && s.type === "merge"; })[0];
-  assert.ok(houstonLeft, "recorded Houston route has a slight-left merge");
-  assert.equal(cue.kind(houstonLeft.type, houstonLeft.modifier, "Merge slight left onto " + houstonLeft.name), "left");
+test("the next maneuver is the first one ahead, and the countdown reaches the turn", function () {
+  const mile = 1 / 69.172;
+  function at(mi) { return [29.76 + mi * mile, -95.37]; }
+  const line = [];
+  let i;
+  for (i = 0; i <= 200; i += 1) line.push(at(i * 0.01));
+  const left = { lat: at(0.5)[0], lng: at(0.5)[1], text: "Turn left onto N 10th St", type: "turn", modifier: "left" };
+  const right = { lat: at(1.2)[0], lng: at(1.2)[1], text: "Turn right onto Main St", type: "turn", modifier: "right" };
+  const steps = [{ lat: at(0)[0], lng: at(0)[1], text: "Head out", type: "depart", modifier: "" }, left, right];
+  function car(mi) { return { lat: at(mi)[0], lng: at(mi)[1] }; }
+  const before576 = 0.5 - 576 / 5280;
+  assert.equal(cue.pick(steps, car(before576), line), 1, "576 ft before the left still shows that left");
+  assert.ok(Math.abs(cue.miles(line, car(before576), left.lat, left.lng) * 5280 - 576) < 40);
+  const before150 = 0.5 - 150 / 5280;
+  assert.equal(cue.pick(steps, car(before150), line), 1, "does not switch 150 ft early");
+  const leftFt = cue.miles(line, car(before150), left.lat, left.lng) * 5280;
+  assert.ok(leftFt > 120 && leftFt < 180, leftFt);
+  const before30 = 0.5 - 30 / 5280;
+  assert.equal(cue.pick(steps, car(before30), line), 1, "stays on this turn under 50 ft");
+  assert.ok(cue.miles(line, car(before30), left.lat, left.lng) * 5280 < 50);
+  assert.equal(cue.pick(steps, car(0.5 + 40 / 5280), line), 2, "switches only after the car passes the turn");
+  /* a later maneuver sits close to the car as the crow flies, but it is still behind on the route */
+  const bent = [];
+  for (i = 0; i <= 40; i += 1) bent.push(at(i * 0.01));
+  for (i = 1; i <= 5; i += 1) bent.push([at(0.4)[0], -95.37 + i * 0.0002]);
+  for (i = 1; i <= 35; i += 1) bent.push([at(0.4)[0] - i * mile * 0.01, -95.37 + 0.001]);
+  const leftB = { lat: at(0.25)[0], lng: at(0.25)[1], text: "Turn left onto N 10th St", type: "turn", modifier: "left" };
+  const rightB = { lat: bent[bent.length - 1][0], lng: bent[bent.length - 1][1], text: "Turn right", type: "turn", modifier: "right" };
+  const bentSteps = [{ lat: at(0)[0], lng: at(0)[1], text: "Head out", type: "depart", modifier: "" }, leftB, rightB];
+  assert.equal(cue.pick(bentSteps, car(0.1), bent), 1, "does not jump to a later turn that is merely nearby");
 });
 
 test("the cue sits in both turn banners and uses the invoice green", function () {
@@ -113,18 +134,21 @@ test("the cue sits in both turn banners and uses the invoice green", function ()
   const meter = appSrc.slice(appSrc.indexOf("function meterTurnHtml"), appSrc.indexOf("function meterTurnPaint"));
   const paint = appSrc.slice(appSrc.indexOf("function schedNavPaint"), appSrc.indexOf("function schedFullKey"));
   const gps = appSrc.slice(appSrc.indexOf("function onGpsFix"), appSrc.indexOf("function fgLocateNow"));
-  assert.match(sched, /navCueHtml\(kind, cueMi\)/);
+  assert.match(sched, /words \+[\s\S]*navCueHtml\(kind, cueMi\)/);
   assert.match(sched, /mi to the pickup/);
-  assert.doesNotMatch(sched, /In ' \+ esc\(dd\)/);
-  assert.match(meter, /navCueHtml\(t\.kind, t\.mi\)/);
+  assert.match(sched, /In ' \+ esc\(dd\)/);
+  assert.match(meter, /esc\(t\.text\) \+ navCueHtml\(t\.kind, t\.mi\)/);
   assert.match(meter, /id="meter-turn"/);
   assert.equal(meter.indexOf("Invoice"), -1);
-  assert.match(paint, /schedTurnMapPaint\(\)/);
+  assert.match(paint, /schedTurnHtml\(false\)/);
+  assert.match(paint, /schedTurnHtml\(true\)/);
   assert.match(gps, /schedNavPaint\(\)/);
   assert.match(gps, /meterTurnPaint\(\)/);
   assert.match(appSrc, /type: String\(mv\.type \|\| ""\), modifier: String\(mv\.modifier \|\| ""\)/);
+  assert.match(appSrc, /var\(--meter-banner, 96px\)/);
   assert.ok(cue.css().indexOf("#0b6b3a") >= 0);
-  assert.ok(cue.css().indexOf("#meter-map-stage .meter-turn .pcs-turn-cue{margin-left:46px}") >= 0);
+  assert.equal(cue.css().indexOf("margin-left:46px"), -1);
+  assert.equal(cue.css().indexOf("pcs-turn-float"), -1);
   const html = cue.html("uturn", 0.8);
   assert.ok(html.indexOf('data-turn="uturn"') >= 0);
   assert.ok(html.indexOf("0.8 miles") >= 0);
@@ -161,10 +185,11 @@ function pointBefore(line, dest, targetMi) {
   return pick;
 }
 
-function banner(kind, miles, text, id) {
+function banner(kind, miles, text, id, ride) {
+  const words = '<span class="pcs-turn-text" style="display:block">' + text + "</span>" + cue.html(kind, miles);
+  if (ride) return '<div class="meter-turn" id="' + id + '" role="status">' + words + "</div>";
   return '<div id="' + id + '" role="status" style="background:#0b3d23;color:#fff;border-radius:12px;padding:10px 12px;margin:0;font-size:20px;font-weight:800">' +
-    cue.html(kind, miles) + text +
-    '<small style="display:block;font-size:14px;font-weight:700;color:#d1fae5;margin-top:4px">5.2 mi to the pickup · about 9 min</small></div>';
+    words + '<small style="display:block;font-size:14px;font-weight:700;color:#d1fae5;margin-top:4px">5.2 mi to the pickup · about 9 min</small></div>';
 }
 
 function page(spec) {
@@ -206,17 +231,16 @@ function page(spec) {
       '<div id="sched-fs-bottom"><div id="sched-fs-arrived" class="pcs-map-green">I\u2019m at the pickup<div id="sched-fs-inv">Invoice #000584 \u00b7 Paid \u00b7 View receipt</div></div><button type="button" id="sched-fs-close">Close map</button></div>' +
       '<button type="button" id="pcs-sos-btn">SOS</button></div>';
   } else if (spec.map === "pickup-small") {
-    stage = '<div style="width:' + spec.w + 'px;height:' + spec.h + 'px;display:flex;flex-direction:column"><div id="home-map-stage" style="flex:1;min-height:0">' +
-      '<div id="live-map"></div><button type="button" id="sched-fs-open">Full screen map</button>' + eta +
-      '<div id="sched-turn-map" class="pcs-turn-float">' + cue.html(spec.kind, spec.miles) + "</div>" + toggles +
-      '</div><div id="card-banner">' + banner(spec.kind, spec.miles, spec.text, "sched-turn") + "</div></div>";
+    stage = '<div id="home-map-stage" style="width:' + spec.w + 'px;height:' + spec.h + 'px">' +
+      '<div id="live-map"></div>' + banner(spec.kind, spec.miles, spec.text, "sched-turn-map") +
+      '<button type="button" id="sched-fs-open">Full screen map</button>' + eta + toggles + "</div>";
   } else if (spec.map === "ride-small") {
     stage = '<div id="meter-map-stage" style="width:' + spec.w + 'px;height:' + spec.h + 'px"><div id="live-map"></div>' +
-      '<div class="meter-topstack" id="meter-topstack"><div class="meter-turn" id="meter-turn">' + cue.html(spec.kind, spec.miles) + spec.text + "</div>" + eta + "</div>" +
+      '<div class="meter-topstack" id="meter-topstack">' + banner(spec.kind, spec.miles, spec.text, "meter-turn", true) + eta + "</div>" +
       '<button type="button" id="rfs-open">Full screen</button>' + toggles + "</div>";
   } else {
     stage = '<div id="meter-map-stage" class="pcs-rfs" style="width:' + spec.w + 'px;height:' + spec.h + 'px"><div id="live-map"></div>' +
-      '<div class="meter-topstack" id="meter-topstack"><div class="meter-turn" id="meter-turn">' + cue.html(spec.kind, spec.miles) + spec.text + "</div>" + eta + "</div>" +
+      '<div class="meter-topstack" id="meter-topstack">' + banner(spec.kind, spec.miles, spec.text, "meter-turn", true) + eta + "</div>" +
       toggles +
       '<div id="fs-mph" class="fs-mph"><b>32</b><span>MPH</span></div>' +
       '<div id="rfs-bar"><div id="rfs-green" class="pcs-map-green">Invoice #000584 \u00b7 Paid \u00b7 View receipt</div>' +
@@ -230,16 +254,23 @@ function page(spec) {
     "L.polyline(line, { color: '#1E88FF', weight: 6 }).addTo(map);" +
     "L.circleMarker([car.lat, car.lng], { radius: 9, color: '#fff', weight: 3, fillColor: '#0b6b3a', fillOpacity: 1 }).addTo(map);" +
     "map.fitBounds(focus, { padding: [30, 30], maxZoom: 15, animate: false });" +
-    "var bannerEl = document.getElementById('sched-fs-top'); var stage = document.getElementById('home-map-stage') || document.getElementById('meter-map-stage');" +
-    "if (bannerEl && stage) stage.style.setProperty('--sched-fs-top', bannerEl.offsetHeight + 'px');" +
-    "var zoom = document.querySelector('#home-map-stage.pcs-fullmap .leaflet-top.leaflet-left');" +
-    "if (zoom && bannerEl) zoom.style.setProperty('top', (bannerEl.offsetHeight + 16) + 'px', 'important');" +
+    "var bannerEl = document.getElementById('sched-fs-top') || document.getElementById('sched-turn-map') || document.getElementById('meter-topstack');" +
+    "var stage = document.getElementById('home-map-stage') || document.getElementById('meter-map-stage');" +
+    "if (bannerEl && stage) {" +
+    "  if (stage.id === 'meter-map-stage') stage.style.setProperty('--meter-banner', bannerEl.offsetHeight + 'px');" +
+    "  else if (!stage.classList.contains('pcs-fullmap')) {" +
+    "    stage.style.setProperty('--sched-map-banner', (bannerEl.offsetHeight + 8) + 'px');" +
+    "    var etaEl = document.getElementById('sched-eta-map');" +
+    "    stage.style.setProperty('--sched-map-chrome', (bannerEl.offsetHeight + 8 + (etaEl ? etaEl.offsetHeight + 12 : 0)) + 'px');" +
+    "  } else stage.style.setProperty('--sched-fs-top', bannerEl.offsetHeight + 'px');" +
+    "}" +
     "var sos = document.getElementById('pcs-sos-btn'); if (sos) { var stack = document.getElementById('sched-fs-top') || document.getElementById('meter-topstack'); sos.style.top = Math.round((stack ? stack.getBoundingClientRect().bottom : 120) + 16) + 'px'; }" +
     "function box(id){var n=document.getElementById(id); if(!n) return null; var r=n.getBoundingClientRect(); if(r.width<2||r.height<2) return null; return {id:id,left:r.left,top:r.top,right:r.right,bottom:r.bottom};}" +
     "function hit(a,b){return !(a.right<=b.left+1||a.left>=b.right-1||a.bottom<=b.top+1||a.top>=b.bottom-1);}" +
-    "var cues=[].slice.call(document.querySelectorAll('.pcs-turn-cue')).map(function(n){var r=n.getBoundingClientRect(); var bg=getComputedStyle(n).backgroundColor; var arrow=n.querySelector('.pcs-turn-arrow'); var ar=arrow.getBoundingClientRect(); return {turn:n.getAttribute('data-turn'),text:n.querySelector('.pcs-turn-dist').textContent,bg:bg,aw:Math.round(ar.width),ah:Math.round(ar.height),left:r.left,top:r.top,right:r.right,bottom:r.bottom};});" +
-    "var watch=" + JSON.stringify(spec.watch) + "; var hits=[]; cues.forEach(function(c){ watch.forEach(function(id){ var b=box(id); if(b && hit(c,b)) hits.push(c.turn+' '+id); }); });" +
-    "document.body.dataset.report=JSON.stringify({hits:hits,cues:cues,zoom:!!document.querySelector('.leaflet-control-zoom')});" +
+    "var cues=[].slice.call(document.querySelectorAll('.pcs-turn-cue')).map(function(n){var r=n.getBoundingClientRect(); var bg=getComputedStyle(n).backgroundColor; var arrow=n.querySelector('.pcs-turn-arrow'); var ar=arrow.getBoundingClientRect(); var words=n.parentNode.querySelector('.pcs-turn-text'); var wr=words?words.getBoundingClientRect():null; return {turn:n.getAttribute('data-turn'),text:n.querySelector('.pcs-turn-dist').textContent,instr:words?words.textContent:'',bg:bg,aw:Math.round(ar.width),ah:Math.round(ar.height),left:r.left,top:r.top,right:r.right,bottom:r.bottom,under:!!(wr && r.top>=wr.bottom-4)};});" +
+    "var watch=" + JSON.stringify(spec.watch) + "; var hits=[]; var zoomEl=document.querySelector('.leaflet-control-zoom'); var zb=zoomEl?zoomEl.getBoundingClientRect():null;" +
+    "cues.forEach(function(c){ watch.forEach(function(id){ var b=box(id); if(b && hit(c,b)) hits.push(c.turn+' '+id); }); if(zb && zb.width>2 && hit(c,{left:zb.left,top:zb.top,right:zb.right,bottom:zb.bottom})) hits.push(c.turn+' zoom'); });" +
+    "document.body.dataset.report=JSON.stringify({hits:hits,cues:cues,zoom:!!zoomEl});" +
     "</script></body></html>";
 }
 
@@ -253,11 +284,14 @@ function maneuvers() {
   const ramp = route.steps.filter(function (s) { return s.type === "off ramp" && s.modifier === "slight right"; })[0];
   const smith = route.steps.filter(function (s) { return s.name === "Smith Street" && s.modifier === "right"; })[0];
   return {
-    left: { kind: "left", miles: 0.8, text: "Merge slight left onto Southwest Freeway", dest: merge, label: "left-0.8miles" },
-    right: { kind: "right", miles: 0.8, text: "Take the exit on the right", dest: ramp, label: "right-0.8miles" },
-    uturn: { kind: "uturn", miles: 0.4, text: "Make a U-turn onto Smith Street", dest: { lat: smith.lat, lng: smith.lng }, label: "uturn" },
-    feet450: { kind: "left", miles: 450 / 5280, text: "Merge slight left onto Southwest Freeway", dest: merge, label: "450feet" },
-    feet50: { kind: "left", miles: 50 / 5280, text: "Merge slight left onto Southwest Freeway", dest: merge, label: "50feet" }
+    left: { kind: "left", miles: 0.5, text: "Turn left onto N 10th St", dest: merge, label: "left-0.5miles" },
+    feet450: { kind: "left", miles: 450 / 5280, text: "Turn left onto N 10th St", dest: merge, label: "450feet" },
+    feet100: { kind: "left", miles: 100 / 5280, text: "Turn left onto N 10th St", dest: merge, label: "100feet" },
+    feet50: { kind: "left", miles: 50 / 5280, text: "Turn left onto N 10th St", dest: merge, label: "50feet" },
+    fork: { kind: "left", miles: 0.5, text: "Turn left onto Fork Right Rd", dest: merge, label: "fork-right" },
+    bayou: { kind: "left", miles: 0.5, text: "Turn left onto Bayou Turnpike", dest: merge, label: "bayou" },
+    right: { kind: "right", miles: 0.5, text: "Take the exit on the right", dest: ramp, label: "right" },
+    uturn: { kind: "uturn", miles: 0.4, text: "Make a U-turn onto Smith Street", dest: { lat: smith.lat, lng: smith.lng }, label: "uturn" }
   };
 }
 
@@ -268,7 +302,7 @@ test("four driver maps keep the arrow clear of the other controls", async functi
     MAPS.forEach(function (map) { shots.push({ size: size, map: map, move: moves.left }); });
   });
   const big = SIZES[1];
-  ["right", "uturn", "feet450", "feet50"].forEach(function (key) {
+  ["feet450", "feet100", "feet50", "fork", "bayou", "right", "uturn"].forEach(function (key) {
     MAPS.forEach(function (map) { shots.push({ size: big, map: map, move: moves[key] }); });
   });
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pcs-turn-"));
@@ -344,15 +378,19 @@ test("four driver maps keep the arrow clear of the other controls", async functi
       assert.ok(report, name + " did not report");
       const got = JSON.parse(report);
       assert.equal(got.hits.length, 0, name + " arrow covers " + got.hits.join(", "));
-      assert.ok(got.cues.length >= 1, name + " missing arrow");
+      assert.equal(got.cues.length, 1, name + " arrow count " + got.cues.length);
       got.cues.forEach(function (c) {
         assert.equal(c.turn, shot.move.kind, name);
+        assert.equal(c.under, true, name + " arrow is not under the direction text");
         assert.equal(c.bg.replace(/\s/g, ""), "rgb(11,107,58)", name + " green");
         assert.ok(c.aw >= 52 && c.aw <= 64, name + " arrow width " + c.aw);
         assert.ok(c.ah >= 52 && c.ah <= 64, name + " arrow height " + c.ah);
       });
-      if (shot.move.label === "left-0.8miles") assert.ok(got.cues[0].text.indexOf("miles") >= 0, got.cues[0].text);
-      if (shot.move.label === "450feet" || shot.move.label === "50feet") assert.ok(/feet$/.test(got.cues[0].text), got.cues[0].text);
+      if (shot.move.label === "left-0.5miles") assert.equal(got.cues[0].text, "0.5 miles");
+      if (shot.move.label === "450feet") assert.equal(got.cues[0].text, "450 feet");
+      if (shot.move.label === "100feet") assert.equal(got.cues[0].text, "100 feet");
+      if (shot.move.label === "50feet") assert.equal(got.cues[0].text, "50 feet");
+      if (shot.move.label === "fork-right" || shot.move.label === "bayou") assert.equal(got.cues[0].turn, "left");
       await wait(400);
       const pic = await send("Page.captureScreenshot", { format: "png" }, sid);
       const file = path.join(outDir, shot.map + "-" + shot.size.name + "-" + shot.move.label + ".png");

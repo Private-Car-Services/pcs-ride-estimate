@@ -10676,19 +10676,49 @@
     if (isCoord(state.hereLat) && isCoord(state.hereLng) && Date.now() - Number(state.gpsAt || 0) < 20000) return { lat: +state.hereLat, lng: +state.hereLng };
     return here;
   }
-  function navPickStep(steps, here) {
-    var S = steps || [], k = 0, best = Infinity, i;
+  /* Project a point onto the route. mi = miles from the start of the line to that projection. */
+  function navProject(line, lat, lng) {
+    if (!line || !line.length || !isFinite(lat) || !isFinite(lng)) return null;
+    if (line.length === 1) return { mi: 0, off: haversineMi(lat, lng, line[0][0], line[0][1]) };
+    var bestOff = Infinity, bestAlong = 0, acc = 0, i, cos = Math.cos(lat * Math.PI / 180) * 69.172;
+    for (i = 1; i < line.length; i += 1) {
+      var a = line[i - 1], b = line[i];
+      var ax = (a[1] - lng) * cos, ay = (a[0] - lat) * 69.172;
+      var bx = (b[1] - lng) * cos, by = (b[0] - lat) * 69.172;
+      var dx = bx - ax, dy = by - ay, len2 = dx * dx + dy * dy;
+      var t = len2 > 0 ? (ax * dx + ay * dy) / -len2 : 0;
+      if (t < 0) t = 0; else if (t > 1) t = 1;
+      var px = ax + t * dx, py = ay + t * dy, off = Math.sqrt(px * px + py * py), seg = Math.sqrt(len2);
+      if (off < bestOff) { bestOff = off; bestAlong = acc + t * seg; }
+      acc += seg;
+    }
+    return { mi: bestAlong, off: bestOff };
+  }
+  /* First maneuver still ahead on the route. Switch only after the car has passed that point, so the countdown reaches the turn. */
+  function navPickStep(steps, here, line) {
+    var S = steps || [], i;
     if (!S.length || !here) return -1;
+    if (line && line.length >= 2) {
+      var car = navProject(line, here.lat, here.lng);
+      if (car && car.off <= 0.2) {
+        for (i = 0; i < S.length; i += 1) {
+          var p = navProject(line, S[i].lat, S[i].lng);
+          if (p && p.off <= 0.08 && p.mi > car.mi + 1e-6) return i;
+        }
+        return S.length - 1;
+      }
+    }
+    var k = 0, best = Infinity;
     for (i = 0; i < S.length; i += 1) { var d = haversineMi(here.lat, here.lng, S[i].lat, S[i].lng); if (d < best) { best = d; k = i; } }
-    if (k + 1 < S.length && (best < 0.03 || haversineMi(S[k].lat, S[k].lng, S[k + 1].lat, S[k + 1].lng) > haversineMi(here.lat, here.lng, S[k + 1].lat, S[k + 1].lng))) k += 1;
-    if (k === 0 && S.length > 1) k = 1; /* skip "Head out" */
     return k;
   }
   function navCueKindFromText(text) {
     var lo = String(text || "").toLowerCase().replace(/\s+/g, " ").trim();
+    var cut = lo.search(/\s(?:onto|on|toward|at)\s/);
+    if (cut >= 0) lo = lo.slice(0, cut).trim();
     lo = lo.replace(/\bdestination\b[\s\S]*$/, "").trim();
     if (!lo) return "straight";
-    if (/u-?\s*turn/.test(lo)) return "uturn";
+    if (/\bu-?turn\b/.test(lo)) return "uturn";
     var rules = [
       [/slight left|sharp left|keep left|bear left|merge left|fork left/, "left"],
       [/slight right|sharp right|keep right|bear right|merge right|fork right/, "right"],
@@ -10715,26 +10745,22 @@
     if (m === "straight") return "straight";
     return navCueKindFromText(text);
   }
-  /* Miles to the maneuver along the route line when the car and the maneuver both sit on it; otherwise straight-line. */
+  /* Miles still to drive along the route. Straight-line only when the car or the maneuver is off the line. */
   function navCueMiles(line, here, lat, lng) {
     var straight = haversineMi(here.lat, here.lng, lat, lng);
     if (!line || line.length < 2 || !here || !isFinite(lat) || !isFinite(lng)) return straight;
-    var k = 0, best = Infinity, i, d;
-    for (i = 0; i < line.length; i += 1) { d = haversineMi(here.lat, here.lng, line[i][0], line[i][1]); if (d < best) { best = d; k = i; } }
-    if (best > 0.2) return straight;
-    var m = k, bestM = Infinity;
-    for (i = k; i < line.length; i += 1) { d = haversineMi(lat, lng, line[i][0], line[i][1]); if (d < bestM) { bestM = d; m = i; } }
-    if (bestM > 0.08) return straight;
-    var mi = haversineMi(here.lat, here.lng, line[k][0], line[k][1]);
-    for (i = k + 1; i <= m; i += 1) mi += haversineMi(line[i - 1][0], line[i - 1][1], line[i][0], line[i][1]);
-    mi += haversineMi(line[m][0], line[m][1], lat, lng);
-    return mi;
+    var car = navProject(line, here.lat, here.lng), step = navProject(line, lat, lng);
+    if (!car || !step || car.off > 0.2 || step.off > 0.08) return straight;
+    var d = step.mi - car.mi;
+    return d >= 0 ? d : straight;
   }
   function navCueDist(mi) {
     if (mi == null || !isFinite(+mi)) return "";
     var n = Math.max(0, +mi);
     if (n < 0.1) return Math.max(50, Math.round(n * 5280 / 50) * 50) + " feet";
-    return (Math.round(n * 10) / 10).toFixed(1) + " miles";
+    var tenths = Math.round(n * 10) / 10;
+    if (tenths === 1) return "1 mile";
+    return tenths.toFixed(1) + " miles";
   }
   function navCueSvg(kind) {
     var up = '<path d="M32 8 46 26h-8v30H26V26h-8z" fill="#fff"/>';
@@ -10752,21 +10778,22 @@
     return '<div class="pcs-turn-cue" data-turn="' + k + '"><span class="pcs-turn-arrow" aria-hidden="true">' + navCueSvg(k) + "</span>" +
       (dist ? '<span class="pcs-turn-dist">' + esc(dist) + "</span>" : "") + "</div>";
   }
-  var NAV_CUE_CSS = ".pcs-turn-cue{display:flex;align-items:center;gap:8px;width:max-content;max-width:100%;box-sizing:border-box;background:#0b6b3a;color:#fff;border-radius:14px;padding:4px 14px 4px 4px;margin:0 0 6px;box-shadow:0 1px 3px rgba(0,0,0,.35);font-family:system-ui,-apple-system,sans-serif}" +
+  var NAV_CUE_CSS = ".pcs-turn-cue{display:flex;align-items:center;gap:8px;width:max-content;max-width:100%;box-sizing:border-box;background:#0b6b3a;color:#fff;border-radius:14px;padding:4px 14px 4px 4px;margin:6px 0 0;box-shadow:0 1px 3px rgba(0,0,0,.35);font-family:system-ui,-apple-system,sans-serif}" +
     ".pcs-turn-arrow{display:flex;align-items:center;justify-content:center;width:60px;height:60px;flex:0 0 60px}" +
     ".pcs-turn-arrow svg{width:56px;height:56px;display:block}" +
     ".pcs-turn-dist{font-size:28px;line-height:1.05;font-weight:900;color:#fff;white-space:nowrap;font-variant-numeric:tabular-nums}" +
-    "#meter-map-stage .meter-turn .pcs-turn-cue{margin-left:46px}" +
-    "#sched-turn-map.pcs-turn-float{position:absolute;left:8px;top:68px;z-index:1001;pointer-events:none;max-width:42%}" +
-    "#sched-turn-map .pcs-turn-cue{flex-direction:column;align-items:center;gap:0;padding:4px 8px 6px;margin:0}" +
-    "#sched-turn-map .pcs-turn-dist{font-size:22px}" +
-    "#home-map-stage.pcs-fullmap #sched-turn-map{display:none}";
+    "#home-map-stage:not(.pcs-fullmap) #sched-turn-map{position:absolute;left:8px;right:8px;top:8px;z-index:1002;margin:0;pointer-events:none;box-shadow:0 2px 8px rgba(0,0,0,.4)}" +
+    "#home-map-stage.pcs-fullmap #sched-turn-map{display:none}" +
+    "#home-map-stage:not(.pcs-fullmap) #sched-eta-map{top:calc(var(--sched-map-banner, 8px) + 4px)}" +
+    "#home-map-stage:not(.pcs-fullmap) .leaflet-top.leaflet-left{top:calc(var(--sched-map-chrome, var(--sched-map-banner, 8px)) + 8px) !important;left:10px !important;z-index:1005}" +
+    "#home-map-stage:not(.pcs-fullmap) #sched-fs-open{top:calc(var(--sched-map-chrome, var(--sched-map-banner, 8px)) + 8px);left:52px}" +
+    "#meter-map-stage .leaflet-top.leaflet-left{top:calc(var(--meter-banner, 96px) + 12px) !important;left:10px !important;z-index:1005}";
   function navCueStyle() {
     if (typeof document === "undefined" || document.getElementById("pcs-turn-cue-style")) return;
     var st = document.createElement("style"); st.id = "pcs-turn-cue-style"; st.textContent = NAV_CUE_CSS;
     if (document.head) document.head.appendChild(st);
   }
-  if (typeof window !== "undefined") window.__pcsTurnCue = { kind: navCueKind, dist: navCueDist, miles: navCueMiles, pick: navPickStep, svg: navCueSvg, html: navCueHtml, css: function () { return NAV_CUE_CSS; } };
+  if (typeof window !== "undefined") window.__pcsTurnCue = { kind: navCueKind, dist: navCueDist, miles: navCueMiles, pick: navPickStep, project: navProject, svg: navCueSvg, html: navCueHtml, css: function () { return NAV_CUE_CSS; } };
   function schedNextTurn() {
     var R = schedNavRoute, t = schedNavTrip(), here = meterHerePt();
     if (!R || !t || R.id !== t.id || !here) return null;
@@ -10774,32 +10801,49 @@
     var out = { left: haversineMi(here.lat, here.lng, R.to.lat, R.to.lng) };
     var S = R.steps || [];
     if (S.length) {
-      var k = navPickStep(S, here);
+      var k = navPickStep(S, gps, R.line);
       out.text = S[k].text; out.mi = navCueMiles(R.line, gps, S[k].lat, S[k].lng); out.kind = navCueKind(S[k].type, S[k].modifier, S[k].text);
     }
     return out;
   }
-  function schedTurnHtml() {
+  function schedTurnHtml(onMap) {
     navCueStyle();
     var n = schedNextTurn(), R = schedNavRoute;
-    var box = "background:#0b3d23;color:#fff;border-radius:12px;padding:10px 12px;margin:0 0 8px;font-size:20px;font-weight:800";
+    var box = "background:#0b3d23;color:#fff;border-radius:12px;padding:10px 12px;margin:" + (onMap ? "0" : "0 0 8px") + ";font-size:20px;font-weight:800";
     if (!n) return '<div id="sched-turn" role="status" style="' + box + '">' + (meterHerePt() ? "Finding the route to the pickup\u2026" : "Allow location to see the route to the pickup.") + "</div>";
     var mins = R && R.miles > 0 ? Math.max(1, Math.round(R.minutes * Math.min(1, n.left * 1.3 / Math.max(0.01, R.miles)))) : null;
     var cueMi = n.text ? n.mi : n.left, kind = n.text ? n.kind : "straight";
-    return '<div id="sched-turn" role="status" aria-live="polite" style="' + box + '">' + navCueHtml(kind, cueMi) +
-      (n.text ? esc(n.text) : "Head to the pickup") +
+    var dd = n.mi == null ? "" : n.mi < 0.1 ? Math.max(50, Math.round(n.mi * 5280 / 50) * 50) + " ft" : n.mi.toFixed(1) + " mi";
+    var words = n.text ? esc(n.text) : "Head to the pickup";
+    var lead = !onMap && n.text ? '<small style="display:block;font-size:14px;font-weight:700;color:#d1fae5">In ' + esc(dd) + "</small>" : "";
+    return '<div id="sched-turn" role="status" aria-live="polite" style="' + box + '">' + lead + words +
+      (onMap ? navCueHtml(kind, cueMi) : "") +
       '<small style="display:block;font-size:14px;font-weight:700;color:#d1fae5;margin-top:4px">' + esc((Math.round(n.left * 10) / 10) + " mi to the pickup" + (mins ? " \u00b7 about " + mins + " min" : "")) + "</small></div>";
   }
   function schedTurnMapPaint() {
     if (typeof document === "undefined") return;
     var stage = document.getElementById("home-map-stage"), el = document.getElementById("sched-turn-map");
-    if (!stage || !schedNavTrip() || (stage.classList && stage.classList.contains("pcs-fullmap"))) { if (el) el.remove(); return; }
+    if (!stage || !schedNavTrip() || (stage.classList && stage.classList.contains("pcs-fullmap"))) {
+      if (el) el.remove();
+      if (stage && stage.style && stage.style.removeProperty) { stage.style.removeProperty("--sched-map-banner"); stage.style.removeProperty("--sched-map-chrome"); }
+      return;
+    }
     navCueStyle();
-    var n = schedNextTurn();
-    if (!n) { if (el) el.remove(); return; }
-    var h = '<div id="sched-turn-map" class="pcs-turn-float" role="status" aria-live="polite">' + navCueHtml(n.text ? n.kind : "straight", n.text ? n.mi : n.left) + "</div>";
+    var h = schedTurnHtml(true).replace('id="sched-turn"', 'id="sched-turn-map"');
     if (!el) stage.insertAdjacentHTML("beforeend", h);
     else if (el.outerHTML !== h) el.outerHTML = h;
+    el = document.getElementById("sched-turn-map");
+    schedMapChrome();
+  }
+  function schedMapChrome() {
+    var stage = document.getElementById("home-map-stage");
+    if (!stage || !stage.style || !stage.style.setProperty) return;
+    if (stage.classList && stage.classList.contains("pcs-fullmap")) return;
+    var ban = document.getElementById("sched-turn-map"), eta = document.getElementById("sched-eta-map");
+    var h = ban && ban.offsetHeight ? ban.offsetHeight + 8 : 0;
+    stage.style.setProperty("--sched-map-banner", h + "px");
+    var below = h + (eta && eta.offsetHeight && eta.style.display !== "none" ? eta.offsetHeight + 12 : 0);
+    stage.style.setProperty("--sched-map-chrome", below + "px");
   }
   /* v77.8 (Matthew 10/20, circled spot): big ETA box top-right of the nav map, below the turn banner.
      "Arrive 1:55 PM" / "9 min \u00b7 5 mi" + "to pickup" / "to drop-off". Minutes come from the route duration (Google
@@ -10839,7 +10883,7 @@
     var fe = document.getElementById("sched-eta-fs"), top = document.getElementById("sched-fs-top");
     if (top) { var h2 = schedEtaHtml("sched-eta-fs"); if (!fe) top.insertAdjacentHTML("beforeend", h2); else if (fe.outerHTML !== h2) fe.outerHTML = h2; }
   }
-  function schedNavPaint() { var el = document.getElementById("sched-turn"); if (el) { var h = schedTurnHtml(); if (el.outerHTML !== h) el.outerHTML = h; } var fs = document.getElementById("sched-turn-fs"); if (fs) { var h2 = schedTurnHtml().replace('id="sched-turn"', 'id="sched-turn-fs"'); if (fs.outerHTML !== h2) fs.outerHTML = h2; } try { schedTurnMapPaint(); } catch (e) {} try { schedEtaPaint(); } catch (e) {} try { schedFsMeasure(); } catch (e) {} try { sosPlace(); } catch (e) {} if (!schedNavTrip()) schedFullApply(); if (navTestOn()) try { navTestPaint(); } catch (e) {} } /* v75x: full screen banner too; v75y test flag: Uber-style card + bar; v2.0m-bt: arrow on the small map too */
+  function schedNavPaint() { var el = document.getElementById("sched-turn"); if (el) { var h = schedTurnHtml(false); if (el.outerHTML !== h) el.outerHTML = h; } var fs = document.getElementById("sched-turn-fs"); if (fs) { var h2 = schedTurnHtml(true).replace('id="sched-turn"', 'id="sched-turn-fs"'); if (fs.outerHTML !== h2) fs.outerHTML = h2; } try { schedTurnMapPaint(); } catch (e) {} try { schedEtaPaint(); } catch (e) {} try { schedMapChrome(); } catch (e) {} try { schedFsMeasure(); } catch (e) {} try { sosPlace(); } catch (e) {} if (!schedNavTrip()) schedFullApply(); if (navTestOn()) try { navTestPaint(); } catch (e) {} } /* v75x: full screen banner too; v75y test flag: Uber-style card + bar; v2.0m-bt: same banner on the small map, no second arrow in the card */
   /* v75x (Matthew 10/16): on the way to the pickup the map can fill the whole screen. A big "Full screen map" button on the
      small map (or a tap on the map) opens it; the next-turn banner stays on top, the pickup pin, Follow / Heading up and the
      v75w arrow freeze are the SAME map (resized, never recreated). Big "I'm at the pickup" + Close. The choice is remembered
@@ -11025,7 +11069,7 @@
     if (full) {
       if (!top) { top = document.createElement("div"); top.id = "sched-fs-top"; stage.appendChild(top); }
       if (navTestOn()) navTestTop(stage, top); else /* v75y test flag */
-      top.innerHTML = schedTurnHtml().replace('id="sched-turn"', 'id="sched-turn-fs"') + schedEtaHtml("sched-eta-fs"); /* v77.8 ETA box below the banner */
+      top.innerHTML = schedTurnHtml(true).replace('id="sched-turn"', 'id="sched-turn-fs"') + schedEtaHtml("sched-eta-fs"); /* v77.8 ETA box below the banner */
       if (!bot) {
         bot = document.createElement("div"); bot.id = "sched-fs-bottom";
         bot.innerHTML = '<div id="sched-fs-arrived" class="pcs-map-green" role="button" tabindex="0" aria-label="I\u2019m at the pickup"><span class="pcs-arrived-label">I\u2019m at the pickup</span></div><button type="button" id="sched-fs-close">Close map</button>';
@@ -11112,7 +11156,7 @@
       "#meter-map-stage.pcs-rfs .map-caption{display:none}" +
       "#meter-map-stage.pcs-rfs .meter-topstack{top:8px;top:calc(env(safe-area-inset-top,0px) + 8px)}" +
       "#meter-map-stage.pcs-rfs .nav-toggle{bottom:calc(var(--pcs-safe-bottom, env(safe-area-inset-bottom, 0px)) + 22px + var(--rfs-bar, 148px) + 14px) !important;z-index:1004;pointer-events:auto}#meter-map-stage.pcs-rfs .nav-recenter{bottom:calc(var(--pcs-safe-bottom, env(safe-area-inset-bottom, 0px)) + 22px + var(--rfs-bar, 148px) + 62px) !important;z-index:1004;pointer-events:auto}" +
-      "#meter-map-stage.pcs-rfs .leaflet-top.leaflet-left{top:calc(var(--pcs-safe-top, env(safe-area-inset-top, 0px)) + 12px) !important;left:calc(var(--pcs-safe-left, env(safe-area-inset-left, 0px)) + 10px) !important;z-index:1005;pointer-events:auto}" +
+      "#meter-map-stage.pcs-rfs .leaflet-top.leaflet-left{top:calc(var(--pcs-safe-top, env(safe-area-inset-top, 0px)) + var(--meter-banner, 96px) + 12px) !important;left:calc(var(--pcs-safe-left, env(safe-area-inset-left, 0px)) + 10px) !important;z-index:1005;pointer-events:auto}" +
       "#meter-map-stage.pcs-rfs #rfs-open{display:none}" +
       "#rfs-open{position:absolute;left:8px;bottom:34px;z-index:1002;width:auto;min-height:52px;margin:0;padding:10px 16px;font-size:18px;font-weight:800;border-radius:12px;border:2px solid #0b3d23;background:#d1fae5;color:#0b3d23;box-shadow:0 2px 6px rgba(0,0,0,.35);cursor:pointer}" +
       "#rfs-bar{position:absolute;left:max(8px, calc(var(--pcs-safe-left, env(safe-area-inset-left, 0px)) + 8px));right:max(8px, calc(var(--pcs-safe-right, env(safe-area-inset-right, 0px)) + 8px));bottom:calc(var(--pcs-safe-bottom, env(safe-area-inset-bottom, 0px)) + 22px);z-index:1003;display:flex;flex-direction:column;gap:8px;background:transparent;padding:0;margin:0;border:0;box-shadow:none;pointer-events:none}" +
@@ -17822,14 +17866,14 @@
   function meterNextTurn() {
     var M = state.meter, here = meterHerePt();
     if (!M || !M.dest || !here || !meterRoute || !meterRoute.steps || !meterRoute.steps.length) return null;
-    var S = meterRoute.steps, k = navPickStep(S, here), gps = navCueHere(here);
+    var gps = navCueHere(here), S = meterRoute.steps, k = navPickStep(S, gps, meterRoute.line);
     return { text: S[k].text, mi: navCueMiles(meterRoute.line, gps, S[k].lat, S[k].lng), kind: navCueKind(S[k].type, S[k].modifier, S[k].text) };
   }
   function meterTurnHtml() {
     navCueStyle();
     var t = meterNextTurn();
     if (!t) return '<div class="meter-turn" id="meter-turn" style="display:none"></div>';
-    return '<div class="meter-turn" id="meter-turn" role="status" aria-live="polite">' + navCueHtml(t.kind, t.mi) + esc(t.text) + "</div>";
+    return '<div class="meter-turn" id="meter-turn" role="status" aria-live="polite">' + esc(t.text) + navCueHtml(t.kind, t.mi) + "</div>";
   }
   function meterTurnPaint() {
     if (typeof document === "undefined") return;
@@ -17837,6 +17881,8 @@
     if (!el) return;
     var html = meterTurnHtml();
     if (el.outerHTML !== html) { el.outerHTML = html; try { sosPlace(); } catch (e) {} }
+    var stage = document.getElementById("meter-map-stage"), stack = document.getElementById("meter-topstack");
+    if (stage && stage.style && stage.style.setProperty && stack && stack.offsetHeight) stage.style.setProperty("--meter-banner", stack.offsetHeight + "px");
   }
   if (typeof window !== "undefined") setInterval(function () { try { meterTurnPaint(); } catch (e) {} }, 2000);
   function meterEstFetch() {
