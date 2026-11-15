@@ -177,7 +177,7 @@
      v2.0m-bi: gallons is a three-decimal register (1,2,3,4 -> 1.234; Delete drops the last digit). Price stays two decimals. The point key does not insert a point. */
   var KP_KEY = "pcsGoalSysKb", kpEl = null, kpCur = null;
   function kpOn() { try { return localStorage.getItem(KP_KEY) !== "1"; } catch (e) { return true; } }
-  function kpHold(el) { var id = el && el.id; return id === "gl-pin" || id === "gl-pin1" || id === "gl-pin2" || id === "gl-q-amt" || id === "gl-q-tip" || id === "gl-fuel-odo" || id === "gl-fuel-price" || id === "gl-fuel-gal" || id === "gl-fuel-miss-odo" || id === "gl-fuel-miss-gal" || id === "gl-fuel-miss-ppg"; }
+  function kpHold(el) { var id = el && el.id; return id === "gl-pin" || id === "gl-pin1" || id === "gl-pin2" || id === "gl-q-amt" || id === "gl-q-tip" || id === "gl-fuel-odo" || id === "gl-fuel-price" || id === "gl-fuel-gal" || id === "gl-fuel-miss-odo" || id === "gl-fuel-miss-gal" || id === "gl-fuel-miss-price"; }
   function kpMark(el, whole) { el.setAttribute("data-kp", whole ? "w" : "d"); if (!whole && el.type !== "password") el.setAttribute("data-reg", "1"); else el.removeAttribute("data-reg");
     if (kpHold(el) || kpOn()) el.setAttribute("inputmode", "none"); else el.setAttribute("inputmode", whole ? "numeric" : "decimal"); if (kpHold(el)) el.readOnly = true; }
   function kpRefresh() { var ov = document.getElementById("gl-screen"); if (!ov) return; [].forEach.call(ov.querySelectorAll("input[data-kp]"), function (el) {
@@ -607,7 +607,7 @@
   }
   function fuelValidateMissing(book, rec) {
     book = book || {};
-    var seed = fuelSeedOdo(book), odo = Math.round(Number(rec && rec.odo)), at = rec && rec.at != null ? Number(rec.at) : NaN, gal, priceEach, rows, i, r, ro, ra;
+    var seed = fuelSeedOdo(book), odo = Math.round(Number(rec && rec.odo)), at = rec && rec.at != null ? Number(rec.at) : NaN, gal, total, priceEach, rows, i, r, ro, ra;
     if (!isFinite(at)) return { ok: false, error: "Enter the date of the receipt." };
     if (!isFinite(odo)) return { ok: false, error: "Enter the odometer." };
     if (seed == null) return { ok: false, error: "Save a starting odometer first." };
@@ -617,14 +617,15 @@
       if (Math.round(Number(rows[i].odo)) === odo) return { ok: false, error: "That odometer is already in the log." };
     }
     gal = Math.round(Number(rec && rec.gallons) * 1000) / 1000;
-    priceEach = Math.round(Number(rec && rec.ppg) * 1000) / 1000;
-    if (!(gal > 0) || !(priceEach > 0)) return { ok: false, error: "Gallons and price have to be more than 0." };
+    total = Math.round(Number(rec && rec.price) * 100) / 100;
+    if (!(gal > 0) || !(total > 0)) return { ok: false, error: "Gallons and price have to be more than 0." };
+    priceEach = Math.round(total / gal * 1000) / 1000;
     for (i = 0; i < rows.length; i++) {
       r = rows[i]; ro = Math.round(Number(r.odo)); ra = Number(r.at) || 0;
       if (ra < at && ro >= odo) return { ok: false, error: "That odometer does not fit the dates around it. An older fill has to have a lower odometer." };
       if (ra > at && ro <= odo) return { ok: false, error: "That odometer does not fit the dates around it. An older fill has to have a lower odometer." };
     }
-    return { ok: true, odo: odo, gallons: gal, ppg: priceEach, price: Math.round(gal * priceEach * 100) / 100, at: at };
+    return { ok: true, odo: odo, gallons: gal, ppg: priceEach, price: total, at: at };
   }
   function fuelAddMissing(book, rec, now) {
     var v = fuelValidateMissing(book, rec), at, when, prev, rows, i, entry;
@@ -668,12 +669,12 @@
     var last = rows.length ? rows[rows.length - 1] : null, shown = last ? fuelFmt(fuelMath(last.displayPrev, last.odo, last.gallons, last.price)) : fuelFmt(null);
     var miss = '<p style="margin:10px 0 6px"><button type="button" class="btn ghost" id="gl-fuel-miss-open">Add missing receipt</button></p>';
     if (fuelMissOpen) miss += '<div id="gl-fuel-miss" style="margin:8px 0;padding:10px;border:1px solid var(--line);border-radius:10px">' +
-      '<p class="fine">Date, odometer, gallons, and price per gallon from the receipt.</p>' +
+      '<p class="fine">Date, price, odometer, and gallons from the receipt.</p>' +
       '<label class="fine">Date <input id="gl-fuel-miss-date" type="date" aria-label="Receipt date" style="' + box + ';width:170px"></label> ' +
       '<label class="fine">Time (optional) <input id="gl-fuel-miss-time" type="time" value="12:00" aria-label="Receipt time, optional, default noon" style="' + box + ';width:130px"></label> ' +
+      '<label class="fine">Price <input id="gl-fuel-miss-price" type="text" inputmode="decimal" autocomplete="off" aria-label="Receipt total price" placeholder="0.00" style="' + box + ';width:120px"></label> ' +
       '<label class="fine">Odometer <input id="gl-fuel-miss-odo" data-fuel="odo" type="text" inputmode="numeric" autocomplete="off" aria-label="Receipt odometer" style="' + box + ';width:140px"></label> ' +
       '<label class="fine">Gallons <input id="gl-fuel-miss-gal" data-fuel="gal" type="text" inputmode="decimal" autocomplete="off" aria-label="Receipt gallons" placeholder="0.000" style="' + box + ';width:120px"></label> ' +
-      '<label class="fine">Price per gallon <input id="gl-fuel-miss-ppg" data-fuel="ppg" type="text" inputmode="decimal" autocomplete="off" aria-label="Price per gallon" placeholder="0.000" style="' + box + ';width:120px"></label> ' +
       '<button type="button" class="btn" id="gl-fuel-miss-save">Save missing receipt</button>' +
       '<p class="fine" id="gl-fuel-miss-msg"></p></div>';
     return head + '<p class="fine">Previous odometer <b id="gl-fuel-prev">' + prev + "</b> locked</p>" +
@@ -715,7 +716,7 @@
     if (!fuelForMatthew()) return;
     var msg = document.getElementById("gl-fuel-miss-msg");
     var dateEl = document.getElementById("gl-fuel-miss-date"), timeEl = document.getElementById("gl-fuel-miss-time");
-    var rec = { at: fuelAtFromInput(dateEl && dateEl.value, timeEl && timeEl.value), odo: (document.getElementById("gl-fuel-miss-odo") || {}).value, gallons: (document.getElementById("gl-fuel-miss-gal") || {}).value, ppg: (document.getElementById("gl-fuel-miss-ppg") || {}).value };
+    var rec = { at: fuelAtFromInput(dateEl && dateEl.value, timeEl && timeEl.value), odo: (document.getElementById("gl-fuel-miss-odo") || {}).value, gallons: (document.getElementById("gl-fuel-miss-gal") || {}).value, price: (document.getElementById("gl-fuel-miss-price") || {}).value };
     D.fuel = D.fuel || {};
     var result = fuelAddMissing(D.fuel, rec);
     if (!result.ok) { if (msg) msg.textContent = result.error; return; }

@@ -227,7 +227,7 @@ test("v2.0m-bu is what a phone on v2.0m-bf is offered", function () {
   const pages = {
     "app/driver/index.html": "version.js?v=2.0m-bu",
     "app/index.html": "version.js?v=2.0m-bu",
-    "god/index.html": "goal.js?v=2.0m-bv",
+    "god/index.html": "goal.js?v=2.0m-bw",
     "meter/index.html": "version.js?v=2.0m-bu"
   };
   Object.keys(pages).forEach(function (rel) {
