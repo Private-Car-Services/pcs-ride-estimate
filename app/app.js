@@ -10718,10 +10718,12 @@
     if (cut >= 0) lo = lo.slice(0, cut).trim();
     lo = lo.replace(/\bdestination\b[\s\S]*$/, "").trim();
     if (!lo) return "straight";
-    if (/\bu-?turn\b/.test(lo)) return "uturn";
+    if (/\bu-?turn\b/.test(lo) || /\bu turn\b/.test(lo)) return "uturn";
     var rules = [
-      [/slight left|sharp left|keep left|bear left|merge left|fork left/, "left"],
-      [/slight right|sharp right|keep right|bear right|merge right|fork right/, "right"],
+      [/sharp left/, "sharp-left"],
+      [/slight left|keep left|bear left|merge left|fork left/, "slight-left"],
+      [/sharp right/, "sharp-right"],
+      [/slight right|keep right|bear right|merge right|fork right/, "slight-right"],
       [/turn left|\bleft turn\b/, "left"],
       [/turn right|\bright turn\b/, "right"],
       [/\bleft\b/, "left"],
@@ -10740,8 +10742,12 @@
       if (gm) m = gm[1].replace("u turn", "uturn");
     }
     if (m === "uturn" || m === "u turn" || t === "uturn") return "uturn";
-    if (m === "sharp left" || m === "left" || m === "slight left") return "left";
-    if (m === "sharp right" || m === "right" || m === "slight right") return "right";
+    if (m === "sharp left") return "sharp-left";
+    if (m === "slight left") return "slight-left";
+    if (m === "left") return "left";
+    if (m === "sharp right") return "sharp-right";
+    if (m === "slight right") return "slight-right";
+    if (m === "right") return "right";
     if (m === "straight") return "straight";
     return navCueKindFromText(text);
   }
@@ -10764,17 +10770,22 @@
   }
   function navCueSvg(kind) {
     var up = '<path d="M32 8 46 26h-8v30H26V26h-8z" fill="#fff"/>';
+    /* One filled silhouette: a wide circular bend, then a head whose base is the stroke end. U-turn and straight are unchanged. */
     var body = {
       straight: up,
-      right: '<g transform="rotate(40 32 32)">' + up + "</g>",
-      left: '<g transform="rotate(-40 32 32)">' + up + "</g>",
+      right: '<path fill="#fff" d="M14 58V40A22 22 0 0 1 36 18H44L60 22.5 44 27H36A13 13 0 0 0 23 40V58Z"/>',
+      left: '<path fill="#fff" d="M50 58V40A22 22 0 0 0 28 18H20L4 22.5 20 27H28A13 13 0 0 1 41 40V58Z"/>',
+      "slight-right": '<path fill="#fff" d="M19.5 58V48A24.5 24.5 0 0 1 26.7 30.7L35.2 22.2 48.3 15.5 41.6 28.6 33 37A15.5 15.5 0 0 0 28.5 48V58Z"/>',
+      "slight-left": '<path fill="#fff" d="M44.5 58V48A24.5 24.5 0 0 0 37.3 30.7L28.8 22.2 15.7 15.5 22.4 28.6 31 37A15.5 15.5 0 0 1 35.5 48V58Z"/>',
+      "sharp-right": '<path fill="#fff" d="M15.5 58V42A20.5 20.5 0 0 1 46.3 24.3L56.1 35.1 41.8 32A11.5 11.5 0 0 0 24.5 42V58Z"/>',
+      "sharp-left": '<path fill="#fff" d="M48.5 58V42A20.5 20.5 0 0 0 17.7 24.3L7.9 35.1 22.2 32A11.5 11.5 0 0 1 39.5 42V58Z"/>',
       uturn: '<path d="M22 52V30a10 10 0 0 1 20 0v10" fill="none" stroke="#fff" stroke-width="9" stroke-linecap="round"/>' +
         '<path d="M33 36h18L42 56z" fill="#fff"/>'
     };
     return '<svg viewBox="0 0 64 64" width="56" height="56" aria-hidden="true" focusable="false">' + (body[kind] || up) + "</svg>";
   }
   function navCueHtml(kind, mi) {
-    var dist = navCueDist(mi), k = kind === "left" || kind === "right" || kind === "uturn" ? kind : "straight";
+    var dist = navCueDist(mi), k = kind === "left" || kind === "right" || kind === "slight-left" || kind === "slight-right" || kind === "sharp-left" || kind === "sharp-right" || kind === "uturn" ? kind : "straight";
     return '<div class="pcs-turn-cue" data-turn="' + k + '"><span class="pcs-turn-arrow" aria-hidden="true">' + navCueSvg(k) + "</span>" +
       (dist ? '<span class="pcs-turn-dist">' + esc(dist) + "</span>" : "") + "</div>";
   }
@@ -11158,7 +11169,7 @@
       "#meter-map-stage.pcs-rfs .nav-toggle{bottom:calc(var(--pcs-safe-bottom, env(safe-area-inset-bottom, 0px)) + 22px + var(--rfs-bar, 148px) + 14px) !important;z-index:1004;pointer-events:auto}#meter-map-stage.pcs-rfs .nav-recenter{bottom:calc(var(--pcs-safe-bottom, env(safe-area-inset-bottom, 0px)) + 22px + var(--rfs-bar, 148px) + 62px) !important;z-index:1004;pointer-events:auto}" +
       "#meter-map-stage.pcs-rfs .leaflet-top.leaflet-left{top:calc(var(--pcs-safe-top, env(safe-area-inset-top, 0px)) + var(--meter-banner, 96px) + 12px) !important;left:calc(var(--pcs-safe-left, env(safe-area-inset-left, 0px)) + 10px) !important;z-index:1005;pointer-events:auto}" +
       "#meter-map-stage.pcs-rfs #rfs-open{display:none}" +
-      "#rfs-open{position:absolute;left:8px;bottom:34px;z-index:1002;width:auto;min-height:52px;margin:0;padding:10px 16px;font-size:18px;font-weight:800;border-radius:12px;border:2px solid #0b3d23;background:#d1fae5;color:#0b3d23;box-shadow:0 2px 6px rgba(0,0,0,.35);cursor:pointer}" +
+      "#rfs-open{position:absolute;left:52px;top:calc(var(--meter-banner, 96px) + 12px);bottom:auto;z-index:1002;width:auto;min-height:52px;margin:0;padding:10px 16px;font-size:18px;font-weight:800;border-radius:12px;border:2px solid #0b3d23;background:#d1fae5;color:#0b3d23;box-shadow:0 2px 6px rgba(0,0,0,.35);cursor:pointer}" +
       "#rfs-bar{position:absolute;left:max(8px, calc(var(--pcs-safe-left, env(safe-area-inset-left, 0px)) + 8px));right:max(8px, calc(var(--pcs-safe-right, env(safe-area-inset-right, 0px)) + 8px));bottom:calc(var(--pcs-safe-bottom, env(safe-area-inset-bottom, 0px)) + 22px);z-index:1003;display:flex;flex-direction:column;gap:8px;background:transparent;padding:0;margin:0;border:0;box-shadow:none;pointer-events:none}" +
       "#rfs-bar .pcs-map-green,#rfs-bar button,#rfs-bar .rfs-row,#rfs-bar #sched-rider-line{pointer-events:auto;position:relative;z-index:1}" +
       "#rfs-bar *{box-sizing:border-box}.rfs-row{display:flex;align-items:center;flex-wrap:nowrap;gap:8px;margin:0;min-height:28px;background:#f0fdf4;color:#0b3d23;border-radius:10px;padding:2px 10px}" +

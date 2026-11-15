@@ -49,31 +49,34 @@ const appSrc = fs.readFileSync(path.join(__dirname, "../app/app.js"), "utf8");
 test("maneuver modifier picks the arrow, and Google text is the fallback", function () {
   const rows = [
     ["turn", "left", "Turn left onto McKinney St", "left"],
-    ["turn", "slight left", "Keep left", "left"],
-    ["turn", "sharp left", "Sharp left", "left"],
+    ["turn", "slight left", "Keep left", "slight-left"],
+    ["turn", "sharp left", "Sharp left", "sharp-left"],
     ["turn", "straight", "Continue straight", "straight"],
-    ["turn", "slight right", "Slight right", "right"],
+    ["turn", "slight right", "Slight right", "slight-right"],
     ["turn", "right", "Turn right onto Smith Street", "right"],
-    ["turn", "sharp right", "Sharp right", "right"],
+    ["turn", "sharp right", "Sharp right", "sharp-right"],
     ["turn", "uturn", "Make a U-turn", "uturn"],
-    ["merge", "slight left", "Merge slight left onto Southwest Freeway", "left"],
-    ["off ramp", "slight right", "Take the exit on the right", "right"],
+    ["merge", "slight left", "Merge slight left onto Southwest Freeway", "slight-left"],
+    ["off ramp", "slight right", "Take the exit on the right", "slight-right"],
     ["roundabout", "right", "At the roundabout, take exit 2", "right"],
     ["roundabout", "", "At the roundabout, take exit 2 onto Main", "straight"],
-    ["fork", "slight right", "Keep right at the fork", "right"],
+    ["fork", "slight right", "Keep right at the fork", "slight-right"],
     ["arrive", "left", "Arrive at the destination", "straight"],
     ["depart", "", "Head southwest on Bagby St toward McKinney St", "straight"],
     ["", "", "Turn left onto McKinney St", "left"],
     ["", "", "Turn right onto Branard St Destination will be on the right", "right"],
     ["", "", "Make a U-turn onto Smith Street", "uturn"],
-    ["", "", "Slight left to stay on Southwest Freeway", "left"],
-    ["", "", "Keep right at the fork", "right"],
-    ["", "", "Merge left onto I-45", "left"],
+    ["", "", "Slight left to stay on Southwest Freeway", "slight-left"],
+    ["", "", "Keep right at the fork", "slight-right"],
+    ["", "", "Merge left onto I-45", "slight-left"],
     ["", "", "Continue onto Bagby Street", "straight"],
     ["", "", "Turn left onto Fork Right Rd", "left"],
     ["", "", "Turn left onto Bayou Turnpike", "left"],
     ["", "", "Turn right onto Left Street", "right"],
-    ["", "", "Make a U-turn on Bayou Turnpike", "uturn"]
+    ["", "", "Make a U-turn on Bayou Turnpike", "uturn"],
+    ["", "", "Make a U turn onto Smith Street", "uturn"],
+    ["", "", "U TURN at the light", "uturn"],
+    ["", "", "u turn", "uturn"]
   ];
   rows.forEach(function (row) {
     assert.equal(cue.kind(row[0], row[1], row[2]), row[3], row[2]);
@@ -146,6 +149,8 @@ test("the cue sits in both turn banners and uses the invoice green", function ()
   assert.match(gps, /meterTurnPaint\(\)/);
   assert.match(appSrc, /type: String\(mv\.type \|\| ""\), modifier: String\(mv\.modifier \|\| ""\)/);
   assert.match(appSrc, /var\(--meter-banner, 96px\)/);
+  assert.match(appSrc, /#rfs-open\{position:absolute;left:52px;top:calc\(var\(--meter-banner, 96px\) \+ 12px\);bottom:auto/);
+  assert.equal(appSrc.indexOf("bottom:34px"), -1);
   assert.ok(cue.css().indexOf("#0b6b3a") >= 0);
   assert.equal(cue.css().indexOf("margin-left:46px"), -1);
   assert.equal(cue.css().indexOf("pcs-turn-float"), -1);
@@ -153,9 +158,15 @@ test("the cue sits in both turn banners and uses the invoice green", function ()
   assert.ok(html.indexOf('data-turn="uturn"') >= 0);
   assert.ok(html.indexOf("0.8 miles") >= 0);
   assert.ok(html.indexOf("<svg") >= 0);
-  assert.ok(cue.svg("left").indexOf("rotate(-40") >= 0);
-  assert.ok(cue.svg("right").indexOf("rotate(40") >= 0);
-  assert.ok(cue.svg("straight").indexOf("rotate") < 0);
+  assert.ok(cue.svg("straight").indexOf("M32 8 46 26") >= 0);
+  assert.ok(cue.svg("uturn").indexOf("M22 52V30a10 10 0 0 1 20 0v10") >= 0);
+  assert.ok(cue.svg("left").indexOf("A22 22 0 0 0 28 18") >= 0);
+  assert.ok(cue.svg("right").indexOf("A22 22 0 0 1 36 18") >= 0);
+  assert.equal(cue.svg("left").indexOf("rotate"), -1);
+  assert.equal((cue.svg("right").match(/ d="/g) || []).length, 1);
+  assert.equal((cue.svg("left").match(/ d="/g) || []).length, 1);
+  assert.ok(cue.svg("slight-right").indexOf("A24.5 24.5") >= 0);
+  assert.ok(cue.svg("sharp-left").indexOf("A20.5 20.5") >= 0);
 });
 
 function hav(a, b) {
@@ -206,7 +217,7 @@ function page(spec) {
     ".nav-eta-at{font-size:24px;font-weight:900;line-height:1.15}.nav-eta-left{font-size:20px;font-weight:800;color:#d1fae5}.nav-eta-to{font-size:14px;font-weight:700;color:#bef1c6}" +
     "#sched-eta-map{position:absolute;right:8px;top:8px;z-index:1001}" +
     "#sched-fs-open,#rfs-open{position:absolute;z-index:1002;width:auto;min-height:52px;margin:0;padding:10px 16px;font-size:18px;font-weight:800;border-radius:12px;border:2px solid #0b3d23;background:#d1fae5;color:#0b3d23}" +
-    "#sched-fs-open{left:8px;top:8px}#rfs-open{left:8px;bottom:34px}" +
+    "#sched-fs-open{left:8px;top:8px}#meter-map-stage:not(.pcs-rfs) #rfs-open{left:52px;top:calc(var(--meter-banner, 96px) + 12px);bottom:auto}#meter-map-stage.pcs-rfs #rfs-open{display:none}" +
     "#sched-fs-bottom,#rfs-bar{position:absolute;left:8px;right:8px;bottom:22px;z-index:1002;display:flex;flex-direction:column;gap:8px}" +
     ".pcs-map-green{display:block;width:100%;box-sizing:border-box;min-height:62px;margin:0;padding:8px 12px;font-size:18px;font-weight:800;text-align:center;background:#0b6b3a;color:#fff;border:2px solid #fff;border-radius:14px}" +
     "#sched-fs-close,#rfs-close{display:block;width:100%;min-height:58px;font-size:20px;font-weight:800;background:#d1fae5;color:#0b3d23;border:3px solid #0b3d23;border-radius:14px}" +
@@ -396,6 +407,126 @@ test("four driver maps keep the arrow clear of the other controls", async functi
       const file = path.join(outDir, shot.map + "-" + shot.size.name + "-" + shot.move.label + ".png");
       fs.writeFileSync(file, Buffer.from(pic.result.data, "base64"));
       assert.ok(fs.statSync(file).size > 5000, file);
+    }
+    ws.close();
+  } finally {
+    chrome.kill("SIGKILL");
+    server.kill("SIGKILL");
+  }
+});
+
+test("ride-map Full screen sits beside zoom, and U turn is a U-turn", async function () {
+  assert.equal(cue.kind("", "", "Make a U turn onto Smith Street"), "uturn");
+  assert.equal(cue.kind("", "", "U TURN"), "uturn");
+  assert.equal(cue.kind("", "", "u turn"), "uturn");
+  assert.equal(cue.kind("", "", "Turn left onto Bayou Turnpike"), "left");
+  const openAt = appSrc.indexOf("#rfs-open{position:absolute;left:52px");
+  const openCss = appSrc.slice(openAt, appSrc.indexOf('"', openAt));
+  const zoomAt = appSrc.indexOf("#meter-map-stage.pcs-rfs .leaflet-top");
+  const zoomCss = appSrc.slice(zoomAt, appSrc.indexOf('"', zoomAt));
+  const words = "Turn left onto<br>North 10th Street";
+  function ridePage(full, w, h) {
+    const banner = '<div class="meter-turn" id="meter-turn"><span class="pcs-turn-text" style="display:block">' + words + "</span>" + cue.html("left", 0.5) + "</div>";
+    const eta = '<div id="meter-eta-box" class="nav-eta"><div class="nav-eta-at">Arrive 1:55 PM</div><div class="nav-eta-left">9 min · 5.2 mi</div><div class="nav-eta-to">to drop-off</div></div>';
+    const stageH = full ? "100vh" : "46vh";
+    return "<!doctype html><html><head><meta charset=\"utf-8\"><link rel=\"stylesheet\" href=\"leaflet.css\"><style>" +
+      cue.css() + zoomCss + openCss +
+      "html,body{margin:0;background:#d5e0ea}#meter-map-stage{position:relative;width:100vw;height:" + stageH + ";overflow:hidden;background:#d5e0ea}" +
+      "#live-map{position:absolute;inset:0}.leaflet-top,.leaflet-left{position:absolute;pointer-events:none}.leaflet-control{pointer-events:auto}" +
+      ".nav-eta{background:#0b3d23;color:#fff;border:3px solid #2e9d4f;border-radius:14px;padding:8px 14px;min-width:150px;text-align:right}" +
+      ".nav-eta-at{font-size:24px;font-weight:900}.nav-eta-left{font-size:20px;font-weight:800;color:#d1fae5}.nav-eta-to{font-size:14px;font-weight:700}" +
+      ".meter-topstack{position:absolute;left:8px;right:8px;top:8px;z-index:900;display:flex;flex-direction:column;align-items:flex-end;gap:6px}" +
+      ".meter-turn{align-self:stretch;background:#20371d;color:#cdeccd;border-radius:10px;padding:8px 12px;font-weight:800;font-size:18px;line-height:1.25}" +
+      ".nav-toggle{position:absolute;right:8px;bottom:40px;z-index:1004;display:flex;gap:6px}" +
+      ".nav-toggle button{padding:6px 12px;border-radius:999px;border:2px solid #fff;background:#20371d;color:#cdeccd;font-weight:800;font-size:14px}" +
+      "</style></head><body><div id=\"meter-map-stage\"" + (full ? " class=\"pcs-rfs\"" : "") + " style=\"width:" + w + "px\">" +
+      "<div id=\"live-map\"></div><div class=\"meter-topstack\" id=\"meter-topstack\">" + banner + eta + "</div>" +
+      "<button type=\"button\" id=\"rfs-open\">Full screen</button>" +
+      "<div class=\"nav-toggle\"><button type=\"button\" id=\"map-orient-toggle\">Heading up</button><button type=\"button\" id=\"map-mode-toggle\">Full route</button></div>" +
+      "</div><script src=\"leaflet.js\"></script><script>" +
+      "var map=L.map('live-map',{zoomControl:true,attributionControl:false});" +
+      "L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19}).addTo(map);" +
+      "map.setView([29.75,-95.39],13);" +
+      "var stage=document.getElementById('meter-map-stage');var stack=document.getElementById('meter-topstack');" +
+      "stage.style.setProperty('--meter-banner', stack.offsetHeight+'px');" +
+      "function box(n){if(!n)return null;var r=n.getBoundingClientRect();if(r.width<2||r.height<2)return null;return {left:r.left,top:r.top,right:r.right,bottom:r.bottom};}" +
+      "function hit(a,b){return a.right>b.left+1&&a.left<b.right-1&&a.bottom>b.top+1&&a.top<b.bottom-1;}" +
+      "var ids=['rfs-open','map-orient-toggle','map-mode-toggle'];" +
+      "var nodes=ids.map(function(id){return {id:id,box:box(document.getElementById(id))};});" +
+      "var zoom=document.querySelectorAll('.leaflet-control-zoom a');" +
+      "nodes.push({id:'zoom-in',box:box(zoom[0])});nodes.push({id:'zoom-out',box:box(zoom[1])});" +
+      "var hits=[];for(var i=0;i<nodes.length;i++)for(var j=i+1;j<nodes.length;j++){if(nodes[i].box&&nodes[j].box&&hit(nodes[i].box,nodes[j].box))hits.push(nodes[i].id+' '+nodes[j].id);}" +
+      "document.body.dataset.report=JSON.stringify({hits:hits,open:!!box(document.getElementById('rfs-open')),zoom:zoom.length,boxes:nodes.map(function(n){return {id:n.id,box:n.box};})});" +
+      "</script></body></html>";
+  }
+  const shots = [
+    { full: false, w: 1024, h: 768, name: "ride-small-1024x768" },
+    { full: false, w: 390, h: 844, name: "ride-small-390x844" },
+    { full: false, w: 375, h: 667, name: "ride-small-375x667" },
+    { full: true, w: 1024, h: 768, name: "ride-full-1024x768" },
+    { full: true, w: 390, h: 844, name: "ride-full-390x844" },
+    { full: true, w: 375, h: 667, name: "ride-full-375x667" }
+  ];
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "pcs-rfs-"));
+  fs.copyFileSync("/tmp/leaflet/leaflet.js", path.join(dir, "leaflet.js"));
+  fs.copyFileSync("/tmp/leaflet/leaflet.css", path.join(dir, "leaflet.css"));
+  const port = 8804;
+  const server = spawn("python3", ["-m", "http.server", String(port), "--bind", "127.0.0.1", "--directory", dir], { stdio: "ignore" });
+  const chrome = spawn("google-chrome", [
+    "--headless=new", "--disable-gpu", "--no-sandbox", "--disable-dev-shm-usage",
+    "--window-size=1100,900", "--remote-debugging-port=" + (port + 100),
+    "--user-data-dir=" + path.join(dir, "chrome"), "about:blank"
+  ], { stdio: "ignore" });
+  const outDir = "/opt/cursor/artifacts/v2.0m-bt";
+  fs.mkdirSync(outDir, { recursive: true });
+  const wait = (ms) => new Promise(function (r) { setTimeout(r, ms); });
+  try {
+    let ver;
+    for (let i = 0; i < 40 && !ver; i += 1) {
+      try { ver = await fetch("http://127.0.0.1:" + (port + 100) + "/json/version").then(function (r) { return r.json(); }); } catch (e) { await wait(200); }
+    }
+    assert.ok(ver && ver.webSocketDebuggerUrl, "chrome did not start");
+    const ws = new WebSocket(ver.webSocketDebuggerUrl);
+    const pending = new Map();
+    let seq = 0;
+    ws.onmessage = function (ev) {
+      const msg = JSON.parse(ev.data);
+      if (msg.id && pending.has(msg.id)) { pending.get(msg.id)(msg); pending.delete(msg.id); }
+    };
+    await new Promise(function (res, rej) { ws.onopen = res; ws.onerror = rej; });
+    function send(method, params, sessionId) {
+      const id = ++seq;
+      return new Promise(function (resolve) {
+        pending.set(id, resolve);
+        ws.send(JSON.stringify({ id: id, sessionId: sessionId, method: method, params: params || {} }));
+      });
+    }
+    const created = await send("Target.createTarget", { url: "about:blank" });
+    const attached = await send("Target.attachToTarget", { targetId: created.result.targetId, flatten: true });
+    const sid = attached.result.sessionId;
+    await send("Page.enable", {}, sid);
+    await send("Runtime.enable", {}, sid);
+    for (let n = 0; n < shots.length; n += 1) {
+      const shot = shots[n];
+      fs.writeFileSync(path.join(dir, shot.name + ".html"), ridePage(shot.full, shot.w, shot.h));
+      await send("Emulation.setDeviceMetricsOverride", { width: shot.w, height: shot.h, deviceScaleFactor: 1, mobile: shot.w < 800 }, sid);
+      await send("Page.navigate", { url: "http://127.0.0.1:" + port + "/" + shot.name + ".html" }, sid);
+      let report = "";
+      for (let i = 0; i < 40 && !report; i += 1) {
+        const msg = await send("Runtime.evaluate", { expression: "document.body && document.body.dataset.report || ''", returnByValue: true }, sid);
+        report = msg.result && msg.result.result ? msg.result.result.value : "";
+        if (!report) await wait(150);
+      }
+      assert.ok(report, shot.name + " did not report");
+      const got = JSON.parse(report);
+      assert.equal(got.hits.length, 0, shot.name + " overlap " + got.hits.join(", ") + " " + JSON.stringify(got.boxes));
+      assert.equal(got.zoom, 2, shot.name);
+      if (!shot.full) assert.equal(got.open, true, shot.name + " Full screen hidden");
+      await wait(300);
+      const pic = await send("Page.captureScreenshot", { format: "png" }, sid);
+      const file = path.join(outDir, shot.name + "-zoom-fullscreen.png");
+      fs.writeFileSync(file, Buffer.from(pic.result.data, "base64"));
+      assert.ok(fs.statSync(file).size > 4000, file);
     }
     ws.close();
   } finally {
