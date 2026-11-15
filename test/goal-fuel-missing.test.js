@@ -200,7 +200,7 @@ test("the Fuel card has Add missing receipt fields and the same gallons keypad",
   assert.ok(src.indexOf('id="gl-fuel-miss-odo"') >= 0);
   assert.ok(src.indexOf('id="gl-fuel-miss-gal"') >= 0);
   const html = fs.readFileSync(path.join(__dirname, "../god/index.html"), "utf8");
-  assert.ok(html.indexOf("goal.js?v=2.0m-bw") >= 0);
+  assert.ok(html.indexOf("goal.js?v=2.0m-bx") >= 0);
 });
 
 test("the fuel log keeps every fill and shows five at a time in a scroll box", function () {

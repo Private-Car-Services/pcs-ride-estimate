@@ -7,7 +7,7 @@
    cannot decrypt. No network calls (CSP connect-src 'none'). Back up with "Export encrypted backup". */
 (function () {
   "use strict";
-  var GL_CSS = '#gl-screen{--bg:#0b1f0b;--card:#102810;--line:#2e5a2e;--green:#3fae5a;--lite:#7ee08f;--gold:#d4af37;--goldt:#f0d48a;--red:#ff8a80;--txt:#eef5ee}#gl-screen,#gl-screen *{box-sizing:border-box}#gl-screen,#gl-screen{margin:0;background:var(--bg);color:var(--txt);font:16px/1.35 -apple-system,system-ui,Segoe UI,Roboto,sans-serif}#gl-screen main{max-width:760px;margin:0 auto;padding:14px 14px 80px}#gl-screen h1{color:var(--goldt);font-size:24px;margin:6px 0 10px}#gl-screen .card{border:1px solid var(--line);border-radius:14px;padding:12px;margin:10px 0;background:var(--card)}#gl-screen .card.hero{border:2px solid var(--gold)}#gl-screen .card.day{border:2px solid var(--green);text-align:center;background:#0f300f}#gl-screen .card b.t{color:var(--goldt);font-size:17px}#gl-screen .grid{display:flex;flex-wrap:wrap;gap:8px;margin-top:6px}#gl-screen .big{flex:1 1 30%;min-width:110px;background:#163a16;border:1px solid var(--green);border-radius:10px;padding:8px}#gl-screen .big .v{font-size:22px;font-weight:900}#gl-screen .neg{color:var(--red)}#gl-screen .pos{color:var(--lite)}#gl-screen .fine{font-size:13px;color:#b9cdb9}#gl-screen table{width:100%;border-collapse:collapse}#gl-screen td,#gl-screen th{padding:4px 3px}#gl-screen td.r,#gl-screen th.r{text-align:right}#gl-screen tr.b{border-top:1px solid var(--line)}#gl-screen input,#gl-screen select{font-size:16px;padding:9px;border-radius:10px;border:1px solid #9ab79a;background:#fff;color:#000}#gl-screen .btn{font-weight:800;border-radius:12px;padding:10px 16px;border:2px solid var(--gold);background:linear-gradient(#f0d48a,#d4af37);color:#0b1f0b;cursor:pointer;font-size:16px}#gl-screen .btn.ghost{background:transparent;color:var(--goldt)}#gl-screen .total{font-size:42px;font-weight:900;color:var(--lite)}#gl-screen #gl-q-amt{font-size:28px;width:170px;text-align:right}#gl-screen label{display:inline-block;margin:4px 8px 4px 0}#gl-screen label span{display:block}#gl-screen .lock{max-width:420px;margin:12vh auto;padding:20px}#gl-screen .err{color:var(--red);min-height:1.2em}#gl-screen .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;justify-content:center}#gl-screen .btn.ghost{background:#f3f4f6;color:#1a1a1a;border:2px solid #6b7280}#gl-screen .lock{color:#eef5ee}#gl-screen summary{cursor:pointer}#gl-screen input,#gl-screen .gl-ovin{pointer-events:auto;touch-action:manipulation;-webkit-user-select:text;user-select:text;position:relative;z-index:2}#gl-screen .gl-ovin::placeholder{color:#555;opacity:1}#gl-close{position:fixed;top:max(40px,calc(10px + env(safe-area-inset-top)));right:max(16px,env(safe-area-inset-right));z-index:9101;min-height:52px;min-width:120px;font-size:20px;font-weight:900;border-radius:14px;border:2px solid #fff;background:#1f8a3b;color:#fff;cursor:pointer}#gl-screen main{padding-top:100px}#gl-kp{display:none;position:fixed;left:0;right:0;bottom:0;z-index:9102;background:#0b3d17;border-top:3px solid #3fae5a;padding:10px max(10px,env(safe-area-inset-right)) max(12px,env(safe-area-inset-bottom)) max(10px,env(safe-area-inset-left));box-shadow:0 -6px 24px rgba(0,0,0,.6)}#gl-kp .kp-top{display:flex;align-items:center;gap:10px;max-width:520px;margin:0 auto 8px}#gl-kp #gl-kp-lbl{flex:1;text-align:center;color:#fff;font-weight:800;font-size:17px}#gl-kp .kp-g{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;max-width:520px;margin:0 auto}#gl-kp button{-webkit-user-select:none;user-select:none;touch-action:manipulation;cursor:pointer}#gl-kp .kp-g button{min-height:68px;font-size:32px;font-weight:800;border-radius:14px;border:2px solid #1f8a3b;background:#fff;color:#0b1f0b}#gl-kp .kp-g button:active{background:#c8f0d0}#gl-kp.whole button[data-k=\".\"]{visibility:hidden}#gl-kp.hold button[data-k=\"sys\"]{display:none}#gl-kp .kp-sm{min-height:48px;padding:8px 14px;font-size:16px;font-weight:800;border-radius:12px;border:2px solid #fff;background:#1f8a3b;color:#fff}#gl-kp .kp-clr{background:#fff;color:#0b1f0b;border-color:#1f8a3b}#gl-kp .kp-done{display:block;width:100%;max-width:520px;margin:10px auto 0;min-height:68px;font-size:26px;font-weight:900;border-radius:14px;border:2px solid #fff;background:#1f8a3b;color:#fff}#gl-screen.kp-open #gl-close{display:none}#gl-kb-tog{position:fixed;left:max(12px,env(safe-area-inset-left));bottom:max(12px,env(safe-area-inset-bottom));z-index:9101;min-height:44px;padding:8px 14px;font-size:15px;font-weight:800;border-radius:12px;border:2px solid #fff;background:#1f8a3b;color:#fff}#gl-screen.kp-open #gl-kb-tog{display:none!important}#gl-screen #gl-fuel-log{margin:8px 0 0;padding:0 0 0 1.2em;max-height:22em;overflow-y:auto;-webkit-overflow-scrolling:touch;overscroll-behavior:contain}#gl-screen #gl-past{text-align:left}#gl-screen #gl-past .gl-past-scroll{max-height:248px;overflow-y:auto;-webkit-overflow-scrolling:touch;overscroll-behavior:contain}#gl-screen #gl-past .gl-pastday{display:block;width:100%;background:none;border:0;padding:0;margin:0;color:inherit;font:inherit;font-weight:700;text-align:left;cursor:pointer;touch-action:manipulation}#gl-screen #gl-past .gl-pastday[aria-pressed=true]{box-shadow:inset 0 0 0 2px #7ee08f}#gl-screen #gl-b-return-today{display:inline-block;width:auto;margin:0 0 6px;min-height:48px;font-size:17px;font-weight:900;touch-action:manipulation}';
+  var GL_CSS = '#gl-screen{--bg:#0b1f0b;--card:#102810;--line:#2e5a2e;--green:#3fae5a;--lite:#7ee08f;--gold:#d4af37;--goldt:#f0d48a;--red:#ff8a80;--txt:#eef5ee}#gl-screen,#gl-screen *{box-sizing:border-box}#gl-screen,#gl-screen{margin:0;background:var(--bg);color:var(--txt);font:16px/1.35 -apple-system,system-ui,Segoe UI,Roboto,sans-serif}#gl-screen main{max-width:760px;margin:0 auto;padding:14px 14px 80px}#gl-screen h1{color:var(--goldt);font-size:24px;margin:6px 0 10px}#gl-screen .card{border:1px solid var(--line);border-radius:14px;padding:12px;margin:10px 0;background:var(--card)}#gl-screen .card.hero{border:2px solid var(--gold)}#gl-screen .card.day{border:2px solid var(--green);text-align:center;background:#0f300f}#gl-screen .card b.t{color:var(--goldt);font-size:17px}#gl-screen .grid{display:flex;flex-wrap:wrap;gap:8px;margin-top:6px}#gl-screen .big{flex:1 1 30%;min-width:110px;background:#163a16;border:1px solid var(--green);border-radius:10px;padding:8px}#gl-screen .big .v{font-size:22px;font-weight:900}#gl-screen .neg{color:var(--red)}#gl-screen .pos{color:var(--lite)}#gl-screen .fine{font-size:13px;color:#b9cdb9}#gl-screen table{width:100%;border-collapse:collapse}#gl-screen td,#gl-screen th{padding:4px 3px}#gl-screen td.r,#gl-screen th.r{text-align:right}#gl-screen tr.b{border-top:1px solid var(--line)}#gl-screen input,#gl-screen select{font-size:16px;padding:9px;border-radius:10px;border:1px solid #9ab79a;background:#fff;color:#000}#gl-screen .btn{font-weight:800;border-radius:12px;padding:10px 16px;border:2px solid var(--gold);background:linear-gradient(#f0d48a,#d4af37);color:#0b1f0b;cursor:pointer;font-size:16px}#gl-screen .btn.ghost{background:transparent;color:var(--goldt)}#gl-screen .total{font-size:42px;font-weight:900;color:var(--lite)}#gl-screen #gl-q-amt{font-size:28px;width:170px;text-align:right}#gl-screen label{display:inline-block;margin:4px 8px 4px 0}#gl-screen label span{display:block}#gl-screen .lock{max-width:420px;margin:12vh auto;padding:20px}#gl-screen .err{color:var(--red);min-height:1.2em}#gl-screen .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;justify-content:center}#gl-screen .btn.ghost{background:#f3f4f6;color:#1a1a1a;border:2px solid #6b7280}#gl-screen .lock{color:#eef5ee}#gl-screen summary{cursor:pointer}#gl-screen input,#gl-screen .gl-ovin{pointer-events:auto;touch-action:manipulation;-webkit-user-select:text;user-select:text;position:relative;z-index:2}#gl-screen .gl-ovin::placeholder{color:#555;opacity:1}#gl-close{position:fixed;top:max(40px,calc(10px + env(safe-area-inset-top)));right:max(16px,env(safe-area-inset-right));z-index:9101;min-height:52px;min-width:120px;font-size:20px;font-weight:900;border-radius:14px;border:2px solid #fff;background:#1f8a3b;color:#fff;cursor:pointer}#gl-screen main{padding-top:100px}#gl-kp{display:none;position:fixed;left:0;right:0;bottom:0;z-index:9102;background:#0b3d17;border-top:3px solid #3fae5a;padding:10px max(10px,env(safe-area-inset-right)) max(12px,env(safe-area-inset-bottom)) max(10px,env(safe-area-inset-left));box-shadow:0 -6px 24px rgba(0,0,0,.6)}#gl-kp .kp-top{display:flex;align-items:center;gap:10px;max-width:520px;margin:0 auto 8px}#gl-kp #gl-kp-lbl{flex:1;text-align:center;color:#fff;font-weight:800;font-size:17px}#gl-kp .kp-g{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;max-width:520px;margin:0 auto}#gl-kp button{-webkit-user-select:none;user-select:none;touch-action:manipulation;cursor:pointer}#gl-kp .kp-g button{min-height:68px;font-size:32px;font-weight:800;border-radius:14px;border:2px solid #1f8a3b;background:#fff;color:#0b1f0b}#gl-kp .kp-g button:active{background:#c8f0d0}#gl-kp.whole button[data-k=\".\"]{visibility:hidden}#gl-kp.hold button[data-k=\"sys\"]{display:none}#gl-kp .kp-sm{min-height:48px;padding:8px 14px;font-size:16px;font-weight:800;border-radius:12px;border:2px solid #fff;background:#1f8a3b;color:#fff}#gl-kp .kp-clr{background:#fff;color:#0b1f0b;border-color:#1f8a3b}#gl-kp .kp-done{display:block;width:100%;max-width:520px;margin:10px auto 0;min-height:68px;font-size:26px;font-weight:900;border-radius:14px;border:2px solid #fff;background:#1f8a3b;color:#fff}#gl-screen.kp-open #gl-close{display:none}#gl-kb-tog{position:fixed;left:max(12px,env(safe-area-inset-left));bottom:max(12px,env(safe-area-inset-bottom));z-index:9101;min-height:44px;padding:8px 14px;font-size:15px;font-weight:800;border-radius:12px;border:2px solid #fff;background:#1f8a3b;color:#fff}#gl-screen.kp-open #gl-kb-tog{display:none!important}#gl-screen #gl-fuel-log{margin:8px 0 0;padding:0 0 0 1.2em;max-height:22em;overflow-y:auto;-webkit-overflow-scrolling:touch;overscroll-behavior:contain}#gl-screen #gl-past{text-align:left}#gl-screen #gl-past .gl-past-scroll{max-height:248px;overflow-y:auto;-webkit-overflow-scrolling:touch;overscroll-behavior:contain}#gl-screen #gl-past .gl-pastday{display:block;width:100%;background:none;border:0;padding:0;margin:0;color:inherit;font:inherit;font-weight:700;text-align:left;cursor:pointer;touch-action:manipulation}#gl-screen #gl-past .gl-pastday[aria-pressed=true]{box-shadow:inset 0 0 0 2px #7ee08f}#gl-screen #gl-b-return-today{display:inline-block;width:auto;margin:0 0 6px;min-height:48px;font-size:17px;font-weight:900;touch-action:manipulation}#gl-screen #gl-fuel-month{margin:8px 0 4px}#gl-screen #gl-fuel-month .gl-fuel-mrow{display:flex;flex-wrap:wrap;gap:8px}#gl-screen #gl-fuel-month .gl-fuel-mrow + .gl-fuel-mrow{margin-top:8px}#gl-screen #gl-fuel-month .gl-fuel-mbox{flex:1 1 0;min-width:96px;text-align:center;background:#163a16;border:1px solid #1f8a3b;border-radius:10px;padding:8px}#gl-screen #gl-fuel-month .gl-fuel-mrow2 .gl-fuel-mbox{min-width:140px}#gl-screen #gl-fuel-month .gl-fuel-mbox .v{font-size:22px;font-weight:900;color:var(--lite)}#gl-screen #gl-fuel-month #gl-fuel-m-label{margin:6px 0 0}';
   var ITER = 600000, LOCK_MS = 5 * 60000, MINPW = 10;
   var LINES = [["pcs", "PCS (private clients)"], ["uber", "Uber"], ["lyft", "Lyft"], /* v76j (Matthew 10/19): PCS first + the default pick */ ["ofc", "Officiating (Football/Softball)"], ["va", "VA"], ["cash", "Cash"], ["oth", "Other"]];
   var EXP = [["exp", "Old fuel & expenses"]]; /* v76e: kept only so old entries still show; never offered, never in totals */
@@ -660,12 +660,71 @@
     var f = fuelFmt(fuelMath(prev, r.odo, r.gallons, r.price));
     return esc(r.date + " " + r.time) + " · odo " + r.odo + " · " + Number(r.gallons).toFixed(3) + " gal · " + f.miles + " mi · " + f.tank + " mi/tank · " + f.mpg + " mpg · " + f.ppg + "/gal · $" + Number(r.price).toFixed(2) + " total · " + f.ppm + "/mi";
   }
+
+  var fuelMonthNowMs = null;
+  function fuelMonthStats(book, nowMs) {
+    nowMs = nowMs == null ? (fuelMonthNowMs != null ? fuelMonthNowMs : Date.now()) : nowMs;
+    var wall = ctWall(nowMs), y = wall.y, m = wall.m, label = "", months, rows, i, r, w, price, gal, mi, spent = 0, gallons = 0, miles = 0, rowGal = 0, rowPrice = 0, nValid = 0, mpg = null, ppm = null;
+    try { label = new Intl.DateTimeFormat("en-US", { timeZone: "America/Chicago", month: "long", year: "numeric" }).format(new Date(nowMs)); } catch (e) {
+      months = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+      label = (months[m - 1] || "") + " " + y;
+    }
+    rows = fuelDisplayRows(book);
+    for (i = 0; i < rows.length; i++) {
+      r = rows[i];
+      w = ctWall(Number(r.at) || 0);
+      if (w.y !== y || w.m !== m) continue;
+      price = Math.round(Number(r.price) * 100) / 100;
+      gal = Math.round(Number(r.gallons) * 1000) / 1000;
+      if (isFinite(price)) spent += price;
+      if (isFinite(gal)) gallons += gal;
+      mi = Math.round(Number(r.odo)) - (r.displayPrev != null ? r.displayPrev : Math.round(Number(r.prev)));
+      if (!isFinite(mi) || !(mi > 0)) continue;
+      miles += mi;
+      nValid += 1;
+      if (isFinite(gal)) rowGal += gal;
+      if (isFinite(price)) rowPrice += price;
+    }
+    spent = Math.round(spent * 100) / 100;
+    gallons = Math.round(gallons * 1000) / 1000;
+    if (nValid && miles > 0 && rowGal > 0) mpg = miles / rowGal;
+    if (nValid && miles > 0) ppm = rowPrice / miles;
+    return { spent: spent, gallons: gallons, miles: miles, mpg: mpg, ppm: ppm, label: label };
+  }
+  function fuelMonthFmt(s) {
+    return {
+      spent: "$" + (Number(s && s.spent) || 0).toFixed(2),
+      gallons: (Number(s && s.gallons) || 0).toFixed(3),
+      miles: String((s && isFinite(s.miles) ? s.miles : 0) || 0),
+      mpg: s && s.mpg != null && isFinite(s.mpg) ? s.mpg.toFixed(2) : "\u2014",
+      ppm: s && s.ppm != null && isFinite(s.ppm) ? "$" + s.ppm.toFixed(2) : "\u2014",
+      label: (s && s.label) || ""
+    };
+  }
+  function fuelMonthBox(id, label, value) {
+    return '<div class="gl-fuel-mbox" id="' + id + '"><div class="fine">' + esc(label) + '</div><div class="v">' + esc(value) + "</div></div>";
+  }
+  function fuelMonthHtml(book) {
+    var f = fuelMonthFmt(fuelMonthStats(book));
+    return '<div id="gl-fuel-month">' +
+      '<div class="gl-fuel-mrow gl-fuel-mrow3">' +
+        fuelMonthBox("gl-fuel-m-spent", "$ This month", f.spent) +
+        fuelMonthBox("gl-fuel-m-gal", "Gallons", f.gallons) +
+        fuelMonthBox("gl-fuel-m-miles", "Miles", f.miles) +
+      "</div>" +
+      '<div class="gl-fuel-mrow gl-fuel-mrow2">' +
+        fuelMonthBox("gl-fuel-m-mpg", "Avg MPG", f.mpg) +
+        fuelMonthBox("gl-fuel-m-ppm", "Price per mile", f.ppm) +
+      "</div>" +
+      '<p class="fine" id="gl-fuel-m-label">' + esc(f.label) + "</p></div>";
+  }
   function fuelHtml() {
     if (!fuelForMatthew()) return "";
     var book = (D && D.fuel) || {}, prev = fuelPrevOdo(book), rows = fuelDisplayRows(book);
     var box = "background:#fff;color:#0b2a12;border:2px solid #1f8a3b;border-radius:10px;padding:8px;font-size:18px";
-    var head = '<section class="card" id="gl-fuel"><b class="t">Fuel</b><p class="fine" id="gl-fuel-when">Date and time are saved automatically.</p>';
-    if (prev == null) return head + '<label class="fine">Starting odometer <input id="gl-fuel-odo" data-fuel="odo" type="text" inputmode="numeric" autocomplete="off" aria-label="Starting odometer" style="' + box + ';width:160px"></label> <button type="button" class="btn" id="gl-fuel-seed">Save starting odometer</button><p class="fine" id="gl-fuel-msg"></p></section>';
+    var head = '<section class="card" id="gl-fuel"><b class="t">Fuel</b>';
+    var whenLine = '<p class="fine" id="gl-fuel-when">Date and time are saved automatically.</p>';
+    if (prev == null) return head + whenLine + '<label class="fine">Starting odometer <input id="gl-fuel-odo" data-fuel="odo" type="text" inputmode="numeric" autocomplete="off" aria-label="Starting odometer" style="' + box + ';width:160px"></label> <button type="button" class="btn" id="gl-fuel-seed">Save starting odometer</button><p class="fine" id="gl-fuel-msg"></p></section>';
     var last = rows.length ? rows[rows.length - 1] : null, shown = last ? fuelFmt(fuelMath(last.displayPrev, last.odo, last.gallons, last.price)) : fuelFmt(null);
     var miss = '<p style="margin:10px 0 6px"><button type="button" class="btn ghost" id="gl-fuel-miss-open">Add missing receipt</button></p>';
     if (fuelMissOpen) miss += '<div id="gl-fuel-miss" style="margin:8px 0;padding:10px;border:1px solid var(--line);border-radius:10px">' +
@@ -677,7 +736,7 @@
       '<label class="fine">Gallons <input id="gl-fuel-miss-gal" data-fuel="gal" type="text" inputmode="decimal" autocomplete="off" aria-label="Receipt gallons" placeholder="0.000" style="' + box + ';width:120px"></label> ' +
       '<button type="button" class="btn" id="gl-fuel-miss-save">Save missing receipt</button>' +
       '<p class="fine" id="gl-fuel-miss-msg"></p></div>';
-    return head + '<p class="fine">Previous odometer <b id="gl-fuel-prev">' + prev + "</b> locked</p>" +
+    return head + fuelMonthHtml(book) + whenLine + '<p class="fine">Previous odometer <b id="gl-fuel-prev">' + prev + "</b> locked</p>" +
       '<label class="fine">Price <input id="gl-fuel-price" type="text" inputmode="decimal" autocomplete="off" aria-label="Fuel price" placeholder="0.00" style="' + box + ';width:120px"></label> ' +
       '<label class="fine">Current odometer <input id="gl-fuel-odo" data-fuel="odo" type="text" inputmode="numeric" autocomplete="off" aria-label="Current odometer" style="' + box + ';width:140px"></label> ' +
       '<label class="fine">Gallons <input id="gl-fuel-gal" data-fuel="gal" type="text" inputmode="decimal" autocomplete="off" aria-label="Gallons" placeholder="0.000" style="' + box + ';width:120px"></label> ' +
@@ -723,7 +782,7 @@
     fuelMissOpen = false;
     save(); paint();
   }
-  if (typeof window !== "undefined") window.__pcsGoalFuel = { math: fuelMath, fmt: fuelFmt, when: fuelWhen, prev: fuelPrevOdo, rows: fuelRows, displayRows: fuelDisplayRows, owner: fuelForMatthew, seed: fuelSeedOdo, atFromInput: fuelAtFromInput, validateMissing: fuelValidateMissing, addMissing: fuelAddMissing, hist: fuelHist, logFit: fuelLogFit, logFitSoon: fuelLogFitSoon, logFitWatch: fuelLogFitWatch };
+  if (typeof window !== "undefined") window.__pcsGoalFuel = { math: fuelMath, fmt: fuelFmt, when: fuelWhen, prev: fuelPrevOdo, rows: fuelRows, displayRows: fuelDisplayRows, owner: fuelForMatthew, seed: fuelSeedOdo, atFromInput: fuelAtFromInput, validateMissing: fuelValidateMissing, addMissing: fuelAddMissing, hist: fuelHist, logFit: fuelLogFit, logFitSoon: fuelLogFitSoon, logFitWatch: fuelLogFitWatch, monthStats: fuelMonthStats, monthFmt: fuelMonthFmt, monthNow: function (ms) { if (arguments.length) fuelMonthNowMs = (ms == null || ms === "" ? null : Number(ms)); return fuelMonthNowMs; } };
   function paint() { paint.editK = null; /* v2.0d.4 r2 (Harry): every redraw rebuilds the add row as "Add", so no edit may survive it */
     if (snapToday()) save(); /* first open after midnight, or once goals are set */
     var c = calc(), s = D.settings, h = "";
