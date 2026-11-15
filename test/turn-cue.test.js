@@ -160,13 +160,15 @@ test("the cue sits in both turn banners and uses the invoice green", function ()
   assert.ok(html.indexOf("<svg") >= 0);
   assert.ok(cue.svg("straight").indexOf("M32 8 46 26") >= 0);
   assert.ok(cue.svg("uturn").indexOf("M22 52V30a10 10 0 0 1 20 0v10") >= 0);
-  assert.ok(cue.svg("left").indexOf("A22 22 0 0 0 28 18") >= 0);
-  assert.ok(cue.svg("right").indexOf("A22 22 0 0 1 36 18") >= 0);
+  assert.ok(cue.svg("left").indexOf("A16 16 0 0 0 34 22") >= 0);
+  assert.ok(cue.svg("right").indexOf("A16 16 0 0 1 30 22") >= 0);
+  assert.ok(cue.svg("right").indexOf('fill="none"') >= 0);
+  assert.ok(cue.svg("right").indexOf('stroke-linecap="round"') >= 0);
   assert.equal(cue.svg("left").indexOf("rotate"), -1);
   assert.equal((cue.svg("right").match(/ d="/g) || []).length, 1);
   assert.equal((cue.svg("left").match(/ d="/g) || []).length, 1);
-  assert.ok(cue.svg("slight-right").indexOf("A24.5 24.5") >= 0);
-  assert.ok(cue.svg("sharp-left").indexOf("A20.5 20.5") >= 0);
+  assert.ok(cue.svg("slight-right").indexOf("A16 16") >= 0);
+  assert.ok(cue.svg("sharp-left").indexOf("A13 13") >= 0);
 });
 
 function hav(a, b) {

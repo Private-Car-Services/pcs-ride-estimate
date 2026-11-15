@@ -10770,15 +10770,16 @@
   }
   function navCueSvg(kind) {
     var up = '<path d="M32 8 46 26h-8v30H26V26h-8z" fill="#fff"/>';
-    /* One filled silhouette: a wide circular bend, then a head whose base is the stroke end. U-turn and straight are unchanged. */
+    /* Line icon: uniform round stroke, wide curve, open chevron. Straight and U-turn are unchanged. */
+    var stroke = ' fill="none" stroke="#fff" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>';
     var body = {
       straight: up,
-      right: '<path fill="#fff" d="M14 58V40A22 22 0 0 1 36 18H44L60 22.5 44 27H36A13 13 0 0 0 23 40V58Z"/>',
-      left: '<path fill="#fff" d="M50 58V40A22 22 0 0 0 28 18H20L4 22.5 20 27H28A13 13 0 0 1 41 40V58Z"/>',
-      "slight-right": '<path fill="#fff" d="M19.5 58V48A24.5 24.5 0 0 1 26.7 30.7L35.2 22.2 48.3 15.5 41.6 28.6 33 37A15.5 15.5 0 0 0 28.5 48V58Z"/>',
-      "slight-left": '<path fill="#fff" d="M44.5 58V48A24.5 24.5 0 0 0 37.3 30.7L28.8 22.2 15.7 15.5 22.4 28.6 31 37A15.5 15.5 0 0 1 35.5 48V58Z"/>',
-      "sharp-right": '<path fill="#fff" d="M15.5 58V42A20.5 20.5 0 0 1 46.3 24.3L56.1 35.1 41.8 32A11.5 11.5 0 0 0 24.5 42V58Z"/>',
-      "sharp-left": '<path fill="#fff" d="M48.5 58V42A20.5 20.5 0 0 0 17.7 24.3L7.9 35.1 22.2 32A11.5 11.5 0 0 1 39.5 42V58Z"/>',
+      right: '<path d="M14 58V38A16 16 0 0 1 30 22H56M43.3 9.3 56 22 43.3 34.7"' + stroke,
+      left: '<path d="M50 58V38A16 16 0 0 0 34 22H8M20.7 34.7 8 22 20.7 9.3"' + stroke,
+      "slight-right": '<path d="M20 58V48A16 16 0 0 1 24.7 36.7L34.6 26.8M20.6 26.8 34.6 26.8 34.6 40.8"' + stroke,
+      "slight-left": '<path d="M44 58V48A16 16 0 0 0 39.3 36.7L29.4 26.8M43.4 26.8 29.4 26.8 29.4 40.8"' + stroke,
+      "sharp-right": '<path d="M12 58V36A13 13 0 0 1 34.2 26.8L49.7 42.4M49.7 32.4 49.7 42.4 39.7 42.4"' + stroke,
+      "sharp-left": '<path d="M52 58V36A13 13 0 0 0 29.8 26.8L14.3 42.4M14.3 32.4 14.3 42.4 24.3 42.4"' + stroke,
       uturn: '<path d="M22 52V30a10 10 0 0 1 20 0v10" fill="none" stroke="#fff" stroke-width="9" stroke-linecap="round"/>' +
         '<path d="M33 36h18L42 56z" fill="#fff"/>'
     };
