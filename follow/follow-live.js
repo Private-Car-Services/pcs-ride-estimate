@@ -424,8 +424,25 @@
     if (!m || !/(^|\.)squareup(sandbox)?\.com$|(^|\.)square\.link$/i.test(m[1])) return "";
     return s;
   }
+  /* v2.0m-by (Matthew 11/15): a linked ride (one tracker, two riders, two invoices) shows each invoice number with paid or
+     unpaid beside it and nothing else: no bill, no receipt, no pay link, even if the copy held one. v2.0m-by2: same plain
+     words as the normal bar ("Invoice #000600 – paid"), one line each, two at most. Pure (tested). */
+  function linkedModel(d) {
+    var out = [], seen = {};
+    (Array.isArray(d && d.linked) ? d.linked : []).slice(0, 2).forEach(function (x) {
+      var no = x && typeof x === "object" ? String(x.invoiceNo || "").replace(/^#/, "").replace(/\s+/g, "") : "";
+      if (!/^\d{1,20}$/.test(no) || seen[no]) return;
+      seen[no] = 1;
+      out.push({ invoiceNo: no, pay: x.pay === "paid" ? "paid" : "unpaid", text: "Invoice #" + no + " \u2013 " + (x.pay === "paid" ? "paid" : "unpaid") });
+    });
+    return out;
+  }
   function billBarModel(d) {
     d = d || {};
+    if (Array.isArray(d.linked)) {
+      var rows = linkedModel(d);
+      return { label: rows.map(function (r) { return r.text; }).join(" \u00b7 "), link: null, show: rows.length > 0, gap: "linked", rows: rows };
+    }
     var no = String(d.invoiceNo || "").replace(/^#/, "").replace(/\s+/g, "");
     if (!/^\d{1,20}$/.test(no)) no = "";
     var pay = d.pay === "paid" || d.pay === "unpaid" ? d.pay : "";
@@ -455,8 +472,15 @@
       if (on) live.classList.add("fl-has-bill"); else live.classList.remove("fl-has-bill");
       if (had !== on && S.map) { try { S.map.invalidateSize(); } catch (e) {} }
     }
+    if (live && live.style && live.style.setProperty) { /* v2.0m-by: room above the taller linked bar (one line per invoice) */
+      if (m.rows && m.show) live.style.setProperty("padding-bottom", (20 + 30 * m.rows.length) + "px", "important");
+      else if (live.style.getPropertyValue && live.style.getPropertyValue("padding-bottom")) live.style.removeProperty("padding-bottom");
+    }
     if (!m.show) { el.hidden = true; if (el.textContent) el.textContent = ""; mark(false); return; }
-    if (m.link) {
+    if (m.rows) { /* v2.0m-by linked ride: one plain line per invoice, never a link */
+      var lh = m.rows.map(function (r) { return '<span style="display:block;line-height:30px">' + esc(r.text) + "</span>"; }).join(""); /* plain bar text, two short lines */
+      if (el.innerHTML !== lh) el.innerHTML = lh;
+    } else if (m.link) {
       var html = esc(m.label) + " \u00b7 <a id=\"" + m.link.id + "\" href=\"" + esc(m.link.href) + "\" target=\"_blank\" rel=\"noopener\">" + esc(m.link.text) + "</a>";
       if (el.innerHTML !== html) el.innerHTML = html;
     } else if (el.textContent !== m.label || (el.querySelector && el.querySelector("a"))) el.textContent = m.label;

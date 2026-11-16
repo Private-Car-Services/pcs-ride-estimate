@@ -283,7 +283,20 @@
     return ""; /* v75r: free calendar notes ("Take to Hotel Galvez") are never used as the drop-off */
   }
 
+  /* v2.0m-by (Matthew 11/15): linked rides. Same rule as app.js schedLinkOf. Pure (tested). */
+  var LINK_GROUP_RE = /^lk_[A-Za-z0-9_-]{6,40}$/, LINK_ID_RE = /^[A-Za-z0-9_-]{1,80}$/;
+  function calLinkOf(raw, selfId) {
+    if (!raw || typeof raw !== "object" || !LINK_GROUP_RE.test(String(raw.linkGroup || ""))) return null;
+    var seen = {}, ids = (Array.isArray(raw.linkedIds) ? raw.linkedIds : raw.linkedIds && typeof raw.linkedIds === "object" ? Object.keys(raw.linkedIds).map(function (k) { return raw.linkedIds[k]; }) : [])
+      .map(String).filter(function (x) { if (!LINK_ID_RE.test(x) || x === String(selfId || "") || seen[x]) return false; seen[x] = 1; return true; });
+    return ids.length === 1 ? { linkGroup: String(raw.linkGroup), linkedIds: ids } : null; /* v2.0m-by2: two rides at most */
+  }
   function normalizeCalendarRow(id, raw) {
+    var row = normalizeCalendarRow0(id, raw), lk = row && calLinkOf(raw, row.id);
+    if (lk) { row.linkGroup = lk.linkGroup; row.linkedIds = lk.linkedIds; } /* only on linked rows */
+    return row;
+  }
+  function normalizeCalendarRow0(id, raw) {
     if (!raw || typeof raw !== "object") return null;
     var title = String(raw.title || raw.summary || "").trim();
     return {
@@ -7972,7 +7985,11 @@
     GFOL.busy[id] = true; GFOL.err[id] = ""; renderBoardLists();
     var key = "c_" + id, now = Date.now();
     fetch(gfolUrl("FLWRDMAP", key)).then(function (res) { if (!res.ok) throw new Error("read " + res.status); return res.json(); }).then(function (d) {
-      if (d && GFOL_TOKEN_RE.test(String(d.t || ""))) return String(d.t);
+      var lkr = calLinkOf(r, id), lkg = lkr ? lkr.linkGroup : ""; /* v2.0m-by2: a token is reused only for the link state it was made for */
+      if (d && GFOL_TOKEN_RE.test(String(d.t || "")) && (d.lk || "") === lkg) return String(d.t);
+      return gfolLinkTok(r).then(function (sib) { /* v2.0m-by: a linked ride uses its sibling's live tracker (one tracker) */
+        if (sib) return fetch(gfolUrl("FLWRDMAP", key), { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ t: sib, at: now, by: "god", lk: lkg }) })
+          .then(function (x) { if (!x.ok) throw new Error("save " + x.status); return sib; });
       var t = gfolToken();
       if (!GFOL_TOKEN_RE.test(t)) throw new Error("token");
       var copy = { v: 1, status: "assigned", kind: "sched", createdAt: now, updatedAt: now };
@@ -7981,7 +7998,9 @@
       var dr = gfolPlace(r.dropoff, r.dropoffLat, r.dropoffLng); if (dr) copy.dest = dr;
       var sx = (r.stopsGeo || []).slice(0, 5).map(function (x) { return x ? gfolPlace(x.address, x.lat, x.lng) : null; }).filter(Boolean); if (sx.length) copy.stops = sx; /* v76g: stops show on the tracker */
       var put = function (url, body) { return fetch(url, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }).then(function (x) { if (!x.ok) throw new Error("save " + x.status); }); };
-      return put(gfolUrl("FLWSHARE", t), copy).then(function () { return put(gfolUrl("FLWRDMAP", key), { t: t, at: now, by: "god" }); }).then(function () { return t; });
+      var row = { t: t, at: now, by: "god" }; if (lkg) row.lk = lkg;
+      return put(gfolUrl("FLWSHARE", t), copy).then(function () { return put(gfolUrl("FLWRDMAP", key), row); }).then(function () { return t; });
+      });
     }).then(function (t) { GFOL.busy[id] = false; GFOL.map[id] = { t: t }; renderBoardLists(); })
       .catch(function (e) { GFOL.busy[id] = false; GFOL.err[id] = "The tracking link could not be made right now (" + (e && e.message || "try again") + ")."; renderBoardLists(); });
   }
@@ -8000,6 +8019,145 @@
     if (b.classList.contains("gfol-stop")) gfolStop(id); else gfolMake(id, gfolFind(id));
   });
   window.__pcsGodFollow = { html: gfolHtml, msg: gfolMsg, e164: gfolE164, state: GFOL, place: gfolPlace }; /* test hook */
+  /* ---------- v2.0m-by (Matthew 11/15): "Link ride" on a board card ----------
+     Two rides, two invoices: Matthew links them by hand so ONE tracker goes out to both riders. Only linkGroup + linkedIds
+     are written on each row (field-level PATCH). Invoices, prices, times and the driver assignment are never touched; every
+     ride keeps its own invoice. The shared tracker shows each invoice number with paid / unpaid and no bill, receipt or pay
+     link (app.js folClean).
+     v2.0m-by2 (Harry hold): two rides at most. Link ends any tracker either ride already had (it could hold that ride's pay
+     or receipt link), so the pair starts on a fresh shared tracker tagged lk = group. Unlink ends the shared tracker and
+     clears both rides' tracker rows, so each ride starts a fresh tracker of its own; the shared link never gets a bill. */
+  var LINK = { open: {}, pick: {}, busy: false };
+  function linkLive(r) { return !!r && r.status !== "completed" && r.status !== "cancelled" && r.status !== "canceled" && r.status !== "deleted"; }
+  function linkOn(r) { return !!(r && calLinkOf(r, r.id)); }
+  function linkMembers(r) { /* both board rides in r's link group, r included, by pickup time */
+    if (!linkOn(r)) return r ? [r] : [];
+    return (state.calendar || []).filter(function (x) { return x && x.linkGroup === r.linkGroup && linkLive(x); })
+      .sort(function (a, b) { return String(a.start || "").localeCompare(String(b.start || "")); });
+  }
+  function linkCandidates(r) { /* same Chicago day, upcoming, still open, not linked already */
+    var day = boardDayKey(r && r.start);
+    return upcomingCalendarRides().filter(function (x) {
+      return x && x.id !== r.id && linkLive(x) && !linkOn(x) && boardDayKey(x.start) === day;
+    });
+  }
+  function linkNewGroup() {
+    var c = window.crypto || window.msCrypto, s = "", i, A = "abcdefghijkmnpqrstuvwxyz23456789";
+    if (c && c.getRandomValues) { var b = new Uint8Array(10); c.getRandomValues(b); for (i = 0; i < b.length; i += 1) s += A[b[i] % A.length]; }
+    else for (i = 0; i < 10; i += 1) s += A[Math.floor(Math.random() * A.length)];
+    return "lk_" + s;
+  }
+  /* pure (tested): the field-level PATCH for both rows when ride a is linked with ride b ({ id: patch }); null when either is
+     already linked (two rides at most) */
+  function linkPlan(rows, aId, bId, group) {
+    var byId = {}; (rows || []).forEach(function (x) { if (x && x.id) byId[x.id] = x; });
+    var a = byId[aId], b = byId[bId]; if (!a || !b || aId === bId || linkOn(a) || linkOn(b)) return null;
+    var out = {};
+    out[aId] = { linkGroup: group, linkedIds: [bId] };
+    out[bId] = { linkGroup: group, linkedIds: [aId] };
+    return out;
+  }
+  /* pure (tested): unlink ride a; its partner is unlinked too (a link is two rides) */
+  function unlinkPlan(rows, aId) {
+    var a = null; (rows || []).forEach(function (x) { if (x && x.id === aId) a = x; });
+    if (!a || !a.linkGroup) return null;
+    var out = {}; out[aId] = { linkGroup: null, linkedIds: null };
+    (rows || []).forEach(function (x) { if (x && x.id && x.id !== aId && x.linkGroup === a.linkGroup) out[x.id] = { linkGroup: null, linkedIds: null }; });
+    return out;
+  }
+  /* pure (tested): which tracker rows to end. keep = the link group whose shared token may stay ("" = end every token) */
+  function linkEndPlan(maps, keep) {
+    var out = [];
+    Object.keys(maps || {}).forEach(function (id) {
+      var d = maps[id], t = d && GFOL_TOKEN_RE.test(String(d.t || "")) ? String(d.t) : "";
+      if (t && !(keep && d.lk === keep)) out.push({ id: id, t: t });
+    });
+    return out;
+  }
+  /* end the trackers those rows point to (PUT stopped wipes every field) and clear the rows; GFOL cache forgets them */
+  function linkEndTrackers(ids, keep) {
+    var maps = {}, now = Date.now();
+    return Promise.all(ids.map(function (id) {
+      return fetch(gfolUrl("FLWRDMAP", "c_" + id)).then(function (x) { if (!x.ok) throw new Error("read " + x.status); return x.json(); }).then(function (d) { maps[id] = d; });
+    })).then(function () {
+      var ends = linkEndPlan(maps, keep), done = {};
+      return Promise.all(ends.map(function (e) {
+        var wipe = done[e.t] ? Promise.resolve() : fetch(gfolUrl("FLWSHARE", e.t), { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ v: 1, status: "stopped", endedAt: now, updatedAt: now }) })
+          .then(function (x) { if (!x.ok) throw new Error("end " + x.status); });
+        done[e.t] = 1;
+        return wipe.then(function () { return fetch(gfolUrl("FLWRDMAP", "c_" + e.id), { method: "DELETE" }); }).then(function (x) { if (!x.ok) throw new Error("clear " + x.status); });
+      }));
+    }).then(function () { ids.forEach(function (id) { GFOL.map[id] = null; }); });
+  }
+  function linkPatch(plan) {
+    return Promise.all(Object.keys(plan).map(function (id) {
+      return godFetch(calendarUrl(id), { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(plan[id]) }).then(function (res) { if (!res.ok) throw new Error("save"); return id; });
+    })).then(function () {
+      Object.keys(plan).forEach(function (id) { var r = gfolFind(id); if (!r) return; if (plan[id].linkGroup) { r.linkGroup = plan[id].linkGroup; r.linkedIds = plan[id].linkedIds; } else { delete r.linkGroup; delete r.linkedIds; } LINK.open[id] = false; });
+    });
+  }
+  function linkSave(plan, unlink, msg) {
+    if (!plan || LINK.busy) return;
+    LINK.busy = true; renderBoardLists();
+    var ids = Object.keys(plan), g = unlink ? "" : plan[ids[0]].linkGroup;
+    /* Unlink: end the shared tracker first, then unlink the rows. Link: link the rows, then end any old solo tracker. */
+    var work = unlink ? linkEndTrackers(ids, "").then(function () { return linkPatch(plan); })
+      : linkPatch(plan).then(function () { return linkEndTrackers(ids, g).catch(function () { msg += " The old tracking link did not close; tap Stop the tracking link."; }); });
+    work.then(function () { LINK.busy = false; state.boardNotice = msg; refresh(); })
+      .catch(function () { LINK.busy = false; state.boardNotice = "NOT SAVED. Check the connection and tap again."; renderBoardLists(); });
+  }
+  function linkWho(x) { return (x.rider || "Ride") + " \u00b7 " + fmtBoardWhenLine(x.start).split(" \u00b7 ").pop() + (x.prepaidInvoiceNo ? " \u00b7 #" + x.prepaidInvoiceNo : ""); }
+  function linkRideHtml(r) {
+    if (!linkLive(r)) return "";
+    var mem = linkMembers(r), others = mem.filter(function (x) { return x.id !== r.id; });
+    var box = '<div class="db-link" data-link-box="' + esc(r.id) + '" style="margin:6px 0">';
+    if (linkOn(r)) {
+      var mate = others.length ? others : [gfolFind(r.linkedIds[0])].filter(Boolean);
+      return box + '<p class="day-line"><span>Linked</span> ' + (mate.length ? mate.map(function (x) { return esc(linkWho(x)); }).join(", ") : "another ride") + "</p>" +
+        '<button type="button" class="btn btn-ghost btn-link-unlink" data-event-id="' + esc(r.id) + '"' + (LINK.busy ? " disabled" : "") + ">Unlink</button></div>";
+    }
+    if (!LINK.open[r.id]) return box + '<button type="button" class="btn btn-ghost btn-link-open" data-event-id="' + esc(r.id) + '">Link ride</button></div>';
+    var cands = linkCandidates(r);
+    if (!cands.length) return box + '<p class="fine">No other ride that day.</p><button type="button" class="btn btn-ghost btn-link-close" data-event-id="' + esc(r.id) + '">Close</button></div>';
+    var pick = LINK.pick[r.id] || "";
+    return box + '<select id="link-' + esc(r.id) + '" class="day-link-pick" data-event-id="' + esc(r.id) + '" aria-label="Link with"><option value="">Link with\u2026</option>' +
+      cands.map(function (x) { return '<option value="' + esc(x.id) + '"' + (pick === x.id ? " selected" : "") + ">" + esc(linkWho(x)) + "</option>"; }).join("") + "</select> " +
+      '<button type="button" class="btn btn-gold btn-link-go" data-event-id="' + esc(r.id) + '"' + (LINK.busy ? " disabled" : "") + ">Link</button> " +
+      '<button type="button" class="btn btn-ghost btn-link-close" data-event-id="' + esc(r.id) + '">Cancel</button></div>';
+  }
+  document.addEventListener("change", function (e) {
+    var t = e.target; if (!t || !t.classList || !t.classList.contains("day-link-pick")) return;
+    LINK.pick[t.getAttribute("data-event-id")] = t.value;
+  });
+  document.addEventListener("click", function (e) {
+    var b = e.target && e.target.closest ? e.target.closest(".btn-link-open,.btn-link-close,.btn-link-go,.btn-link-unlink") : null;
+    if (!b) return;
+    e.preventDefault();
+    var id = b.getAttribute("data-event-id"), r = gfolFind(id); if (!r) return;
+    if (b.classList.contains("btn-link-open")) { LINK.open[id] = true; renderBoardLists(); return; }
+    if (b.classList.contains("btn-link-close")) { LINK.open[id] = false; renderBoardLists(); return; }
+    if (b.classList.contains("btn-link-unlink")) { linkSave(unlinkPlan(state.calendar, id), true, "Unlinked. Each ride gets a new tracking link."); return; }
+    var sel = document.getElementById("link-" + id), other = (sel && sel.value) || LINK.pick[id] || "", o = gfolFind(other);
+    if (!o) { state.boardNotice = "Pick the ride to link first."; renderBoardLists(); return; }
+    var plan = linkPlan(state.calendar, id, other, linkNewGroup());
+    if (!plan) { state.boardNotice = "Those rides can\u2019t be linked."; renderBoardLists(); return; }
+    linkSave(plan, false, "Linked " + (r.rider || "ride") + " + " + (o.rider || "ride") + ".");
+  });
+  /* the live tracker of the linked sibling ride, made for this same link group (map row lk), else "" */
+  function gfolLinkTok(r) {
+    var lk = calLinkOf(r, r && r.id), ids = lk ? lk.linkedIds : [], i = 0;
+    function next() {
+      if (i >= ids.length) return Promise.resolve("");
+      var sid = ids[i++];
+      return fetch(gfolUrl("FLWRDMAP", "c_" + sid)).then(function (x) { return x.ok ? x.json() : null; }).then(function (d) {
+        var t = d && GFOL_TOKEN_RE.test(String(d.t || "")) && d.lk === lk.linkGroup ? String(d.t) : "";
+        if (!t) return next();
+        return fetch(gfolUrl("FLWSHARE", t)).then(function (x) { return x.ok ? x.json() : null; }).then(function (n) { return n && !/^(ended|stopped)$/.test(String(n.status || "")) ? t : next(); });
+      }).catch(function () { return next(); });
+    }
+    return next();
+  }
+  window.__pcsGodLink = { of: calLinkOf, plan: linkPlan, unplan: unlinkPlan, endPlan: linkEndPlan, end: linkEndTrackers, save: linkSave, html: function (r) { return linkRideHtml(r); }, cands: function (r) { return linkCandidates(r); }, state: LINK, gfolMake: function (id, r) { return gfolMake(id, r); }, gfol: GFOL }; /* test hook */
   function dayBoardHtml() {
     var rows = upcomingCalendarRides();
     var drivers = approvedDriversForAssign();
@@ -8079,6 +8237,7 @@
           (st !== "cancelled" && st !== "completed" ? cphHtml(r) : "") + /* v77.3 client phone + auto text */
           (r.sqInvoice ? '<p class="day-line db-sqinv"><span>Invoice</span> #' + esc(r.prepaidInvoiceNo || r.sqInvoice.number || "") + " \u00b7 " + esc(sqInvoiceLine(r.sqInvoice)) + "</p>" : "") +
           gfolHtml(r) + /* v76b: Text my client a tracking link */
+          linkRideHtml(r) + /* v2.0m-by: Link ride (one tracker) */
           (st === "completed"
             ? (godCardCommission(r).from === "pending" ? '<p class="day-line db-pend">' + pricePendingBadge({ pricePending: true }) + "</p>" : "") + /* r8: orange badge on the board card */
               '<p class="day-line db-comm"><span>Commission</span> ' + esc(godCardCommission(r).text) + "</p>" + /* r7: source of truth, never $0.00 */
