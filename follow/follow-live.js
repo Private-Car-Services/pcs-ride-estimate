@@ -35,7 +35,7 @@
       ".fl-who{font-size:18px;font-weight:800;margin:4px 0}.fl-car{font-size:16px;font-weight:700;margin:2px 0 8px}.fl-plate{display:inline-block;background:#fff;border:2px solid #0b3d23;border-radius:8px;padding:0 8px;margin-left:4px;font-weight:900;letter-spacing:.06em}" +
       "#fl-map{height:62vh;min-height:340px;border-radius:14px;margin:6px 0 10px;border:2px solid #0b3d23}" +
       ".fl-eta{font-size:19px;font-weight:900;text-align:center;margin:6px 0}.fl-row{margin:3px 0;font-size:16px}.fl-row b{display:inline-block;min-width:44px}" +
-      ".fl-upd{font-size:13px;text-align:center;margin:6px 0 0}.fl-call{display:block;margin:10px 0 0;min-height:52px;line-height:52px;text-align:center;border-radius:12px;background:#bef1c6;color:#0b3d23 !important;border:3px solid #2e9d4f;font-size:19px;font-weight:900;text-decoration:none}#fl-call[hidden]{display:none}" +
+      ".fl-upd{font-size:13px;text-align:center;margin:6px 0 0}.fl-call{display:block;margin:10px 0 0;min-height:52px;line-height:52px;text-align:center;border-radius:12px;background:#bef1c6;color:#0b3d23 !important;border:3px solid #2e9d4f;font-size:19px;font-weight:900;text-decoration:none}#fl-call[hidden]{display:none}#fl-call{line-height:1.3;padding:10px 12px;box-sizing:border-box;height:auto}#fl-call .fl-bill-link{white-space:nowrap}" +
       ".fl-big{display:grid;grid-template-columns:1fr 1.4fr;gap:8px;margin:8px 0}.fl-spd,.fl-arr{background:#fff;border:3px solid #2e9d4f;border-radius:14px;padding:8px;text-align:center;color:#0b3d23}" +
       ".fl-spd b{display:block;font-size:46px;line-height:1.05;font-weight:900;font-variant-numeric:tabular-nums}.fl-spd span{display:block;font-size:15px;font-weight:800}.fl-spd small{display:block;font-size:12px;font-weight:700}" +
       ".fl-arr .k{display:block;font-size:15px;font-weight:800}.fl-arr b{display:block;font-size:34px;line-height:1.1;font-weight:900}.fl-arr span{display:block;font-size:16px;font-weight:800}.fl-arr small{display:block;font-size:13px;font-weight:700}" +
@@ -52,6 +52,7 @@
     style();
     if (final) { S.ended = true; soonHide(true); }
     if (final && S.map) { try { S.map.remove(); } catch (e) {} S.map = null; }
+    if (final) { try { postRideEnd(); } catch (e) {} } /* v2.0m-bz */
     app.innerHTML = '<div class="card fl-msg" id="fl-msg"><p class="tag">' + esc(title) + '</p><p class="lede">' + esc(body) + "</p>" +
       '<a class="fl-call" id="fl-call" href="' + PCS_TEL + '">Call PCS ' + PCS_PHONE + "</a>" +
       '<p class="fine">Need a ride of your own? Visit <a href="https://www.PCSrides.com" style="color:#0b3d23;font-weight:800">www.PCSrides.com</a>.</p></div>';
@@ -427,13 +428,34 @@
   /* v2.0m-by (Matthew 11/15): a linked ride (one tracker, two riders, two invoices) shows each invoice number with paid or
      unpaid beside it and nothing else: no bill, no receipt, no pay link, even if the copy held one. v2.0m-by2: same plain
      words as the normal bar ("Invoice #000600 – paid"), one line each, two at most. Pure (tested). */
+  function tripLabel(n, of) { /* pure (tested): only when an invoice has more than one non-cancelled trip */
+    n = Math.round(+n); of = Math.round(+of);
+    return of > 1 && n >= 1 && n <= of ? "Trip " + n + " of " + of : "";
+  }
+  function barJoin(parts) { /* pure (tested): never a leading, trailing, or doubled mid-dot */
+    var out = [];
+    (parts || []).forEach(function (p) {
+      p = String(p == null ? "" : p).replace(/^[\s\u00b7]+|[\s\u00b7]+$/g, "").trim();
+      if (p) out.push(p);
+    });
+    return out.join(" \u00b7 ");
+  }
+  function billBarHtml(m) { /* painted bar: the mid-dot before a receipt/pay link stays with the link, so it does not dangle when the link wraps */
+    if (!m || !m.show) return "";
+    if (m.rows) return m.rows.map(function (r) { return '<span style="display:block;line-height:30px">' + esc(r.text) + "</span>"; }).join("");
+    if (!m.link) return esc(m.label || "");
+    var a = "<a id=\"" + esc(m.link.id) + "\" href=\"" + esc(m.link.href) + "\" target=\"_blank\" rel=\"noopener\">" + esc(m.link.text) + "</a>";
+    if (!m.label) return a;
+    return esc(m.label) + ' <span class="fl-bill-link">\u00b7 ' + a + "</span>";
+  }
   function linkedModel(d) {
     var out = [], seen = {};
     (Array.isArray(d && d.linked) ? d.linked : []).slice(0, 2).forEach(function (x) {
       var no = x && typeof x === "object" ? String(x.invoiceNo || "").replace(/^#/, "").replace(/\s+/g, "") : "";
       if (!/^\d{1,20}$/.test(no) || seen[no]) return;
       seen[no] = 1;
-      out.push({ invoiceNo: no, pay: x.pay === "paid" ? "paid" : "unpaid", text: "Invoice #" + no + " \u2013 " + (x.pay === "paid" ? "paid" : "unpaid") });
+      var text = barJoin(["Invoice #" + no + " \u2013 " + (x.pay === "paid" ? "paid" : "unpaid"), tripLabel(x.tripN, x.tripOf)]);
+      out.push({ invoiceNo: no, pay: x.pay === "paid" ? "paid" : "unpaid", text: text });
     });
     return out;
   }
@@ -441,7 +463,7 @@
     d = d || {};
     if (Array.isArray(d.linked)) {
       var rows = linkedModel(d);
-      return { label: rows.map(function (r) { return r.text; }).join(" \u00b7 "), link: null, show: rows.length > 0, gap: "linked", rows: rows };
+      return { label: barJoin(rows.map(function (r) { return r.text; })), link: null, show: rows.length > 0, gap: "linked", rows: rows };
     }
     var no = String(d.invoiceNo || "").replace(/^#/, "").replace(/\s+/g, "");
     if (!/^\d{1,20}$/.test(no)) no = "";
@@ -452,9 +474,9 @@
     if (no && pay === "paid" && receipt) link = { href: receipt, text: "View receipt", id: "fl-receipt" };
     else if (no && pay === "unpaid" && payUrl) link = { href: payUrl, text: "Pay invoice", id: "fl-pay" };
     if (no) {
-      var label = "Invoice #" + no;
-      if (link) label += pay === "paid" ? " \u2013 paid" : " \u2013 unpaid";
-      return { label: label, link: link, show: true, gap: link ? "" : "number-only" };
+      var lab = tripLabel(d.tripN, d.tripOf);
+      var label = barJoin(["Invoice #" + no + (link ? (pay === "paid" ? " \u2013 paid" : " \u2013 unpaid") : ""), lab]);
+      return { label: label, link: link, show: true, gap: link ? "" : "number-only", trip: lab };
     }
     var gap = "";
     if (pay === "paid" && !receipt) gap = "paid-without-receipt";
@@ -477,13 +499,9 @@
       else if (live.style.getPropertyValue && live.style.getPropertyValue("padding-bottom")) live.style.removeProperty("padding-bottom");
     }
     if (!m.show) { el.hidden = true; if (el.textContent) el.textContent = ""; mark(false); return; }
-    if (m.rows) { /* v2.0m-by linked ride: one plain line per invoice, never a link */
-      var lh = m.rows.map(function (r) { return '<span style="display:block;line-height:30px">' + esc(r.text) + "</span>"; }).join(""); /* plain bar text, two short lines */
-      if (el.innerHTML !== lh) el.innerHTML = lh;
-    } else if (m.link) {
-      var html = esc(m.label) + " \u00b7 <a id=\"" + m.link.id + "\" href=\"" + esc(m.link.href) + "\" target=\"_blank\" rel=\"noopener\">" + esc(m.link.text) + "</a>";
-      if (el.innerHTML !== html) el.innerHTML = html;
-    } else if (el.textContent !== m.label || (el.querySelector && el.querySelector("a"))) el.textContent = m.label;
+    var html = billBarHtml(m);
+    if (m.rows || m.link) { if (el.innerHTML !== html) el.innerHTML = html; }
+    else if (el.textContent !== m.label || (el.querySelector && el.querySelector("a"))) el.textContent = m.label;
     el.hidden = false;
     mark(true);
   }
@@ -515,6 +533,7 @@
       : age < 0 ? "Waiting for the first update from the car\u2026" : age <= 20 ? "Live \u00b7 updated just now" : age < 600 ? "Your driver is navigating. Location updates shortly." : "Last update " + (age < 60 ? age + " s" : Math.floor(age / 60) + " min") + " ago");
     track(d); soonCheck(d, now); bigBox(d, now, live);
     draw(d, showCar);
+    try { postRide(d); } catch (e) {} /* v2.0m-bz */
   }
   function stopsList(d) { /* v76g: one line per stop between From and To, like the driver app */
     var box = $("fl-stops"); if (!box) return;
@@ -685,9 +704,202 @@
   window.addEventListener("focus", function () { try { if (S.map) S.map.invalidateSize(false); } catch (e) {} });
   (function qr() { var el = $("fw-qr"); if (!el || typeof window.qrcode !== "function") return; try { var x = window.qrcode(0, "M"); x.addData("https://www.PCSrides.com"); x.make(); el.innerHTML = x.createSvgTag(4, 0); } catch (e) {} })();
   setInterval(function () { if (S.d && !S.ended && $("fl-live")) { try { bigBox(S.d, Date.now(), /^(on_way|arrived|picked_up)$/.test(String(S.d.status))); } catch (e) {} } }, 15000);
+  /* ---------- v2.0m-bz (Matthew 11/16): post-ride window ----------
+     Once the top says "Ride completed": 1. Rate your driver (1-5 stars, tapping a star fills every star up to it, optional
+     comment). 2. Tip (presets + Custom tip in $ or %; "Your driver keeps 100% of tips"; Square's page takes the payment; never on a
+     linked / shared tracker, which stays money-free; on a linked run each account holder tips on their own holder link). 3. Optional survey (2 car, 2 driver, 1 ride tracker; one tap each on 1-10, 1 = Very unsatisfied, 10 = Very satisfied; comment; anonymous or name; website Yes / No).
+     Everything goes to the PCS Worker with the link token only; nothing here writes to the database. Done / Not now is
+     remembered per link on this phone. */
+  var PR_WORKER = "https://pcs-pay.pcsrides.workers.dev", PR_KEY = "pcs-fl-post-v1:", PR_PCTS = [15, 18, 20], PR_PCT_MAX = 50000; /* Matthew 6:54 / 6:55: % of the pre-tax fare (car-service standard 15-20%). Presets cap at the $500 charge max; Custom stays $1-$100. */
+  /* Matthew 11/16 (1:56 / 1:58 PM): each survey question is scored 1-10 (1 = Very unsatisfied, 10 = Very satisfied); no stars
+     (stars are only the 1-5 driver rating). The Worker stores the ride grade = average of the answered items. */
+  var PR_Q = [["car1", "How satisfied were you with the cleanliness of the car?"], ["car2", "How satisfied were you with the comfort of the car?"],
+    ["drv1", "How satisfied were you with your driver's safe driving?"], ["drv2", "How satisfied were you with your driver's courtesy and professionalism?"],
+    ["trk1", "How satisfied were you with the ride tracker?"]];
+  var PR_SCALE_MAX = 10;
+  function prLoad() { var st = soonStore(); try { var o = st && JSON.parse(st.getItem(PR_KEY + token) || "null"); return o && typeof o === "object" ? o : {}; } catch (e) { return {}; } }
+  function prSave(o) { var st = soonStore(); try { if (st) st.setItem(PR_KEY + token, JSON.stringify(o)); } catch (e) {} }
+  /* pure (tested). Matthew 1:51 PM 11/16: on a linked run the shared tracker has no tip; an account holder's OWN holder link
+     (the Worker answers own: true there) gets the tip step for their own invoice. */
+  function prSteps(d, P) { return d && Array.isArray(d.linked) && !(P && P.own === true) ? ["stars", "survey"] : ["stars", "tip", "survey"]; }
+  function prTipCents(s) { /* pure (tested): "12.5" -> 1250; $1 to $100 only */
+    var t = String(s == null ? "" : s).replace(/[$,\s]/g, "");
+    if (!/^\d{1,3}(\.\d{0,2})?$/.test(t)) return null;
+    var c = Math.round(Number(t) * 100); return c >= 100 && c <= 10000 ? c : null;
+  }
+  function prPctTip(fare, pct) { return PR_PCTS.indexOf(pct) >= 0 && fare > 0 ? Math.round(fare * pct / 100) : 0; } /* pure (tested): nearest cent; the Worker does the same math */
+  function prCustomPct(s) { /* pure (tested): "22" / "22.5" -> 22 / 22.5; 1-100, whole or one decimal */
+    var t = String(s == null ? "" : s).replace(/[%\s]/g, "");
+    if (!/^\d{1,3}(\.\d)?$/.test(t)) return null;
+    var n = Number(t); return n >= 1 && n <= 100 ? n : null;
+  }
+  function prCustomPctCents(fare, pct) { /* pure (tested): dollars from the same pre-tax base; $1-$100 or null */
+    if (!(fare > 0) || pct == null) return null;
+    var c = Math.round(fare * pct / 100); return c >= 100 && c <= 10000 ? c : null;
+  }
+  function prCustomKind(P) { return (Number(P && P.fareCents) || 0) > 0 && P.customKind === "%" ? "%" : "$"; }
+  function prCustomAmount(P) { /* cents for the Tip button / post; 0 if invalid */
+    if (prCustomKind(P) === "%") { var pct = prCustomPct(P.customPct); return pct != null ? (prCustomPctCents(Number(P.fareCents) || 0, pct) || 0) : 0; }
+    return prTipCents(P.custom) || 0;
+  }
+  function prPctList(fare, maxCents) { /* pure (tested): the % buttons, only with a known fare and a tip of $1+ up to the $500 charge max (not the $100 Custom cap); else Custom only */
+    var max = Number(maxCents) > 0 ? Number(maxCents) : PR_PCT_MAX;
+    return fare > 0 ? PR_PCTS.map(function (p) { return { pct: p, cents: prPctTip(fare, p) }; }).filter(function (x) { return x.cents >= 100 && x.cents <= max; }) : [];
+  }
+  function prMoney(c) { var v = c / 100; return "$" + (v % 1 ? v.toFixed(2) : String(v)); }
+  function prPost(path, body) {
+    return fetch(PR_WORKER + path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(Object.assign({ t: token }, body || {})) })
+      .then(function (r) { return r.json().catch(function () { return {}; }).then(function (j) { if (!r.ok || !j || j.ok === false) { var e = new Error((j && j.error) || "Try again."); e.status = r.status; throw e; } return j; }); });
+  }
+  function prStyle() {
+    if ($("fl-pr-style")) return;
+    var st = document.createElement("style"); st.id = "fl-pr-style";
+    st.textContent = "#fl-pr{position:fixed;inset:0;z-index:3500;background:rgba(5,14,28,.94);display:flex;align-items:center;justify-content:center;padding:12px}" +
+      "#fl-pr .box{background:#f0fdf4;color:#0b3d23;border:3px solid #2e9d4f;border-radius:16px;max-width:420px;width:100%;max-height:100%;overflow:auto;padding:14px;box-sizing:border-box}" +
+      "#fl-pr .fl-status{margin:0 0 10px}#fl-pr p,#fl-pr label{color:#0b3d23;font-size:16px;font-weight:700;margin:8px 0 4px;display:block}" +
+      "#fl-pr .stars{display:flex;justify-content:center;gap:4px}#fl-pr .stars.sm{justify-content:flex-start}" +
+      "#fl-pr .stars button{background:none;border:0;padding:0 2px;font-size:44px;line-height:1;color:#b9c9bd;cursor:pointer;-webkit-tap-highlight-color:transparent}" +
+      "#fl-pr .stars.sm button{font-size:32px}#fl-pr .stars button.on{color:#d4b15a}" +
+      "#fl-pr textarea,#fl-pr input[type=text]{width:100%;box-sizing:border-box;border:2px solid #2e9d4f;border-radius:10px;padding:8px;font-size:16px;color:#0b3d23;background:#fff}" +
+      "#fl-pr textarea{height:60px;resize:none}" +
+      "#fl-pr .seg{display:inline-flex;border:2px solid #2e9d4f;border-radius:10px;overflow:hidden;margin:8px 0 4px}" +
+      "#fl-pr .seg button{background:#fff;border:0;min-width:52px;padding:8px 16px;font-size:18px;font-weight:800;color:#0b3d23;cursor:pointer;-webkit-tap-highlight-color:transparent}" +
+      "#fl-pr .seg button[aria-pressed=true]{background:#0b6b3a;color:#fff}" +
+      "#fl-pr .row{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px}#fl-pr .row button,#fl-pr .row a{flex:1;min-width:70px}" +
+      "#fl-pr .fl-call{margin:8px 0 0;min-height:48px;line-height:48px;font-size:18px;cursor:pointer;width:100%;box-sizing:border-box}#fl-pr .row .fl-call{margin:0;line-height:1.2;padding:12px 4px;display:flex;align-items:center;justify-content:center}" +
+      "#fl-pr .fl-call[aria-pressed=true]{background:#0b6b3a;color:#fff !important}#fl-pr .fl-call:disabled{opacity:.5}" +
+      "#fl-pr .skip{background:none;border:0;color:#0b3d23;text-decoration:underline;font-size:16px;font-weight:800;display:block;margin:10px auto 0;cursor:pointer}" +
+      "#fl-pr .error{color:#a61b1b;font-weight:800}" +
+      "#fl-pr .scale{display:grid;grid-template-columns:repeat(10,1fr);gap:3px}" +
+      "#fl-pr .scale button{background:#fff;border:2px solid #2e9d4f;border-radius:8px;padding:0;min-height:44px;font-size:17px;font-weight:900;color:#0b3d23;cursor:pointer;-webkit-tap-highlight-color:transparent}" +
+      "#fl-pr .scale-ends{display:flex;justify-content:space-between;font-size:13px;font-weight:700;color:#0b3d23;margin:3px 0 2px}" +
+      "#fl-pr .scale button[aria-pressed=true]{background:#0b6b3a;border-color:#0b6b3a;color:#fff}" +
+      "#fl-pr p.fl-pr-keeps{text-align:center;font-size:15px;font-weight:700;color:#0b6b3a;margin:-4px 0 6px}"; /* Matthew 1:51 PM 11/16 */
+    document.head.appendChild(st);
+  }
+  function prStarsHtml(name, val, sm) {
+    var h = '<div class="stars' + (sm ? " sm" : "") + '" role="group" data-q="' + name + '">';
+    for (var i = 1; i <= 5; i += 1) h += '<button type="button" data-q="' + name + '" data-v="' + i + '" class="' + (val >= i ? "on" : "") + '" aria-label="' + i + " star" + (i > 1 ? "s" : "") + '" aria-pressed="' + (val === i ? "true" : "false") + '">\u2605</button>';
+    return h + "</div>";
+  }
+  function prScaleHtml(name, val, label) { /* 1-10 tap buttons with the two end labels under them */
+    var h = '<div class="scale" role="radiogroup" aria-labelledby="' + label + '" data-scale="' + name + '">';
+    for (var i = 1; i <= PR_SCALE_MAX; i += 1) h += '<button type="button" data-q="' + name + '" data-v="' + i + '" role="radio" aria-label="' + i + (i === 1 ? " (Very unsatisfied)" : i === PR_SCALE_MAX ? " (Very satisfied)" : "") + '" aria-checked="' + (val === i ? "true" : "false") + '" aria-pressed="' + (val === i ? "true" : "false") + '">' + i + "</button>";
+    return h + '</div><div class="scale-ends" aria-hidden="true"><span>1 = Very unsatisfied</span><span>10 = Very satisfied</span></div>';
+  }
+  function prHtml(P, d) {
+    var err = P.err ? '<p class="error" role="alert">' + esc(P.err) + "</p>" : "", busy = P.busy ? " disabled" : "";
+    if (P.step === "stars") return '<p class="fl-status">Rate your driver</p>' + prStarsHtml("stars", P.stars || 0) +
+      '<label for="fl-pr-c">Comment (optional)</label><textarea id="fl-pr-c" maxlength="300">' + esc(P.comment || "") + "</textarea>" + err +
+      '<button type="button" class="fl-call" id="fl-pr-send"' + (P.stars ? busy : " disabled") + ">Send</button>" +
+      '<button type="button" class="skip" id="fl-pr-later">Not now</button>';
+    if (P.step === "tip") {
+      var pick = P.tip || "", pcts = prPctList(Number(P.fareCents) || 0), pp = /^p(\d+)$/.exec(pick), pc = pp ? pcts.filter(function (x) { return x.pct === Number(pp[1]); })[0] : null;
+      var c = pick === "custom" ? prCustomAmount(P) : pc ? pc.cents : 0, kind = prCustomKind(P);
+      var customIn = '<label for="fl-pr-tip">Custom tip</label>' +
+        ((Number(P.fareCents) || 0) > 0 ? '<div class="seg" role="radiogroup" aria-label="Dollars or percent"><button type="button" data-kind="$" aria-pressed="' + (kind === "$" ? "true" : "false") + '">$</button><button type="button" data-kind="%" aria-pressed="' + (kind === "%" ? "true" : "false") + '">%</button></div>' : "") +
+        '<input type="text" id="fl-pr-tip" inputmode="decimal" autocomplete="off" placeholder="' + (kind === "%" ? "0" : "0.00") + '" value="' + esc(kind === "%" ? (P.customPct || "") : (P.custom || "")) + '">';
+      return '<p class="fl-status">Tip your driver</p><p class="fl-pr-keeps" id="fl-pr-keeps">Your driver keeps 100% of tips</p><div class="row" role="group" aria-label="Tip">' +
+        pcts.map(function (x) { return '<button type="button" class="fl-call fl-pr-pct" data-tip="p' + x.pct + '" aria-pressed="' + ("p" + x.pct === pick ? "true" : "false") + '">' + x.pct + "% (" + esc(prMoney(x.cents)) + ")</button>"; }).join("") +
+        '<button type="button" class="fl-call" data-tip="custom" aria-pressed="' + (pick === "custom" ? "true" : "false") + '">Custom tip</button></div>' +
+        (pick === "custom" ? customIn : "") + err +
+        (P.payUrl ? '<a class="fl-call" id="fl-pr-pay" href="' + esc(P.payUrl) + '" target="_blank" rel="noopener">Pay ' + esc(prMoney(P.payCents)) + " tip</a>" +
+          '<button type="button" class="skip" id="fl-pr-next">Next</button>'
+          : '<button type="button" class="fl-call" id="fl-pr-tipgo"' + (c ? busy : " disabled") + ">" + (c ? "Tip " + esc(prMoney(c)) : "Tip") + "</button>" +
+          '<button type="button" class="skip" id="fl-pr-notip">No tip</button>');
+    }
+    if (P.step === "survey") {
+      var S2 = P.sv || {};
+      return '<p class="fl-status">Quick survey (optional)</p>' +
+        PR_Q.map(function (q) { return '<p id="fl-pr-q-' + q[0] + '">' + esc(q[1]) + "</p>" + prScaleHtml(q[0], S2[q[0]] || 0, "fl-pr-q-" + q[0]); }).join("") +
+        '<label for="fl-pr-sc">Comments (optional)</label><textarea id="fl-pr-sc" maxlength="300">' + esc(S2.comment || "") + "</textarea>" +
+        '<div class="row" role="group" aria-label="Your name"><button type="button" class="fl-call" data-anon="1" aria-pressed="' + (S2.anon !== false ? "true" : "false") + '">Stay anonymous</button>' +
+        '<button type="button" class="fl-call" data-anon="0" aria-pressed="' + (S2.anon === false ? "true" : "false") + '">Add my name</button></div>' +
+        (S2.anon === false ? '<label for="fl-pr-name">Your name (shown as first name and last initial)</label><input type="text" id="fl-pr-name" maxlength="60" autocomplete="name" value="' + esc(S2.name || "") + '">' : "") +
+        '<p id="fl-pr-webq">May we put your feedback on www.PCSrides.com?</p><div class="row" role="group" aria-label="Website"><button type="button" class="fl-call" data-web="1" aria-pressed="' + (S2.web === true ? "true" : "false") + '">Yes</button>' +
+        '<button type="button" class="fl-call" data-web="0" aria-pressed="' + (S2.web === false ? "true" : "false") + '">No</button></div>' + err +
+        '<button type="button" class="fl-call" id="fl-pr-svsend"' + busy + ">Send</button>" +
+        '<button type="button" class="skip" id="fl-pr-svskip">Skip</button>';
+    }
+    return '<p class="fl-status">Thank you!</p>' + (P.tipPaid ? '<p style="text-align:center">Tip received: ' + esc(prMoney(P.tipPaid)) + "</p>" : "") +
+      '<button type="button" class="fl-call" id="fl-pr-close">Close</button>';
+  }
+  function prNext(P, d) { var s = prSteps(d, P), i = s.indexOf(P.step); P.step = i >= 0 && i + 1 < s.length ? s[i + 1] : "done"; P.err = ""; P.busy = false; if (P.step === "done") prPost("/ride/post-status", { done: true }).catch(function () {}); }
+  function prPaint() {
+    var P = S.pr, d = S.d; if (!P) return;
+    var el = $("fl-pr");
+    if (!el) {
+      prStyle(); el = document.createElement("div"); el.id = "fl-pr"; el.setAttribute("role", "dialog"); el.setAttribute("aria-modal", "true");
+      el.innerHTML = '<div class="box" id="fl-pr-box"></div>'; document.body.appendChild(el);
+      el.addEventListener("click", prClick); el.addEventListener("input", prInput);
+    }
+    if (P.step === "tip" && P.fareCents === undefined && !P.fareBusy) prFare();
+    var box = $("fl-pr-box"), h = prHtml(P, d); if (box && box.__h !== h) { box.innerHTML = h; box.__h = h; }
+    prSave({ step: P.step, tipOpen: P.tipOpen || 0, tipPaid: P.tipPaid || 0 });
+  }
+  function prInput(ev) {
+    var t = ev.target, P = S.pr; if (!t || !P) return;
+    if (t.id === "fl-pr-c") P.comment = t.value;
+    else if (t.id === "fl-pr-sc") (P.sv = P.sv || {}).comment = t.value;
+    else if (t.id === "fl-pr-name") (P.sv = P.sv || {}).name = t.value;
+    else if (t.id === "fl-pr-tip") { if (prCustomKind(P) === "%") P.customPct = t.value; else P.custom = t.value; var b = $("fl-pr-tipgo"), c = prCustomAmount(P); if (b) { b.disabled = !c; b.textContent = c ? "Tip " + prMoney(c) : "Tip"; } }
+  }
+  function prClick(ev) {
+    var t = ev.target, P = S.pr, d = S.d; if (!t || !P || P.busy) return;
+    var q = t.getAttribute && t.getAttribute("data-q");
+    if (q) { var v = Number(t.getAttribute("data-v")); if (q === "stars") P.stars = v; else (P.sv = P.sv || {})[q] = v; P.err = ""; prPaint(); return; }
+    var kd = t.getAttribute && t.getAttribute("data-kind"); if (kd === "$" || kd === "%") { P.customKind = kd; P.payUrl = ""; P.err = ""; prPaint(); if ($("fl-pr-tip")) try { $("fl-pr-tip").focus(); } catch (e) {} return; }
+    var tp = t.getAttribute && t.getAttribute("data-tip"); if (tp) { P.tip = tp; P.payUrl = ""; P.err = ""; prPaint(); if (tp === "custom" && $("fl-pr-tip")) try { $("fl-pr-tip").focus(); } catch (e) {} return; }
+    var an = t.getAttribute && t.getAttribute("data-anon"); if (an) { (P.sv = P.sv || {}).anon = an === "1"; prPaint(); return; }
+    var wb = t.getAttribute && t.getAttribute("data-web"); if (wb) { (P.sv = P.sv || {}).web = wb === "1"; P.err = ""; prPaint(); return; }
+    var id = t.id;
+    if (id === "fl-pr-later") { prNext(P, d); prPaint(); return; } /* Harry r1: Not now on the stars goes on to the tip (linked: the survey) */
+    if (id === "fl-pr-close") { P.step = "done"; P.closed = true; prSave({ step: "done", tipOpen: P.tipOpen || 0, tipPaid: P.tipPaid || 0 }); prPost("/ride/post-status", { done: true }).catch(function () {}); var el = $("fl-pr"); if (el && el.parentNode) el.parentNode.removeChild(el); return; }
+    if (id === "fl-pr-notip" || id === "fl-pr-next" || id === "fl-pr-svskip") { prNext(P, d); prPaint(); return; }
+    if (id === "fl-pr-pay") { P.tipOpen = P.payCents; prSave({ step: P.step, tipOpen: P.tipOpen, tipPaid: P.tipPaid || 0 }); setTimeout(function () { prNext(P, d); prPaint(); }, 300); return; }
+    if (id === "fl-pr-send") { if (!P.stars) return; P.busy = true; prPaint();
+      prPost("/ride/rate", { stars: P.stars, comment: P.comment || "" }).then(function () { prNext(P, d); prPaint(); }, function (e) { P.busy = false; if (e.status === 409) { prNext(P, d); } else P.err = e.message; prPaint(); }); return; }
+    if (id === "fl-pr-tipgo") { var pm = /^p(\d+)$/.exec(P.tip || ""), pct = P.tip === "custom" && prCustomKind(P) === "%" ? prCustomPct(P.customPct) : null, c = P.tip === "custom" ? prCustomAmount(P) : pm ? prPctTip(Number(P.fareCents) || 0, Number(pm[1])) : 0; if (!c) return; P.busy = true; prPaint();
+      prPost("/ride/tip", pm ? { percent: Number(pm[1]) } : (pct != null ? { percent: pct } : { tipCents: c })).then(function (j) { P.busy = false; P.payUrl = String(j.url || ""); P.payCents = Number(j.tipCents) > 0 ? Number(j.tipCents) : c; /* the Worker's amount */ if (!/^https:\/\//.test(P.payUrl)) { P.payUrl = ""; P.err = "Try again."; } prPaint(); }, function (e) { P.busy = false; P.err = e.message; prPaint(); }); return; }
+    if (id === "fl-pr-svsend") { var sv = P.sv || {}; if (sv.web !== true && sv.web !== false) { P.err = "Pick Yes or No for the website."; prPaint(); return; }
+      var body = { comment: sv.comment || "", anon: sv.anon !== false, name: sv.anon === false ? sv.name || "" : "", web: sv.web };
+      PR_Q.forEach(function (x) { if (sv[x[0]]) body[x[0]] = sv[x[0]]; });
+      P.busy = true; prPaint();
+      prPost("/ride/survey", body).then(function () { prNext(P, d); prPaint(); }, function (e) { P.busy = false; if (e.status === 409) prNext(P, d); else P.err = e.message; prPaint(); }); }
+  }
+  function prFare() { /* read-only: the ride's pre-tax fare from the Worker for the % buttons; unknown -> Custom tip only */
+    var P = S.pr; if (!P) return; P.fareBusy = true;
+    prPost("/ride/tip/status", {}).then(function (j) { P.fareCents = Number(j && j.fareCents) > 0 ? Math.round(Number(j.fareCents)) : 0; if (j && j.paid === true && P.tipOpen) P.tipPaid = P.tipOpen; if ($("fl-pr")) prPaint(); }, function () { P.fareCents = 0; if ($("fl-pr")) prPaint(); });
+  }
+  function prTipCheck() { /* Square's word only: "Tip received" shows after the Worker sees the payment */
+    var P = S.pr; if (!P || !P.tipOpen || P.tipPaid || P.checking || (S.d && Array.isArray(S.d.linked) && P.own !== true)) return;
+    P.checking = true;
+    prPost("/ride/tip/status", {}).then(function (j) { P.checking = false; if (j && j.paid === true) { P.tipPaid = P.tipOpen; if ($("fl-pr")) prPaint(); else prSave({ step: P.step, tipOpen: P.tipOpen, tipPaid: P.tipPaid }); } }, function () { P.checking = false; });
+  }
+  function postRide(d) { /* only after the Worker says this invoice's last trip is done, and only on the account-holder tracker */
+    if (!d || d.status !== "completed" || S.ended) return;
+    if (S.pr === false) { postRideEnd(); return; }
+    if (S.pr) { prTipCheck(); if (!S.pr.closed) prPaint(); return; }
+    if (S.prPending) return;
+    S.prPending = true;
+    prPost("/ride/post-status", {}).then(function (j) {
+      S.prPending = false;
+      if (!j || j.show !== true) { S.pr = false; postRideEnd(); return; }
+      var o = prLoad();
+      S.pr = { step: o.step && /^(stars|tip|survey|done)$/.test(o.step) ? o.step : "stars", tipOpen: Number(o.tipOpen) || 0, tipPaid: Number(o.tipPaid) || 0 };
+      if (Number(j.fareCents) > 0) S.pr.fareCents = Math.round(Number(j.fareCents));
+      if (j.tripOf) { S.pr.tripN = j.tripN; S.pr.tripOf = j.tripOf; }
+      if (j.own === true) S.pr.own = true; /* a linked run's account holder on their own holder link */
+      if (S.pr.step === "tip" && prSteps(d, S.pr).indexOf("tip") < 0) S.pr.step = "survey";
+      if (S.pr.step === "done") { S.pr.closed = true; S.pr = false; postRideEnd(); return; }
+      prTipCheck(); prPaint();
+    }, function () { S.prPending = false; S.pr = false; postRideEnd(); });
+  }
+  function postRideEnd() { var el = $("fl-pr"); if (el && el.parentNode) el.parentNode.removeChild(el); }
+  document.addEventListener("visibilitychange", function () { if (document.visibilityState !== "hidden") { try { prTipCheck(); } catch (e) {} } });
   window.__pcsFollowLive = { resume: resume, setPath: setPath, update: update, track: track, state: S, over: over, statusText: statusText,
-    stopsOf: stopsOf, nextTarget: nextTarget, soonDue: soonDue, soonText: SOON_TEXT, photo: trackerPhotoSrc, showPhoto: applyTrackerPhoto, bill: billBarModel,
-    sosText: sosReadout, notice: message };
+    stopsOf: stopsOf, nextTarget: nextTarget, soonDue: soonDue, soonText: SOON_TEXT, photo: trackerPhotoSrc, showPhoto: applyTrackerPhoto, bill: billBarModel, billHtml: function (d) { return billBarHtml(billBarModel(d)); }, barJoin: barJoin,
+    sosText: sosReadout, notice: message, tripLabel: tripLabel, postRide: { steps: prSteps, tipCents: prTipCents, pctTip: prPctTip, pctList: prPctList, customPct: prCustomPct, customPctCents: prCustomPctCents, customKind: prCustomKind, customAmount: prCustomAmount, html: prHtml, questions: PR_Q, next: prNext } };
   ensureFlSos();
   poll();
 })();

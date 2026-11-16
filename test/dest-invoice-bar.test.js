@@ -50,7 +50,8 @@ test("destination map green bar: Derek #000570 Paid + View receipt (his real rec
   const h = box.__pcsRideFull.green({ status: "running", schedId: DEREK.id });
   assert.ok(h.indexOf('class="pcs-map-green has-inv"') >= 0, h);
   assert.ok(h.indexOf('id="sched-fs-inv"') >= 0);
-  assert.ok(h.indexOf("Invoice #000570 \u00b7 Paid \u00b7 ") >= 0, h);
+  assert.ok(h.indexOf("Invoice #000570 \u00b7 Paid") >= 0, h);
+  assert.doesNotMatch(h.replace(/<[^>]+>/g, " "), /\u00b7\s*$/);
   assert.ok(h.indexOf('href="https://squareup.com/receipt/preview/wJ5IG1LBUjKu3hydKKtgyfJj9HeZY"') >= 0, h);
   assert.ok(h.indexOf(">View receipt</a>") >= 0);
   assert.equal(h.indexOf("pay-invoice"), -1, "a paid ride never links the pay page");
@@ -58,7 +59,8 @@ test("destination map green bar: Derek #000570 Paid + View receipt (his real rec
 
 test("destination map green bar: Rahual #000587 Unpaid + Pay invoice", function () {
   const h = box.__pcsRideFull.green({ status: "running", schedId: RAHUAL.id });
-  assert.ok(h.indexOf("Invoice #000587 \u00b7 Unpaid \u00b7 ") >= 0, h);
+  assert.ok(h.indexOf("Invoice #000587 \u00b7 Unpaid") >= 0, h);
+  assert.doesNotMatch(h.replace(/<[^>]+>/g, " "), /\u00b7\s*$/);
   assert.ok(h.indexOf('href="https://app.squareup.com/pay-invoice/invtmp:95a58e9c-5700-4c"') >= 0, h);
   assert.ok(h.indexOf(">Pay invoice</a>") >= 0);
 });

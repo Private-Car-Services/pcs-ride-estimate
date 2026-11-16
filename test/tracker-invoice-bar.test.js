@@ -152,3 +152,39 @@ test("partial, refund, and non-Square links are not a paid or unpaid href", func
   assert.equal(script.label, "Invoice #000574");
   assert.equal(script.label.indexOf("unpaid"), -1);
 });
+
+test("the invoice bar shows Trip X of Y only when the invoice has more than one trip", function () {
+  assert.equal(live.tripLabel(3, 5), "Trip 3 of 5");
+  assert.equal(live.tripLabel(1, 1), "");
+  const multi = live.bill({ invoiceNo: "000600", pay: "paid", receiptUrl: RECEIPT, tripN: 3, tripOf: 5 });
+  assert.equal(multi.show, true);
+  assert.ok(multi.label.indexOf("Invoice #000600") >= 0);
+  assert.ok(multi.label.indexOf("Trip 3 of 5") >= 0);
+  const solo = live.bill({ invoiceNo: "000602", pay: "paid", receiptUrl: RECEIPT, tripN: 1, tripOf: 1 });
+  assert.equal(solo.label.indexOf("Trip"), -1);
+});
+
+test("the tracker invoice bar never has a dangling or doubled separator", function () {
+  function vis(s) { return String(s || "").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim(); }
+  function clean(d) {
+    const m = live.bill(d);
+    const html = live.billHtml(d);
+    const v = vis(html || m.label);
+    assert.equal((m.label || "").indexOf("\u00b7 \u00b7"), -1, m.label);
+    assert.doesNotMatch(m.label || "", /\u00b7\s*$/);
+    assert.equal(v.indexOf("\u00b7 \u00b7"), -1, html);
+    assert.doesNotMatch(v, /\u00b7\s*$/, html);
+    if (m.link) assert.ok(html.indexOf('class="fl-bill-link"') >= 0, html);
+  }
+  clean({ invoiceNo: "000602", pay: "paid", receiptUrl: RECEIPT, tripN: 3, tripOf: 5 });
+  clean({ invoiceNo: "000602", pay: "paid", receiptUrl: RECEIPT });
+  clean({ invoiceNo: "000574", pay: "unpaid", payUrl: "https://squareup.com/pay-invoice/invtmp:sample-unpaid", tripN: 2, tripOf: 3 });
+  clean({ invoiceNo: "000574", pay: "unpaid", payUrl: "https://squareup.com/pay-invoice/invtmp:sample-unpaid" });
+  clean({ invoiceNo: "000600", tripN: 3, tripOf: 5 });
+  clean({ invoiceNo: "000602" });
+  clean({ invoiceNo: "000210", pay: "paid" });
+  assert.equal(live.barJoin(["Invoice #000602 \u2013 paid", "Trip 3 of 5", "", " \u00b7 "]), "Invoice #000602 \u2013 paid \u00b7 Trip 3 of 5");
+  const html = live.billHtml({ invoiceNo: "000602", pay: "paid", receiptUrl: RECEIPT, tripN: 3, tripOf: 5 });
+  assert.ok(html.indexOf("Trip 3 of 5") >= 0 && html.indexOf("View receipt") >= 0);
+  assert.ok(html.indexOf('class="fl-bill-link"') >= 0);
+});

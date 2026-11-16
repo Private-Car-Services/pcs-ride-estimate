@@ -232,7 +232,14 @@ test("tracker page: unlinked bill bar is unchanged from v2.0m-bx", function (t) 
   if (!old) { t.skip("base commit not available"); return; }
   const a = loadFollow(old).api, b = loadFollow(fs.readFileSync(path.join(root, "follow/follow-live.js"), "utf8")).api;
   [{ invoiceNo: "000574", pay: "unpaid", payUrl: PAY }, { invoiceNo: "000554", pay: "paid", receiptUrl: RECEIPT }, { invoiceNo: "000560", bill: "invoiced" }, { pay: "paid" }, {}]
-    .forEach(function (d) { assert.equal(JSON.stringify(b.bill(d)), JSON.stringify(a.bill(d))); });
+    .forEach(function (d) {
+      const now = b.bill(d), then = a.bill(d);
+      assert.equal(now.label, then.label);
+      assert.equal(JSON.stringify(now.link || null), JSON.stringify(then.link || null));
+      assert.equal(now.show, then.show);
+      assert.equal(now.gap, then.gap);
+      assert.equal(now.trip || "", "", "no Trip X of Y on a single-invoice bar");
+    });
 });
 
 test("God board: Link / Unlink write only linkGroup + linkedIds, same-day open rides only", function () {

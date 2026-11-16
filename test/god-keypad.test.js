@@ -216,10 +216,11 @@ test("a PIN tap types one digit and does not double it", function () {
   assert.equal(input.value, "1234");
 });
 
-test("v2.0m-by2 is what a phone on v2.0m-bf is offered", function () {
+test("v2.0m-bz is what a phone on v2.0m-bf is offered", function () {
   const { sandbox } = loadGoal();
   const version = fs.readFileSync(path.join(__dirname, "../app/version.js"), "utf8");
-  assert.ok(version.indexOf('var APP_VERSION = "v2.0m-by2"') >= 0);
+  assert.ok(version.indexOf('var APP_VERSION = "v2.0m-bz"') >= 0);
+  assert.equal(version.indexOf('var APP_VERSION = "v2.0m-by2"'), -1);
   assert.equal(version.indexOf('var APP_VERSION = "v2.0m-by"'), -1);
   assert.equal(version.indexOf('var APP_VERSION = "v2.0m-bu"'), -1);
   assert.equal(version.indexOf('var APP_VERSION = "v2.0m-bt"'), -1);
@@ -227,10 +228,10 @@ test("v2.0m-by2 is what a phone on v2.0m-bf is offered", function () {
   assert.equal(version.indexOf('var APP_VERSION = "v2.0m-bq"'), -1);
   assert.equal(version.indexOf('var APP_VERSION = "v2.0m-bp"'), -1);
   const pages = {
-    "app/driver/index.html": "version.js?v=2.0m-by2",
-    "app/index.html": "version.js?v=2.0m-by2",
+    "app/driver/index.html": "version.js?v=2.0m-bz",
+    "app/index.html": "version.js?v=2.0m-bz",
     "god/index.html": "goal.js?v=2.0m-bx",
-    "meter/index.html": "version.js?v=2.0m-by2"
+    "meter/index.html": "version.js?v=2.0m-bz"
   };
   Object.keys(pages).forEach(function (rel) {
     const html = fs.readFileSync(path.join(__dirname, "..", rel), "utf8");
