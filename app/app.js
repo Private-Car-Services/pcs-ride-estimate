@@ -9740,7 +9740,22 @@
     }
   }
 
+  /* v2.0m-by (Matthew 11/15): linked rides. God mode links two board rides by hand so ONE tracker goes out. Only the link
+     is stored on each row (linkGroup + linkedIds); invoices, prices, times and assignment are never touched, and every ride
+     keeps its own invoice. v2.0m-by2: two rides at most (exactly one linked id). Pure (tested). */
+  var LINK_GROUP_RE = /^lk_[A-Za-z0-9_-]{6,40}$/, LINK_ID_RE = /^[A-Za-z0-9_-]{1,80}$/;
+  function schedLinkOf(raw, selfId) {
+    if (!raw || typeof raw !== "object" || !LINK_GROUP_RE.test(String(raw.linkGroup || ""))) return null;
+    var seen = {}, ids = (Array.isArray(raw.linkedIds) ? raw.linkedIds : raw.linkedIds && typeof raw.linkedIds === "object" ? Object.keys(raw.linkedIds).map(function (k) { return raw.linkedIds[k]; }) : [])
+      .map(String).filter(function (x) { if (!LINK_ID_RE.test(x) || x === String(selfId || "") || seen[x]) return false; seen[x] = 1; return true; });
+    return ids.length === 1 ? { linkGroup: String(raw.linkGroup), linkedIds: ids } : null;
+  }
   function normalizeScheduleRow(id, raw) {
+    var row = normalizeScheduleRow0(id, raw), lk = row && schedLinkOf(raw, row.id);
+    if (lk) { row.linkGroup = lk.linkGroup; row.linkedIds = lk.linkedIds; } /* only on linked rows: unlinked rows stay exactly as before */
+    return row;
+  }
+  function normalizeScheduleRow0(id, raw) {
     if (!raw || typeof raw !== "object") return null;
     var title = String(raw.title || raw.summary || "").trim();
     var status = String(raw.status || "open").toLowerCase();
@@ -11485,6 +11500,19 @@
     });
     return out.length ? out : null;
   }
+  /* v2.0m-by: the linked-ride list for the public copy. Each entry is { invoiceNo: digits, pay: "paid" | "unpaid" } and
+     nothing else (no amounts, no links). Two at most, one line per invoice number. Pure (tested). */
+  function folLinkedOut(list) {
+    var out = [], seen = {};
+    (Array.isArray(list) ? list : []).forEach(function (x) {
+      if (out.length >= 2 || !x || typeof x !== "object") return;
+      var no = String(x.invoiceNo || "").replace(/^#/, "").replace(/\s+/g, "");
+      if (!/^\d{1,20}$/.test(no) || seen[no]) return;
+      seen[no] = 1;
+      out.push({ invoiceNo: no, pay: x.pay === "paid" ? "paid" : "unpaid" });
+    });
+    return out.length ? out : null;
+  }
   /* The ONLY fields that ever reach the public copy. Add nothing here without a privacy review (Harry). */
   function folClean(o, now) {
     o = o || {}; now = now || Date.now();
@@ -11492,6 +11520,10 @@
     var live = st === "on_way" || st === "arrived" || st === "picked_up", done = st === "completed" || st === "cancelled";
     var out = { v: 1, status: st, kind: o.kind === "sched" ? "sched" : "app", updatedAt: now };
     if (st === "ended" || st === "stopped") { out.endedAt = Number(o.endedAt) || now; return out; }
+    if (Array.isArray(o.linked)) { /* v2.0m-by linked ride (one tracker, several invoices): invoice numbers + paid / unpaid ONLY.
+      No bill word, no amount, no receipt link, no pay link, nothing else from any invoice, whatever the ride row holds. */
+      var lk = folLinkedOut(o.linked); if (lk) out.linked = lk;
+    } else {
     if (o.bill === "invoiced" || o.bill === "prepaid") out.bill = o.bill; /* v2.0l r3: a plain word only ("Invoiced ride" / "Prepaid ride"), never an amount */
     if (o.pay === "paid" || o.pay === "unpaid") out.pay = o.pay;
     var invNo = String(o.invoiceNo || "").replace(/^#/, "").replace(/\s+/g, "");
@@ -11499,6 +11531,7 @@
     var recUrl = folSquareUrl(o.receiptUrl), payUrl = folSquareUrl(o.payUrl);
     if (o.pay === "paid" && recUrl) out.receiptUrl = recUrl; /* receipt link only after a verified paid record */
     if (o.pay === "unpaid" && payUrl) out.payUrl = payUrl; /* pay link only with an explicit unpaid record */
+    }
     var df = folFirst(o.driverName); if (df) out.driverFirst = df;
     var car = folCar(o.car); if (car) out.car = car;
     if (/^[A-Za-z0-9_-]{24}$/.test(String(o.cardKey || ""))) out.cardKey = String(o.cardKey); /* v77.3b: random key of the driver's picture card (photo shown on /follow/); never the driver id */
@@ -11550,6 +11583,7 @@
       if (d === undefined) { folRedraw(); return; }
       var before = JSON.stringify(fol.map[k] || null);
       fol.map[k] = d && FOL_TOKEN_RE.test(String(d.t || "")) ? { t: String(d.t), at: Number(d.at) || 0 } : { t: "" };
+      if (fol.map[k].t && LINK_GROUP_RE.test(String(d.lk || ""))) fol.map[k].lk = String(d.lk); /* v2.0m-by2: a linked ride's shared token */
       fol.mapAt[k] = Date.now();
       if (JSON.stringify(fol.map[k]) !== before) folRedraw();
     }).catch(function () { fol.mapBusy[k] = false; fol.mapAt[k] = Date.now() - FOL_MAP_POLL_MS + 5000; });
@@ -11570,11 +11604,15 @@
   function folCommit(k, t, role, ctx) {
     if (!FOL_KEY_RE.test(k || "") || !FOL_TOKEN_RE.test(t || "")) return Promise.resolve(false);
     var now = Date.now();
+    var lk = ctx && LINK_GROUP_RE.test(String(ctx.linkGroup || "")) ? String(ctx.linkGroup) : ""; /* v2.0m-by2: only linked rides tag their row */
     fol.map[k] = { t: t, at: now }; fol.mapAt[k] = now;
+    if (lk) fol.map[k].lk = lk;
     folMineNote(t, k, { role: role, at: now });
     folDraftDrop(k);
     fol.lastPush[t] = now; fol.lastSt[t] = ctx && ctx.status || "";
-    folWrite(folMapUrl(k), "PUT", { t: t, at: now, by: role === "rider" ? "rider" : role === "god" ? "god" : "driver" });
+    var row = { t: t, at: now, by: role === "rider" ? "rider" : role === "god" ? "god" : "driver" };
+    if (lk) row.lk = lk;
+    folWrite(folMapUrl(k), "PUT", row);
     var c = folClean(Object.assign({}, ctx || {}, { createdAt: now }), now);
     fol.lastSig[t] = folSig(c);
     return folWrite(folNodeUrl(t), "PUT", c);
@@ -11593,7 +11631,9 @@
     if (!m || !/(^|\.)squareup(sandbox)?\.com$|(^|\.)square\.link$/i.test(m[1])) return "";
     return s;
   }
-  function folSig(c) { return JSON.stringify([c.bill || "", c.pay || "", c.invoiceNo || "", c.receiptUrl || "", c.payUrl || "", c.status, c.pos ? [c.pos.lat, c.pos.lng] : 0, c.eta || 0, c.pickup || 0, c.dest || 0, c.car || 0, c.driverFirst || "", c.cardKey || "", folPhotoSig(c.photo), c.route ? c.route.length + ":" + c.route[c.route.length - 1] : 0, c.stops || 0]); }
+  function folSig(c) { var a = [c.bill || "", c.pay || "", c.invoiceNo || "", c.receiptUrl || "", c.payUrl || "", c.status, c.pos ? [c.pos.lat, c.pos.lng] : 0, c.eta || 0, c.pickup || 0, c.dest || 0, c.car || 0, c.driverFirst || "", c.cardKey || "", folPhotoSig(c.photo), c.route ? c.route.length + ":" + c.route[c.route.length - 1] : 0, c.stops || 0];
+    if (c.linked) a.push(c.linked); /* v2.0m-by: only linked copies carry it, so unlinked signatures are unchanged */
+    return JSON.stringify(a); }
   function folHere() {
     if (!isCoord(state.hereLat) || !isCoord(state.hereLng)) return null;
     var at = Number(state.gpsAt) || 0;
@@ -11703,6 +11743,7 @@
       }
       out.push(Object.assign({ key: "c_" + r.id, kind: "sched", bill: rideBillKind(r, onMeter ? M : null), pay: share.pay, invoiceNo: share.invoiceNo, receiptUrl: share.pay === "paid" ? share.url : "", payUrl: share.pay === "unpaid" ? share.url : "", status: st, phone: r.riderPhone, pickup: pickup, dest: dest, stops: stops, eta: eta, route: route, pos: here }, base));
     });
+    folLinkMerge(out, M);
     var code = state.screen === "trip" ? String(state.driverCode || readDriverCode() || "") : "";
     if (code && FOL_KEY_RE.test("r_" + code)) {
       var rs = String(state.rideStatus || "").toLowerCase();
@@ -11714,6 +11755,72 @@
         eta: st2 === "on_way" ? folStraight(here, pk, "pickup") : st2 === "picked_up" ? folStraight(here, dr, "dest") : null, route: null, pos: here }, base));
     }
     return out;
+  }
+  /* ---------- v2.0m-by (Matthew 11/15): linked rides share ONE tracker ----------
+     Rides God mode linked by hand publish the same public copy: the map of the ride that is furthest along, plus each linked
+     invoice number with paid / unpaid. The copy never holds a bill word, an amount, a receipt link or a pay link for a linked
+     ride (folClean). Unlinked rides are not touched here.
+     v2.0m-by2 (Harry hold): every map row made for a linked ride carries lk = its link group. A ride only ever pushes to a
+     token whose lk matches its link state NOW (folLiveTok): after Unlink the ride never touches the shared token again and
+     gets a fresh one; after Link a ride's old solo token is dropped (God mode also ends it at once). */
+  function folLinkEntry(r, M) {
+    var onM = M && M.schedId === r.id ? M : null, sh = { invoiceNo: "", pay: "" };
+    try { sh = invoiceShareFromWorker(verInv[r.id]); } catch (e) {}
+    if (sh.pay && sh.invoiceNo) return { invoiceNo: sh.invoiceNo, pay: sh.pay === "paid" ? "paid" : "unpaid" };
+    var no = "", pay = "";
+    try { no = String(rideInvoiceNoFrom(r, onM) || "").replace(/^#/, "").replace(/\s+/g, ""); } catch (e1) { no = ""; }
+    try { pay = ridePayWord(r, onM); } catch (e2) { pay = ""; }
+    return { invoiceNo: no, pay: pay === "paid" ? "paid" : "unpaid" };
+  }
+  function folLinkRows(r) {
+    var rows = state.scheduledRides || [], lk = r && schedLinkOf(r, r.id), g = lk && lk.linkGroup;
+    if (!g) return [];
+    return rows.filter(function (x) { return x && x.id && x.linkGroup === g && schedLinkOf(x, x.id) && x.status !== "cancelled" && x.status !== "canceled" && x.status !== "deleted"; })
+      .sort(function (a, b) { return String(a.start || "").localeCompare(String(b.start || "")) || String(a.id).localeCompare(String(b.id)); });
+  }
+  var FOL_LINK_RANK = { picked_up: 5, arrived: 4, on_way: 3, completed: 2, assigned: 1, cancelled: 0 };
+  function folLinkMerge(out, M) {
+    var byId = {}, groups = {};
+    (state.scheduledRides || []).forEach(function (r) { if (r && r.id) byId[r.id] = r; });
+    out.forEach(function (c, i) {
+      var r = c && c.kind === "sched" ? byId[String(c.key).slice(2)] : null;
+      var lk = r && schedLinkOf(r, r.id);
+      if (lk) (groups[lk.linkGroup] = groups[lk.linkGroup] || { r: r, at: [] }).at.push(i);
+    });
+    Object.keys(groups).forEach(function (g) {
+      var G = groups[g], mem = folLinkRows(G.r);
+      var linked = mem.map(function (r) { return folLinkEntry(r, M); });
+      var keys = mem.map(function (r) { return "c_" + r.id; }).filter(function (k) { return FOL_KEY_RE.test(k); });
+      var lead = null;
+      G.at.forEach(function (i) { var c = out[i]; if (c.status !== "cancelled" && (!lead || (FOL_LINK_RANK[c.status] || 0) > (FOL_LINK_RANK[lead.status] || 0))) lead = c; });
+      G.at.forEach(function (i) {
+        var c = out[i], src = c.status === "cancelled" || !lead ? c : lead;
+        out[i] = Object.assign({}, src, { key: c.key, phone: c.phone, bill: "", pay: "", invoiceNo: "", receiptUrl: "", payUrl: "", linked: linked, linkKeys: keys, linkGroup: g });
+      });
+    });
+  }
+  function folLinkKeys(k) {
+    var id = String(k || "").slice(2), me = null;
+    if (String(k || "").indexOf("c_") !== 0) return [];
+    (state.scheduledRides || []).forEach(function (r) { if (r && r.id === id) me = r; });
+    return folLinkRows(me).map(function (r) { return "c_" + r.id; }).filter(function (x) { return x !== k && FOL_KEY_RE.test(x); });
+  }
+  /* the link group ride k is in right now ("" when not linked) */
+  function folLkOf(k) {
+    var id = String(k || "").slice(2), lk = null;
+    if (String(k || "").indexOf("c_") !== 0) return "";
+    (state.scheduledRides || []).forEach(function (r) { if (r && r.id === id) lk = schedLinkOf(r, r.id); });
+    return lk ? lk.linkGroup : "";
+  }
+  /* ride k's live token, only when it was made for k's link state now: a shared (lk) token never serves an unlinked ride
+     and a solo token never serves a linked one. Unlinked rides with solo rows: same as folTokenFor. */
+  function folLiveTok(k) { var m = fol.map[k]; return m && m.t && (m.lk || "") === folLkOf(k) ? m.t : ""; }
+  /* the live tracker token of the linked sibling ride (made for this same link group), so both rides text the SAME link */
+  function folLinkTok(k) {
+    var ks = folLinkKeys(k), g = folLkOf(k), i;
+    if (!g) return "";
+    for (i = 0; i < ks.length; i += 1) { folMapLoad(ks[i], false); var m = fol.map[ks[i]]; if (m && m.t && m.lk === g) return m.t; }
+    return "";
   }
   function folDriverCtx(k) { var cs = folDriverCtxs(), i; for (i = 0; i < cs.length; i += 1) if (cs[i].key === k) return cs[i]; return null; }
   function folPush(t, c, now, role) {
@@ -11741,7 +11848,11 @@
     var now = Date.now(), seen = {};
     folDriverCtxs().forEach(function (c) {
       folMapLoad(c.key, false);
-      var t = folTokenFor(c.key);
+      var t = folLiveTok(c.key); /* v2.0m-by2: never a token made for another link state (shared after Unlink, solo after Link) */
+      if (!t && c.linked && fol.mapAt[c.key] && fol.map[c.key]) { /* v2.0m-by: a linked ride with no link yet joins its sibling's tracker */
+        var sib = folLinkTok(c.key);
+        if (sib && !(folMine()[sib] && (folMine()[sib].wiped || folMine()[sib].endedAt))) { folCommit(c.key, sib, "driver", c); t = sib; }
+      }
       if (!t) return;
       seen[t] = 1;
       var mm = folMine()[t];
@@ -11815,7 +11926,7 @@
   function folDriverInner(k, phone, name) {
     folStyle();
     if (!fol.mapAt[k]) return '<button type="button" class="fol-big" disabled>Getting the tracking link ready\u2026</button>';
-    var live = folTokenFor(k), t = live || folDraft(k);
+    var live = folLiveTok(k), sib = live ? "" : folLinkTok(k), t = live || sib || folDraft(k); /* v2.0m-by: a linked ride sends its sibling's tracker */
     if (!t) return "";
     var e = folPhoneE164(phone), st = (fol.biz && fol.biz[k]) || {};
     /* v77.8 (Matthew 10/20): ONE tap texts the client from the PCS business line (picture card + tap-to-track link).
@@ -11938,7 +12049,8 @@
     setTimeout(function () { try { folSweep(); } catch (e) {} }, 5000);
     window.__pcsFollow = { bizMsg: folBizMsg, bizSend: folBizSend, autoMsg: folAutoMsg, clean: folClean, share: invoiceShareFromWorker, refresh: invShareRefresh, request: driverInvoiceRequest, token: folNewToken, link: folLink, sms: folSmsHref, msg: folDriverMsg, riderMsg: folRiderMsg, e164: folPhoneE164, photoPick: followDriverPhoto,
       ctxs: function () { return folDriverCtxs(); }, publish: function (rides) { if (rides) state.scheduledRides = rides; return folDriverCtxs().map(function (c) { return folClean(Object.assign({}, c), Date.now()); }); }, holdPhoto: function (v) { state.driverPhoto = v || ""; }, rider: function () { return folRiderCtx(); }, state: fol, fast: function () { folFastTick(); }, posOut: folPosOut, tick: function () { if (ROLE === "driver") folDriverTick(); else folRiderTick(); },
-      sweep: function () { folSweep(); }, mine: folMine, route: folRoute, schedStops: folSchedStops, sig: folSig }; /* test hooks */
+      sweep: function () { folSweep(); }, mine: folMine, route: folRoute, schedStops: folSchedStops, sig: folSig,
+      linkedOut: folLinkedOut, linkOf: schedLinkOf, normRow: function (id, raw) { return normalizeScheduleRow(id, raw); }, linkKeys: folLinkKeys, liveTok: folLiveTok, linkTok: folLinkTok, commit: folCommit, inner: folDriverInner, tickNow: function () { folDriverTick(); } }; /* test hooks */
   }
   if (typeof window !== "undefined" && typeof location !== "undefined") try { var ntq = /[?&]navtest=([01])\b/.exec(location.search || ""); if (ntq) { if (ntq[1] === "1") localStorage.setItem(NAVTEST_KEY, "1"); else localStorage.removeItem(NAVTEST_KEY); } } catch (e) {} /* v75y */
   if (typeof window !== "undefined") window.__pcsSchedFull = { key: schedFullKey, on: function () { return schedFullOn(); }, set: function (v) { schedFullSet(v); }, apply: function () { schedFullApply(); } }; /* test hook */
@@ -12345,9 +12457,9 @@
   function folAutoText(schedId) {
     var k = "c_" + schedId;
     if (ROLE !== "driver" || fol.off || !FOL_KEY_RE.test(k)) return Promise.resolve(null);
-    var t = folTokenFor(k) || folDraft(k);
+    var t = folLiveTok(k) || folLinkTok(k) || folDraft(k); /* v2.0m-by: a linked ride texts its sibling's tracker */
     if (!FOL_TOKEN_RE.test(t || "")) return Promise.resolve(null);
-    var live = folTokenFor(k) === t ? Promise.resolve(true) : folCommit(k, t, "driver", folDriverCtx(k) || { status: "assigned" });
+    var live = folLiveTok(k) === t ? Promise.resolve(true) : folCommit(k, t, "driver", folDriverCtx(k) || { status: "assigned" });
     return live.then(function () {
       var tk = typeof qToken === "function" ? qToken() : ""; if (!tk) return null;
       var link = folLink(t);
