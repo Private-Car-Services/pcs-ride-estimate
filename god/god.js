@@ -394,19 +394,46 @@
   /* v2.0a (Matthew 10/22): the running meter shows only on rides started as "Metered"; every other ride shows
      Invoice # (or No invoice) + Paid (green) / Unpaid (red), using paidSource (paid-truth). Pure (tested). */
   function godMeterShown(p) { var m = (p && p.meter) || {}; return !!(p && (p.meterVisible === true || m.meterVisible === true) && !(p.scheduleId || m.scheduleId)); }
+  function invNorm(n) { return String(n == null ? "" : n).replace(/^#/, "").trim().replace(/^0+(?=\d)/, ""); }
+  function invoiceNoOf(r) {
+    if (!r) return "";
+    var sq = r.sqInvoice && typeof r.sqInvoice === "object" ? r.sqInvoice : {};
+    return invNorm(sq.invoiceNo || sq.number || r.prepaidInvoiceNo || r.invoiceNo || r.sqInvoiceNumber || (sq.invoiceNumber) || "");
+  }
+  function invoiceTripCancelled(r) { return /^(cancelled|canceled|deleted)$/i.test(String((r && r.status) || "")); }
+  function invoiceTripStart(r) { var t = Date.parse((r && (r.start || r.pickupTime || r.begin)) || ""); return isFinite(t) ? t : 0; }
+  function invoiceTripOf(rows, ride) { /* pure (tested): pickup-time order among non-cancelled trips with the same normalized invoice */
+    var want = invoiceNoOf(ride), id = String((ride && (ride.id || ride.key)) || "");
+    if (!want) return { n: 0, of: 0 };
+    var a = (rows || []).filter(function (x) { return x && invoiceNoOf(x) === want && !invoiceTripCancelled(x); })
+      .slice().sort(function (a, b) { return invoiceTripStart(a) - invoiceTripStart(b) || String(a.id || "").localeCompare(String(b.id || "")); });
+    var i = a.findIndex(function (x) { return String(x.id || x.key || "") === id || x === ride; });
+    return { n: i >= 0 ? i + 1 : 0, of: a.length };
+  }
+  function tripLabel(n, of) { n = Math.round(+n); of = Math.round(+of); return of > 1 && n >= 1 && n <= of ? "Trip " + n + " of " + of : ""; }
+  function barJoin(parts) { /* pure (tested): never a leading, trailing, or doubled mid-dot */
+    var out = [];
+    (parts || []).forEach(function (p) {
+      p = String(p == null ? "" : p).replace(/^[\s\u00b7]+|[\s\u00b7]+$/g, "").trim();
+      if (p) out.push(p);
+    });
+    return out.join(" \u00b7 ");
+  }
+  function godTripOf(ride) { return invoiceTripOf((typeof state !== "undefined" && state.calendar) || [], ride); }
   function godInvInfo(p) {
     var m = (p && p.meter) || {}, sid = (p && p.scheduleId) || m.scheduleId || "", row = null;
     if (sid) (state.calendar || []).forEach(function (r) { if (r && r.id === sid) row = r; });
     var src = row || p || {}, q = src.sqInvoice && typeof src.sqInvoice === "object" ? src.sqInvoice : null;
     var no = String(src.prepaidInvoiceNo || src.invoiceNo || (q && (q.invoiceNumber || q.number)) || "").replace(/^#/, "").trim();
     var paid = paidSource(src).paid;
-    return { label: no ? "Invoice #" + no : "No invoice", paid: paid, word: paid ? "Paid" : "Unpaid" };
+    var trip = godTripOf(src), lab = tripLabel(src.tripN || trip.n, src.tripOf || trip.of);
+    return { label: no ? "Invoice #" + no : "No invoice", paid: paid, word: paid ? "Paid" : "Unpaid", trip: lab, tripN: trip.n, tripOf: trip.of };
   }
   function godInvBadgeHtml(i) {
-    return ' <span class="god-inv-badge" style="display:inline-block;font-size:18px;font-weight:900;color:#fff;margin-left:6px">' + esc(i.label) +
+    return ' <span class="god-inv-badge" style="display:inline-block;font-size:18px;font-weight:900;color:#fff;margin-left:6px">' + esc(barJoin([i.label, i.trip])) +
       ' <span class="badge" style="font-size:18px;padding:3px 12px;border-radius:999px;color:#fff;background:' + (i.paid ? "#1b9e4b" : "#d32f2f") + '">' + i.word + "</span></span>";
   }
-  if (typeof window !== "undefined") window.__pcsGodV20a = { shown: godMeterShown, info: godInvInfo, badge: godInvBadgeHtml };
+  if (typeof window !== "undefined") window.__pcsGodV20a = { shown: godMeterShown, info: godInvInfo, badge: godInvBadgeHtml, tripOf: invoiceTripOf, tripLabel: tripLabel, invNo: invoiceNoOf, barJoin: barJoin };
   function firstName(n) { return String(n || "").trim().split(/\s+/)[0] || "driver"; }
   function paidSource(r) {
     if (!r) return { paid: false, kind: "unpaid", text: "Unpaid" };
@@ -7966,13 +7993,29 @@
     if (lat != null && lng != null && isFinite(+lat) && isFinite(+lng) && !(+lat === 0 && +lng === 0)) { p.lat = Math.round(+lat * 1e4) / 1e4; p.lng = Math.round(+lng * 1e4) / 1e4; }
     return p.label || p.lat != null ? p : null;
   }
+  function gfolTeenOn(r) { return !!(r && r.teenRider === true && gfolE164(r.teenPhone)); }
+  /* Matthew 1:51 PM 11/16: a linked ride's account holder gets their own holder link (same live map, money-free) even with Teen
+     rider off, so their after-ride stars / tip / survey reach them alone; the shared link never carries money. */
+  function gfolLinkedRun(r) { return !!(r && calLinkOf(r, r.id)); }
+  function gfolHolderTok(g, r) { return g && (gfolTeenOn(r) || gfolLinkedRun(r)) && GFOL_TOKEN_RE.test(String(g.holderT || "")) ? String(g.holderT) : (g && g.t ? String(g.t) : ""); }
+  function gfolCopyText(u, done) {
+    if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(u).then(function () { done("copied"); }, function () { done(u); });
+    else done(u);
+  }
   function gfolHtml(r) {
     if (!r || !r.assignedDriverId || r.status === "completed" || r.status === "cancelled" || r.status === "deleted") return "";
-    var g = GFOL.map[r.id], e = gfolE164(r.riderPhone);
+    var g = GFOL.map[r.id], e = gfolE164(r.riderPhone), teenOn = gfolTeenOn(r), te = gfolE164(r.teenPhone);
     if (g && g.t) {
+      var holderTok = gfolHolderTok(g, r), teenTok = teenOn && GFOL_TOKEN_RE.test(String(g.teenT || "")) ? String(g.teenT) : "";
+      var msg = GFOL.msg && GFOL.msg[r.id] ? '<p class="fine" style="margin:4px 0;font-weight:700">' + esc(GFOL.msg[r.id]) + "</p>" : "";
       return '<div class="gfol" style="margin:6px 0"><a class="btn btn-gold gfol-sms" style="display:block;text-align:center;min-height:52px;font-size:18px;font-weight:800;text-decoration:none;padding:12px" href="' +
-        esc("sms:" + e + "?&body=" + encodeURIComponent(gfolMsg(r, g.t))) + '">Open Messages' + (e ? " to " + esc(r.riderPhone) : "") + ": tracking link</a>" +
+        esc("sms:" + e + "?&body=" + encodeURIComponent(gfolMsg(r, holderTok))) + '">Open Messages' + (e ? " to " + esc(r.riderPhone) : "") + ": tracking link</a>" +
+        (teenTok ? '<a class="btn btn-ghost gfol-sms-teen" style="display:block;text-align:center;min-height:48px;font-size:16px;font-weight:800;text-decoration:none;padding:10px;margin-top:6px" href="' +
+          esc("sms:" + te + "?&body=" + encodeURIComponent(gfolMsg(r, teenTok))) + '">Open Messages' + (te ? " to " + esc(r.teenPhone) : "") + ": teen tracking link</a>" : "") +
         '<p class="fine" style="margin:4px 0">You press Send. The client sees the car and ETA once ' + esc(gfolFirst(r.assignedDriverName) || "the driver") + " heads out; fare and payment stay private.</p>" +
+        '<button type="button" class="btn btn-ghost gfol-copy" data-event-id="' + esc(r.id) + '" style="margin:2px 6px 2px 0">Copy link</button>' +
+        (teenOn ? '<button type="button" class="btn btn-ghost gfol-copy-teen" data-event-id="' + esc(r.id) + '" style="margin:2px 6px 2px 0"' + (teenTok ? "" : " disabled") + ">Copy teen link</button>" : "") +
+        msg +
         '<button type="button" class="btn btn-ghost gfol-stop" data-event-id="' + esc(r.id) + '" style="margin:2px 0">Stop the tracking link</button></div>';
     }
     return '<div class="gfol" style="margin:6px 0"><button type="button" class="btn btn-gold gfol-make" data-event-id="' + esc(r.id) + '" style="display:block;width:100%;min-height:52px;font-size:18px;font-weight:800"' + (GFOL.busy[r.id] ? " disabled" : "") + ">" +
@@ -7980,6 +8023,30 @@
       (GFOL.err[r.id] ? '<p class="fine" style="color:#ffb35c">' + esc(GFOL.err[r.id]) + "</p>" : "") + "</div>";
   }
   function gfolFind(id) { var rows = (state.calendar || []), i; for (i = 0; i < rows.length; i += 1) if (rows[i] && rows[i].id === id) return rows[i]; return null; }
+  function gfolPut(url, body) { return fetch(url, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }).then(function (x) { if (!x.ok) throw new Error("save " + x.status); }); }
+  function gfolEnsureRoles(id, r, live, prev) {
+    prev = prev && typeof prev === "object" ? prev : {};
+    var teenOn = gfolTeenOn(r), row = { t: live, at: Date.now(), by: "god" }, lkr = calLinkOf(r, id), lkg = lkr ? lkr.linkGroup : "";
+    if (lkg) row.lk = lkg;
+    if (prev.holderT) row.holderT = prev.holderT;
+    if (prev.teenT) row.teenT = prev.teenT;
+    if (!teenOn && !lkg) {
+      return gfolPut(gfolUrl("FLWRDMAP", "c_" + id), row).then(function () { return { t: live, holderT: "", teenT: "" }; });
+    }
+    function mintRole(key, role) {
+      if (GFOL_TOKEN_RE.test(String(row[key] || ""))) return Promise.resolve(row[key]);
+      var tok = gfolToken(); if (!GFOL_TOKEN_RE.test(tok)) return Promise.resolve("");
+      return fetch(gfolUrl("FLWSHARE", live)).then(function (x) { return x.ok ? x.json() : {}; }).then(function (copy) {
+        copy = copy && typeof copy === "object" ? copy : { v: 1, status: "assigned", kind: "sched", createdAt: Date.now(), updatedAt: Date.now() };
+        copy.role = role; copy.updatedAt = Date.now();
+        var tr = godTripOf(r), lab = tripLabel(tr.n, tr.of); if (lab) { copy.tripN = tr.n; copy.tripOf = tr.of; }
+        return gfolPut(gfolUrl("FLWSHARE", tok), copy).then(function () { row[key] = tok; return tok; });
+      });
+    }
+    return mintRole("holderT", "holder").then(function () { return teenOn ? mintRole("teenT", "teen") : ""; })
+      .then(function () { return gfolPut(gfolUrl("FLWRDMAP", "c_" + id), row); })
+      .then(function () { return { t: live, holderT: row.holderT || "", teenT: row.teenT || "" }; });
+  }
   function gfolMake(id, r) {
     if (!r || GFOL.busy[id]) return;
     GFOL.busy[id] = true; GFOL.err[id] = ""; renderBoardLists();
@@ -7988,7 +8055,7 @@
       var lkr = calLinkOf(r, id), lkg = lkr ? lkr.linkGroup : ""; /* v2.0m-by2: a token is reused only for the link state it was made for */
       if (d && GFOL_TOKEN_RE.test(String(d.t || "")) && (d.lk || "") === lkg) return String(d.t);
       return gfolLinkTok(r).then(function (sib) { /* v2.0m-by: a linked ride uses its sibling's live tracker (one tracker) */
-        if (sib) return fetch(gfolUrl("FLWRDMAP", key), { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ t: sib, at: now, by: "god", lk: lkg }) })
+        if (sib) return fetch(gfolUrl("FLWRDMAP", key), { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(Object.assign({}, d || {}, { t: sib, at: now, by: "god", lk: lkg })) })
           .then(function (x) { if (!x.ok) throw new Error("save " + x.status); return sib; });
       var t = gfolToken();
       if (!GFOL_TOKEN_RE.test(t)) throw new Error("token");
@@ -7998,27 +8065,40 @@
       var dr = gfolPlace(r.dropoff, r.dropoffLat, r.dropoffLng); if (dr) copy.dest = dr;
       var sx = (r.stopsGeo || []).slice(0, 5).map(function (x) { return x ? gfolPlace(x.address, x.lat, x.lng) : null; }).filter(Boolean); if (sx.length) copy.stops = sx; /* v76g: stops show on the tracker */
       var put = function (url, body) { return fetch(url, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }).then(function (x) { if (!x.ok) throw new Error("save " + x.status); }); };
-      var row = { t: t, at: now, by: "god" }; if (lkg) row.lk = lkg;
+      var row = Object.assign({}, d || {}, { t: t, at: now, by: "god" }); if (lkg) row.lk = lkg;
+      var tr = godTripOf(r), lab = tripLabel(tr.n, tr.of); if (lab) { copy.tripN = tr.n; copy.tripOf = tr.of; }
       return put(gfolUrl("FLWSHARE", t), copy).then(function () { return put(gfolUrl("FLWRDMAP", key), row); }).then(function () { return t; });
       });
-    }).then(function (t) { GFOL.busy[id] = false; GFOL.map[id] = { t: t }; renderBoardLists(); })
+    }).then(function (t) { return fetch(gfolUrl("FLWRDMAP", "c_" + id)).then(function (x) { return x.ok ? x.json() : {}; }).then(function (prev) { return gfolEnsureRoles(id, r, t, prev); }); })
+      .then(function (row) { GFOL.busy[id] = false; GFOL.map[id] = row; renderBoardLists(); })
       .catch(function (e) { GFOL.busy[id] = false; GFOL.err[id] = "The tracking link could not be made right now (" + (e && e.message || "try again") + ")."; renderBoardLists(); });
   }
   function gfolStop(id) {
     var g = GFOL.map[id]; if (!g || !g.t) return;
-    var now = Date.now();
-    fetch(gfolUrl("FLWSHARE", g.t), { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ v: 1, status: "stopped", endedAt: now, updatedAt: now }) }).catch(function () {});
+    var now = Date.now(), body = { v: 1, status: "stopped", endedAt: now, updatedAt: now };
+    [g.t, g.holderT, g.teenT].forEach(function (tok) {
+      if (GFOL_TOKEN_RE.test(String(tok || ""))) fetch(gfolUrl("FLWSHARE", tok), { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }).catch(function () {});
+    });
     fetch(gfolUrl("FLWRDMAP", "c_" + id), { method: "DELETE" }).catch(function () {});
     GFOL.map[id] = null; renderBoardLists();
   }
   document.addEventListener("click", function (e) {
-    var b = e.target && e.target.closest ? e.target.closest(".gfol-make,.gfol-stop") : null;
+    var b = e.target && e.target.closest ? e.target.closest(".gfol-make,.gfol-stop,.gfol-copy,.gfol-copy-teen") : null;
     if (!b) return;
     e.preventDefault();
     var id = b.getAttribute("data-event-id"); if (!id) return;
-    if (b.classList.contains("gfol-stop")) gfolStop(id); else gfolMake(id, gfolFind(id));
+    if (b.classList.contains("gfol-stop")) { gfolStop(id); return; }
+    if (b.classList.contains("gfol-copy") || b.classList.contains("gfol-copy-teen")) {
+      var r = gfolFind(id), g = GFOL.map[id]; if (!r || !g) return;
+      var tok = b.classList.contains("gfol-copy-teen") ? g.teenT : gfolHolderTok(g, r);
+      var u = gfolLink(tok);
+      GFOL.msg = GFOL.msg || {};
+      gfolCopyText(u, function (m) { GFOL.msg[id] = m === "copied" ? (b.classList.contains("gfol-copy-teen") ? "Teen link copied." : "Link copied.") : u; renderBoardLists(); });
+      return;
+    }
+    gfolMake(id, gfolFind(id));
   });
-  window.__pcsGodFollow = { html: gfolHtml, msg: gfolMsg, e164: gfolE164, state: GFOL, place: gfolPlace }; /* test hook */
+  window.__pcsGodFollow = { html: gfolHtml, msg: gfolMsg, e164: gfolE164, state: GFOL, place: gfolPlace, holderTok: gfolHolderTok, teenOn: gfolTeenOn, ensureRoles: gfolEnsureRoles }; /* test hook */
   /* ---------- v2.0m-by (Matthew 11/15): "Link ride" on a board card ----------
      Two rides, two invoices: Matthew links them by hand so ONE tracker goes out to both riders. Only linkGroup + linkedIds
      are written on each row (field-level PATCH). Invoices, prices, times and the driver assignment are never touched; every
@@ -8069,8 +8149,12 @@
   function linkEndPlan(maps, keep) {
     var out = [];
     Object.keys(maps || {}).forEach(function (id) {
-      var d = maps[id], t = d && GFOL_TOKEN_RE.test(String(d.t || "")) ? String(d.t) : "";
-      if (t && !(keep && d.lk === keep)) out.push({ id: id, t: t });
+      var d = maps[id]; if (!d) return;
+      function add(tok, live) {
+        var t = GFOL_TOKEN_RE.test(String(tok || "")) ? String(tok) : "";
+        if (t && !(keep && d.lk === keep && live)) out.push({ id: id, t: t });
+      }
+      add(d.t, true); add(d.holderT, false); add(d.teenT, false);
     });
     return out;
   }
@@ -8215,6 +8299,7 @@
             '<p class="day-time db-when">' + esc(fmtBoardWhenLine(r.start)) + "</p>" + /* v2.0c: one line, never wraps mid-date */
           "</div>" +
           '<h3 class="day-rider">' + esc(r.rider) + "</h3>" + driverLineHtml(r) + /* v77.10 */
+          (function () { var tr = godTripOf(r); return tr.of > 1 ? '<p class="day-line db-trip" style="font-weight:800;color:#f0d48a"><span>Trip</span> ' + esc(tr.n + " of " + tr.of) + "</p>" : ""; })() +
           '<div class="db-badges">' + (st === "canceled" || st === "cancelled" ? '<span class="db-tag db-tag-cancel">' + esc(drvCancelTag(r)) + '</span>' : dbPayPillHtml(r) + (typeof smscPillHtml === "function" ? smscPillHtml(smscPhoneOf(r), clientFullName(r)) : "") + badge) + "</div>" + /* v2.0c: one tidy wrapping row */
           '<div class="day-card-body"' + (dbCards[r.id] ? ' style="display:none"' : "") + ">" +
           '<p class="day-line"><span>Pickup</span> ' + esc(r.pickup || "—") + "</p>" +
@@ -8235,7 +8320,7 @@
           (r.assignedDriverId && st !== "cancelled" ? rideCommHtml(r) : "") + /* v76d per-ride Commission % */
           (st !== "cancelled" && st !== "completed" ? rateOvHtml(r) : "") + /* v76j rate override */
           (st !== "cancelled" && st !== "completed" ? cphHtml(r) : "") + /* v77.3 client phone + auto text */
-          (r.sqInvoice ? '<p class="day-line db-sqinv"><span>Invoice</span> #' + esc(r.prepaidInvoiceNo || r.sqInvoice.number || "") + " \u00b7 " + esc(sqInvoiceLine(r.sqInvoice)) + "</p>" : "") +
+          (r.sqInvoice ? '<p class="day-line db-sqinv"><span>Invoice</span> ' + esc(barJoin(["#" + String(r.prepaidInvoiceNo || r.sqInvoice.number || "").replace(/^#/, ""), sqInvoiceLine(r.sqInvoice)])) + "</p>" : "") +
           gfolHtml(r) + /* v76b: Text my client a tracking link */
           linkRideHtml(r) + /* v2.0m-by: Link ride (one tracker) */
           (st === "completed"

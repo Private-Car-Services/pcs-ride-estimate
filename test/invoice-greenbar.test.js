@@ -82,7 +82,7 @@ test("paid and unpaid words follow an actual payment record", function () {
   assert.equal(bill.pay({ prepaidInvoiceNo: "000574", sqInvoice: { paid: false } }), "");
   assert.equal(bill.pay({ prepaidInvoiceNo: "000574", invoiceStatus: "UNPAID", payState: "invoice_pending" }), "");
   const paidLinked = { prepaidInvoiceNo: "000554", sqInvoice: { paid: true, status: "PAID", amountDueCents: 0 }, receiptUrl: RECEIPT };
-  assert.equal(bill.slot(paidLinked), " \u00b7 Invoice #000554 \u2013 paid \u00b7 <a id=\"sched-inv-link\" href=\"" + RECEIPT + "\" target=\"_blank\" rel=\"noopener\">View receipt</a>");
+  assert.equal(bill.slot(paidLinked), " \u00b7 Invoice #000554 \u2013 paid <span class=\"pcs-inv-link\" style=\"white-space:nowrap\">\u00b7 <a id=\"sched-inv-link\" href=\"" + RECEIPT + "\" target=\"_blank\" rel=\"noopener\">View receipt</a></span>");
   const owedLinked = { prepaidInvoiceNo: "000574", payState: "invoice_pending", invoicePayUrl: PAY };
   assert.equal(bill.slot(owedLinked).indexOf("Pay invoice"), -1);
   assert.equal(bill.slot(owedLinked).indexOf(PAY), -1);
@@ -96,7 +96,7 @@ test("paid and unpaid words follow an actual payment record", function () {
   assert.equal(bill.slot(shared).indexOf("paid"), -1);
   const dueUnpaid = { prepaidInvoiceNo: "000574", sqInvoice: { status: "UNPAID", paid: false, amountDueCents: 2066, public_url: PAY } };
   assert.equal(bill.pay(dueUnpaid), "unpaid");
-  assert.equal(bill.slot(dueUnpaid), " \u00b7 Invoice #000574 \u2013 unpaid \u00b7 <a id=\"sched-inv-link\" href=\"" + PAY + "\" target=\"_blank\" rel=\"noopener\">Pay invoice</a>");
+  assert.equal(bill.slot(dueUnpaid), " \u00b7 Invoice #000574 \u2013 unpaid <span class=\"pcs-inv-link\" style=\"white-space:nowrap\">\u00b7 <a id=\"sched-inv-link\" href=\"" + PAY + "\" target=\"_blank\" rel=\"noopener\">Pay invoice</a></span>");
   assert.equal(bill.pay({ prepaidInvoiceNo: "000559", paymentStatus: "unpaid", invoiceStatus: "UNPAID" }), "");
   assert.equal(bill.slot({ prepaidInvoiceNo: "000559", paymentStatus: "unpaid" }), " \u00b7 Invoice #000559");
 });
@@ -452,4 +452,41 @@ test("the white invoice bar is gone and the invoice text is in the dark green ba
     session.chrome.kill("SIGKILL");
     session.server.kill("SIGKILL");
   }
+});
+
+test("the driver invoice bar shows Trip X of Y only when the invoice has more than one trip", function () {
+  assert.equal(bill.tripLabel(3, 5), "Trip 3 of 5");
+  assert.equal(bill.tripLabel(1, 1), "");
+  const rows = [
+    { id: "a", prepaidInvoiceNo: "000600", start: "2026-11-15T11:45:00-06:00", status: "assigned" },
+    { id: "b", prepaidInvoiceNo: "000600", start: "2026-11-15T18:30:00-06:00", status: "assigned" },
+    { id: "c", prepaidInvoiceNo: "000600", start: "2026-11-16T07:45:00-06:00", status: "assigned" },
+    { id: "d", prepaidInvoiceNo: "000600", start: "2026-11-17T07:45:00-06:00", status: "assigned" },
+    { id: "e", prepaidInvoiceNo: "000600", start: "2026-11-18T07:45:00-06:00", status: "cancelled" },
+  ];
+  assert.deepEqual(bill.tripOf(rows, rows[2]), { n: 3, of: 4 });
+  assert.equal(bill.bar(Object.assign({ prepaidInvoiceNo: "000600", tripN: 3, tripOf: 5 })), "Invoice #000600 \u00b7 Trip 3 of 5");
+  assert.equal(bill.bar(RAHUAL), "Invoice #000554", "single-trip / no index: unchanged");
+  const slot = bill.slot({ prepaidInvoiceNo: "000600", tripN: 3, tripOf: 5 });
+  assert.ok(slot.indexOf("Trip 3 of 5") >= 0);
+});
+
+test("the driver invoice bar never has a dangling or doubled separator", function () {
+  function vis(s) { return String(s || "").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim(); }
+  function clean(s) {
+    const v = vis(s).replace(/^[\s\u00b7]+/, "");
+    assert.equal(v.indexOf("\u00b7 \u00b7"), -1, s);
+    assert.doesNotMatch(v, /\u00b7\s*$/, s);
+  }
+  const receipt = { prepaidInvoiceNo: "000600", tripN: 3, tripOf: 5, sqInvoice: { paid: true, status: "PAID", amountDueCents: 0 }, receiptUrl: RECEIPT };
+  const unpaid = { prepaidInvoiceNo: "000600", tripN: 3, tripOf: 5, sqInvoice: { status: "UNPAID", paid: false, amountDueCents: 100, public_url: PAY } };
+  const bareTrip = { prepaidInvoiceNo: "000600", tripN: 3, tripOf: 5 };
+  const bare = { prepaidInvoiceNo: "000554" };
+  const paidNoTrip = { prepaidInvoiceNo: "000554", sqInvoice: { paid: true, status: "PAID", amountDueCents: 0 }, receiptUrl: RECEIPT };
+  [receipt, unpaid, bareTrip, bare, paidNoTrip, RAHUAL].forEach(function (r) {
+    clean(bill.bar(r));
+    clean(bill.slot(r));
+    clean(bill.fsInv(r));
+  });
+  assert.equal(bill.barJoin(["Invoice #000600", "", "Trip 3 of 5", " \u00b7 "]), "Invoice #000600 \u00b7 Trip 3 of 5");
 });

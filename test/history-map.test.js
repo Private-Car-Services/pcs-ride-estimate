@@ -329,9 +329,10 @@ test("God day view keeps a missing stored type blank and does not call it PCS", 
 });
 
 
-test("v2.0m-by2 is the update phones on v2.0m-bf will accept", function () {
+test("v2.0m-bz is the update phones on v2.0m-bf will accept", function () {
   const box = loadScript("app/version.js");
-  assert.equal(box.PCS_APP_VERSION, "v2.0m-by2");
+  assert.equal(box.PCS_APP_VERSION, "v2.0m-bz");
+  assert.ok(box.pcsVersionCmp("v2.0m-bz", "v2.0m-by2") >= 0);
   assert.ok(box.pcsVersionCmp("v2.0m-by2", "v2.0m-by") >= 0);
   assert.ok(box.pcsVersionCmp("v2.0m-by", "v2.0m-bu") >= 0);
   assert.ok(box.pcsVersionCmp("v2.0m-bu", "v2.0m-bt") >= 0);
@@ -356,14 +357,16 @@ test("v2.0m-by2 is the update phones on v2.0m-bf will accept", function () {
   assert.notEqual(box.PCS_APP_VERSION, "v2.0m-az");
   assert.notEqual(box.PCS_APP_VERSION, "v2.0m-ay");
   const pages = {
-    "app/driver/index.html": ["../version.js?v=2.0m-by2", "../driverlog.js?v=2.0m-bq", "../app.js?v=2.0m-by2"],
-    "app/index.html": ["version.js?v=2.0m-by2", "app.js?v=2.0m-by2"],
-    "god/index.html": ["../app/version.js?v=2.0m-by2", "../app/driverlog.js?v=2.0m-bq", "./godmap.js?v=2.0m-ad", "./goal.js?v=2.0m-bx", "./god.js?v=2.0m-by2"]
+    "app/driver/index.html": ["../version.js?v=2.0m-bz", "../driverlog.js?v=2.0m-bq", "../app.js?v=2.0m-bz"],
+    "app/index.html": ["version.js?v=2.0m-bz", "app.js?v=2.0m-bz"],
+    "god/index.html": ["../app/version.js?v=2.0m-bz", "../app/driverlog.js?v=2.0m-bq", "./godmap.js?v=2.0m-ad", "./goal.js?v=2.0m-bx", "./god.js?v=2.0m-bz"],
+    "follow/index.html": ["follow-live.js?v=2.0m-bz"] /* Harry r14: every file changed in bz loads with a new ?v */
   };
   Object.keys(pages).forEach(function (rel) {
     const html = fs.readFileSync(path.join(root, rel), "utf8");
     pages[rel].forEach(function (src) { assert.ok(html.indexOf(src) >= 0, rel + " " + src); });
     assert.equal(html.indexOf("version.js?v=2.0m-ai"), -1, rel);
+    assert.equal(html.indexOf("god.js?v=2.0m-by2"), -1, rel); assert.equal(html.indexOf("follow-live.js?v=2.0m-by2"), -1, rel);
   });
   const driverSw = fs.readFileSync(path.join(root, "app/driver/sw-driver.js"), "utf8");
   const godSw = fs.readFileSync(path.join(root, "god/sw.js"), "utf8");

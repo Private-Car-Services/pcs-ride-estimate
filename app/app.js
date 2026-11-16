@@ -9955,13 +9955,54 @@
     if (String(r.payState || "").toLowerCase() === "unpaid") return "unpaid";
     return "";
   }
+  function invNorm(n) { return String(n == null ? "" : n).replace(/^#/, "").trim().replace(/^0+(?=\d)/, ""); }
+  function invoiceNoOf(r) {
+    if (!r) return "";
+    var sq = r.sqInvoice && typeof r.sqInvoice === "object" ? r.sqInvoice : {};
+    return invNorm(sq.invoiceNo || sq.number || r.prepaidInvoiceNo || r.invoiceNo || r.sqInvoiceNumber || "");
+  }
+  function invoiceTripCancelled(r) { return /^(cancelled|canceled|deleted)$/i.test(String((r && r.status) || "")); }
+  function invoiceTripStart(r) { var t = Date.parse((r && (r.start || r.pickupTime || r.begin)) || ""); return isFinite(t) ? t : 0; }
+  function invoiceTripOf(rows, ride) { /* pure (tested): pickup-time order among non-cancelled trips with the same normalized invoice */
+    var want = invoiceNoOf(ride), id = String((ride && (ride.id || ride.key)) || "");
+    if (!want) return { n: 0, of: 0 };
+    var a = (rows || []).filter(function (x) { return x && invoiceNoOf(x) === want && !invoiceTripCancelled(x); })
+      .slice().sort(function (a, b) { return invoiceTripStart(a) - invoiceTripStart(b) || String(a.id || a.key || "").localeCompare(String(b.id || b.key || "")); });
+    var i = a.findIndex(function (x) { return String(x.id || x.key || "") === id || x === ride; });
+    return { n: i >= 0 ? i + 1 : 0, of: a.length };
+  }
+  function tripLabel(n, of) { n = Math.round(+n); of = Math.round(+of); return of > 1 && n >= 1 && n <= of ? "Trip " + n + " of " + of : ""; }
+  function barJoin(parts) { /* pure (tested): never a leading, trailing, or doubled mid-dot */
+    var out = [];
+    (parts || []).forEach(function (p) {
+      p = String(p == null ? "" : p).replace(/^[\s\u00b7]+|[\s\u00b7]+$/g, "").trim();
+      if (p) out.push(p);
+    });
+    return out.join(" \u00b7 ");
+  }
+  function invoiceTripLab(r, rows) {
+    var lab = tripLabel(r && r.tripN, r && r.tripOf);
+    if (!lab) { var of = invoiceTripOf(rows || (typeof state !== "undefined" && state.scheduledRides) || [], r); lab = tripLabel(of.n, of.of); }
+    return lab;
+  }
+  function invoiceTripSuffix(r, rows) {
+    var lab = invoiceTripLab(r, rows);
+    return lab ? " \u00b7 " + lab : "";
+  }
+  function invoiceLinkChunk(href, text) {
+    if (!href || !text) return "";
+    return ' <span class="pcs-inv-link" style="white-space:nowrap">\u00b7 <a id="sched-inv-link" href="' + esc(href) + '" target="_blank" rel="noopener">' + esc(text) + "</a></span>";
+  }
+  function invoiceSlotBody(no, word, r, M, href, linkText) {
+    var head = barJoin(["Invoice #" + no + (word ? " \u2013 " + word : ""), invoiceTripLab(r, (M && M.board) || null)]);
+    return head ? " \u00b7 " + esc(head) + invoiceLinkChunk(href, linkText) : "";
+  }
   function rideMapBillText(r, M) {
     var no = rideInvoiceNoFrom(r || {}, M);
     var w = "";
     try { w = ridePayWord(r || {}, M); } catch (e) { w = ""; }
-    if (no && w) return "Invoice #" + no + " \u2013 " + w;
-    if (no) return "Invoice #" + no;
-    return rideBillText(rideBillKind(r || {}, M), "");
+    var base = no && w ? "Invoice #" + no + " \u2013 " + w : no ? "Invoice #" + no : rideBillText(rideBillKind(r || {}, M), "");
+    return barJoin([base, invoiceTripLab(r || {}, (M && M.board) || null)]);
   }
   function rideCustomerPayUrl(r) {
     r = r || {};
@@ -9999,25 +10040,25 @@
     var held = r.id && typeof verInv !== "undefined" ? verInv[r.id] : null;
     if (held && !held.stale) {
       var share = invoiceShareFromWorker(held);
-      if (share.pay && share.url) return " \u00b7 Invoice #" + esc(share.invoiceNo) + " \u2013 " + share.pay + " \u00b7 <a id=\"sched-inv-link\" href=\"" + esc(share.url) + "\" target=\"_blank\" rel=\"noopener\">" + (share.pay === "paid" ? "View receipt" : "Pay invoice") + "</a>";
+      if (share.pay && share.url) return invoiceSlotBody(share.invoiceNo, share.pay, r, M, share.url, share.pay === "paid" ? "View receipt" : "Pay invoice");
     }
     var live = rideLivePay(r, M);
-    if (live) return " \u00b7 Invoice #" + esc(live.invoiceNo) + " \u2013 " + live.pay + " \u00b7 <a id=\"sched-inv-link\" href=\"" + esc(live.url) + "\" target=\"_blank\" rel=\"noopener\">" + esc(live.link) + "</a>";
+    if (live) return invoiceSlotBody(live.invoiceNo, live.pay, r, M, live.url, live.link);
     var no = rideInvoiceNoFrom(r, M);
     if (!no) return "";
     var q = r.sqInvoice && typeof r.sqInvoice === "object" ? r.sqInvoice : null;
     var sqSt = String((q && q.status) || "").toUpperCase();
     var st = String(sqSt || r.invoiceStatus || "").toUpperCase();
-    if (/PARTIAL|REFUND|CANCEL/.test(st)) return " \u00b7 Invoice #" + esc(no);
-    if (q && sqSt !== "UNPAID" && sqSt !== "PAID" && isFinite(+q.amountDueCents) && +q.amountDueCents > 0) return " \u00b7 Invoice #" + esc(no);
+    if (/PARTIAL|REFUND|CANCEL/.test(st)) return invoiceSlotBody(no, "", r, M);
+    if (q && sqSt !== "UNPAID" && sqSt !== "PAID" && isFinite(+q.amountDueCents) && +q.amountDueCents > 0) return invoiceSlotBody(no, "", r, M);
     var w = "";
     try { w = ridePayWord(r, M); } catch (e) { w = ""; }
-    if (w !== "paid" && w !== "unpaid") return " \u00b7 Invoice #" + esc(no);
+    if (w !== "paid" && w !== "unpaid") return invoiceSlotBody(no, "", r, M);
     var receipt = rideSquareHttps(r.receiptUrl || (q && (q.receipt_url || q.receiptUrl)) || "");
     var pay = rideSquareHttps(r.invoicePayUrl || r.payUrl || (q && (q.public_url || q.publicUrl || q.payUrl)) || "");
-    if (w === "paid" && receipt) return " \u00b7 Invoice #" + esc(no) + " \u2013 paid \u00b7 <a id=\"sched-inv-link\" href=\"" + esc(receipt) + "\" target=\"_blank\" rel=\"noopener\">View receipt</a>";
-    if (w === "unpaid" && pay) return " \u00b7 Invoice #" + esc(no) + " \u2013 unpaid \u00b7 <a id=\"sched-inv-link\" href=\"" + esc(pay) + "\" target=\"_blank\" rel=\"noopener\">Pay invoice</a>";
-    return " \u00b7 Invoice #" + esc(no) + " \u2013 " + w;
+    if (w === "paid" && receipt) return invoiceSlotBody(no, "paid", r, M, receipt, "View receipt");
+    if (w === "unpaid" && pay) return invoiceSlotBody(no, "unpaid", r, M, pay, "Pay invoice");
+    return invoiceSlotBody(no, w, r, M);
   }
   /* v2.0m-be: the same invoice line the white bar used, for the full-screen map's existing dark green bar.
      Paid / Unpaid are capitalized. No invoice number means nothing extra. */
@@ -10071,7 +10112,7 @@
     try { if (M && M.schedId) r = schedFind(M.schedId); } catch (e) {}
     return rideInvoiceNoFrom(r, M);
   }
-  if (typeof window !== "undefined") window.__pcsV20lBill = { kind: rideBillKind, text: rideBillText, label: rideBillLabelHtml, invoiceNo: rideInvoiceDisplayNo, from: rideInvoiceNoFrom, fit: rideBillLabelFitCss, map: schedMapBillHtml, pickupLine: schedPickupStatusText, pay: ridePayWord, bar: rideMapBillText, payUrl: rideCustomerPayUrl, slot: rideInvoiceSlotHtml, square: squareInvoiceLink, take: verInvTake, live: rideLivePay, fsInv: fsMapInvoiceHtml };
+  if (typeof window !== "undefined") window.__pcsV20lBill = { kind: rideBillKind, text: rideBillText, label: rideBillLabelHtml, invoiceNo: rideInvoiceDisplayNo, from: rideInvoiceNoFrom, fit: rideBillLabelFitCss, map: schedMapBillHtml, pickupLine: schedPickupStatusText, pay: ridePayWord, bar: rideMapBillText, payUrl: rideCustomerPayUrl, slot: rideInvoiceSlotHtml, square: squareInvoiceLink, take: verInvTake, live: rideLivePay, fsInv: fsMapInvoiceHtml, tripOf: invoiceTripOf, tripLabel: tripLabel, tripSuffix: invoiceTripSuffix, invNo: invoiceNoOf, barJoin: barJoin };
   function meterInvInfo(M) { return rideInvoiceInfo(M && M.schedId ? schedFind(M.schedId) : null, M); }
   function meterInvRefresh(M) { /* live: the 15-min Square sync / refreshScheduledRides flips the badge without a re-render */
     if (typeof document === "undefined" || meterShown(M)) return;
@@ -11528,6 +11569,8 @@
     if (o.pay === "paid" || o.pay === "unpaid") out.pay = o.pay;
     var invNo = String(o.invoiceNo || "").replace(/^#/, "").replace(/\s+/g, "");
     if (/^\d{1,20}$/.test(invNo)) out.invoiceNo = invNo;
+    if (tripLabel(o.tripN, o.tripOf)) { out.tripN = Math.round(+o.tripN); out.tripOf = Math.round(+o.tripOf); }
+    if (o.role === "holder" || o.role === "teen") out.role = o.role;
     var recUrl = folSquareUrl(o.receiptUrl), payUrl = folSquareUrl(o.payUrl);
     if (o.pay === "paid" && recUrl) out.receiptUrl = recUrl; /* receipt link only after a verified paid record */
     if (o.pay === "unpaid" && payUrl) out.payUrl = payUrl; /* pay link only with an explicit unpaid record */
@@ -11584,6 +11627,8 @@
       var before = JSON.stringify(fol.map[k] || null);
       fol.map[k] = d && FOL_TOKEN_RE.test(String(d.t || "")) ? { t: String(d.t), at: Number(d.at) || 0 } : { t: "" };
       if (fol.map[k].t && LINK_GROUP_RE.test(String(d.lk || ""))) fol.map[k].lk = String(d.lk); /* v2.0m-by2: a linked ride's shared token */
+      if (d && FOL_TOKEN_RE.test(String(d.holderT || ""))) fol.map[k].holderT = String(d.holderT);
+      if (d && FOL_TOKEN_RE.test(String(d.teenT || ""))) fol.map[k].teenT = String(d.teenT);
       fol.mapAt[k] = Date.now();
       if (JSON.stringify(fol.map[k]) !== before) folRedraw();
     }).catch(function () { fol.mapBusy[k] = false; fol.mapAt[k] = Date.now() - FOL_MAP_POLL_MS + 5000; });
@@ -11605,13 +11650,18 @@
     if (!FOL_KEY_RE.test(k || "") || !FOL_TOKEN_RE.test(t || "")) return Promise.resolve(false);
     var now = Date.now();
     var lk = ctx && LINK_GROUP_RE.test(String(ctx.linkGroup || "")) ? String(ctx.linkGroup) : ""; /* v2.0m-by2: only linked rides tag their row */
+    var prev = fol.map[k] || {};
     fol.map[k] = { t: t, at: now }; fol.mapAt[k] = now;
     if (lk) fol.map[k].lk = lk;
+    if (FOL_TOKEN_RE.test(String(prev.holderT || ""))) fol.map[k].holderT = prev.holderT;
+    if (FOL_TOKEN_RE.test(String(prev.teenT || ""))) fol.map[k].teenT = prev.teenT;
     folMineNote(t, k, { role: role, at: now });
     folDraftDrop(k);
     fol.lastPush[t] = now; fol.lastSt[t] = ctx && ctx.status || "";
     var row = { t: t, at: now, by: role === "rider" ? "rider" : role === "god" ? "god" : "driver" };
     if (lk) row.lk = lk;
+    if (fol.map[k].holderT) row.holderT = fol.map[k].holderT;
+    if (fol.map[k].teenT) row.teenT = fol.map[k].teenT;
     folWrite(folMapUrl(k), "PUT", row);
     var c = folClean(Object.assign({}, ctx || {}, { createdAt: now }), now);
     fol.lastSig[t] = folSig(c);
@@ -11741,7 +11791,8 @@
           share = { invoiceNo: boardNo, pay: boardPay, url: shareUrl };
         }
       }
-      out.push(Object.assign({ key: "c_" + r.id, kind: "sched", bill: rideBillKind(r, onMeter ? M : null), pay: share.pay, invoiceNo: share.invoiceNo, receiptUrl: share.pay === "paid" ? share.url : "", payUrl: share.pay === "unpaid" ? share.url : "", status: st, phone: r.riderPhone, pickup: pickup, dest: dest, stops: stops, eta: eta, route: route, pos: here }, base));
+      var trip = invoiceTripOf(state.scheduledRides || [], r);
+      out.push(Object.assign({ key: "c_" + r.id, kind: "sched", bill: rideBillKind(r, onMeter ? M : null), pay: share.pay, invoiceNo: share.invoiceNo, receiptUrl: share.pay === "paid" ? share.url : "", payUrl: share.pay === "unpaid" ? share.url : "", status: st, phone: r.riderPhone, tripN: trip.n, tripOf: trip.of, pickup: pickup, dest: dest, stops: stops, eta: eta, route: route, pos: here }, base));
     });
     folLinkMerge(out, M);
     var code = state.screen === "trip" ? String(state.driverCode || readDriverCode() || "") : "";
@@ -11854,10 +11905,18 @@
         if (sib && !(folMine()[sib] && (folMine()[sib].wiped || folMine()[sib].endedAt))) { folCommit(c.key, sib, "driver", c); t = sib; }
       }
       if (!t) return;
-      seen[t] = 1;
-      var mm = folMine()[t];
-      if ((c.status === "on_way" || c.status === "arrived" || c.status === "picked_up") && !(mm && (mm.wiped || mm.endedAt))) fol.live[t] = { at: now }; else delete fol.live[t];
-      folPush(t, c, now, "driver");
+      var toks = [t], mm0 = fol.map[c.key] || {};
+      if (FOL_TOKEN_RE.test(String(mm0.holderT || "")) && toks.indexOf(mm0.holderT) < 0) toks.push(mm0.holderT);
+      if (FOL_TOKEN_RE.test(String(mm0.teenT || "")) && toks.indexOf(mm0.teenT) < 0) toks.push(mm0.teenT);
+      toks.forEach(function (tok) {
+        seen[tok] = 1;
+        var mm = folMine()[tok];
+        if ((c.status === "on_way" || c.status === "arrived" || c.status === "picked_up") && !(mm && (mm.wiped || mm.endedAt))) fol.live[tok] = { at: now }; else delete fol.live[tok];
+        var ctx = c;
+        if (mm0.holderT === tok) ctx = Object.assign({}, c, { role: "holder" });
+        else if (mm0.teenT === tok) ctx = Object.assign({}, c, { role: "teen" });
+        folPush(tok, ctx, now, "driver");
+      });
     });
     if (ROLE !== "driver") return;
     var o = folMine(), ch = false;
@@ -21853,6 +21912,62 @@
     } catch (e) { return ""; }
   }
   function qSetToken(t) { try { if (t) localStorage.setItem(qTokKey(), t); else localStorage.removeItem(qTokKey()); } catch (e) {} }
+  /* v2.0m-bz (Matthew 11/16): a rider's after-ride tip. The Worker adds it only after Square shows it paid, then keeps one
+     notice for this driver (POST /driver/tips, own driver token) and pushes it to the driver's saved devices (same path as
+     Ping driver). While the driver app is open it checks on open, on coming back to the screen and every minute, and shows a
+     pop-up (same card as the wait / police pop-ups): big header "You received a $20 tip", then the ride, the invoice number
+     when there is one, and the customer's name. OK clears it. Pure parts tested (window.__pcsTipNote). */
+  function tipNoteMoney(c) { var v = (Number(c) || 0) / 100; return "$" + (v % 1 ? v.toFixed(2) : String(v)); }
+  function tipNoteWhen(ms) { try { return new Date(ms).toLocaleString("en-US", { timeZone: "America/Chicago", weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) + " CT"; } catch (e) { return ""; } }
+  function tipNoteInvoice(n) { /* pure (tested), Harry r1: the notice's number, else a calendar ride's prepaidInvoiceNo / sqInvoice.number */
+    var sq = n && n.sqInvoice && typeof n.sqInvoice === "object" ? n.sqInvoice : {};
+    var v = String((n && n.invoiceNo) || sq.invoiceNo || sq.number || (n && n.prepaidInvoiceNo) || "").replace(/^#/, "").replace(/\s+/g, "");
+    return /^\d{1,20}$/.test(v) ? v : "";
+  }
+  function tipNoteHtml(n) {
+    var lines = [];
+    if (n.from || n.to) lines.push("Ride: " + esc(n.from || "Pickup") + " \u2192 " + esc(n.to || "Drop-off"));
+    if (n.when) lines.push(esc(tipNoteWhen(n.when)));
+    var inv = tipNoteInvoice(n); if (inv) lines.push("Invoice #" + esc(inv));
+    if (n.customer) lines.push("Customer: " + esc(n.customer));
+    return '<div class="wa-card" role="alertdialog" aria-modal="true" aria-labelledby="drv-tip-title">' +
+      '<p class="wa-title" id="drv-tip-title">You received a <span class="drv-tip-amt">' + esc(tipNoteMoney(n.tipCents)) + "</span> tip</p>" +
+      '<p class="wa-body">' + lines.join("<br>") + "</p>" +
+      '<div class="wa-actions"><button type="button" class="wa-yes" id="drv-tip-ok">OK</button></div></div>';
+  }
+  var tipNoteBusy = false, tipNoteShown = "";
+  function tipNoteStyle() {
+    if (document.getElementById("drv-tip-style")) return;
+    var st = document.createElement("style"); st.id = "drv-tip-style";
+    st.textContent = "#drv-tip-popup{position:fixed;inset:0;z-index:11500;background:rgba(5,14,28,.94);display:flex;align-items:center;justify-content:center;padding:16px;font-family:inherit}" +
+      "#drv-tip-popup .wa-card{background:#0b1c33;color:#fff;border:2px solid #f0d48a;border-radius:20px;max-width:440px;width:100%;padding:22px}" +
+      "#drv-tip-popup .wa-title{font-size:27px;font-weight:800;color:#fff;margin:0 0 12px;text-align:center}#drv-tip-popup .drv-tip-amt{color:#4ade80;font-weight:800}" + /* 20pt header: white words, green amount (Matthew 4:49) */
+      "#drv-tip-popup .wa-body{font-size:15px;line-height:1.45;margin:0 0 16px;text-align:center;color:#fff}" + /* about 11pt */
+      "#drv-tip-popup .wa-actions{display:flex;gap:12px}#drv-tip-popup .wa-actions button{flex:1;font-size:20px;font-weight:800;padding:18px 10px;border-radius:14px;border:0;color:#fff;cursor:pointer;background:#2e9d4f}";
+    document.head.appendChild(st);
+  }
+  function tipNoteShow(n) {
+    if (document.getElementById("drv-tip-popup")) return;
+    tipNoteStyle(); tipNoteShown = String(n.id || "");
+    var el = document.createElement("div"); el.id = "drv-tip-popup"; el.innerHTML = tipNoteHtml(n); document.body.appendChild(el);
+    var ok = document.getElementById("drv-tip-ok");
+    if (ok) ok.addEventListener("click", function () {
+      if (el.parentNode) el.parentNode.removeChild(el);
+      var tk = qToken(); if (tk) qWorker("/driver/tips", { token: tk, ack: [tipNoteShown] }).then(function (d) { tipNoteNext(d); }, function () {});
+    });
+  }
+  function tipNoteNext(d) { var list = d && Array.isArray(d.tips) ? d.tips.filter(function (n) { return n && n.id && Number(n.tipCents) > 0; }) : []; if (list.length) tipNoteShow(list[0]); }
+  function tipNotePoll() {
+    if (ROLE !== "driver" || tipNoteBusy || document.visibilityState === "hidden" || document.getElementById("drv-tip-popup")) return;
+    var tk = qToken(); if (!tk) return;
+    tipNoteBusy = true;
+    qWorker("/driver/tips", { token: tk }).then(function (d) { tipNoteBusy = false; tipNoteNext(d); }, function () { tipNoteBusy = false; });
+  }
+  if (typeof window !== "undefined") window.__pcsTipNote = { html: tipNoteHtml, invoice: tipNoteInvoice, money: tipNoteMoney, when: tipNoteWhen, show: tipNoteShow };
+  if (typeof document !== "undefined" && ROLE === "driver" && typeof setInterval === "function") {
+    setTimeout(tipNotePoll, 4000); setInterval(tipNotePoll, 60000);
+    document.addEventListener("visibilitychange", function () { if (document.visibilityState === "visible") tipNotePoll(); });
+  }
   function qDriverLoginToken(email, password) {
     if (ROLE !== "driver" || !email || !password) return;
     var tries = 0;
