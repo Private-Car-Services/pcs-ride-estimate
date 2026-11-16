@@ -11791,8 +11791,8 @@
           share = { invoiceNo: boardNo, pay: boardPay, url: shareUrl };
         }
       }
-      var trip = invoiceTripOf(state.scheduledRides || [], r);
-      out.push(Object.assign({ key: "c_" + r.id, kind: "sched", bill: rideBillKind(r, onMeter ? M : null), pay: share.pay, invoiceNo: share.invoiceNo, receiptUrl: share.pay === "paid" ? share.url : "", payUrl: share.pay === "unpaid" ? share.url : "", status: st, phone: r.riderPhone, tripN: trip.n, tripOf: trip.of, pickup: pickup, dest: dest, stops: stops, eta: eta, route: route, pos: here }, base));
+      var tripInfo = invoiceTripOf(state.scheduledRides || [], r); /* hotfix: was "var trip", which overwrote schedTripNow() so On my way never reached the tracker */
+      out.push(Object.assign({ key: "c_" + r.id, kind: "sched", bill: rideBillKind(r, onMeter ? M : null), pay: share.pay, invoiceNo: share.invoiceNo, receiptUrl: share.pay === "paid" ? share.url : "", payUrl: share.pay === "unpaid" ? share.url : "", status: st, phone: r.riderPhone, tripN: tripInfo.n, tripOf: tripInfo.of, pickup: pickup, dest: dest, stops: stops, eta: eta, route: route, pos: here }, base));
     });
     folLinkMerge(out, M);
     var code = state.screen === "trip" ? String(state.driverCode || readDriverCode() || "") : "";
