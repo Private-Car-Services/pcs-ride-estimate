@@ -1,7 +1,12 @@
 /* PCS v76g (Matthew 10/18): the ride's stops on the map (numbered) + in the From / To list; the map zooms in on the car and
-   its next target as it gets closer (pauses 10 s after the viewer touches the map); a slide-down pop-up across the top
+   its next target as it gets closer (pauses 25 s after the viewer pans or zooms the map); a slide-down pop-up across the top
    when the driver is about 1 minute from the pickup and again from the drop-off (once per leg, plus a short vibration
    where the phone supports it; silent, no sound).
+   v2.0m-bz2: before pickup, frame the car and the pickup only (never the drop-off). If the pickup has no coordinates,
+   follow the car at street zoom (16). After pickup, frame the car and the drop-off the same way. Re-fits as the gap shrinks
+   (max zoom 17, padded). A manual pan or zoom pauses auto-fit for 25 s.
+   v2.0m-bz3: driver's average stars under the photo (or next to the name if there is no photo), and Share my ride — a
+   separate public copy with its own token, no invoice / pay / receipt / tip / original token.
    v76f: 2.5 s updates, GPS speed/heading when shared, gliding arrow. v76e: big live speed + ETA + heading arrow (computed here). v76b (Matthew 10/17): "Follow my ride" / driver tracking link. /follow/?t=<32-character token>.
    Read-only. Reads ONE small public copy: /rides/FLWSHARE/<token> (written by the rider / driver / God apps, see app.js
    folClean). Shows: status, driver first name + photo (v77.3b, from the picture card), car + plate, the car on a map with the route, pickup + drop-off, ETA and
@@ -45,7 +50,9 @@
       "#fl-soon{position:fixed;left:6px;right:6px;top:4px;top:calc(env(safe-area-inset-top,0px) + 4px);z-index:2000;background:#bef1c6;color:#0b3d23;border:3px solid #2e9d4f;border-radius:14px;" +
       "padding:8px 12px;box-shadow:0 6px 18px rgba(11,61,35,.35);text-align:center;cursor:pointer;transform:translateY(-130%);opacity:0;transition:transform .45s ease,opacity .45s ease;-webkit-tap-highlight-color:transparent}" +
       "#fl-soon.in{transform:translateY(0);opacity:1}#fl-soon b{display:block;font-size:20px;line-height:1.2;font-weight:900}#fl-soon small{display:block;font-size:13px;font-weight:700;margin-top:1px}" +
-      ".fl-msg{background:#f0fdf4;color:#0b3d23;border:3px solid #2e9d4f;border-radius:16px;padding:14px}.fl-msg p{color:#0b3d23}.fl-msg .tag{color:#0b3d23;font-weight:900;font-size:20px}";
+      ".fl-msg{background:#f0fdf4;color:#0b3d23;border:3px solid #2e9d4f;border-radius:16px;padding:14px}.fl-msg p{color:#0b3d23}.fl-msg .tag{color:#0b3d23;font-weight:900;font-size:20px}" +
+      ".fl-rate-col{display:flex;flex-direction:column;align-items:center;flex:none;max-width:48%}.fl-stars{margin:4px 0 0;font-size:14px;line-height:1.15;text-align:center;font-weight:800;color:#0b3d23;white-space:nowrap}.fl-star-empty{opacity:.3;filter:grayscale(1)}" +
+      ".fl-share{display:block;width:auto;margin:12px auto 0;padding:8px 18px;min-height:44px;box-sizing:border-box;text-align:center;background:#bef1c6;border:2px solid #2e9d4f;border-radius:999px;color:#0b6b3a;font-size:19px;font-weight:900;text-decoration:none;cursor:pointer}#fl-share[hidden]{display:none}.fl-share-note{margin:6px 0 0;text-align:center;font-size:13px;font-weight:700;color:#e8f5ea}";
     document.head.appendChild(st);
   }
   function message(title, body, final) {
@@ -196,18 +203,21 @@
     app.innerHTML = '<div class="card" id="fl-live"><p class="fl-status" id="fl-status" role="status" aria-live="polite"></p>' +
       '<div class="fl-under" id="fl-under"><div class="fl-under-main">' +
       '<div class="fl-drv" id="fl-drv"><div class="fl-drv-t"><p class="fl-who" id="fl-who"></p><p class="fl-car" id="fl-car"></p></div></div></div>' +
-      '<img class="fl-photo" id="fl-photo" alt="Your PCS driver" hidden width="64" height="64"></div>' +
+      '<div class="fl-rate-col" id="fl-rate-col"><img class="fl-photo" id="fl-photo" alt="Your PCS driver" hidden width="64" height="64"><p class="fl-stars" id="fl-stars" hidden></p></div></div>' +
       '<div class="fl-big" id="fl-big" hidden><div class="fl-spd" id="fl-spd"><b id="fl-mph">--</b><span id="fl-mph-l">mph</span><small id="fl-mph-n"></small></div>' +
       '<div class="fl-arr" id="fl-arr"><span class="k" id="fl-arr-k"></span><b id="fl-arr-t"></b><span id="fl-arr-m"></span><small id="fl-arr-to"></small></div></div>' +
       '<p class="fl-eta" id="fl-eta"></p>' +
       '<div id="fl-map" role="img" aria-label="Map with the car, the pickup and the drop-off"></div>' +
       '<p class="fl-row" id="fl-from"></p><div id="fl-stops"></div><p class="fl-row" id="fl-to"></p>' +
       '<p class="fl-upd" id="fl-upd"></p><p class="error" id="fl-net" role="status"></p>' +
-      /* Bottom bar: a known invoice. With no invoice number the bar stays hidden. */
-      '<p class="fl-call" id="fl-call" hidden></p></div>';
+      /* Bottom bar: a known invoice. With no invoice number the bar stays hidden. Shared copies replace this with the shared-by line. */
+      '<p class="fl-call" id="fl-call" hidden></p></div>' +
+      /* bz3: Share my ride is a text link just below the card, so the pinned invoice bar can never cover it */
+      '<button type="button" class="fl-share" id="fl-share" hidden>Share my ride</button>' +
+      '<p class="fl-share-note" id="fl-share-note" hidden></p>';
     if (window.L) {
       S.map = window.L.map("fl-map", { zoomControl: true, attributionControl: true, zoomSnap: 0.25, zoomDelta: 1 }).setView([29.76, -95.37], 11);
-      /* v76g: the viewer touched the map (drag, pinch, wheel, the +/- buttons): auto-zoom waits 10 s, then picks up again */
+      /* v76g / v2.0m-bz2: the viewer touched the map (drag, pinch, wheel, the +/- buttons): auto-zoom waits 25 s, then picks up again */
       var mapEl = $("fl-map"), touched = function () { S.userUntil = Date.now() + USER_PAUSE_MS; };
       ["touchstart", "pointerdown", "mousedown", "wheel"].forEach(function (ev) { try { mapEl.addEventListener(ev, touched, { passive: true }); } catch (e) {} });
       window.L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", { referrerPolicy: "strict-origin-when-cross-origin", maxZoom: 19, attribution: "&copy; OpenStreetMap" }).addTo(S.map);
@@ -248,11 +258,15 @@
     var key = (d.status || "") + (car ? "c" : ""), now = Date.now();
     var sz = S.map.getSize(), szKey = sz ? sz.x + "x" + sz.y : "";
     var refit = S.fitted && S.lastKey === key && now < (S.overviewUntil || 0) && S.fitSize !== szKey && now >= (S.userUntil || 0); /* the map settled to its real size */
-    if (!S.fitted || S.lastKey !== key || refit) { /* first look (and each new phase): the whole route */
+    var liveFit = d.status === "on_way" || d.status === "arrived" || d.status === "picked_up";
+    if (!S.fitted || S.lastKey !== key || refit) { /* first look (and each new phase) */
       if (!refit) S.overviewUntil = now + OVERVIEW_MS;
       S.fitted = true; S.lastKey = key; S.autoAt = now; S.fitSize = szKey;
-      var all = pts.concat(route);
-      if (pts.length === 1 && route.length < 2) S.map.setView(pts[0], 15); else if (all.length) S.map.fitBounds(all, { padding: [36, 36], maxZoom: 16 });
+      if (liveFit) fitTo(car, nextTarget(d, sl));
+      else {
+        var all = pts.concat(route);
+        if (pts.length === 1 && route.length < 2) S.map.setView(pts[0], 15); else if (all.length) S.map.fitBounds(all, { padding: [36, 36], maxZoom: 16 });
+      }
       return;
     }
     autoZoom(car, nextTarget(d, sl), now);
@@ -274,13 +288,27 @@
     for (var i = 0; i < sl.length; i += 1) if (!sl[i].done && sl[i].p) return sl[i].p;
     return pt(d.dest);
   }
-  /* v76g auto-zoom: fit the car + its next target with padding. It moves the map only when the right zoom is 3/4 of a
-     level away or a point is off screen, at most every 2.5 s, so it does not jitter; it waits 10 s after a touch. */
-  var OVERVIEW_MS = 5000, USER_PAUSE_MS = 10000, AUTO_EVERY_MS = 2500, AUTO_MAX_Z = 17, AUTO_PAD = 56;
+  /* v76g / v2.0m-bz2 auto-zoom: fit the car + its next target with padding. It moves the map only when the right zoom is 3/4 of a
+     level away or a point is off screen, at most every 2.5 s, so it does not jitter; it waits 25 s after a touch.
+     Before pickup the target is the pickup only; after pickup, the drop-off (or the next stop). No target (no coordinates):
+     follow the car at street zoom. Never fit the drop-off while still heading to the pickup. */
+  var OVERVIEW_MS = 5000, USER_PAUSE_MS = 25000, AUTO_EVERY_MS = 2500, AUTO_MAX_Z = 17, AUTO_PAD = 56, STREET_Z = 16;
+  function fitTo(car, tg) {
+    var m = S.map, L = window.L; if (!m) return;
+    if (car && tg) m.fitBounds(L.latLngBounds([car, tg]), { padding: [AUTO_PAD, AUTO_PAD], maxZoom: AUTO_MAX_Z });
+    else if (car) m.setView(car, STREET_Z);
+    else if (tg) m.setView(tg, STREET_Z);
+  }
   function autoZoom(car, tg, now) {
     var m = S.map; if (!m || !car) return;
     if (now < (S.userUntil || 0)) return; /* the viewer is looking around */
-    if (!tg) { if (now >= (S.overviewUntil || 0) && !m.getBounds().pad(-0.15).contains(car)) m.panTo(car); return; }
+    if (!tg) {
+      if (now < (S.overviewUntil || 0)) return;
+      var cz0 = m.getZoom ? m.getZoom() : 0;
+      if (!cz0 || cz0 < STREET_Z - 1) { S.autoAt = now; m.setView(car, STREET_Z); return; }
+      if (!m.getBounds().pad(-0.15).contains(car)) m.panTo(car);
+      return;
+    }
     if (now < (S.overviewUntil || 0) || now - (S.autoAt || 0) < AUTO_EVERY_MS) return;
     var L = window.L, b = L.latLngBounds([car, tg]), sz = m.getSize();
     if (!sz || sz.x < 50 || sz.y < 50) return;
@@ -440,6 +468,30 @@
     });
     return out.join(" \u00b7 ");
   }
+  function ratingStarsModel(avg) { /* pure (tested): nearest whole number of filled stars, dimmed empties to five, average to two decimals, no count. Hidden when there is no average. */
+    var a = Number(avg);
+    if (!isFinite(a) || a < 1 || a > 5) return null;
+    var n = Math.round(a);
+    if (n < 0) n = 0; if (n > 5) n = 5;
+    var star = "\u2B50\uFE0F";
+    return { filled: n, empty: 5 - n, label: a.toFixed(2), text: star.repeat(n) + "\u2606".repeat(5 - n) + "(" + a.toFixed(2) + ")" };
+  }
+  function ratingStarsHtml(avg) {
+    var m = ratingStarsModel(avg); if (!m) return "";
+    var star = "\u2B50\uFE0F", i, h = "";
+    for (i = 0; i < m.filled; i += 1) h += star;
+    for (i = 0; i < m.empty; i += 1) h += '<span class="fl-star-empty" aria-hidden="true">' + star + "</span>";
+    h += "(" + m.label + ")";
+    return h;
+  }
+  function shareByText(d) {
+    var name = txt(d && d.sharedBy, 31);
+    return name ? "This ride was shared by " + name : "This ride was shared by a PCS rider";
+  }
+  function shareLinkOf(shareT) {
+    if (!/^[A-Za-z0-9_-]{32}$/.test(String(shareT || ""))) return "";
+    try { return new URL("?t=" + shareT, window.location.href).href; } catch (e) { return ""; }
+  }
   function billBarHtml(m) { /* painted bar: the mid-dot before a receipt/pay link stays with the link, so it does not dangle when the link wraps */
     if (!m || !m.show) return "";
     if (m.rows) return m.rows.map(function (r) { return '<span style="display:block;line-height:30px">' + esc(r.text) + "</span>"; }).join("");
@@ -461,6 +513,7 @@
   }
   function billBarModel(d) {
     d = d || {};
+    if (d.shared === true) return { label: shareByText(d), link: null, show: true, gap: "shared", rows: null, shared: true };
     if (Array.isArray(d.linked)) {
       var rows = linkedModel(d);
       return { label: barJoin(rows.map(function (r) { return r.text; })), link: null, show: rows.length > 0, gap: "linked", rows: rows };
@@ -486,6 +539,14 @@
   }
   function paintBill(d) {
     var el = $("fl-call"); if (!el) return;
+    if (d && d.shared === true) {
+      var text = shareByText(d);
+      if (el.innerHTML !== esc(text)) { el.textContent = text; }
+      el.hidden = false;
+      var live = $("fl-live");
+      if (live && live.classList) live.classList.remove("fl-has-bill");
+      return;
+    }
     var m = billBarModel(d);
     var live = $("fl-live");
     function mark(on) {
@@ -505,6 +566,65 @@
     el.hidden = false;
     mark(true);
   }
+  function ensureStarsEl() {
+    var el = $("fl-stars"); if (el) return el;
+    if (typeof document === "undefined" || !document.createElement) return null;
+    try {
+      el = document.createElement("p"); el.id = "fl-stars"; el.className = "fl-stars"; el.hidden = true;
+      var photo = $("fl-photo"), col = $("fl-rate-col"), who = $("fl-who");
+      if (col && typeof col.appendChild === "function") col.appendChild(el);
+      else if (photo && photo.parentNode && typeof photo.parentNode.insertBefore === "function") photo.parentNode.insertBefore(el, photo.nextSibling);
+      else if (who && who.parentNode && typeof who.parentNode.insertBefore === "function") who.parentNode.insertBefore(el, who.nextSibling);
+      else return null;
+      return el;
+    } catch (e) { return $("fl-stars"); }
+  }
+  function paintStars(d) {
+    var el = ensureStarsEl(); if (!el) return;
+    var html = ratingStarsHtml(d && d.ratingAvg);
+    if (!html) { el.hidden = true; if (el.innerHTML) el.innerHTML = ""; el.textContent = ""; return; }
+    if (el.__h !== html) { el.innerHTML = html; el.__h = html; }
+    el.hidden = false;
+    el.setAttribute("aria-label", "Driver rating " + ratingStarsModel(d.ratingAvg).label + " out of 5");
+  }
+  function ensureShareBtn() {
+    var btn = $("fl-share");
+    if (btn) return btn;
+    if (typeof document === "undefined" || !document.createElement) return null;
+    try {
+      btn = document.createElement("button"); btn.type = "button"; btn.id = "fl-share"; btn.className = "fl-share"; btn.hidden = true; btn.textContent = "Share my ride";
+      var live = $("fl-live"), parent = live && live.parentNode; /* below the card, never inside it (the invoice bar is pinned inside) */
+      if (parent && typeof parent.insertBefore === "function") parent.insertBefore(btn, live.nextSibling);
+      else return null;
+      if (typeof btn.addEventListener === "function") btn.addEventListener("click", onShareTap);
+      return btn;
+    } catch (e) { return $("fl-share"); }
+  }
+  function onShareTap() {
+    var d = S.d, url = shareLinkOf(d && d.shareT); if (!url) return;
+    var note = $("fl-share-note");
+    function copied() { if (note) { note.hidden = false; note.textContent = "Link copied"; } }
+    try {
+      if (navigator.share) { navigator.share({ title: "PCS ride tracker", url: url }).catch(function () { copyShare(url, copied); }); return; }
+    } catch (e) {}
+    copyShare(url, copied);
+  }
+  function copyShare(url, done) {
+    try {
+      if (navigator.clipboard && navigator.clipboard.writeText) { navigator.clipboard.writeText(url).then(done, done); return; }
+    } catch (e) {}
+    try { done(); } catch (e2) {}
+  }
+  function paintShare(d) {
+    var btn = ensureShareBtn(); if (!btn) return;
+    if (!btn.__bound) { try { btn.addEventListener("click", onShareTap); btn.__bound = true; } catch (e) {} }
+    var note = $("fl-share-note");
+    if (d && d.shared === true) { btn.hidden = true; if (note) { note.hidden = true; note.textContent = ""; } return; }
+    var url = shareLinkOf(d && d.shareT);
+    if (!url) { btn.hidden = true; if (note) note.hidden = true; return; }
+    btn.hidden = false;
+    btn.textContent = "Share my ride";
+  }
   function update(d) {
     S.d = d;
     if (!$("fl-live")) shell();
@@ -517,6 +637,8 @@
     var ch = (ct ? esc(ct) : "") + (plate ? ' <span class="fl-plate" aria-label="License plate">' + esc(plate) + "</span>" : "");
     if (car && car.__h !== ch) { car.innerHTML = ch; car.__h = ch; }
     applyTrackerPhoto($("fl-photo"), d);
+    paintStars(d);
+    paintShare(d);
     var live = d.status === "on_way" || d.status === "arrived" || d.status === "picked_up";
     var done = d.status === "completed" || d.status === "cancelled";
     var e = d.eta, etaOk = live && e && num(e.min) !== null && num(e.miles) !== null && (!num(d.etaAt) || now - num(d.etaAt) <= 180000);
@@ -877,6 +999,7 @@
     prPost("/ride/tip/status", {}).then(function (j) { P.checking = false; if (j && j.paid === true) { P.tipPaid = P.tipOpen; if ($("fl-pr")) prPaint(); else prSave({ step: P.step, tipOpen: P.tipOpen, tipPaid: P.tipPaid }); } }, function () { P.checking = false; });
   }
   function postRide(d) { /* only after the Worker says this invoice's last trip is done, and only on the account-holder tracker */
+    if (d && d.shared === true) { S.pr = false; postRideEnd(); return; } /* v2.0m-bz3: shared copies have no rating / tip / survey */
     if (!d || d.status !== "completed" || S.ended) return;
     if (S.pr === false) { postRideEnd(); return; }
     if (S.pr) { prTipCheck(); if (!S.pr.closed) prPaint(); return; }
@@ -899,7 +1022,7 @@
   document.addEventListener("visibilitychange", function () { if (document.visibilityState !== "hidden") { try { prTipCheck(); } catch (e) {} } });
   window.__pcsFollowLive = { resume: resume, setPath: setPath, update: update, track: track, state: S, over: over, statusText: statusText,
     stopsOf: stopsOf, nextTarget: nextTarget, soonDue: soonDue, soonText: SOON_TEXT, photo: trackerPhotoSrc, showPhoto: applyTrackerPhoto, bill: billBarModel, billHtml: function (d) { return billBarHtml(billBarModel(d)); }, barJoin: barJoin,
-    sosText: sosReadout, notice: message, tripLabel: tripLabel, postRide: { steps: prSteps, tipCents: prTipCents, pctTip: prPctTip, pctList: prPctList, customPct: prCustomPct, customPctCents: prCustomPctCents, customKind: prCustomKind, customAmount: prCustomAmount, html: prHtml, questions: PR_Q, next: prNext } };
+    sosText: sosReadout, notice: message, tripLabel: tripLabel, stars: ratingStarsModel, starsHtml: ratingStarsHtml, shareBy: shareByText, shareLink: shareLinkOf, postRide: { steps: prSteps, tipCents: prTipCents, pctTip: prPctTip, pctList: prPctList, customPct: prCustomPct, customPctCents: prCustomPctCents, customKind: prCustomKind, customAmount: prCustomAmount, html: prHtml, questions: PR_Q, next: prNext } };
   ensureFlSos();
   poll();
 })();

@@ -11451,7 +11451,8 @@
   var FOL_END_SHOW_MS = 30 * 60000, FOL_MAX_AGE_MS = 24 * 3600000, FOL_PUSH_MS = 8000, FOL_BEAT_MS = 30000, FOL_MAP_POLL_MS = 30000;
   var FOL_MINE_KEY = "pcs-follow-mine-v1", FOL_DRAFT_KEY = "pcs-follow-draft-v1";
   var FOL_STATUSES = { assigned: 1, on_way: 1, arrived: 1, picked_up: 1, completed: 1, cancelled: 1, ended: 1, stopped: 1 };
-  var fol = { live: {}, fast: {}, map: {}, mapAt: {}, mapBusy: {}, lastPush: {}, lastSig: {}, lastSt: {}, off: false };
+  var fol = { live: {}, fast: {}, map: {}, mapAt: {}, mapBusy: {}, lastPush: {}, lastSig: {}, lastSt: {}, off: false, shareOf: {} };
+  var folRate = { avg: null, at: 0, busy: false }; /* v2.0m-bz3: precomputed driver star average from POST /driver/rating-avg; published onto the tracker copy, never raw ratings */
   function folNewToken() {
     var c = typeof window !== "undefined" && (window.crypto || window.msCrypto);
     if (!c || !c.getRandomValues || typeof btoa !== "function") return "";
@@ -11526,6 +11527,8 @@
       var p = folPosOut(h, now, true); if (!p) return;
       fol.fast[t] = { at: now, lat: h.lat, lng: h.lng, gpsAt: h.at };
       folWrite(folNodeUrl(t), "PATCH", { pos: p, updatedAt: now });
+      var shareT = folShareTokFor(t);
+      if (shareT && shareT !== t) folWrite(folNodeUrl(shareT), "PATCH", { pos: p, updatedAt: now });
     });
   }
   /* v76g (Matthew 10/18): the ride's stops, in driving order, same as the driver app shows them (including a stop added
@@ -11587,7 +11590,25 @@
     if (live) { var r = folRoute(o.route); if (r) out.route = r; }
     if (done) out.endedAt = Number(o.endedAt) || now;
     if (Number(o.createdAt) > 0) out.createdAt = Math.round(Number(o.createdAt));
+    if (isFinite(+o.ratingAvg) && +o.ratingAvg >= 1 && +o.ratingAvg <= 5) out.ratingAvg = Math.round(+o.ratingAvg * 100) / 100; /* v2.0m-bz3: average only, never a count, comment, or rider name */
+    if (FOL_TOKEN_RE.test(String(o.shareT || ""))) out.shareT = String(o.shareT); /* rider copy only: the Share my ride token; stripped from the shared copy */
     return out;
+  }
+  /* v2.0m-bz3: the Share my ride copy. Own token, same live map/status/ETA/driver/car/stars. Never invoice, pay, receipt, tip, bill, linked invoice list, trip label, role, the rider's original token, or shareT (so this record cannot be turned back into the full view). */
+  var FOL_SHARE_STRIP = ["bill", "pay", "invoiceNo", "receiptUrl", "payUrl", "linked", "role", "tripN", "tripOf", "shareT", "t", "token", "srcT", "origT", "riderT", "holderT", "teenT", "tip", "tipUrl", "fare", "fareCents", "amount", "cents"];
+  function folCleanShared(o, now) {
+    o = o || {};
+    var c = folClean(Object.assign({}, o, { bill: "", pay: "", invoiceNo: "", receiptUrl: "", payUrl: "", linked: null, role: "", tripN: "", tripOf: "", shareT: "" }), now);
+    FOL_SHARE_STRIP.forEach(function (k) { if (k in c) delete c[k]; });
+    c.shared = true;
+    var by = folFirst(o.sharedBy || o.riderName);
+    if (by) c.sharedBy = by;
+    return c;
+  }
+  function folSharePair(c, shareT, now) { /* pure (tested): the two records the driver app writes */
+    now = now || Date.now();
+    shareT = FOL_TOKEN_RE.test(String(shareT || "")) ? String(shareT) : "";
+    return { shareT: shareT, rider: folClean(Object.assign({}, c || {}, { shareT: shareT }), now), shared: folCleanShared(Object.assign({}, c || {}, { shareT: shareT }), now) };
   }
   function folMine() { try { var o = JSON.parse(localStorage.getItem(FOL_MINE_KEY) || "{}"); return o && typeof o === "object" ? o : {}; } catch (e) { return {}; } }
   function folMineSave(o) { try { localStorage.setItem(FOL_MINE_KEY, JSON.stringify(o)); } catch (e) {} }
@@ -11610,8 +11631,16 @@
        PATCH already in flight can't put pos back on an ended share (seen live: stopped/cancelled shares still holding pos). */
     if (fol.live) delete fol.live[t];
     if (fol.fast) delete fol.fast[t];
-    setTimeout(function () { folWrite(folNodeUrl(t), "PATCH", { pos: null, eta: null, route: null }); }, 4000);
-    return folWrite(folNodeUrl(t), "PUT", { v: 1, status: why === "stopped" || why === "cancelled" ? why : "ended", endedAt: now, updatedAt: now });
+    var status = why === "stopped" || why === "cancelled" ? why : "ended";
+    var shareT = folShareTokFor(t);
+    setTimeout(function () { folWrite(folNodeUrl(t), "PATCH", { pos: null, eta: null, route: null }); if (shareT && shareT !== t) folWrite(folNodeUrl(shareT), "PATCH", { pos: null, eta: null, route: null }); }, 4000);
+    if (shareT && shareT !== t) {
+      if (fol.live) delete fol.live[shareT];
+      if (fol.fast) delete fol.fast[shareT];
+      folWrite(folNodeUrl(shareT), "PUT", { v: 1, status: status, endedAt: now, updatedAt: now });
+      folMineNote(shareT, (folMine()[t] || {}).k, { endedAt: now, wiped: true, role: "share" });
+    }
+    return folWrite(folNodeUrl(t), "PUT", { v: 1, status: status, endedAt: now, updatedAt: now });
   }
   function folMapLoad(k, force) {
     if (!FOL_KEY_RE.test(k || "") || !syncOn() || fol.off || typeof fetch !== "function") return;
@@ -11629,6 +11658,7 @@
       if (fol.map[k].t && LINK_GROUP_RE.test(String(d.lk || ""))) fol.map[k].lk = String(d.lk); /* v2.0m-by2: a linked ride's shared token */
       if (d && FOL_TOKEN_RE.test(String(d.holderT || ""))) fol.map[k].holderT = String(d.holderT);
       if (d && FOL_TOKEN_RE.test(String(d.teenT || ""))) fol.map[k].teenT = String(d.teenT);
+      if (d && FOL_TOKEN_RE.test(String(d.shareT || ""))) fol.map[k].shareT = String(d.shareT); /* v2.0m-bz3 */
       fol.mapAt[k] = Date.now();
       if (JSON.stringify(fol.map[k]) !== before) folRedraw();
     }).catch(function () { fol.mapBusy[k] = false; fol.mapAt[k] = Date.now() - FOL_MAP_POLL_MS + 5000; });
@@ -11645,6 +11675,41 @@
     return d.t;
   }
   function folDraftDrop(k) { try { var o = JSON.parse(localStorage.getItem(FOL_DRAFT_KEY) || "{}") || {}; delete o[k]; localStorage.setItem(FOL_DRAFT_KEY, JSON.stringify(o)); } catch (e) {} }
+  /* v2.0m-bz3: one stable Share my ride token per ride, stored on the map row next to t. */
+  function folEnsureShareT(k) {
+    var m = fol.map[k] || {}, cur = String(m.shareT || "");
+    if (FOL_TOKEN_RE.test(cur) && cur !== m.t && cur !== m.holderT && cur !== m.teenT) return cur;
+    var t = folNewToken(), guard = 0;
+    while (t && (t === m.t || t === m.holderT || t === m.teenT) && guard < 3) { t = folNewToken(); guard += 1; }
+    if (!FOL_TOKEN_RE.test(t)) return "";
+    fol.map[k] = Object.assign({}, m, { shareT: t });
+    if (FOL_TOKEN_RE.test(String(m.t || ""))) folWrite(folMapUrl(k), "PATCH", { shareT: t });
+    return t;
+  }
+  function folShareTokFor(t) {
+    if (fol.shareOf && FOL_TOKEN_RE.test(String(fol.shareOf[t] || ""))) return fol.shareOf[t];
+    var mine = folMine()[t];
+    if (mine && FOL_TOKEN_RE.test(String(mine.shareT || ""))) return mine.shareT;
+    var k, m;
+    for (k in (fol.map || {})) {
+      m = fol.map[k];
+      if (!m) continue;
+      if (m.t === t || m.holderT === t || m.teenT === t) return FOL_TOKEN_RE.test(String(m.shareT || "")) ? m.shareT : "";
+    }
+    return "";
+  }
+  function folWriteShared(t, c, now, statusSnap) {
+    var k = c && c.key, shareT = (k && folEnsureShareT(k)) || folShareTokFor(t);
+    if (!FOL_TOKEN_RE.test(shareT) || shareT === t) return "";
+    fol.shareOf[t] = shareT;
+    var sh = folCleanShared(c, now);
+    if (statusSnap && (statusSnap === "ended" || statusSnap === "stopped" || statusSnap === "cancelled")) {
+      sh = { v: 1, status: statusSnap === "cancelled" ? "cancelled" : statusSnap, endedAt: now, updatedAt: now };
+    }
+    folWrite(folNodeUrl(shareT), "PUT", sh);
+    folMineNote(shareT, k, { role: "share", srcGone: true, at: now, last: sh.status, seenAt: now });
+    return shareT;
+  }
   /* make t the live link for ride k: the map row + the first public copy */
   function folCommit(k, t, role, ctx) {
     if (!FOL_KEY_RE.test(k || "") || !FOL_TOKEN_RE.test(t || "")) return Promise.resolve(false);
@@ -11655,22 +11720,29 @@
     if (lk) fol.map[k].lk = lk;
     if (FOL_TOKEN_RE.test(String(prev.holderT || ""))) fol.map[k].holderT = prev.holderT;
     if (FOL_TOKEN_RE.test(String(prev.teenT || ""))) fol.map[k].teenT = prev.teenT;
-    folMineNote(t, k, { role: role, at: now });
+    if (FOL_TOKEN_RE.test(String(prev.shareT || ""))) fol.map[k].shareT = prev.shareT;
+    var shareT = role === "rider" ? "" : folEnsureShareT(k);
+    if (shareT) fol.map[k].shareT = shareT;
+    folMineNote(t, k, { role: role, at: now, shareT: shareT || undefined });
     folDraftDrop(k);
     fol.lastPush[t] = now; fol.lastSt[t] = ctx && ctx.status || "";
     var row = { t: t, at: now, by: role === "rider" ? "rider" : role === "god" ? "god" : "driver" };
     if (lk) row.lk = lk;
     if (fol.map[k].holderT) row.holderT = fol.map[k].holderT;
     if (fol.map[k].teenT) row.teenT = fol.map[k].teenT;
+    if (shareT) row.shareT = shareT;
     folWrite(folMapUrl(k), "PUT", row);
-    var c = folClean(Object.assign({}, ctx || {}, { createdAt: now }), now);
+    var c = folClean(Object.assign({}, ctx || {}, { createdAt: now, shareT: shareT || undefined }), now);
     fol.lastSig[t] = folSig(c);
+    if (shareT) { fol.shareOf[t] = shareT; folWrite(folNodeUrl(shareT), "PUT", folCleanShared(Object.assign({}, ctx || {}, { createdAt: now }), now)); }
     return folWrite(folNodeUrl(t), "PUT", c);
   }
   function folStop(k, why) {
     var t = folTokenFor(k);
+    var shareT = fol.map[k] && fol.map[k].shareT;
     fol.map[k] = { t: "" }; fol.mapAt[k] = Date.now();
     if (t) { folWipe(t, why === "cancelled" ? "cancelled" : "stopped"); folMineNote(t, k, { endedAt: Date.now(), wiped: true }); }
+    if (shareT && shareT !== t) { folWipe(shareT, why === "cancelled" ? "cancelled" : "stopped"); folMineNote(shareT, k, { endedAt: Date.now(), wiped: true, role: "share" }); }
     folWrite(folMapUrl(k), "DELETE");
     folRedraw();
   }
@@ -11681,7 +11753,7 @@
     if (!m || !/(^|\.)squareup(sandbox)?\.com$|(^|\.)square\.link$/i.test(m[1])) return "";
     return s;
   }
-  function folSig(c) { var a = [c.bill || "", c.pay || "", c.invoiceNo || "", c.receiptUrl || "", c.payUrl || "", c.status, c.pos ? [c.pos.lat, c.pos.lng] : 0, c.eta || 0, c.pickup || 0, c.dest || 0, c.car || 0, c.driverFirst || "", c.cardKey || "", folPhotoSig(c.photo), c.route ? c.route.length + ":" + c.route[c.route.length - 1] : 0, c.stops || 0];
+  function folSig(c) { var a = [c.bill || "", c.pay || "", c.invoiceNo || "", c.receiptUrl || "", c.payUrl || "", c.status, c.pos ? [c.pos.lat, c.pos.lng] : 0, c.eta || 0, c.pickup || 0, c.dest || 0, c.car || 0, c.driverFirst || "", c.cardKey || "", folPhotoSig(c.photo), c.route ? c.route.length + ":" + c.route[c.route.length - 1] : 0, c.stops || 0, c.ratingAvg || "", c.shareT || "", c.shared ? 1 : 0, c.sharedBy || ""];
     if (c.linked) a.push(c.linked); /* v2.0m-by: only linked copies carry it, so unlinked signatures are unchanged */
     return JSON.stringify(a); }
   function folHere() {
@@ -11759,20 +11831,27 @@
     var out = [], me = driverPresenceId(), M = state.meter, trip = schedTripNow(), here = folHere();
     var acc = readDriverAccount() || {};
     var base = { driverName: acc.name || state.driverName || "", car: acc, cardKey: folCardKey(), photo: folProfilePhoto() }; /* this driver's jpeg only; card key still displays first */
+    if (folRate.avg != null) base.ratingAvg = folRate.avg; /* v2.0m-bz3: precomputed average only */
     (state.scheduledRides || []).forEach(function (r) {
       if (!r || !r.id || folMyId(r) !== me || !FOL_KEY_RE.test("c_" + r.id)) return;
       var st = r.status === "cancelled" || r.status === "canceled" || r.status === "deleted" ? "cancelled" : r.status === "completed" ? "completed" : "assigned";
       var onMeter = !!(M && M.schedId === r.id);
       if (onMeter) st = M.status === "running" ? "picked_up" : "completed";
       else if (trip && trip.id === r.id && st === "assigned") st = trip.phase === "arrived" ? "arrived" : "on_way";
-      var pickup = { lat: r.pickupLat, lng: r.pickupLng, label: r.pickup }, dest = { lat: r.dropoffLat, lng: r.dropoffLng, label: r.dropoff };
+      var cachePt = function (text, lat, lng) { /* v2.0m-bz2: calendar rides often have an address and no pickupLat; use a geocode the app already looked up (estimate / Start ride) */
+        if (isCoord(lat) && isCoord(lng)) return { lat: +lat, lng: +lng };
+        var g = schedGeoCache[String(text || "").trim()];
+        return g && isCoord(g.lat) && isCoord(g.lng) ? { lat: +g.lat, lng: +g.lng } : null;
+      };
+      var pkPt = cachePt(r.pickup, r.pickupLat, r.pickupLng), dsPt = cachePt(r.dropoff, r.dropoffLat, r.dropoffLng);
+      var pickup = { lat: pkPt && pkPt.lat, lng: pkPt && pkPt.lng, label: r.pickup }, dest = { lat: dsPt && dsPt.lat, lng: dsPt && dsPt.lng, label: r.dropoff };
       if (onMeter && M.dest && isCoord(M.dest.lat)) dest = { lat: M.dest.lat, lng: M.dest.lng, label: [M.dest.label, M.dest.sub].filter(Boolean).join(", ") || r.dropoff };
       var stops = folSchedStops(r, onMeter ? M : null); /* v76g */
       var eta = null, route = null;
       if (st === "on_way") {
         var R = schedNavRoute;
         if (R && R.id === r.id && here && R.line) { var mi = navRemain(R.line, here); if (mi != null) { eta = { to: "pickup", miles: mi, min: R.miles > 0 ? Math.max(1, Math.round(R.minutes * Math.min(1, mi / R.miles))) : Math.max(1, Math.round(mi * 2)) }; route = R.line; } }
-        if (!eta) eta = folStraight(here, folPt(r.pickupLat, r.pickupLng), "pickup");
+        if (!eta) eta = folStraight(here, pkPt || folPt(r.pickupLat, r.pickupLng), "pickup");
       } else if (st === "picked_up") {
         var e = meterEtaInfo(M);
         if (e && !e.pending) eta = { to: "dest", miles: e.miles, min: e.min };
@@ -11792,7 +11871,7 @@
         }
       }
       var tripInfo = invoiceTripOf(state.scheduledRides || [], r); /* hotfix: was "var trip", which overwrote schedTripNow() so On my way never reached the tracker */
-      out.push(Object.assign({ key: "c_" + r.id, kind: "sched", bill: rideBillKind(r, onMeter ? M : null), pay: share.pay, invoiceNo: share.invoiceNo, receiptUrl: share.pay === "paid" ? share.url : "", payUrl: share.pay === "unpaid" ? share.url : "", status: st, phone: r.riderPhone, tripN: tripInfo.n, tripOf: tripInfo.of, pickup: pickup, dest: dest, stops: stops, eta: eta, route: route, pos: here }, base));
+      out.push(Object.assign({ key: "c_" + r.id, kind: "sched", bill: rideBillKind(r, onMeter ? M : null), pay: share.pay, invoiceNo: share.invoiceNo, receiptUrl: share.pay === "paid" ? share.url : "", payUrl: share.pay === "unpaid" ? share.url : "", status: st, phone: r.riderPhone, riderName: r.rider, tripN: tripInfo.n, tripOf: tripInfo.of, pickup: pickup, dest: dest, stops: stops, eta: eta, route: route, pos: here }, base));
     });
     folLinkMerge(out, M);
     var code = state.screen === "trip" ? String(state.driverCode || readDriverCode() || "") : "";
@@ -11878,7 +11957,8 @@
     var done = c.status === "completed" || c.status === "cancelled";
     var m = folMine()[t] || null;
     if (m && (m.wiped || (done && m.endedAt))) return; /* the final copy is out; the sweep wipes it 30 min later */
-    var snap = folClean(Object.assign({}, c, { createdAt: m && m.at }), now), sig = folSig(snap);
+    var shareT = (role !== "rider" && c.key) ? folEnsureShareT(c.key) : (m && m.shareT) || "";
+    var snap = folClean(Object.assign({}, c, { createdAt: m && m.at, shareT: shareT || undefined }), now), sig = folSig(snap);
     var changed = fol.lastSt[t] !== snap.status;
     if (!changed && !done) {
       var since = now - (fol.lastPush[t] || 0);
@@ -11886,16 +11966,33 @@
     }
     fol.lastPush[t] = now; fol.lastSig[t] = sig; fol.lastSt[t] = snap.status;
     folMineNote(t, c.key, Object.assign({ role: (m && m.role) || role, seenAt: now, last: snap.status }, done ? { endedAt: now } : {}));
+    if (shareT) { folMineNote(t, c.key, Object.assign({ shareT: shareT }, done ? { endedAt: now } : {})); fol.shareOf[t] = shareT; }
     if (role === "rider") { /* the rider phone only refreshes what it knows: status + the car point it sees */
       var p = { status: snap.status, updatedAt: now };
       if (snap.pos) p.pos = snap.pos;
       else if (done) { p.pos = null; p.eta = null; p.route = null; } /* v2.0j privacy: PATCH null deletes the last car point */
       if (snap.endedAt) p.endedAt = snap.endedAt;
       folWrite(folNodeUrl(t), "PATCH", p);
-    } else folWrite(folNodeUrl(t), "PUT", snap);
+    } else {
+      folWrite(folNodeUrl(t), "PUT", snap);
+      if (shareT && shareT !== t) folWrite(folNodeUrl(shareT), "PUT", folCleanShared(Object.assign({}, c, { createdAt: m && m.at }), now));
+    }
+  }
+  function folRateRefresh() { /* v2.0m-bz3: read-only Worker average; the tracker never reads RDRRATES */
+    if (folRate.busy || (folRate.at && Date.now() - folRate.at < 10 * 60000)) return;
+    var tk = "";
+    try { tk = qToken(); } catch (e) { tk = ""; }
+    if (!tk || typeof qWorker !== "function") return;
+    folRate.busy = true;
+    qWorker("/driver/rating-avg", { token: tk }).then(function (d) {
+      folRate.busy = false; folRate.at = Date.now();
+      var n = Number(d && d.count) || 0, a = Number(d && d.avg);
+      folRate.avg = n > 0 && isFinite(a) && a >= 1 && a <= 5 ? Math.round(a * 100) / 100 : null;
+    }, function () { folRate.busy = false; folRate.at = Date.now() - 9 * 60000; });
   }
   function folDriverTick() {
     try { invShareRefresh(); } catch (e) {}
+    try { folRateRefresh(); } catch (e) {}
     var now = Date.now(), seen = {};
     folDriverCtxs().forEach(function (c) {
       folMapLoad(c.key, false);
@@ -12106,7 +12203,7 @@
     setInterval(function () { try { folFastTick(); } catch (e) {} }, 500); /* v76f: checks twice a second, sends at most once a second */
     setInterval(function () { try { folSweep(); } catch (e) {} }, 60000);
     setTimeout(function () { try { folSweep(); } catch (e) {} }, 5000);
-    window.__pcsFollow = { bizMsg: folBizMsg, bizSend: folBizSend, autoMsg: folAutoMsg, clean: folClean, share: invoiceShareFromWorker, refresh: invShareRefresh, request: driverInvoiceRequest, token: folNewToken, link: folLink, sms: folSmsHref, msg: folDriverMsg, riderMsg: folRiderMsg, e164: folPhoneE164, photoPick: followDriverPhoto,
+    window.__pcsFollow = { bizMsg: folBizMsg, bizSend: folBizSend, autoMsg: folAutoMsg, clean: folClean, cleanShared: folCleanShared, sharePair: folSharePair, share: invoiceShareFromWorker, refresh: invShareRefresh, request: driverInvoiceRequest, token: folNewToken, link: folLink, sms: folSmsHref, msg: folDriverMsg, riderMsg: folRiderMsg, e164: folPhoneE164, photoPick: followDriverPhoto, geoCache: schedGeoCache, rateSet: function (v) { var a = Number(v); folRate.avg = isFinite(a) && a >= 1 && a <= 5 ? Math.round(a * 100) / 100 : null; folRate.at = Date.now(); return folRate.avg; }, rateGet: function () { return folRate.avg; },
       ctxs: function () { return folDriverCtxs(); }, publish: function (rides) { if (rides) state.scheduledRides = rides; return folDriverCtxs().map(function (c) { return folClean(Object.assign({}, c), Date.now()); }); }, holdPhoto: function (v) { state.driverPhoto = v || ""; }, rider: function () { return folRiderCtx(); }, state: fol, fast: function () { folFastTick(); }, posOut: folPosOut, tick: function () { if (ROLE === "driver") folDriverTick(); else folRiderTick(); },
       sweep: function () { folSweep(); }, mine: folMine, route: folRoute, schedStops: folSchedStops, sig: folSig,
       linkedOut: folLinkedOut, linkOf: schedLinkOf, normRow: function (id, raw) { return normalizeScheduleRow(id, raw); }, linkKeys: folLinkKeys, liveTok: folLiveTok, linkTok: folLinkTok, commit: folCommit, inner: folDriverInner, tickNow: function () { folDriverTick(); } }; /* test hooks */
