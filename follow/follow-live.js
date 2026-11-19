@@ -729,6 +729,11 @@
     if (st === "stopped") return "Sharing for this ride was turned off.";
     if (st === "ended") return "This ride has ended. Thanks for following along with PCS.";
     var end = num(d.endedAt), upd = num(d.updatedAt), made = num(d.createdAt);
+    /* v2.0m-bz-ls1 (Matthew 3:27 PM 11/19): a past ride's survey link from God mode (Worker /god/survey/reopen) stays open until
+       lateUntil (at most 8 days ahead) so the client can still rate / tip / answer the survey. The Worker alone decides whether the
+       stars / tip / survey show (its own KV record for this link); this only keeps the page from saying "ended". */
+    var late = num(d.lateUntil);
+    if (st === "completed" && d.shared !== true && late && late > now && late - now <= 8 * 86400000) return "";
     if ((st === "completed" || st === "cancelled") && end && now - end > END_SHOW_MS) return "This ride has ended. Thanks for following along with PCS.";
     if ((made && now - made > MAX_AGE_MS) || (upd && now - upd > STALE_MS)) return "This follow link has expired. Thanks for following along with PCS.";
     return "";
