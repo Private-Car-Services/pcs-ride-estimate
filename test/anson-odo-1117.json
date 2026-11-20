@@ -1,0 +1,456 @@
+{
+"2026-10-05": {
+"lastUpdate": 1791241689030,
+"startOdometer": 144826,
+"startedAt": 1791223979871
+},
+"2026-10-06": {
+"endOdometer": 145276,
+"lastUpdate": 1791330914304,
+"shiftClosed": true,
+"startOdometer": 145075,
+"startedAt": 1791287349599
+},
+"2026-10-07": {
+"endOdometer": 145521,
+"lastUpdate": 1791428332123,
+"shiftClosed": true,
+"shifts": {
+"1791374359730": {
+"endOdo": 145521,
+"shiftEndedAt": 1791428332123,
+"shiftStartedAt": 1791374359730,
+"startOdo": 145276
+}
+},
+"startOdometer": 145276,
+"startedAt": 1791374359730
+},
+"2026-10-08": {
+"lastUpdate": 1791464287033,
+"shiftClosed": false,
+"shiftStartAt": 1791456951186,
+"startOdometer": 145521,
+"startedAt": 1791456951186
+},
+"2026-10-09": {
+"endOdometer": 146792,
+"lastUpdate": 1791544078040,
+"shiftClosed": true,
+"shifts": {
+"1791544026438": {
+"endOdo": 146792,
+"shiftEndedAt": 1791544078040,
+"shiftStartedAt": 1791544026438,
+"startOdo": 145761
+}
+},
+"startOdometer": 145761,
+"startedAt": 1791544026438
+},
+"2026-10-12": {
+"endOdometer": 147241,
+"firstStartOdometer": 146792,
+"lastUpdate": 1791862317598,
+"priorEndOdometer": 146852,
+"shiftClosed": true,
+"shifts": {
+"1791801777503": {
+"endOdo": 146852,
+"shiftEndedAt": 1791813582267,
+"shiftStartedAt": 1791801777503,
+"startOdo": 146792
+},
+"1791813616787": {
+"endOdo": 147241,
+"shiftEndedAt": 1791862317598,
+"shiftStartedAt": 1791813616787,
+"startOdo": 146852
+}
+},
+"startOdometer": 146852,
+"startedAt": 1791801777503
+},
+"2026-10-13": {
+"endOdometer": 147512,
+"firstStartOdometer": 147241,
+"lastUpdate": 1791950940802,
+"priorEndOdometer": 147447,
+"shiftClosed": true,
+"shifts": {
+"1791886981916": {
+"endOdo": 147447,
+"shiftEndedAt": 1791932930375,
+"shiftStartedAt": 1791886981916,
+"startOdo": 147241
+},
+"1791939704283": {
+"endOdo": 147512,
+"shiftEndedAt": 1791950940802,
+"shiftStartedAt": 1791939704283,
+"startOdo": 147447
+}
+},
+"startOdometer": 147447,
+"startedAt": 1791886981916
+},
+"2026-10-14": {
+"endOdometer": 147723,
+"lastUpdate": 1792012039518,
+"shiftClosed": true,
+"shifts": {
+"1791976568167": {
+"endOdo": 147723,
+"shiftEndedAt": 1792012039518,
+"shiftStartedAt": 1791976568167,
+"startOdo": 147518
+}
+},
+"startOdometer": 147518,
+"startedAt": 1791976568167
+},
+"2026-10-15": {
+"endOdometer": 1477238,
+"lastUpdate": 1792082119789,
+"shiftClosed": true,
+"shifts": {
+"1792067180404": {
+"endOdo": 1477238,
+"shiftEndedAt": 1792082119789,
+"shiftStartedAt": 1792067180404,
+"startOdo": 1477223
+}
+},
+"startOdometer": 1477223,
+"startedAt": 1792067180404
+},
+"2026-10-20": {
+"endOdometer": 1478563,
+"firstStartOdometer": 1478238,
+"lastUpdate": 1792546550504,
+"priorEndOdometer": 1478320,
+"shiftClosed": true,
+"shifts": {
+"1792485574361": {
+"endOdo": 1478320,
+"shiftEndedAt": 1792495662352,
+"shiftStartedAt": 1792485574361,
+"startOdo": 1478238
+},
+"1792496298340": {
+"endOdo": 1478563,
+"shiftEndedAt": 1792546550504,
+"shiftStartedAt": 1792496298340,
+"startOdo": 1478320
+}
+},
+"startOdometer": 1478320,
+"startedAt": 1792485574361
+},
+"2026-10-21": {
+"firstStartOdometer": 1478568,
+"lastUpdate": 1792670017777,
+"shiftClosed": true,
+"shifts": {
+"1792580341782": {
+"missingEnd": true,
+"shiftEndedAt": 1792670017777,
+"skippedEnd": true,
+"startOdo": 1478568
+}
+},
+"startOdometer": 1478568,
+"startedAt": 1792580341782
+},
+"2026-10-22": {
+"endOdometer": 1478963,
+"firstStartOdometer": 1478720,
+"lastUpdate": 1792712796571,
+"priorEndOdometer": 1478815,
+"shiftClosed": true,
+"shifts": {
+"1792670082903": {
+"endOdo": 1478815,
+"shiftEndedAt": 1792681164838,
+"shiftStartedAt": 1792670082903,
+"startOdo": 1478720
+},
+"1792699020738": {
+"endOdo": 1478963,
+"shiftEndedAt": 1792712796571,
+"shiftStartedAt": 1792699020738,
+"startOdo": 1478852
+}
+},
+"startOdometer": 1478852,
+"startedAt": 1792670082903
+},
+"2026-10-23": {
+"endOdometer": 151200,
+"lastUpdate": 1792768445116,
+"shiftClosed": true,
+"shifts": {
+"1792755003437": {
+"endOdo": 151200,
+"shiftEndedAt": 1792768445116,
+"shiftStartedAt": 1792755003437,
+"startOdo": 1478963
+}
+},
+"startOdometer": 1478963,
+"startedAt": 1792755003437
+},
+"2026-10-26": {
+"firstStartOdometer": 151200,
+"lastUpdate": 1793047696374,
+"priorEndOdometer": 151200,
+"shiftClosed": false,
+"shiftStartAt": 1793023402330,
+"shifts": {
+"1793023084821": {
+"endOdo": 151200,
+"shiftEndedAt": 1793023282931,
+"shiftStartedAt": 1793023084821,
+"startOdo": 151200
+}
+},
+"startOdometer": 151200,
+"startedAt": 1793023084821
+},
+"2026-10-27": {
+"lastUpdate": 1793215894851,
+"shiftClosed": true,
+"shifts": {
+"1793102394701": {
+"missingEnd": true,
+"shiftEndedAt": 1793130930060,
+"skippedEnd": true,
+"startOdo": 151200
+}
+},
+"startOdometer": 151200,
+"startedAt": 1793102394701
+},
+"2026-10-28": {
+"endOdometer": 151433,
+"firstStartOdometer": 151312,
+"lastUpdate": 1793220524562,
+"priorEndOdometer": 151416,
+"shiftClosed": true,
+"shifts": {
+"1793216044829": {
+"endOdo": 151416,
+"shiftEndedAt": 1793216224046,
+"shiftStartedAt": 1793216044829,
+"startOdo": 151312
+},
+"1793216288704": {
+"endOdo": 151433,
+"shiftEndedAt": 1793220524562,
+"shiftStartedAt": 1793216288704,
+"startOdo": 151416
+}
+},
+"startOdometer": 151416,
+"startedAt": 1793216044829
+},
+"2026-10-29": {
+"endOdometer": 151616,
+"lastUpdate": 1793329929699,
+"shiftClosed": true,
+"shifts": {
+"1793280482450": {
+"endOdo": 151616,
+"shiftEndedAt": 1793329929699,
+"shiftStartedAt": 1793280482450,
+"startOdo": 151436
+}
+},
+"startOdometer": 151436,
+"startedAt": 1793280482450
+},
+"2026-11-02": {
+"lastUpdate": 1793709337151,
+"shiftClosed": true,
+"shifts": {
+"1793629918292": {
+"missingEnd": true,
+"shiftEndedAt": 1793709337151,
+"skippedEnd": true,
+"startOdo": 1479558
+}
+},
+"startOdometer": 1479558,
+"startedAt": 1793629918292
+},
+"2026-11-03": {
+"endOdometer": 1479782,
+"lastUpdate": 1793739044145,
+"shiftClosed": true,
+"shifts": {
+"1793709404802": {
+"endOdo": 1479782,
+"shiftEndedAt": 1793739044145,
+"shiftStartedAt": 1793709404802,
+"startOdo": 1479658
+}
+},
+"startOdometer": 1479658,
+"startedAt": 1793709404802
+},
+"2026-11-04": {
+"endOdometer": 1479896,
+"lastUpdate": 1793851073374,
+"shiftClosed": true,
+"shifts": {
+"1793812628414": {
+"endOdo": 1479896,
+"shiftEndedAt": 1793851073374,
+"shiftStartedAt": 1793812628414,
+"startOdo": 1479853
+}
+},
+"startOdometer": 1479853,
+"startedAt": 1793812628414
+},
+"2026-11-05": {
+"endOdometer": 1479985,
+"lastUpdate": 1793926943410,
+"shiftClosed": true,
+"shifts": {
+"1793901583383": {
+"endOdo": 1479985,
+"shiftEndedAt": 1793926943410,
+"shiftStartedAt": 1793901583383,
+"startOdo": 1479896
+}
+},
+"startOdometer": 1479896,
+"startedAt": 1793901583383
+},
+"2026-11-06": {
+"lastUpdate": 1794224977779,
+"shiftClosed": true,
+"shifts": {
+"1793976040735": {
+"missingEnd": true,
+"shiftEndedAt": 1794224977779,
+"skippedEnd": true,
+"startOdo": 1479988
+}
+},
+"startOdometer": 1479988,
+"startedAt": 1793976040735
+},
+"2026-11-09": {
+"endOdometer": 244250,
+"firstStartOdometer": 1479988,
+"lastUpdate": 1794273797138,
+"priorEndOdometer": 1479988,
+"shiftClosed": true,
+"shifts": {
+"1794225091519": {
+"endOdo": 1479988,
+"shiftEndedAt": 1794240352696,
+"shiftStartedAt": 1794225091519,
+"startOdo": 1479988
+},
+"1794251977145": {
+"endOdo": 244250,
+"shiftEndedAt": 1794273797138,
+"shiftStartedAt": 1794251977145,
+"startOdo": 1479988
+}
+},
+"startOdometer": 1479988,
+"startedAt": 1794225091519
+},
+"2026-11-10": {
+"endOdometer": 2153263,
+"lastUpdate": 1794361627154,
+"shiftClosed": true,
+"shifts": {
+"1794317756044": {
+"endOdo": 2153263,
+"shiftEndedAt": 1794361627154,
+"shiftStartedAt": 1794317756044,
+"startOdo": 1479993
+}
+},
+"startOdometer": 1479993,
+"startedAt": 1794317756044
+},
+"2026-11-11": {
+"endOdometer": 2154562,
+"lastUpdate": 1794443431567,
+"shiftClosed": true,
+"shifts": {
+"1794401411610": {
+"endOdo": 2154562,
+"shiftEndedAt": 1794443431567,
+"shiftStartedAt": 1794401411610,
+"startOdo": 2154415
+}
+},
+"startOdometer": 2154415,
+"startedAt": 1794401411610
+},
+"2026-11-12": {
+"endOdometer": 2154886,
+"lastUpdate": 1794531262974,
+"shiftClosed": true,
+"shifts": {
+"1794487230177": {
+"endOdo": 2154886,
+"shiftEndedAt": 1794531262974,
+"shiftStartedAt": 1794487230177,
+"startOdo": 2154629
+}
+},
+"startOdometer": 2154629,
+"startedAt": 1794487230177
+},
+"2026-11-13": {
+"endOdometer": 2155098,
+"lastUpdate": 1794608968176,
+"shiftClosed": true,
+"shifts": {
+"1794578723435": {
+"endOdo": 2155098,
+"shiftEndedAt": 1794608968176,
+"shiftStartedAt": 1794578723435,
+"startOdo": 2154999
+}
+},
+"startOdometer": 2154999,
+"startedAt": 1794578723435
+},
+"2026-11-16": {
+"lastUpdate": 1794921877358,
+"shiftClosed": true,
+"shifts": {
+"1794837203721": {
+"missingEnd": true,
+"shiftEndedAt": 1794921877358,
+"skippedEnd": true,
+"startOdo": 2155439
+}
+},
+"startOdometer": 2155439,
+"startedAt": 1794837203721
+},
+"2026-11-17": {
+"lastUpdate": 1794926683093,
+"odoCorrectedAt": 1794925646119,
+"odoRepaired": {
+"at": 1794925646119,
+"from": 155735,
+"to": 155735,
+"why": "Corrected in God mode"
+},
+"shiftClosed": false,
+"shiftStartAt": 1794921910247,
+"startOdometer": 2155735,
+"startedAt": 1794921910247
+}
+}

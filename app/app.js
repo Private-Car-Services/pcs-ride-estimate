@@ -3396,11 +3396,16 @@
     if (!row || typeof row !== "object") return row;
     var ovr = false; try { ovr = odoOverrideActive(); } catch (e) {}
     if (ovr) return row;
+    var gf = godOdoFix(row); /* bz4: keep God's corrected opening (a stale phone copy had put the old high one back) */
+    if (gf) {
+      if (Number(row.startOdometer) > gf.to + ODO_JUMP_MAX) row.startOdometer = gf.to;
+      ["priorEndOdometer", "firstStartOdometer"].forEach(function (k) { if (Number(row[k]) > gf.to + ODO_JUMP_MAX) row[k] = gf.to; });
+    }
     var last = null; try { last = lastKnownOdometer(); } catch (e) {}
     var floor = Math.max(Number(row.priorEndOdometer) || 0, 0);
     var sh = row.shifts && typeof row.shifts === "object" ? row.shifts : {};
     Object.keys(sh).forEach(function (k) { var x = sh[k]; if (!x) return; if (Number(x.endOdo) > 0 && Number(x.endOdo) < Number(x.startOdo)) x.endOdo = x.startOdo; });
-    Object.keys(sh).forEach(function (k) { var x = sh[k]; if (x && Number(x.endOdo) > floor && Number(x.endOdo) >= Number(x.startOdo || 0)) floor = Math.max(floor, Number(x.startOdo) > 0 ? Number(x.endOdo) : 0); });
+    Object.keys(sh).forEach(function (k) { var x = sh[k]; if (x && Number(x.endOdo) > floor && Number(x.endOdo) >= Number(x.startOdo || 0) && !(gf && Number(x.endOdo) > gf.to + ODO_JUMP_MAX)) floor = Math.max(floor, Number(x.startOdo) > 0 ? Number(x.endOdo) : 0); });
     if (!(floor > 0) && last > 0) floor = last;
     if (row.priorEndOdometer != null && !(Number(row.priorEndOdometer) > 0) && floor > 0) row.priorEndOdometer = floor;
     if (row.startOdometer != null && floor > 0 && Number(row.startOdometer) < floor && !shiftClosed(row)) { row.odoRepaired = { from: Number(row.startOdometer), to: floor, at: Date.now(), why: "opening odometer below last reading" }; row.startOdometer = floor; }
@@ -4745,10 +4750,19 @@
   /* v2.0m-n (Matthew 10/29: a mistyped 2222222 stuck on the phone): odometer readings the server has for this driver.
      The highest one is kept so the phone copy can be checked against it. */
   var ODO_JUMP_MAX = 1000;
+  /* v2.0m-bz4 (Matthew 11/17: Anson had to put a 2 in front of his mileage): a God-mode odometer correction
+     (odoCorrectedAt + odoRepaired.to, god.js "Correct") is a reset point for the floor. Readings saved before it that are
+     higher than the corrected reading (a typo, or numbers typed to get past that typo) stop setting the floor, and a
+     phone's stale opening odometer can't be put back over the correction. */
+  function godOdoFix(r) {
+    if (!r || typeof r !== "object" || !(Number(r.odoCorrectedAt) > 0)) return null;
+    var to = Number(r.odoRepaired && r.odoRepaired.to);
+    return to > 0 && isFinite(to) ? { at: Number(r.odoCorrectedAt), to: to } : null;
+  }
   function rowOdoValues(r) {
-    var out = [], add = function (v) { v = Number(v); if (v > 0 && isFinite(v)) out.push(v); };
+    var fx = godOdoFix(r), out = fx ? [fx.to] : [], add = function (v) { v = Number(v); if (v > 0 && isFinite(v) && (!fx || v <= fx.to + ODO_JUMP_MAX)) out.push(v); };
     if (!r || typeof r !== "object") return out;
-    add(r.endOdometer); add(r.priorEndOdometer); add(r.startOdometer); add(r.firstStartOdometer);
+    add(r.endOdometer); if (!fx) { add(r.priorEndOdometer); add(r.startOdometer); add(r.firstStartOdometer); } /* bz4: a corrected row's opening is fx.to */
     var sh = r.shifts && typeof r.shifts === "object" ? r.shifts : {};
     Object.keys(sh).forEach(function (k) { add(sh[k] && sh[k].endOdo); add(sh[k] && sh[k].startOdo); });
     return out;
@@ -4775,15 +4789,30 @@
     return vals[0];
   }
   function lastKnownOdometer() {
-    var vals = [];
-    try { var map = readMilesLocal(); Object.keys(map || {}).forEach(function (d) { vals = vals.concat(rowOdoValues(map[d])); }); } catch (e) {}
-    try { vals.push(localStorage.getItem("pcs-driver-lastodo-" + driverPresenceId())); } catch (e) {}
-    return pickBelievableOdo(vals, serverOdometer());
+    var vals = [], map = {}, fix = null, fixDay = "", key = null, srv = serverOdometer();
+    try { map = readMilesLocal() || {}; } catch (e) {}
+    Object.keys(map).forEach(function (d) { var f = godOdoFix(map[d]); if (f && (!fix || f.at > fix.at)) { fix = f; fixDay = d; } }); /* bz4: newest God correction */
+    Object.keys(map).forEach(function (d) { var rv = rowOdoValues(map[d]); if (fix && d < fixDay) rv = rv.filter(function (v) { return v <= fix.to; }); vals = vals.concat(rv); });
+    try { key = localStorage.getItem("pcs-driver-lastodo-" + driverPresenceId()); } catch (e) {}
+    if (fix) { /* bz4: the phone's kept highs (last typed, server max) from before the correction don't count either */
+      var top = Math.max.apply(null, vals.concat([fix.to]).map(Number).filter(function (v) { return v > 0 && isFinite(v); }));
+      if (Number(key) > top + ODO_JUMP_MAX) key = null;
+      if (Number(srv) > top + ODO_JUMP_MAX) srv = null;
+    }
+    vals.push(key);
+    var p = pickBelievableOdo(vals, srv);
+    return fix ? Math.max(Number(p) || 0, fix.to) : p; /* bz4: never below God's corrected reading (the 1,000 mi gap rule must not drop it) */
   }
   /* (b) odometer fields: the server value replaces the phone's ONLY when the phone's is more than 1,000 mi above it (a typo). Smaller differences keep the normal merge, so an offline reading survives and uploads (Harry 10/29). */
   function odoFieldsServerWins(loc, srv) {
     if (!loc || typeof loc !== "object" || !srv || typeof srv !== "object") return loc;
     var changed = false;
+    var sf = godOdoFix(srv), lf = godOdoFix(loc); /* bz4: a newer God correction on the server replaces this phone's opening odometer */
+    if (sf && (!lf || sf.at > lf.at)) {
+      if (!(Number(loc.startOdometer) >= sf.to && Number(loc.startOdometer) <= sf.to + ODO_JUMP_MAX)) loc.startOdometer = sf.to;
+      ["priorEndOdometer", "firstStartOdometer"].forEach(function (k) { if (Number(loc[k]) > sf.to + ODO_JUMP_MAX) delete loc[k]; });
+      loc.odoRepaired = srv.odoRepaired; loc.odoCorrectedAt = srv.odoCorrectedAt; changed = true;
+    }
     ["endOdometer", "priorEndOdometer", "startOdometer", "firstStartOdometer"].forEach(function (k) {
       if (srv[k] != null && srv[k] !== "" && Number(srv[k]) > 0 && Number(loc[k]) > Number(srv[k]) + ODO_JUMP_MAX) { loc[k] = srv[k]; changed = true; }
     });
@@ -4793,7 +4822,7 @@
     if (changed) try { loc.odoFromServer = Date.now(); } catch (e) {}
     return loc;
   }
-  window.__pcsOdo = { pick: function (v, s) { return pickBelievableOdo(v, s); }, merge: function (l, s) { return odoFieldsServerWins(l, s); } }; /* v2.0m-n test hook */
+  window.__pcsOdo = { pick: function (v, s) { return pickBelievableOdo(v, s); }, merge: function (l, s) { return odoFieldsServerWins(l, s); }, last: function () { return lastKnownOdometer(); }, sanitize: function (r) { return sanitizeMilesOdos(r); } }; /* v2.0m-n test hook */
   function noteLastOdometer(v) { v = Number(v); if (!(v > 0)) return; try { var k = "pcs-driver-lastodo-" + driverPresenceId(); if (!(Number(localStorage.getItem(k)) >= v)) localStorage.setItem(k, String(v)); } catch (e) {} }
   /* v72u one-time repair: an OPEN shift whose opening odometer is below the last ending odometer (e.g. 0 typed in by mistake)
      takes the last ending odometer instead, unless God mode allowed the lower number. Logged on the row as odoRepaired. */
@@ -4803,6 +4832,7 @@
     if (!row || !shiftOpen(row)) return false;
     var start = Number(row.startOdometer), fix = Number(row.priorEndOdometer);
     if (!(fix > 0) || !(start < fix)) return false;
+    var gfx = godOdoFix(row); if (gfx && fix > gfx.to + ODO_JUMP_MAX) return false; /* bz4 */
     var r2 = Object.assign({}, row, { startOdometer: fix, odoRepaired: { from: start, to: fix, at: Date.now(), why: "opening odometer below last ending odometer" } });
     var sh = readShift();
     if (sh && Number(sh.startOdo) < fix) { sh.startOdo = fix; writeShift(sh); }

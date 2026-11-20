@@ -444,10 +444,15 @@
         : tab === "form" ? formHtml(day, meta) : tab === "sign" ? signHtml(day, meta)
         : inspHtml(day, meta, tab === "insp-post" ? "post" : "pre")) + "</div>";
   }
-  function listItem(day, withGrid) {
+  /* v2.0m-bz6 (Matthew 11/20): History/Logs rows read the saved pre/post-trip instead of always "No Inspections" */
+  function inspLabel(day, meta) {
+    var f = meta && meta.dvirOf, pre = !!(f && f(day.day, "pre")), post = !!(f && f(day.day, "post"));
+    return pre && post ? "Pre \u2713 \u00b7 Post \u2713" : pre ? "Pre only" : post ? "Post only" : "No Inspections"; /* Harry 11/20: original wording kept */
+  }
+  function listItem(day, withGrid, meta) {
     return '<button type="button" class="dl-item" data-open-day="' + esc(day.day) + '" style="display:block;width:100%;text-align:left;border:0;border-bottom:1px solid #ddd;background:#fff;padding:10px 12px;color:#222">' +
       '<div><b>' + esc(wd(day, { weekday: "long" })) + "</b> " + esc(wd(day, { month: "short", day: "2-digit" })) + '<span style="float:right;color:#595959">\u203a</span></div>' +
-      '<div class="dl-item-hrs" style="color:#666;font-size:13px">\u23f1 ' + esc(hrmin(onMin(day))) + " \u00b7 No Inspections</div>" +
+      '<div class="dl-item-hrs" style="color:#666;font-size:13px">\u23f1 ' + esc(hrmin(onMin(day))) + " \u00b7 " + inspLabel(day, meta) + "</div>" +
       (withGrid ? '<div style="margin-top:6px">' + gridSvg(day) + "</div>" : "") + "</button>";
   }
   function currentStatus(meta) { var c = (meta.currentStatus || "off"), lab = { off: "OFF DUTY", drv: "DRIVING", on: "ON DUTY", sb: "SLEEPER" }[c] || "OFF DUTY";
@@ -464,7 +469,7 @@
     }).join("") + "</ul>";
   }
   function listHtml(days, meta) { meta = meta || {};
-    return currentStatus(meta) + "<p " + SEC + ">TODAY</p>" + (days[0] ? listItem(days[0], true) : "") + ridesHtml(meta) +
+    return currentStatus(meta) + "<p " + SEC + ">TODAY</p>" + (days[0] ? listItem(days[0], true, meta) : "") + ridesHtml(meta) +
       '<button type="button" id="dl-history" style="display:block;width:calc(100% - 24px);margin:12px;padding:12px;border:1px solid #2f6fe0;border-radius:8px;background:#fff;color:#2f6fe0;font-weight:700">History</button>' + mapHtml(meta);
   }
   /* v2.0m-s: today's map under History. Blue = Available, green = On a ride, yellow pin = Break, gray = Off duty / en route.
@@ -741,9 +746,9 @@
     }).catch(function () {});
     var cb = w.querySelector("#dl-personal"); if (cb && meta.onPersonal) cb.addEventListener("change", function () { meta.onPersonal(cb.checked); });
   }
-  function historyHtml(days, shown) {
+  function historyHtml(days, shown, meta) {
     var past = days.slice(1, 1 + shown);
-    return "<p " + SEC + ">LAST " + past.length + " DAYS</p>" + past.map(function (d) { return listItem(d, false); }).join("") +
+    return "<p " + SEC + ">LAST " + past.length + " DAYS</p>" + past.map(function (d) { return listItem(d, false, meta); }).join("") +
       '<button type="button" id="dl-older" style="display:block;width:calc(100% - 24px);margin:12px;padding:12px;border:1px solid #999;border-radius:8px;background:#fff;color:#333">Show older days</button>';
   }
   /* printable / inspector page: every day with its grid, form and events */
@@ -785,7 +790,7 @@
       '<button type="button" id="' + (back ? "dl-back" : "dl-close") + '" aria-label="' + (back ? "Back" : "Close") + '" style="margin-left:auto;min-width:88px;min-height:44px;background:#2e7d32;border:0;border-radius:10px;color:#fff;font-size:17px;font-weight:800;padding:6px 14px">' + (back ? "\u2190 Back" : "Close \u2715") + "</button></div>"; }; /* v74e: Close/Back on the RIGHT, 44 px+ */
     if (day) w.innerHTML = bar(esc(wd(day, { weekday: "short" }) + " | " + wd(day, { month: "short", day: "2-digit" })), true) + detailHtml(day, meta, m[2] || "log");
     else if (mode === "inspector") w.innerHTML = bar("Inspector view \u00b7 today + previous day", false) + '<div class="dl-insp-days" style="padding:6px">' + html(days.slice(0, 2), meta) + "</div>";
-    else if (hm2) w.innerHTML = bar("History", true) + historyHtml(days, shown);
+    else if (hm2) w.innerHTML = bar("History", true) + historyHtml(days, shown, meta);
     else w.innerHTML = bar("Logs", false) + listHtml(days, meta);
     w.setAttribute("data-mode", mode || "all");
     document.body.appendChild(w);
