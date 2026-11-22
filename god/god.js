@@ -7597,7 +7597,7 @@
     }, true);
   }
   function atxPost(path, body) {
-    if (!/^\/(?:god\/(?:discounts|payout\/records|ridepct\/list|invoices|roster|charge\/claims|dvir\/reviewed|clients\/list|sms\/consent\/list)|disc\/list)$/.test(String(path))) slowKick(); /* v77.15: a Worker write reloads the 60 s lists next refresh */
+    if (!/^\/(?:god\/(?:discounts|ratings|payout\/records|ridepct\/list|invoices|roster|charge\/claims|dvir\/reviewed|clients\/list|sms\/consent\/list)|disc\/list)$/.test(String(path))) slowKick(); /* v77.15: a Worker write reloads the 60 s lists next refresh */
     var auth = godWriteAuth(); if (!auth) return Promise.reject(new Error("The God password is needed once on this device."));
     return fetch(PAY_WORKER + path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(Object.assign({}, body || {}, auth)) })
       .then(function (res) { return res.json().catch(function () { return {}; }).then(function (d) { if (!res.ok || !d.ok) throw new Error(d.error || "Server error " + res.status); return d; }); });
@@ -9492,6 +9492,7 @@
     head += rateContractsHtml(); rovWire(); /* v76j */
     head += autoTextPanelHtml(); cphWire(); /* v77.3 */
     head += clientsPanelHtml(); clientsWire(); if (!state.clientsLoaded) { state.clientsLoaded = true; clientsLoad(); } /* v77.10 */
+    if (window.PCSGodRatings) { if (!state.grInit) { state.grInit = true; window.PCSGodRatings.init({ load: function () { return atxPost("/god/ratings", {}); } }); } head += window.PCSGodRatings.panelHtml(); } /* v2.0m-ca: Ratings & surveys (read-only) */
     if (!rows.length) return head;
     /* v73: the added-rides list folds into one row so the map stays in view on iPad / iPhone; remembers open / closed */
     return head + '<details class="manual-list"' + (state.manualListOpen ? " open" : "") + ' style="margin:4px 0"><summary style="cursor:pointer;padding:6px 0;font-weight:700">Added rides (' + rows.length + ")</summary>" + rows.map(function (r) {
@@ -9528,7 +9529,7 @@
     var box = document.getElementById("add-ride-box");
     if (box) {
       var html = manualRidesListHtml();
-      if (box.getAttribute("data-html") !== html) { box.innerHTML = html; box.setAttribute("data-html", html); }
+      if (box.getAttribute("data-html") !== html) { box.innerHTML = html; box.setAttribute("data-html", html); if (window.PCSGodRatings) { try { window.PCSGodRatings.after(); } catch (e) {} } } /* v2.0m-ca: keep the ratings list scroll */
     }
     mountAddRideModal(false);
     if (!window.__pcsArBound) {
