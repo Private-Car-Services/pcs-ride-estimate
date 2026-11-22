@@ -50,4 +50,7 @@ test("Share my ride first name skips a leading Pick up / Pickup / Pick-up", func
   assert.equal(sharedBy(""), "");
   assert.equal(sharedBy("Pick up Ted Payz for IAH"), "Ted");
   assert.equal(sharedBy("Pick-up Casey Lewis for IAH"), "Casey");
+  assert.equal(sharedBy("Pick Shaye Smith from IAH"), "Shaye");
+  assert.equal(sharedBy("pick Hector"), "Hector");
+  assert.equal(sharedBy("Pickett Jones"), "Pickett");
 });
