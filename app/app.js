@@ -11503,10 +11503,10 @@
      "Pick up Casey Lewis for IAH" or "Pick Shaye Smith from Hobby" show "Casey Lewis" / "Shaye Smith". Pure (tested). */
   function folFull(name) {
     var s = String(name || "").replace(/[\u2018\u2019]/g, "'").replace(/\s+/g, " ").trim();
-    s = s.replace(/^pick(?:\s+up|-up|up)?\s+/i, "").replace(/\s*\([^)]*\)?/g, " ").replace(/\s*&\s*/g, " and ").trim();
+    s = s.replace(/^pick(?:\s+up|-up|up)?\s+/i, "").replace(/\s*\([^)]*\)?/g, " ").replace(/\s*&\s*/g, " & ").trim();
     s = s.replace(/\s+(?:for|from|to|at)\b.*$/i, "").replace(/\s+up$/i, "").trim();
     if (s.length > 30) s = s.slice(0, 30).replace(/\s+\S*$/, "");
-    if (!/^[A-Za-z][A-Za-z'. -]{0,29}$/.test(s)) return "";
+    if (!/^[A-Za-z][A-Za-z'. &-]{0,29}$/.test(s)) return "";
     return s.charAt(0).toUpperCase() + s.slice(1);
   }
   function folPt(lat, lng, label) {

@@ -57,6 +57,8 @@ test("Share my ride shows the rider's full name without Pick up / for ... (v2.0m
   assert.equal(sharedBy("Pick up Rahual\u2019s daughter at U of H"), "Rahual's daughter");
   assert.equal(sharedBy("Pick up <b>x</b>"), "");
   assert.equal(sharedBy("Pick Shaye Camara up for school"), "Shaye Camara");
-  assert.equal(sharedBy("Pick up Mr. & Mrs. Camara for date night"), "Mr. and Mrs. Camara");
+  assert.equal(sharedBy("Pick up Mr. & Mrs. Camara for date night"), "Mr. & Mrs. Camara");
+  assert.equal(sharedBy("Pick up Mr. & Mrs. Fisher for Galveston"), "Mr. & Mrs. Fisher");
+  assert.equal(sharedBy("Pick up Mr and Mrs Fisher from Galveston"), "Mr and Mrs Fisher");
   assert.equal(sharedBy("Pick up Mike Black (Metered ride)"), "Mike Black");
 });
