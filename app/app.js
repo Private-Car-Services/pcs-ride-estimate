@@ -11496,7 +11496,9 @@
   function folLink(t) { try { return new URL("../follow/?t=" + t, APP_SCRIPT_SRC || window.location.href).href; } catch (e) { return ""; } }
   function folTxt(v, n) { return String(v == null ? "" : v).replace(/[\u0000-\u001f\u007f<>]/g, " ").replace(/\s+/g, " ").trim().slice(0, n || 60); }
   function folFirst(name) {
-    var w = String(name || "").trim().split(/\s+/)[0] || "";
+    /* v2.0m-bz7: calendar rider titles like "Pick up Casey Lewis for IAH" must not yield "Pick" on Share my ride. */
+    var s = String(name || "").trim().replace(/^pick(?:\s+up|-up|up)\s+/i, "");
+    var w = s.split(/\s+/)[0] || "";
     return /^[A-Za-z][A-Za-z'.-]{0,30}$/.test(w) ? w.charAt(0).toUpperCase() + w.slice(1) : "";
   }
   function folPt(lat, lng, label) {
