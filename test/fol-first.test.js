@@ -43,14 +43,20 @@ function sharedBy(name) {
   return rec.sharedBy || "";
 }
 
-test("Share my ride first name skips a leading Pick up / Pickup / Pick-up", function () {
-  assert.equal(sharedBy("Pick up Casey Lewis for IAH"), "Casey");
-  assert.equal(sharedBy("Casey Lewis"), "Casey");
-  assert.equal(sharedBy("pickup ted payz"), "Ted");
+test("Share my ride shows the rider's full name without Pick up / for ... (v2.0m-bz7)", function () {
+  assert.equal(sharedBy("Pick up Casey Lewis for IAH"), "Casey Lewis");
+  assert.equal(sharedBy("Casey Lewis"), "Casey Lewis");
+  assert.equal(sharedBy("pickup ted payz"), "Ted payz");
   assert.equal(sharedBy(""), "");
-  assert.equal(sharedBy("Pick up Ted Payz for IAH"), "Ted");
-  assert.equal(sharedBy("Pick-up Casey Lewis for IAH"), "Casey");
-  assert.equal(sharedBy("Pick Shaye Smith from IAH"), "Shaye");
+  assert.equal(sharedBy("Pick up Ted Payz for IAH"), "Ted Payz");
+  assert.equal(sharedBy("Pick-up Casey Lewis for IAH"), "Casey Lewis");
+  assert.equal(sharedBy("Pick Shaye Smith from IAH"), "Shaye Smith");
   assert.equal(sharedBy("pick Hector"), "Hector");
-  assert.equal(sharedBy("Pickett Jones"), "Pickett");
+  assert.equal(sharedBy("Pickett Jones"), "Pickett Jones");
+  assert.equal(sharedBy("Pick up Mr. Mordas"), "Mr. Mordas");
+  assert.equal(sharedBy("Pick up Rahual\u2019s daughter at U of H"), "Rahual's daughter");
+  assert.equal(sharedBy("Pick up <b>x</b>"), "");
+  assert.equal(sharedBy("Pick Shaye Camara up for school"), "Shaye Camara");
+  assert.equal(sharedBy("Pick up Mr. & Mrs. Camara for date night"), "Mr. and Mrs. Camara");
+  assert.equal(sharedBy("Pick up Mike Black (Metered ride)"), "Mike Black");
 });

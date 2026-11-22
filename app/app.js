@@ -11496,10 +11496,18 @@
   function folLink(t) { try { return new URL("../follow/?t=" + t, APP_SCRIPT_SRC || window.location.href).href; } catch (e) { return ""; } }
   function folTxt(v, n) { return String(v == null ? "" : v).replace(/[\u0000-\u001f\u007f<>]/g, " ").replace(/\s+/g, " ").trim().slice(0, n || 60); }
   function folFirst(name) {
-    /* v2.0m-bz7: calendar rider titles like "Pick up Casey Lewis for IAH" or "Pick Shaye ..." must not yield "Pick" on Share my ride. */
-    var s = String(name || "").trim().replace(/^pick(?:\s+up|-up|up)?\s+/i, "");
-    var w = s.split(/\s+/)[0] || "";
+    var w = String(name || "").trim().split(/\s+/)[0] || "";
     return /^[A-Za-z][A-Za-z'.-]{0,30}$/.test(w) ? w.charAt(0).toUpperCase() + w.slice(1) : "";
+  }
+  /* v2.0m-bz7 (Matthew 11/22): Share my ride shows the rider's full name. Calendar rider titles like
+     "Pick up Casey Lewis for IAH" or "Pick Shaye Smith from Hobby" show "Casey Lewis" / "Shaye Smith". Pure (tested). */
+  function folFull(name) {
+    var s = String(name || "").replace(/[\u2018\u2019]/g, "'").replace(/\s+/g, " ").trim();
+    s = s.replace(/^pick(?:\s+up|-up|up)?\s+/i, "").replace(/\s*\([^)]*\)?/g, " ").replace(/\s*&\s*/g, " and ").trim();
+    s = s.replace(/\s+(?:for|from|to|at)\b.*$/i, "").replace(/\s+up$/i, "").trim();
+    if (s.length > 30) s = s.slice(0, 30).replace(/\s+\S*$/, "");
+    if (!/^[A-Za-z][A-Za-z'. -]{0,29}$/.test(s)) return "";
+    return s.charAt(0).toUpperCase() + s.slice(1);
   }
   function folPt(lat, lng, label) {
     if (!isCoord(lat) || !isCoord(lng)) return null;
@@ -11633,7 +11641,7 @@
     var c = folClean(Object.assign({}, o, { bill: "", pay: "", invoiceNo: "", receiptUrl: "", payUrl: "", linked: null, role: "", tripN: "", tripOf: "", shareT: "" }), now);
     FOL_SHARE_STRIP.forEach(function (k) { if (k in c) delete c[k]; });
     c.shared = true;
-    var by = folFirst(o.sharedBy || o.riderName);
+    var by = folFull(o.sharedBy || o.riderName);
     if (by) c.sharedBy = by;
     return c;
   }
