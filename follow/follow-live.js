@@ -12,14 +12,17 @@
    folClean). Shows: status, driver first name + photo (v77.3b, from the picture card), car + plate, the car on a map with the route, pickup + drop-off, ETA and
    the PCS phone. Never the fare, payment, card or the rider's phone / email (they are never in the copy). Everything read
    is treated as untrusted text (escaped, numbers checked). 30 min after the ride is completed / cancelled, when sharing
-   stops, or after 24 h, the page shows "This ride has ended" with no map. No buttons here change anything. */
+   stops, or after 24 h, the page shows "This ride has ended" with no map. No buttons here change anything.
+   v2.0m-ca (Matthew 3:35 PM 11/16): a COMPLETED ride's page still shows "This ride has ended" (no map, no live stream) after
+   30 min, but keeps the after-ride stars / tip / survey for up to 48 h after the ride ended (the Worker's PR_WINDOW_MS).
+   Stopped and cancelled links are unchanged. */
 (function () {
   "use strict";
   var q = String(window.location.search || "").match(/[?&]t=([A-Za-z0-9_-]{32})(?:&|#|$)/);
   if (!q) return; /* the older 22-character links (rider meter "Share this ride") run follow.js */
   var token = q[1];
   var DB = "https://pts-maps-rides-default-rtdb.firebaseio.com";
-  var POLL_MS = 1000, END_SHOW_MS = 30 * 60000, MAX_AGE_MS = 24 * 3600000, STALE_MS = 6 * 3600000;
+  var POLL_MS = 1000, END_SHOW_MS = 30 * 60000, PR_SHOW_MS = 48 * 3600000 /* v2.0m-ca: = Worker PR_WINDOW_MS */, MAX_AGE_MS = 24 * 3600000, STALE_MS = 6 * 3600000;
   var PCS_PHONE = "936-261-7878", PCS_TEL = "tel:+19362617878";
   var app = document.getElementById("app");
   var S = { trk: [], mph: null, brg: null, d: null, map: null, layers: null, fitted: false, timer: 0, ended: false, misses: 0, lastKey: "" };
@@ -55,11 +58,11 @@
       ".fl-share{display:block;width:auto;margin:12px auto 0;padding:8px 18px;min-height:44px;box-sizing:border-box;text-align:center;background:#bef1c6;border:2px solid #2e9d4f;border-radius:999px;color:#0b6b3a;font-size:19px;font-weight:900;text-decoration:none;cursor:pointer}#fl-share[hidden]{display:none}.fl-share-note{margin:6px 0 0;text-align:center;font-size:13px;font-weight:700;color:#e8f5ea}";
     document.head.appendChild(st);
   }
-  function message(title, body, final) {
+  function message(title, body, final, keepPr) {
     style();
-    if (final) { S.ended = true; soonHide(true); }
+    if (final) { S.ended = true; S.prKeep = !!keepPr; soonHide(true); } /* v2.0m-ca: keepPr = a completed ride still inside the 48 h after-ride window */
     if (final && S.map) { try { S.map.remove(); } catch (e) {} S.map = null; }
-    if (final) { try { postRideEnd(); } catch (e) {} } /* v2.0m-bz */
+    if (final && !keepPr) { try { postRideEnd(); } catch (e) {} } /* v2.0m-bz */
     app.innerHTML = '<div class="card fl-msg" id="fl-msg"><p class="tag">' + esc(title) + '</p><p class="lede">' + esc(body) + "</p>" +
       '<a class="fl-call" id="fl-call" href="' + PCS_TEL + '">Call PCS ' + PCS_PHONE + "</a>" +
       '<p class="fine">Need a ride of your own? Visit <a href="https://www.PCSrides.com" style="color:#0b3d23;font-weight:800">www.PCSrides.com</a>.</p></div>';
@@ -723,6 +726,17 @@
     if (now) { if (el.parentNode) el.parentNode.removeChild(el); return; }
     el.className = ""; setTimeout(function () { if (el.parentNode) el.parentNode.removeChild(el); }, 500);
   }
+  function prLate(d, now) { /* v2.0m-ca pure (tested): completed, past the 30 min live view, still inside the 48 h after-ride window */
+    if (!d || typeof d !== "object" || String(d.status || "") !== "completed") return false;
+    var end = num(d.endedAt);
+    return !!end && now - end > END_SHOW_MS && now - end <= PR_SHOW_MS;
+  }
+  function endNow(d, why, now) { /* v2.0m-ca: the ended page; on a completed ride inside 48 h the stars / tip / survey stay */
+    var keep = prLate(d, now);
+    if (keep) streamStop();
+    message("Ride ended", why, true, keep);
+    if (keep) { S.d = d; try { postRide(d); } catch (e) {} }
+  }
   function over(d, now) {
     if (!d || typeof d !== "object") return "";
     var st = String(d.status || "");
@@ -757,7 +771,7 @@
     var d = S.raw, now = Date.now();
     if (!d || typeof d !== "object") return;
     var why = over(d, now);
-    if (why) { streamStop(); message("Ride ended", why, true); return; }
+    if (why) { streamStop(); endNow(d, why, now); return; }
     S.misses = 0; S.d = d; update(d);
     if ($("fl-net")) setText("fl-net", "");
   }
@@ -795,7 +809,7 @@
       }
       S.misses = 0;
       var why = over(d, now);
-      if (why) { message("Ride ended", why, true); return; }
+      if (why) { endNow(d, why, now); return; }
       S.d = d; S.raw = d; update(d);
       if ($("fl-net")) setText("fl-net", "");
       stream();
@@ -1005,7 +1019,7 @@
   }
   function postRide(d) { /* only after the Worker says this invoice's last trip is done, and only on the account-holder tracker */
     if (d && d.shared === true) { S.pr = false; postRideEnd(); return; } /* v2.0m-bz3: shared copies have no rating / tip / survey */
-    if (!d || d.status !== "completed" || S.ended) return;
+    if (!d || d.status !== "completed" || (S.ended && !S.prKeep)) return; /* v2.0m-ca: S.prKeep = ended page inside the 48 h window */
     if (S.pr === false) { postRideEnd(); return; }
     if (S.pr) { prTipCheck(); if (!S.pr.closed) prPaint(); return; }
     if (S.prPending) return;
@@ -1027,7 +1041,7 @@
   document.addEventListener("visibilitychange", function () { if (document.visibilityState !== "hidden") { try { prTipCheck(); } catch (e) {} } });
   window.__pcsFollowLive = { resume: resume, setPath: setPath, update: update, track: track, state: S, over: over, statusText: statusText,
     stopsOf: stopsOf, nextTarget: nextTarget, soonDue: soonDue, soonText: SOON_TEXT, photo: trackerPhotoSrc, showPhoto: applyTrackerPhoto, bill: billBarModel, billHtml: function (d) { return billBarHtml(billBarModel(d)); }, barJoin: barJoin,
-    sosText: sosReadout, notice: message, tripLabel: tripLabel, stars: ratingStarsModel, starsHtml: ratingStarsHtml, shareBy: shareByText, shareLink: shareLinkOf, postRide: { steps: prSteps, tipCents: prTipCents, pctTip: prPctTip, pctList: prPctList, customPct: prCustomPct, customPctCents: prCustomPctCents, customKind: prCustomKind, customAmount: prCustomAmount, html: prHtml, questions: PR_Q, next: prNext } };
+    sosText: sosReadout, notice: message, prLate: prLate, endNow: endNow, tripLabel: tripLabel, stars: ratingStarsModel, starsHtml: ratingStarsHtml, shareBy: shareByText, shareLink: shareLinkOf, postRide: { steps: prSteps, tipCents: prTipCents, pctTip: prPctTip, pctList: prPctList, customPct: prCustomPct, customPctCents: prCustomPctCents, customKind: prCustomKind, customAmount: prCustomAmount, html: prHtml, questions: PR_Q, next: prNext } };
   ensureFlSos();
   poll();
 })();

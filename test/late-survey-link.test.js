@@ -47,5 +47,5 @@ test("lateUntil is ignored when passed, more than 8 days ahead, on a shared copy
   assert.equal(F.over({ status: "stopped", lateUntil: now + DAY }, now), "Sharing for this ride was turned off.");
 });
 test("tracker page loads the new follow-live.js build", () => {
-  assert.match(fs.readFileSync(path.join(__dirname, "../follow/index.html"), "utf8"), /follow-live\.js\?v=2\.0m-ls1/);
+  assert.match(fs.readFileSync(path.join(__dirname, "../follow/index.html"), "utf8"), /follow-live\.js\?v=2\.0m-ca2/ /* ca2: follow-live.js changed again (48 h after-ride), was ls1 */);
 });
