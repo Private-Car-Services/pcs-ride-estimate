@@ -7361,7 +7361,7 @@
   function extraPhonePatch(raw, now) { /* pure (tested): "" clears it (null = Firebase delete) */
     var p = cphNorm(raw);
     if (p === null) return { ok: false, error: "Enter a 10-digit US phone, like 936-555-1212." };
-    return { ok: true, patch: { extraPhoneOnce: p || null, updatedAt: now } };
+    return { ok: true, patch: { extraPhoneOnce: p || null, extraPhoneSrc: null, updatedAt: now } }; /* v2.0m-ph2: typed here = God's own; the calendar sync never replaces it */
   }
   /* ---------- v77.10 (Matthew 10/20): CLIENT PHONE DIRECTORY ----------
      A phone saved on a card or an Add ride is also saved for that client (Worker KV via /god/clients/put, never the open
@@ -7951,7 +7951,7 @@
     var now = Date.now(), code = ownCode(row); /* v76d */
     var next = Object.assign({}, row, { status: "cancelled", cancelledAt: now, cancelledBy: "owner", cancelReason: reason, cancelFee: fee === "charge" ? "charge" : "waived",
       cancelFeeStatus: fee === "charge" ? "to_charge" : "waived", code: code, updatedAt: now });
-    delete next.extraPhoneOnce; /* v77.5: one-time Additional number ends with the ride */
+    delete next.extraPhoneOnce; delete next.extraPhoneSrc; /* v77.5: one-time Additional number ends with the ride */
     return putCalendarRide(next).then(function () {
       if (!row.assignedDriverId) return null;
       var cEntry = { scheduleId: eventId, canceled: true, riderName: row.rider || "", day: boardDayKey(row.start) || chicagoToday() };
@@ -7997,6 +7997,10 @@
   /* Matthew 1:51 PM 11/16: a linked ride's account holder gets their own holder link (same live map, money-free) even with Teen
      rider off, so their after-ride stars / tip / survey reach them alone; the shared link never carries money. */
   function gfolLinkedRun(r) { return !!(r && calLinkOf(r, r.id)); }
+  function gfolShareTok(g) { /* v2.0m-ph2: the rider's minimal Share-my-ride token (FLWRDMAP shareT), never t / holderT / teenT */
+    var x = g && String(g.shareT || "");
+    return x && GFOL_TOKEN_RE.test(x) && x !== String(g.t || "") && x !== String(g.holderT || "") && x !== String(g.teenT || "") && x !== String(g.live || "") ? x : "";
+  }
   function gfolHolderTok(g, r) { return g && (gfolTeenOn(r) || gfolLinkedRun(r)) && GFOL_TOKEN_RE.test(String(g.holderT || "")) ? String(g.holderT) : (g && g.t ? String(g.t) : ""); }
   function gfolCopyText(u, done) {
     if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(u).then(function () { done("copied"); }, function () { done(u); });
@@ -8004,14 +8008,18 @@
   }
   function gfolHtml(r) {
     if (!r || !r.assignedDriverId || r.status === "completed" || r.status === "cancelled" || r.status === "deleted") return "";
-    var g = GFOL.map[r.id], e = gfolE164(r.riderPhone), teenOn = gfolTeenOn(r), te = gfolE164(r.teenPhone);
+    var g = GFOL.map[r.id], e = gfolE164(r.riderPhone), teenOn = gfolTeenOn(r), te = gfolE164(r.teenPhone), xe = gfolE164(r.extraPhoneOnce); /* v2.0m-ph2 */
+    if (xe && (xe === e || xe === te)) xe = "";
     if (g && g.t) {
-      var holderTok = gfolHolderTok(g, r), teenTok = teenOn && GFOL_TOKEN_RE.test(String(g.teenT || "")) ? String(g.teenT) : "";
+      var holderTok = gfolHolderTok(g, r), teenTok = teenOn && GFOL_TOKEN_RE.test(String(g.teenT || "")) ? String(g.teenT) : "", shareTok = gfolShareTok(g); /* v2.0m-ph2 */
       var msg = GFOL.msg && GFOL.msg[r.id] ? '<p class="fine" style="margin:4px 0;font-weight:700">' + esc(GFOL.msg[r.id]) + "</p>" : "";
       return '<div class="gfol" style="margin:6px 0"><a class="btn btn-gold gfol-sms" style="display:block;text-align:center;min-height:52px;font-size:18px;font-weight:800;text-decoration:none;padding:12px" href="' +
         esc("sms:" + e + "?&body=" + encodeURIComponent(gfolMsg(r, holderTok))) + '">Open Messages' + (e ? " to " + esc(r.riderPhone) : "") + ": tracking link</a>" +
         (teenTok ? '<a class="btn btn-ghost gfol-sms-teen" style="display:block;text-align:center;min-height:48px;font-size:16px;font-weight:800;text-decoration:none;padding:10px;margin-top:6px" href="' +
           esc("sms:" + te + "?&body=" + encodeURIComponent(gfolMsg(r, teenTok))) + '">Open Messages' + (te ? " to " + esc(r.teenPhone) : "") + ": teen tracking link</a>" : "") +
+        (xe ? (shareTok ? '<a class="btn btn-ghost gfol-sms-x" style="display:block;text-align:center;min-height:48px;font-size:16px;font-weight:800;text-decoration:none;padding:10px;margin-top:6px" href="' +
+          esc("sms:" + xe + "?&body=" + encodeURIComponent(gfolMsg(r, shareTok))) + '">Open Messages to ' + esc(cphShow(r.extraPhoneOnce)) + ": share link (Additional number)</a>" :
+          '<p class="fine gfol-x-wait" style="margin:4px 0">Additional number ' + esc(cphShow(r.extraPhoneOnce)) + ": gets the share link (no fare, pay, tip or survey) when the tracker is texted.</p>") : "") + /* v2.0m-ph2 (Harry 11/20): never the holder link */
         '<p class="fine" style="margin:4px 0">You press Send. The client sees the car and ETA once ' + esc(gfolFirst(r.assignedDriverName) || "the driver") + " heads out; fare and payment stay private.</p>" +
         '<button type="button" class="btn btn-ghost gfol-copy" data-event-id="' + esc(r.id) + '" style="margin:2px 6px 2px 0">Copy link</button>' +
         (teenOn ? '<button type="button" class="btn btn-ghost gfol-copy-teen" data-event-id="' + esc(r.id) + '" style="margin:2px 6px 2px 0"' + (teenTok ? "" : " disabled") + ">Copy teen link</button>" : "") +
@@ -8098,7 +8106,7 @@
     }
     gfolMake(id, gfolFind(id));
   });
-  window.__pcsGodFollow = { html: gfolHtml, msg: gfolMsg, e164: gfolE164, state: GFOL, place: gfolPlace, holderTok: gfolHolderTok, teenOn: gfolTeenOn, ensureRoles: gfolEnsureRoles }; /* test hook */
+  window.__pcsGodFollow = { html: gfolHtml, msg: gfolMsg, e164: gfolE164, state: GFOL, place: gfolPlace, holderTok: gfolHolderTok, shareTok: gfolShareTok, teenOn: gfolTeenOn, ensureRoles: gfolEnsureRoles }; /* test hook */
   /* ---------- v2.0m-by (Matthew 11/15): "Link ride" on a board card ----------
      Two rides, two invoices: Matthew links them by hand so ONE tracker goes out to both riders. Only linkGroup + linkedIds
      are written on each row (field-level PATCH). Invoices, prices, times and the driver assignment are never touched; every
