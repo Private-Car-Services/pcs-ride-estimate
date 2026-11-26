@@ -18573,9 +18573,41 @@
     );
   }
 
+  /* v2.0m-cc (Matthew, Nov 25): ride history cards link the ride's real Square receipt: the meter payment
+     (PAYMENTS/{code}/final.receiptUrl) or the paid invoice on this driver's own scheduled ride (PCSCALND/{scheduleId}/
+     sqInvoice/receipt_url). No receipt, no link; never a placeholder. Pure check is tested. */
+  function hubReceiptOk(u) {
+    return typeof u === "string" && /^https:\/\/([a-z0-9-]+\.)*(squareup\.com|squareupsandbox\.com|square\.link)\//i.test(u);
+  }
+  function hubReceipt(r) {
+    var m = state.hubReceipts || {};
+    return r && r.code ? m[r.code] || "" : "";
+  }
+  function hubLoadReceipts(rides) {
+    state.hubReceipts = state.hubReceipts || {};
+    state.hubReceiptAsk = state.hubReceiptAsk || {};
+    (rides || []).forEach(function (r) {
+      if (!r || !r.code || r.canceled || state.hubReceiptAsk[r.code]) return;
+      state.hubReceiptAsk[r.code] = 1;
+      var code = r.code;
+      var got = function (u) {
+        if (!hubReceiptOk(u)) return false;
+        state.hubReceipts[code] = u;
+        if (state.hubView === "day") render();
+        return true;
+      };
+      var j = function (url) { return authFetch(url).then(function (res) { return res && res.ok ? res.json() : null; }).catch(function () { return null; }); };
+      j(databaseURL() + "/rides/PAYMENTS/" + encodeURIComponent(code) + "/final/receiptUrl.json").then(function (u) {
+        if (got(u) || !r.scheduleId) return;
+        return j(databaseURL() + "/rides/" + encodeURIComponent(CALENDAR_HUB) + "/" + encodeURIComponent(r.scheduleId) + "/sqInvoice/receipt_url.json").then(got);
+      });
+    });
+  }
+
   function driverHubDay() {
     var day = state.hubDay || chicagoToday();
     var rides = ridesForDay(day);
+    try { hubLoadReceipts(rides); } catch (e) {}
     var stats = hubDayStats(day);
     var list;
     if (!rides.length) {
@@ -18591,11 +18623,13 @@
           '<div class="money-row"><span>Ride total</span><span>' + money(r.fareTotal || 0) + "</span></div>" +
           '<div class="money-row"><span>Commission (' + esc(String(r.commissionPct || "")) + "%)</span><span>" +
           money(r.commissionCents || 0) + "</span></div>") +
+          (r.fareTax != null && !(r.pricePending && !(Number(r.fareTotal) > 0)) ? '<div class="money-row hub-tax-row"><span>Tax</span><span>' + money(Number(r.fareTax) || 0) + "</span></div>" : "") + /* v2.0m-cc: the ride's saved tax (Matthew) */
           (r.billedMiles != null ? '<p class="fine">' + esc(String(r.billedMiles)) + " billed mi</p>" : "") +
           (Number(r.tipCents) > 0 ? '<div class="money-row"><span>Tip (100% yours)</span><span>' + money(r.tipCents) + "</span></div>" : "") +
           (Number(r.tollCents) > 0 ? '<div class="money-row hub-toll-row"><span>' + esc(r.tollLabel || "Tolls") + " (paid back, 100% yours)</span><span>" + money(r.tollCents) + "</span></div>" : "") + /* v76b */
           (Number(r.tollRoadFeeCents) > 0 ? '<div class="money-row hub-tollfee-row"><span>' + esc(r.tollLabel || "Toll road fee") + " (fare, in the commission)</span><span>" + money(r.tollRoadFeeCents) + "</span></div>" : "") +
           (r.rideType === "metered" && r.paymentStatus && r.paymentStatus !== "charged" && r.paymentStatus !== "paid_other" ? '<p class="error">Not paid yet</p>' : "") +
+          (hubReceiptOk(hubReceipt(r)) ? '<p class="fine"><a class="hub-receipt-link" href="' + esc(hubReceipt(r)) + '" target="_blank" rel="noopener">View receipt</a></p>' : "") + /* v2.0m-cc: only a real Square receipt */
           (cmpIsRec(r) && r.code ? '<button class="btn secondary cmp-open-btn" type="button" data-cmp-code="' + esc(r.code) + '">Comparison details</button>' : "") + /* v2.0m-g */
           "</article>"
         );
